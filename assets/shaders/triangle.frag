@@ -11,9 +11,11 @@ layout(binding = 0) uniform UniformData {
     vec4 pointLightPos[8];   // xyz = position, w = radius
     vec4 pointLightColor[8]; // xyz = color, w = intensity
     vec4 pointLightCount;    // x = count
+    mat4 lightVP;            // directional light view-projection (for shadow map)
 } ubo;
 
 layout(set = 0, binding = 1) uniform sampler2D unusedSampler; // legacy slot, kept for descriptor compatibility
+layout(set = 0, binding = 2) uniform sampler2DShadow shadowMap;
 layout(set = 1, binding = 0) uniform sampler2D texSampler;
 
 layout(location = 0) in vec3 fragWorldPos;
@@ -56,8 +58,37 @@ void main() {
     vec3 texColor = texture(texSampler, fragUV).rgb;
     vec3 baseColor = fragColor * texColor;
 
-    vec3 lighting = baseColor * (ambient + diff * ubo.lightColor.rgb)
-                  + ubo.lightColor.rgb * spec * 0.25
+    // ---- Directional shadow map (sampler2DShadow does the depth compare) ----
+    // Project worldPos into light clip space, divide, remap [-1,1] -> [0,1].
+    vec4 lightClip = ubo.lightVP * vec4(fragWorldPos, 1.0);
+    vec3 lightNDC = lightClip.xyz / max(lightClip.w, 1e-5);
+    vec3 shadowUV = vec3(lightNDC.xy * 0.5 + 0.5, lightNDC.z);
+    // Bias scaled by surface slope to fight shadow acne.
+    float NdotL = max(dot(N, L), 0.0);
+    float bias = max(0.0008 * (1.0 - NdotL), 0.0002);
+    shadowUV.z -= bias;
+
+    // Skip sampling outside the shadow map (treat as fully lit).
+    float shadow = 1.0;
+    if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 &&
+        shadowUV.y >= 0.0 && shadowUV.y <= 1.0 &&
+        shadowUV.z >= 0.0 && shadowUV.z <= 1.0) {
+        // 4-tap PCF for soft edges.
+        vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+        float s = 0.0;
+        s += texture(shadowMap, vec3(shadowUV.xy + vec2(-0.5,-0.5)*texelSize, shadowUV.z));
+        s += texture(shadowMap, vec3(shadowUV.xy + vec2( 0.5,-0.5)*texelSize, shadowUV.z));
+        s += texture(shadowMap, vec3(shadowUV.xy + vec2(-0.5, 0.5)*texelSize, shadowUV.z));
+        s += texture(shadowMap, vec3(shadowUV.xy + vec2( 0.5, 0.5)*texelSize, shadowUV.z));
+        shadow = s * 0.25;
+        // Lift the floor so shadowed surfaces aren't pitch-black (matches the
+        // toon palette's banded look).
+        shadow = mix(0.45, 1.0, shadow);
+    }
+
+    vec3 lighting = baseColor * ambient
+                  + baseColor * diff * ubo.lightColor.rgb * shadow
+                  + ubo.lightColor.rgb * spec * 0.25 * shadow
                   + rim;
 
     // Point lights

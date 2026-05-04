@@ -5,6 +5,7 @@ pub mod uniform;
 pub mod depth;
 pub mod texture;
 pub mod material;
+pub mod shadow;
 pub mod overlay;
 pub mod font;
 pub mod particles;

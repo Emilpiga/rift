@@ -22,6 +22,10 @@ pub struct UniformData {
     pub point_light_pos: [Vec4; 8],   // xyz = position, w = radius
     pub point_light_color: [Vec4; 8], // xyz = color, w = intensity
     pub point_light_count: Vec4,      // x = count (as float), yzw unused
+    /// Directional-light view-projection matrix. Used by both the shadow
+    /// pass (to project geometry) and the main pass (to sample the shadow
+    /// map at each fragment's projected position).
+    pub light_vp: Mat4,
 }
 
 pub struct UniformBuffers {
@@ -52,7 +56,8 @@ impl UniformBuffers {
             buffers.push(buffer);
         }
 
-        // Descriptor set layout: binding 0 = UBO, binding 1 = texture sampler
+        // Descriptor set layout: binding 0 = UBO, binding 1 = legacy texture sampler,
+        // binding 2 = shadow map (sampler2DShadow in the fragment shader).
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -61,6 +66,11 @@ impl UniformBuffers {
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -80,7 +90,8 @@ impl UniformBuffers {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+                // 2 image samplers per set: legacy + shadow map
+                descriptor_count: 2 * MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
 
@@ -138,6 +149,25 @@ impl UniformBuffers {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&image_info));
 
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+    }
+
+    /// Bind the shadow map (depth image + comparison sampler) to all
+    /// descriptor sets at binding 2. Caller is responsible for keeping the
+    /// view+sampler alive for the renderer's lifetime.
+    pub fn bind_shadow_map(&self, device: &ash::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        for &set in &self.descriptor_sets {
+            let image_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info));
             unsafe { device.update_descriptor_sets(&[write], &[]) };
         }
     }

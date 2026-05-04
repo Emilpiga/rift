@@ -11,6 +11,7 @@ layout(binding = 0) uniform UniformData {
     vec4 pointLightPos[8];
     vec4 pointLightColor[8];
     vec4 pointLightCount;
+    mat4 lightVP;
 } ubo;
 
 layout(push_constant) uniform PushConstants {

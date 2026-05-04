@@ -11,6 +11,7 @@ use crate::renderer::camera::Camera;
 use crate::renderer::depth::{DepthBuffer, DEPTH_FORMAT};
 use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex};
+use crate::renderer::shadow::{self, ShadowMap};
 use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
 use crate::renderer::particle_renderer::ParticleRenderer;
 use crate::renderer::particles::ParticleSystem;
@@ -60,6 +61,7 @@ pub struct Renderer {
     depth_buffer: DepthBuffer,
     default_texture: Texture,
     material_pool: MaterialPool,
+    shadow_map: ShadowMap,
     uniforms: UniformBuffers,
     swapchain: Swapchain,
     allocator: Arc<Mutex<Allocator>>,
@@ -177,6 +179,15 @@ impl Renderer {
             &shader_dir,
         )?;
 
+        // Shadow map (depth-only render target sampled by the main pass).
+        let shadow_map = ShadowMap::new(
+            &device.device,
+            &allocator,
+            uniforms.descriptor_set_layout,
+            &shader_dir,
+        )?;
+        uniforms.bind_shadow_map(&device.device, shadow_map.view, shadow_map.sampler);
+
         // Set up hot-reloader
         let hot_reloader = match HotReloader::new(&shader_dir) {
             Ok(hr) => Some(hr),
@@ -236,6 +247,7 @@ impl Renderer {
             depth_buffer,
             default_texture,
             material_pool,
+            shadow_map,
             uniforms,
             objects: Vec::new(),
             camera,
@@ -694,6 +706,16 @@ impl Renderer {
             point_light_color[i] = Vec4::new(pl.color.x, pl.color.y, pl.color.z, pl.intensity);
         }
 
+        let light_dir_world = Vec4::new(0.4, 0.8, 0.3, 0.0);
+        let light_dir_normalized = light_dir_world.normalize();
+        // Snap shadow focus to camera position projected to ground (y=0). The
+        // shadow module further snaps to texel size.
+        let shadow_focus = Vec3::new(self.camera.position.x, 0.0, self.camera.position.z);
+        let light_vp = shadow::light_view_proj(
+            shadow_focus,
+            Vec3::new(light_dir_normalized.x, light_dir_normalized.y, light_dir_normalized.z),
+        );
+
         let ubo = UniformData {
             view: self.camera.view_matrix(),
             proj: self.camera.projection_matrix(),
@@ -703,13 +725,14 @@ impl Renderer {
                 self.camera.position.z,
                 0.0,
             ),
-            light_dir: Vec4::new(0.4, 0.8, 0.3, 0.0).normalize(),
+            light_dir: light_dir_normalized,
             light_color: Vec4::new(1.05, 0.82, 0.58, 0.22), // warm amber torchlight, moderate ambient so walls/textures stay readable
             fog_color: Vec4::new(self.fog_color[0], self.fog_color[1], self.fog_color[2], 0.0),
             fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 0.0),
             point_light_pos,
             point_light_color,
             point_light_count: Vec4::new(light_count as f32, 0.0, 0.0, 0.0),
+            light_vp,
         };
         self.uniforms.update(frame, &ubo);
 
@@ -771,6 +794,47 @@ impl Renderer {
             let begin_info = vk::CommandBufferBeginInfo::default();
             device.begin_command_buffer(cmd, &begin_info)?;
 
+            // ---- Shadow pass: render scene depth from light's POV ----
+            let shadow_clear = [vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+            }];
+            let shadow_rp_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(self.shadow_map.render_pass)
+                .framebuffer(self.shadow_map.framebuffer)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: shadow::SHADOW_MAP_SIZE,
+                        height: shadow::SHADOW_MAP_SIZE,
+                    },
+                })
+                .clear_values(&shadow_clear);
+            device.cmd_begin_render_pass(cmd, &shadow_rp_begin, vk::SubpassContents::INLINE);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.shadow_map.pipeline);
+            for draw in &draws {
+                device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
+                device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.shadow_map.pipeline_layout,
+                    0,
+                    &[draw.descriptor_set],
+                    &[],
+                );
+                let model_bytes: &[u8] = bytemuck::bytes_of(&draw.model_matrix);
+                device.cmd_push_constants(
+                    cmd,
+                    self.shadow_map.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    model_bytes,
+                );
+                device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
+            }
+            device.cmd_end_render_pass(cmd);
+
+            // ---- Main pass ----
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
@@ -1009,6 +1073,7 @@ impl Drop for Renderer {
         self.uniforms.cleanup(&self.device.device, &self.allocator);
         self.default_texture.cleanup(&self.device.device, &self.allocator);
         self.material_pool.cleanup(&self.device.device, &self.allocator);
+        self.shadow_map.cleanup(&self.device.device, &self.allocator);
         self.depth_buffer.cleanup(&self.device.device, &self.allocator);
         self.overlay.cleanup(&self.device.device, &self.allocator);
         self.particle_renderer.cleanup(&self.device.device, &self.allocator);
