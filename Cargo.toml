@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game"]
+resolver = "2"
+
+[workspace.dependencies]
+ash = "0.38"
+ash-window = "0.13"
+winit = "0.30"
+glam = { version = "0.32.1", features = ["bytemuck"] }
+raw-window-handle = "0.6"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+gpu-allocator = "0.28"
+image = "0.25"
+gltf = { version = "1", default-features = false, features = ["utils", "import", "names"] }
+hecs = "0.10"
+shaderc = "0.10.1"
+notify = "8.2.0"
+bytemuck = { version = "1.14", features = ["derive"] }

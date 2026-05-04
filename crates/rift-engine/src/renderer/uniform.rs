@@ -1,0 +1,158 @@
+use anyhow::Result;
+use ash::vk;
+use glam::{Mat4, Vec4};
+use gpu_allocator::vulkan::Allocator;
+use gpu_allocator::MemoryLocation;
+use std::sync::{Arc, Mutex};
+
+use crate::vulkan::buffer::GpuBuffer;
+use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UniformData {
+    pub view: Mat4,
+    pub proj: Mat4,
+    pub camera_pos: Vec4,    // xyz = position, w unused
+    pub light_dir: Vec4,     // xyz = direction (toward light), w unused
+    pub light_color: Vec4,   // xyz = color, w = ambient intensity
+    pub fog_color: Vec4,     // xyz = fog color, w unused
+    pub fog_params: Vec4,    // x = start dist, y = end dist, z = density, w unused
+    /// Point lights: [pos.xyz, radius] packed into vec4s, then [color.rgb, intensity]
+    pub point_light_pos: [Vec4; 8],   // xyz = position, w = radius
+    pub point_light_color: [Vec4; 8], // xyz = color, w = intensity
+    pub point_light_count: Vec4,      // x = count (as float), yzw unused
+}
+
+pub struct UniformBuffers {
+    pub buffers: Vec<GpuBuffer>,
+    pub descriptor_pool: vk::DescriptorPool,
+    pub descriptor_sets: Vec<vk::DescriptorSet>,
+    pub descriptor_set_layout: vk::DescriptorSetLayout,
+}
+
+impl UniformBuffers {
+    pub fn new(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) -> Result<Self> {
+        let buffer_size = std::mem::size_of::<UniformData>() as vk::DeviceSize;
+
+        // Create one uniform buffer per frame in flight
+        let mut buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let buffer = GpuBuffer::new(
+                device,
+                allocator,
+                buffer_size,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                MemoryLocation::CpuToGpu,
+                &format!("uniform_buffer_{}", i),
+            )?;
+            buffers.push(buffer);
+        }
+
+        // Descriptor set layout: binding 0 = UBO, binding 1 = texture sampler
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings);
+
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+
+        // Descriptor pool
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            },
+        ];
+
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
+            .pool_sizes(&pool_sizes);
+
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
+
+        // Allocate descriptor sets
+        let layouts = vec![descriptor_set_layout; MAX_FRAMES_IN_FLIGHT];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&layouts);
+
+        let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info)? };
+
+        // Update descriptor sets — UBO only (texture binding updated later)
+        for (i, &set) in descriptor_sets.iter().enumerate() {
+            let buffer_info = vk::DescriptorBufferInfo {
+                buffer: buffers[i].buffer,
+                offset: 0,
+                range: buffer_size,
+            };
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info));
+
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+
+        Ok(Self {
+            buffers,
+            descriptor_pool,
+            descriptor_sets,
+            descriptor_set_layout,
+        })
+    }
+
+    /// Bind a texture to all descriptor sets at binding 1.
+    pub fn bind_texture(&self, device: &ash::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        for &set in &self.descriptor_sets {
+            let image_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info));
+
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+    }
+
+    pub fn update(&mut self, frame: usize, data: &UniformData) {
+        self.buffers[frame].write(std::slice::from_ref(data));
+    }
+
+    pub fn cleanup(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+        for buf in &mut self.buffers {
+            buf.cleanup(device, allocator);
+        }
+        unsafe {
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+        }
+    }
+}

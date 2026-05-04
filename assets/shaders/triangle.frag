@@ -1,0 +1,98 @@
+#version 450
+
+layout(binding = 0) uniform UniformData {
+    mat4 view;
+    mat4 proj;
+    vec4 cameraPos;
+    vec4 lightDir;
+    vec4 lightColor;
+    vec4 fogColor;
+    vec4 fogParams; // x = start, y = end
+    vec4 pointLightPos[8];   // xyz = position, w = radius
+    vec4 pointLightColor[8]; // xyz = color, w = intensity
+    vec4 pointLightCount;    // x = count
+} ubo;
+
+layout(set = 0, binding = 1) uniform sampler2D unusedSampler; // legacy slot, kept for descriptor compatibility
+layout(set = 1, binding = 0) uniform sampler2D texSampler;
+
+layout(location = 0) in vec3 fragWorldPos;
+layout(location = 1) in vec3 fragNormal;
+layout(location = 2) in vec3 fragColor;
+layout(location = 3) in vec2 fragUV;
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    vec3 N = normalize(fragNormal);
+    vec3 L = normalize(ubo.lightDir.xyz);
+    vec3 V = normalize(ubo.cameraPos.xyz - fragWorldPos);
+    vec3 H = normalize(L + V);
+
+    // Ambient
+    float ambient = ubo.lightColor.w;
+
+    // Diffuse — quantized into 3 bands for cel-shading.
+    float diffRaw = max(dot(N, L), 0.0);
+    // Bands: shadow (0.35), mid (0.70), lit (1.0). Dark band kept >0 so unlit
+    // surfaces (back walls etc.) still read texture detail.
+    float diff;
+    if (diffRaw < 0.30) {
+        diff = mix(0.35, 0.70, smoothstep(0.25, 0.30, diffRaw));
+    } else if (diffRaw < 0.65) {
+        diff = mix(0.70, 1.0, smoothstep(0.60, 0.65, diffRaw));
+    } else {
+        diff = 1.0;
+    }
+
+    // Specular: thresholded toon highlight (small, subtle).
+    float specRaw = pow(max(dot(N, H), 0.0), 48.0);
+    float spec = smoothstep(0.55, 0.60, specRaw);
+
+    // Fresnel rim — subtle, only on near-grazing angles. Keeps the moody silhouette pop without washing surfaces.
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+    vec3 rim = ubo.lightColor.rgb * fres * 0.35;
+
+    vec3 texColor = texture(texSampler, fragUV).rgb;
+    vec3 baseColor = fragColor * texColor;
+
+    vec3 lighting = baseColor * (ambient + diff * ubo.lightColor.rgb)
+                  + ubo.lightColor.rgb * spec * 0.25
+                  + rim;
+
+    // Point lights
+    int numLights = int(ubo.pointLightCount.x);
+    for (int i = 0; i < numLights && i < 8; i++) {
+        vec3 lightPos = ubo.pointLightPos[i].xyz;
+        float radius = ubo.pointLightPos[i].w;
+        vec3 lightCol = ubo.pointLightColor[i].xyz;
+        float intensity = ubo.pointLightColor[i].w;
+
+        vec3 toLight = lightPos - fragWorldPos;
+        float dist = length(toLight);
+        if (dist < radius) {
+            float atten = 1.0 - (dist / radius);
+            atten = atten * atten; // quadratic falloff
+            vec3 Lp = normalize(toLight);
+            float diffPRaw = max(dot(N, Lp), 0.0);
+            // Quantize point-light diffuse to 2 bands (matches main toon look).
+            float diffP = (diffPRaw < 0.5)
+                ? mix(0.0, 0.6, smoothstep(0.45, 0.5, diffPRaw))
+                : 1.0;
+            vec3 Hp = normalize(Lp + V);
+            float specPRaw = pow(max(dot(N, Hp), 0.0), 24.0);
+            float specP = smoothstep(0.45, 0.50, specPRaw);
+            lighting += baseColor * diffP * lightCol * intensity * atten;
+            lighting += lightCol * specP * intensity * atten * 0.25;
+        }
+    }
+
+    // Distance fog
+    float dist = length(ubo.cameraPos.xyz - fragWorldPos);
+    float fogFactor = clamp((dist - ubo.fogParams.x) / (ubo.fogParams.y - ubo.fogParams.x), 0.0, 1.0);
+    // Smooth curve for more natural falloff
+    fogFactor = fogFactor * fogFactor;
+    vec3 finalColor = mix(lighting, ubo.fogColor.rgb, fogFactor);
+
+    outColor = vec4(finalColor, 1.0);
+}
