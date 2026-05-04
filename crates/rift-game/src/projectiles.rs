@@ -58,9 +58,11 @@ impl ProjectileManager {
             return;
         }
         self.initialized = true;
-        let arrow_mesh = Mesh::arrow();
+        // Use a fireball mesh for player projectiles (gameplay still uses the
+        // existing Projectile::arrow physics — only the visual changes).
+        let proj_mesh = Mesh::fireball();
         for _ in 0..MAX_PROJECTILES {
-            if renderer.add_mesh(&arrow_mesh, Mat4::ZERO).is_ok() {
+            if renderer.add_mesh(&proj_mesh, Mat4::ZERO).is_ok() {
                 self.pool_obj_indices.push(renderer.objects.len() - 1);
             }
         }
@@ -130,9 +132,18 @@ impl ProjectileManager {
                     let rot = glam::Quat::from_rotation_y(angle_offset);
                     let dir = rot * aim_dir;
 
-                    // Spawn from the player's right-hand / weapon tip so projectiles
-                    // appear to come out of the held weapon.
-                    let spawn_pos = crate::player_arms::PlayerArms::right_hand_tip(origin, aim_dir);
+                    // Spawn from approximately the player's right-hand /
+                    // raised-arm position so projectiles appear to come out
+                    // of the casting hand. Offset is in world-space along
+                    // `aim_dir` plus a fixed shoulder height; this is a
+                    // visual approximation since we don't query the live
+                    // hand bone position here.
+                    let yaw = aim_dir.x.atan2(aim_dir.z);
+                    let right = glam::Quat::from_rotation_y(yaw) * glam::Vec3::new(0.30, 0.0, 0.0);
+                    let spawn_pos = origin
+                        + glam::Vec3::Y * 1.25
+                        + right
+                        + aim_dir * 0.55;
                     let mut proj = Projectile::arrow(spawn_pos, dir, damage);
 
                     // Apply talent pierce bonus

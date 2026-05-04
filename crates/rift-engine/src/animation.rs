@@ -428,3 +428,123 @@ pub fn build_bone_palette(
         out[i] = world[i] * joints[i].inverse_bind;
     }
 }
+
+/// Sample a base animator and a layered animator together, where the layer
+/// only contributes to joints with non-zero `mask` weight. The layer's
+/// global `weight` is applied on top of the per-joint mask.
+///
+/// Per-joint blend factor = `mask[i] * layer_weight`. Layer joints not
+/// authored by the layer's clip fall back to their bind pose, which is
+/// what we want for clean "upper body cast over walking legs" results.
+///
+/// `twist_joint` + `twist_yaw` apply an extra rotation around the world
+/// Y axis to a single joint's local transform — used to point the torso
+/// at the cursor while the legs continue running in the body's facing
+/// direction. Pass `None` to skip twisting.
+pub fn build_bone_palette_layered(
+    base: &Animator,
+    layer: Option<&Animator>,
+    layer_mask: &[f32],
+    layer_weight: f32,
+    twist: Option<(usize, f32)>,
+    joints: &[crate::renderer::mesh::Joint],
+    out: &mut Vec<Mat4>,
+) {
+    let n = joints.len();
+    out.clear();
+    out.resize(n, Mat4::IDENTITY);
+
+    // Bind-pose TRS as the baseline.
+    let mut t = vec![Vec3::ZERO; n];
+    let mut r = vec![Quat::IDENTITY; n];
+    let mut s = vec![Vec3::ONE; n];
+    for (i, j) in joints.iter().enumerate() {
+        let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
+        t[i] = tr; r[i] = rot; s[i] = scl;
+    }
+
+    // Sample base clip (and its cross-fade prev, if any).
+    sample_into_trs(&base.clip, base.time, &mut t, &mut r, &mut s);
+    if let Some(prev) = base.prev.as_ref() {
+        if base.blend < 1.0 {
+            let mut tp = vec![Vec3::ZERO; n];
+            let mut rp = vec![Quat::IDENTITY; n];
+            let mut sp = vec![Vec3::ONE; n];
+            for (i, j) in joints.iter().enumerate() {
+                let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
+                tp[i] = tr; rp[i] = rot; sp[i] = scl;
+            }
+            sample_into_trs(prev, base.prev_time, &mut tp, &mut rp, &mut sp);
+            let b = base.blend;
+            for i in 0..n {
+                t[i] = tp[i].lerp(t[i], b);
+                s[i] = sp[i].lerp(s[i], b);
+                r[i] = rp[i].slerp(r[i], b);
+            }
+        }
+    }
+
+    // Apply layer if active. Sample its clip into a fresh TRS array (seeded
+    // with bind pose) and blend per joint by mask*weight.
+    if let (Some(layer), true) = (layer, layer_weight > 0.001) {
+        let mut tl = vec![Vec3::ZERO; n];
+        let mut rl = vec![Quat::IDENTITY; n];
+        let mut sl = vec![Vec3::ONE; n];
+        for (i, j) in joints.iter().enumerate() {
+            let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
+            tl[i] = tr; rl[i] = rot; sl[i] = scl;
+        }
+        sample_into_trs(&layer.clip, layer.time, &mut tl, &mut rl, &mut sl);
+        // Cross-fade inside the layer too (e.g. Enter→Shoot transition).
+        if let Some(prev) = layer.prev.as_ref() {
+            if layer.blend < 1.0 {
+                let mut tp = vec![Vec3::ZERO; n];
+                let mut rp = vec![Quat::IDENTITY; n];
+                let mut sp = vec![Vec3::ONE; n];
+                for (i, j) in joints.iter().enumerate() {
+                    let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
+                    tp[i] = tr; rp[i] = rot; sp[i] = scl;
+                }
+                sample_into_trs(prev, layer.prev_time, &mut tp, &mut rp, &mut sp);
+                let b = layer.blend;
+                for i in 0..n {
+                    tl[i] = tp[i].lerp(tl[i], b);
+                    sl[i] = sp[i].lerp(sl[i], b);
+                    rl[i] = rp[i].slerp(rl[i], b);
+                }
+            }
+        }
+        for i in 0..n {
+            let m = layer_mask.get(i).copied().unwrap_or(0.0) * layer_weight;
+            if m <= 0.001 { continue }
+            t[i] = t[i].lerp(tl[i], m);
+            s[i] = s[i].lerp(sl[i], m);
+            r[i] = r[i].slerp(rl[i], m);
+        }
+    }
+
+    // Apply torso twist: post-multiply the spine root's local rotation by
+    // a yaw. The pelvis local frame in standard humanoid rigs has its
+    // local +Y aligned with body-up, so a local Y rotation produces a
+    // world-Y twist on top of any animated motion. We do this *after*
+    // layer blending so it survives the cast-layer override.
+    if let Some((spine_idx, yaw)) = twist {
+        if spine_idx < n && yaw.abs() > 1e-4 {
+            r[spine_idx] = r[spine_idx] * Quat::from_rotation_y(yaw);
+        }
+    }
+
+    // Compose locals → worlds.
+    let mut world = vec![Mat4::IDENTITY; n];
+    for i in 0..n {
+        let local = Mat4::from_scale_rotation_translation(s[i], r[i], t[i]);
+        let parent_world = match joints[i].parent {
+            Some(p) => world[p as usize],
+            None => Mat4::IDENTITY,
+        };
+        world[i] = parent_world * local;
+    }
+    for i in 0..n {
+        out[i] = world[i] * joints[i].inverse_bind;
+    }
+}

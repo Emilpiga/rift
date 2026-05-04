@@ -70,10 +70,87 @@ impl AnimationSet {
     }
 }
 
+/// Phase of a layered spell cast. Drives clip selection on the cast layer
+/// and the moment at which the projectile is spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpellPhase {
+    /// No cast active; layer weight should be 0.
+    Idle,
+    /// Wind-up. Plays Spell_Simple_Enter once.
+    Entering,
+    /// Release. Plays Spell_Simple_Shoot once. Projectile is spawned on
+    /// entry to this phase.
+    Shooting,
+    /// Recovery. Plays Spell_Simple_Exit once, then returns to Idle.
+    Exiting,
+}
+
+/// Layered spell-cast state attached to a player entity.
+///
+/// While `phase != Idle`, the skinning system blends `layer_animator` over
+/// the base locomotion animator using `mask` (1.0 on upper-body bones,
+/// 0.0 on legs/pelvis). `weight` ramps in/out for clean fades.
+///
+/// `pending_aim_dir` and `pending_damage` capture the original click so the
+/// projectile can be deferred to the start of `Shooting` while still using
+/// the aim and stats from when the player pressed the button.
+pub struct SpellCast {
+    pub phase: SpellPhase,
+    pub layer_animator: Option<crate::animation::Animator>,
+    pub mask: Vec<f32>,
+    pub weight: f32,
+    /// Ability captured at trigger time. Cloned so cooldown state on the
+    /// `Abilities` resource has already been advanced and we don't need to
+    /// re-acquire it when the projectile actually spawns.
+    pub pending_ability: Option<crate::combat::Ability>,
+    /// Aim direction captured at trigger time (xz horizontal).
+    pub pending_aim_dir: glam::Vec3,
+    /// Damage captured at trigger time. Spent at the moment of fire.
+    pub pending_damage: f32,
+    /// Set true once the projectile has been spawned for the current cast,
+    /// so Shooting doesn't fire repeatedly per frame.
+    pub fired: bool,
+}
+
+impl SpellCast {
+    pub fn new(mask: Vec<f32>) -> Self {
+        Self {
+            phase: SpellPhase::Idle,
+            layer_animator: None,
+            mask,
+            weight: 0.0,
+            pending_ability: None,
+            pending_aim_dir: glam::Vec3::Z,
+            pending_damage: 0.0,
+            fired: false,
+        }
+    }
+    pub fn is_active(&self) -> bool { self.phase != SpellPhase::Idle }
+
+    /// Begin a new cast. Captures the ability + aim + damage so the
+    /// projectile can be spawned later when we reach the Shoot phase.
+    pub fn begin(&mut self, ability: crate::combat::Ability, aim_dir: glam::Vec3, damage: f32) {
+        self.phase = SpellPhase::Entering;
+        self.pending_ability = Some(ability);
+        self.pending_aim_dir = aim_dir;
+        self.pending_damage = damage;
+        self.fired = false;
+    }
+}
+
 /// Player marker component.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Player {
     pub speed: f32,
+    /// Direction the player is currently aiming (cursor direction in
+    /// world space, projected on the XZ plane). The body itself still
+    /// turns to face *movement* — this only drives the upper-body twist
+    /// and the locomotion direction sign so that running while aiming
+    /// elsewhere doesn't suddenly snap the character around.
+    pub aim_dir: Vec3,
+    /// Index of the spine-root joint to apply the torso twist to, or
+    /// `usize::MAX` if unset / not a skinned player.
+    pub spine_joint: u32,
 }
 
 /// Velocity component for movement.

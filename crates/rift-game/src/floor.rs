@@ -122,7 +122,11 @@ impl FloorManager {
         let player_entity = world.spawn((
             Transform::from_position(spawn),
             Velocity::default(),
-            Player { speed: player_state.config.base_move_speed },
+            Player {
+                speed: player_state.config.base_move_speed,
+                aim_dir: glam::Vec3::Z,
+                spine_joint: u32::MAX,
+            },
             Collider::new(0.3, 0.5, 0.3),
             Health::new(player_state.max_hp()),
             Renderable { object_index: player_obj_index },
@@ -165,6 +169,28 @@ impl FloorManager {
             }
             if let Some(anim) = animator {
                 world.insert_one(player_entity, anim).ok();
+            }
+            // Layered upper-body cast component. The mask comes from the
+            // skeleton itself (joints under spine/head/clavicle/arm/hand
+            // chain weight 1.0; legs and pelvis remain 0.0) so we can blend
+            // a Spell_Simple_* clip on top of locomotion without disturbing
+            // the run cycle on the lower body. Also captures the spine-root
+            // joint index for the cursor-aim torso twist.
+            let (mask_opt, spine_idx): (Option<Vec<f32>>, Option<usize>) =
+                match world.get::<&rift_engine::ecs::components::Skinned>(player_entity) {
+                    Ok(s) => (Some(s.mesh.upper_body_mask()), s.mesh.spine_root_joint()),
+                    Err(_) => (None, None),
+                };
+            if let Some(mask) = mask_opt {
+                world.insert_one(
+                    player_entity,
+                    rift_engine::ecs::components::SpellCast::new(mask),
+                ).ok();
+            }
+            if let Some(idx) = spine_idx {
+                if let Ok(mut p) = world.get::<&mut Player>(player_entity) {
+                    p.spine_joint = idx as u32;
+                }
             }
         }
 

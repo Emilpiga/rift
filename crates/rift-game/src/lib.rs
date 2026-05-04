@@ -6,7 +6,6 @@ pub mod floor;
 pub mod hud;
 pub mod combat_text;
 pub mod equipment_visuals;
-pub mod player_arms;
 pub mod decals;
 pub mod enemy_attacks;
 
@@ -18,9 +17,8 @@ use rift_engine::ecs::components::{Health, Player, Transform};
 use combat_text::CombatTextSystem;
 use decals::DecalSystem;
 use equipment_visuals::EquipmentVisuals;
-use player_arms::PlayerArms;
 use rift_engine::ecs::systems::{
-    camera_follow_system, collision_system, contact_damage_system, despawn_system,
+    camera_follow_system, cast_advance_system, collision_system, contact_damage_system, despawn_system,
     movement_system, player_input_system, render_sync_system, skinning_system, locomotion_anim_system,
 };
 use rift_engine::loot::{Equipment, Inventory};
@@ -47,7 +45,6 @@ pub struct GameState {
     pub inventory_ui: InventoryUI,
     pub combat_text: CombatTextSystem,
     pub equip_visuals: EquipmentVisuals,
-    pub player_arms: PlayerArms,
     pub decals: DecalSystem,
     pub enemy_attacks: EnemyAttackSystem,
     needs_new_floor: bool,
@@ -97,7 +94,6 @@ impl GameState {
             inventory_ui: InventoryUI::new(),
             combat_text: CombatTextSystem::new(),
             equip_visuals: EquipmentVisuals::new(),
-            player_arms: PlayerArms::new(),
             decals: DecalSystem::new(),
             enemy_attacks: EnemyAttackSystem::new(),
             needs_new_floor: false,
@@ -117,7 +113,6 @@ impl GameState {
         )?;
         self.projectile_mgr.init_pool(renderer);
         self.equip_visuals.init(renderer);
-        self.player_arms.init(renderer)?;
         self.enemy_attacks.init_pool(renderer);
         self.rebuild_wall_caches();
         Ok(())
@@ -164,10 +159,6 @@ impl GameState {
             }
             self.projectile_mgr.init_pool(renderer);
             self.equip_visuals.init(renderer);
-            self.player_arms.clear();
-            if let Err(e) = self.player_arms.init(renderer) {
-                log::error!("Failed to init player arms: {}", e);
-            }
             self.enemy_attacks.init_pool(renderer);
             self.rebuild_wall_caches();
             return;
@@ -417,6 +408,34 @@ impl GameState {
         // gameplay state (idle vs. moving), then advance + skin.
         locomotion_anim_system(&mut self.world);
 
+        // Spell-cast state machine: advances the upper-body cast layer
+        // (Enter → Shoot → Exit) and emits a fire event the moment we
+        // enter the Shoot phase, so the projectile leaves the hand in
+        // sync with the wind-up animation rather than at click time.
+        let cast_fires = cast_advance_system(&mut self.world, dt);
+        for (entity, aim_dir, damage) in cast_fires {
+            // Snapshot transform + ability for this caster.
+            let (origin, ability) = {
+                let pos = self.world.get::<&Transform>(entity)
+                    .map(|t| t.position).ok();
+                let ab = self.world.get::<&mut rift_engine::ecs::components::SpellCast>(entity)
+                    .ok().and_then(|mut c| c.pending_ability.take());
+                match (pos, ab) {
+                    (Some(p), Some(a)) => (p, a),
+                    _ => continue,
+                }
+            };
+            self.projectile_mgr.fire_ability(
+                &ability,
+                origin,
+                aim_dir,
+                damage,
+                &self.player_state,
+                &mut self.world,
+                renderer,
+            );
+        }
+
         // Skeletal animation: advance animators and CPU-skin meshes into the
         // renderer's per-frame dynamic vertex buffers. Must run after
         // prepare_frame (engine ensures that) and before draw_frame.
@@ -431,9 +450,16 @@ impl GameState {
             .unwrap_or(Vec3::ZERO);
         self.equip_visuals.sync(&self.equipment, player_pos, renderer);
 
-        // Sync arms to follow the cursor (visual only — gameplay aim is independent).
+        // Aim direction from cursor — drives upper-body torso twist (in
+        // the skinning system) without disturbing locomotion or movement
+        // input direction. The body keeps facing where it's moving;
+        // the spine rotates up to ~120° to point at the cursor.
         let arm_aim = Self::cursor_aim_dir(input, renderer, player_pos);
-        self.player_arms.sync(player_pos, arm_aim, renderer);
+        if let Some(player_id) = self.player_id() {
+            if let Ok(mut p) = self.world.get::<&mut rift_engine::ecs::components::Player>(player_id) {
+                p.aim_dir = arm_aim;
+            }
+        }
 
         camera_follow_system(&self.world, renderer, input, &self.wall_aabbs);
         renderer.particle_system.tick(dt);
@@ -606,6 +632,20 @@ impl GameState {
                     break;
                 }
 
+                // Slot 0 (left-click primary) routes through the spell-cast
+                // state machine so the upper-body cast animation plays.
+                // The actual projectile spawn is deferred until the Shoot
+                // phase fires its event in `cast_advance_system`. Other
+                // slots fire instantly.
+                if i == 0 {
+                    if let Some(player_id) = self.player_id() {
+                        if let Ok(mut cast) = self.world.get::<&mut rift_engine::ecs::components::SpellCast>(player_id) {
+                            cast.begin(ability_clone, aim_dir, damage);
+                            continue;
+                        }
+                    }
+                }
+
                 self.projectile_mgr.fire_ability(
                     &ability_clone,
                     player_pos,
@@ -617,6 +657,15 @@ impl GameState {
                 );
             }
         }
+    }
+
+    /// Find the player's entity id (first entity with a `Player` component).
+    fn player_id(&self) -> Option<hecs::Entity> {
+        self.world
+            .query::<&Player>()
+            .iter()
+            .map(|(e, _)| e)
+            .next()
     }
 
     /// Compute the world position where the cursor ray hits a ground plane at the given Y.

@@ -903,6 +903,58 @@ impl Mesh {
         Self { vertices, indices }
     }
 
+    /// Fireball: a glowing emissive sphere built as a low-poly UV sphere.
+    /// Vertex colors interpolate from a hot white core to orange edges so it
+    /// reads as a fireball even without point lights. Diameter ≈ 0.45 units.
+    pub fn fireball() -> Self {
+        let radius = 0.22_f32;
+        let stacks = 8usize;
+        let sectors = 12usize;
+
+        let core = glam::Vec3::new(1.0, 1.0, 0.85);   // white-hot core hint
+        let edge = glam::Vec3::new(1.0, 0.45, 0.05);  // orange flame
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity((stacks + 1) * (sectors + 1));
+        for i in 0..=stacks {
+            let v = i as f32 / stacks as f32;
+            let phi = v * std::f32::consts::PI; // 0 .. PI
+            let y = phi.cos();
+            let r = phi.sin();
+            for j in 0..=sectors {
+                let u = j as f32 / sectors as f32;
+                let theta = u * std::f32::consts::TAU;
+                let x = r * theta.cos();
+                let z = r * theta.sin();
+                let n = glam::Vec3::new(x, y, z).normalize_or_zero();
+                let pos = n * radius;
+                // Brighter near the equator (bands), darker at the poles —
+                // a cheap fake shading so it reads as a flame even unlit.
+                let fade = (1.0 - (y.abs() * 0.6)).max(0.4);
+                let color = edge.lerp(core, fade * 0.5);
+                vertices.push(Vertex {
+                    position: pos,
+                    normal: n,
+                    color,
+                    uv: glam::Vec2::new(u, v),
+                });
+            }
+        }
+
+        let stride = sectors + 1;
+        let mut indices: Vec<u32> = Vec::with_capacity(stacks * sectors * 6);
+        for i in 0..stacks {
+            for j in 0..sectors {
+                let a = (i * stride + j) as u32;
+                let b = ((i + 1) * stride + j) as u32;
+                let c = ((i + 1) * stride + j + 1) as u32;
+                let d = (i * stride + j + 1) as u32;
+                indices.extend_from_slice(&[a, b, c, c, d, a]);
+            }
+        }
+
+        Self { vertices, indices }
+    }
+
     /// Portal: a vertical ring/torus-like shape with glowing inner surface.
     pub fn portal() -> Self {
         let mut vertices = Vec::new();
@@ -1333,6 +1385,61 @@ impl SkinnedMesh {
 
     /// Number of joints (palette size needed for rendering).
     pub fn joint_count(&self) -> usize { self.joints.len() }
+
+    /// Build a per-joint mask in `[0, 1]` selecting "upper-body" joints
+    /// (spine, neck, head, clavicles, arms, hands, weapons). Used by the
+    /// animation layer system so a spell-cast clip can override the upper
+    /// body while the base locomotion clip continues to drive the legs.
+    ///
+    /// A joint receives weight 1 if any *ancestor* (including itself)
+    /// matches an upper-body name pattern. This way fingers/weapons that
+    /// don't directly contain "spine"/"arm" still inherit the mask via
+    /// their parent chain.
+    pub fn upper_body_mask(&self) -> Vec<f32> {
+        const UPPER_TOKENS: &[&str] = &[
+            "spine", "chest", "neck", "head",
+            "clavicle", "shoulder",
+            "upperarm", "forearm", "lowerarm", "hand", "finger", "thumb",
+            "weapon", "prop", "tool",
+        ];
+        // First pass: direct hits.
+        let mut weight: Vec<f32> = self.joints.iter().map(|j| {
+            let n = j.name.to_ascii_lowercase();
+            if UPPER_TOKENS.iter().any(|tok| n.contains(tok)) { 1.0 } else { 0.0 }
+        }).collect();
+        // Second pass: propagate from any matched ancestor down to descendants.
+        // Joints in skin order have parents earlier in the array (per glTF spec).
+        for i in 0..self.joints.len() {
+            if weight[i] >= 1.0 { continue }
+            if let Some(p) = self.joints[i].parent {
+                if weight[p as usize] >= 1.0 {
+                    weight[i] = 1.0;
+                }
+            }
+        }
+        weight
+    }
+
+    /// Index of the lowest joint in the spine chain — the joint where a
+    /// torso-twist (e.g. "aim offset" between hips and shoulders) should
+    /// be applied. Returns the first joint whose name contains "spine"
+    /// and whose parent does NOT contain "spine", which in standard UE/
+    /// Mixamo/UAL skeletons is `spine_01`. Falls back to the first
+    /// matched spine joint, then to None if the rig has no spine.
+    pub fn spine_root_joint(&self) -> Option<usize> {
+        let lower = |s: &str| s.to_ascii_lowercase();
+        let is_spine = |i: usize| lower(&self.joints[i].name).contains("spine");
+        for (i, _) in self.joints.iter().enumerate() {
+            if is_spine(i) {
+                let parent_is_spine = self.joints[i].parent
+                    .map(|p| is_spine(p as usize))
+                    .unwrap_or(false);
+                if !parent_is_spine { return Some(i); }
+            }
+        }
+        // Fallback: any matched spine joint.
+        self.joints.iter().position(|j| j.name.to_ascii_lowercase().contains("spine"))
+    }
 
     /// Build a bone palette that produces the bind pose (i.e. an identity
     /// deformation). Useful as a starting point and for Phase 2b verification.

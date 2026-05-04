@@ -162,7 +162,7 @@ impl RiftGame {
         self.world.spawn((
             Transform::from_position(spawn),
             Velocity::default(),
-            Player { speed: class_cfg.base_move_speed },
+            Player { speed: class_cfg.base_move_speed, aim_dir: glam::Vec3::Z, spine_joint: u32::MAX },
             Collider::new(0.3, 0.5, 0.3),
             Health::new(class_cfg.base_hp + class_cfg.hp_per_level * self.experience.level as f32),
             Renderable {

@@ -1,7 +1,7 @@
 use glam::{Quat, Vec3};
 use hecs::World;
 
-use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, Health, Player, Renderable, Skinned, Static, Transform, Velocity};
+use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, Health, Player, Renderable, Skinned, Transform, Velocity};
 use crate::animation::{self, Animator};
 use crate::input::Input;
 use crate::physics::{self, Aabb, Ray};
@@ -139,25 +139,174 @@ pub fn locomotion_anim_system(world: &mut World) {
     }
 }
 
-/// Advance every Animator and re-skin its mesh into the renderer's per-frame
-/// dynamic vertex buffer.
+/// Advance every base Animator (and any active SpellCast layer) and re-skin
+/// each mesh into the renderer's per-frame dynamic vertex buffer.
 pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
     let mut palette: Vec<glam::Mat4> = Vec::new();
-    for (_id, (renderable, skinned, animator)) in
-        world.query_mut::<(&Renderable, &mut Skinned, &mut Animator)>()
+    for (_id, (renderable, skinned, animator, transform, mut cast, player)) in world
+        .query_mut::<(
+            &Renderable,
+            &mut Skinned,
+            &mut Animator,
+            &Transform,
+            Option<&mut super::components::SpellCast>,
+            Option<&Player>,
+        )>()
     {
         animator.advance(dt);
         if animator.clip.joint_count != skinned.mesh.joints.len() {
             continue; // mismatch — skip skinning, render bind pose
         }
-        animation::build_bone_palette(
-            animator,
-            &skinned.mesh.joints,
-            &mut palette,
-        );
+        // Advance the cast layer animator (if any) and pick up its weight/mask.
+        let (layer_anim, layer_mask, layer_weight): (Option<&Animator>, &[f32], f32) =
+            if let Some(c) = cast.as_deref_mut() {
+                if let Some(la) = c.layer_animator.as_mut() {
+                    la.advance(dt);
+                }
+                let weight = c.weight;
+                let mask: &[f32] = if weight > 0.001 { &c.mask } else { &[] };
+                (c.layer_animator.as_ref(), mask, weight)
+            } else {
+                (None, &[], 0.0)
+            };
+
+        // Compute torso twist: the difference between aim yaw and body
+        // yaw, clamped so we never twist past ~120° (you'd see the rig
+        // tear apart). When the offset would exceed the limit, the body
+        // itself catches up via the player_input/movement systems.
+        let twist = if let Some(p) = player {
+            let aim = p.aim_dir;
+            if aim.length_squared() > 1e-4 {
+                let aim_yaw = aim.x.atan2(aim.z);
+                // Extract the body's yaw directly from its forward vector
+                // (rotation * +Z) rather than via Euler decomposition,
+                // which has axis-ordering pitfalls. This matches the
+                // movement system's atan2(x, z) convention exactly.
+                let fwd = transform.rotation * Vec3::Z;
+                let body_yaw = fwd.x.atan2(fwd.z);
+                let mut delta = aim_yaw - body_yaw;
+                while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
+                while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+                let limit = std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_6; // ~120°
+                let clamped = delta.clamp(-limit, limit);
+                if p.spine_joint != u32::MAX {
+                    Some((p.spine_joint as usize, clamped))
+                } else { None }
+            } else { None }
+        } else { None };
+
+        if layer_anim.is_some() && layer_weight > 0.001 || twist.is_some() {
+            animation::build_bone_palette_layered(
+                animator, layer_anim, layer_mask, layer_weight, twist,
+                &skinned.mesh.joints, &mut palette,
+            );
+        } else {
+            animation::build_bone_palette(animator, &skinned.mesh.joints, &mut palette);
+        }
         skinned.mesh.skin_to(&palette, &mut skinned.scratch);
         renderer.update_dynamic_vertices(renderable.object_index, &skinned.scratch);
     }
+}
+
+/// Advance the spell-cast state machine. Returns the list of casts that
+/// just transitioned into `Shooting` (i.e. the moment the projectile
+/// should be spawned). The caller (gameplay code) can then walk the
+/// returned list and emit projectiles at the player's hand position.
+pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, glam::Vec3, f32)> {
+    use super::components::{SpellCast, SpellPhase};
+    let mut fire_events: Vec<(hecs::Entity, glam::Vec3, f32)> = Vec::new();
+
+    // Tunables.
+    const WEIGHT_RAMP: f32 = 8.0; // 1/seconds — about 0.125s to reach full weight
+
+    for (entity, (cast, set)) in world.query_mut::<(&mut SpellCast, &AnimationSet)>() {
+        if cast.phase == SpellPhase::Idle {
+            cast.weight = (cast.weight - dt * WEIGHT_RAMP).max(0.0);
+            continue;
+        }
+
+        // We deliberately skip the Spell_Simple_Shoot clip on the cast
+        // layer: it dips the hand briefly which looks like a flinch right
+        // as the projectile spawns. Instead we fire at the Enter→Exit
+        // boundary, so the hand stays raised through the release and the
+        // Exit clip provides the natural recovery motion.
+        let target_clip = match cast.phase {
+            SpellPhase::Entering => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
+            SpellPhase::Shooting => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
+            SpellPhase::Exiting => set.find_any(&["Spell_Simple_Exit", "Spell_Exit", "Cast_Exit"]),
+            SpellPhase::Idle => None,
+        };
+        let Some(target_clip) = target_clip else {
+            // Missing clip for this phase — fall through gracefully.
+            match cast.phase {
+                SpellPhase::Entering => cast.phase = SpellPhase::Shooting,
+                SpellPhase::Shooting => {
+                    if !cast.fired {
+                        fire_events.push((entity, cast.pending_aim_dir, cast.pending_damage));
+                        cast.fired = true;
+                    }
+                    cast.phase = SpellPhase::Exiting;
+                }
+                SpellPhase::Exiting => {
+                    cast.phase = SpellPhase::Idle;
+                    cast.layer_animator = None;
+                }
+                SpellPhase::Idle => {}
+            }
+            continue;
+        };
+
+        let need_swap = match cast.layer_animator.as_ref() {
+            None => true,
+            Some(la) => !std::sync::Arc::ptr_eq(&la.clip, &target_clip),
+        };
+        if need_swap {
+            match cast.layer_animator.as_mut() {
+                Some(la) => la.cross_fade(target_clip.clone(), false, 0.08),
+                None => {
+                    let mut la = Animator::new(target_clip.clone());
+                    la.looping = false;
+                    cast.layer_animator = Some(la);
+                }
+            }
+        }
+
+        let target_weight = if cast.phase == SpellPhase::Exiting { 0.0 } else { 1.0 };
+        let dw = dt * WEIGHT_RAMP;
+        cast.weight = if target_weight > cast.weight {
+            (cast.weight + dw).min(target_weight)
+        } else {
+            (cast.weight - dw).max(target_weight)
+        };
+
+        if let Some(la) = cast.layer_animator.as_ref() {
+            let done = la.time >= la.clip.duration - 1e-3;
+            if done {
+                match cast.phase {
+                    SpellPhase::Entering => {
+                        // Fire at the end of the wind-up so the projectile
+                        // leaves the hand at its highest, fully-extended pose.
+                        if !cast.fired {
+                            fire_events.push((entity, cast.pending_aim_dir, cast.pending_damage));
+                            cast.fired = true;
+                        }
+                        cast.phase = SpellPhase::Exiting;
+                    }
+                    SpellPhase::Shooting => cast.phase = SpellPhase::Exiting,
+                    SpellPhase::Exiting => {
+                        if cast.weight <= 0.001 {
+                            cast.phase = SpellPhase::Idle;
+                            cast.layer_animator = None;
+                            cast.fired = false;
+                        }
+                    }
+                    SpellPhase::Idle => {}
+                }
+            }
+        }
+    }
+
+    fire_events
 }
 
 /// Make the camera follow the player with a third-person offset.
