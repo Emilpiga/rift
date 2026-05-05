@@ -10,6 +10,7 @@ pub mod overlay;
 pub mod font;
 pub mod particles;
 pub mod particle_renderer;
+pub mod decals;
 
 pub use forward::Renderer;
 pub use overlay::{OverlayBatch, OverlayRenderer};

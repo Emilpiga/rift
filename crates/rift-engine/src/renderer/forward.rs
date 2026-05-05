@@ -264,8 +264,8 @@ impl Renderer {
             deletion_queue: Vec::new(),
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
-            fog_start: 6.0,
-            fog_end: 18.0,
+            fog_start: 5.0,
+            fog_end: 16.0,
             point_lights: Vec::new(),
         })
     }
@@ -525,6 +525,110 @@ impl Renderer {
         Ok(())
     }
 
+    /// Bind a base-color texture decoded from raw PNG/JPG bytes — useful
+    /// for textures embedded in glTF bufferViews where there's no file
+    /// path to pass to `set_object_texture`.
+    pub fn set_object_texture_from_bytes(
+        &mut self,
+        obj_idx: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if obj_idx >= self.objects.len() {
+            return Ok(());
+        }
+        let texture = crate::renderer::material::load_texture_from_memory(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            bytes,
+        )?;
+        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        let obj = &mut self.objects[obj_idx];
+        // Only wait for the GPU to drain if there's an existing per-object
+        // texture to free; first-time texture binding is safe without a
+        // wait (the default material set was never written to a texture
+        // resource that we're about to free here).
+        if obj.texture.is_some() {
+            unsafe { self.device.device.device_wait_idle().ok(); }
+            if let Some(mut old) = obj.texture.take() {
+                old.cleanup(&self.device.device, &self.allocator);
+            }
+        }
+        obj.texture = Some(texture);
+        obj.material_set = set;
+        Ok(())
+    }
+
+    /// Upload a texture from raw PNG/JPG bytes and return both the
+    /// texture handle and a freshly-allocated descriptor set bound to
+    /// it.  The caller is responsible for keeping the texture alive
+    /// for as long as any object references the descriptor set.
+    /// Use together with `set_object_shared_material` to share a
+    /// single texture across many objects (e.g. one descriptor set
+    /// per monster archetype rather than per spawn) — this avoids
+    /// blowing through the per-pool descriptor-set budget when the
+    /// floor spawns dozens of enemies.
+    pub fn upload_shared_texture_from_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(crate::renderer::texture::Texture, vk::DescriptorSet)> {
+        let texture = crate::renderer::material::load_texture_from_memory(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            bytes,
+        )?;
+        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        Ok((texture, set))
+    }
+
+    /// Upload a texture from raw RGBA8 pixels (e.g. procedurally
+    /// generated) and return both the texture handle and a freshly
+    /// allocated shared descriptor set.  See
+    /// [`upload_shared_texture_from_bytes`] for ownership semantics.
+    pub fn upload_shared_texture_from_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<(crate::renderer::texture::Texture, vk::DescriptorSet)> {
+        let texture = crate::renderer::texture::Texture::from_rgba(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            width,
+            height,
+            pixels,
+        )?;
+        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        Ok((texture, set))
+    }
+
+    /// Bind a previously-allocated shared descriptor set to an object.
+    /// Unlike `set_object_texture*`, the renderer does NOT take
+    /// ownership of any texture — the caller must keep the underlying
+    /// `Texture` alive (typically inside a long-lived asset cache).
+    pub fn set_object_shared_material(
+        &mut self,
+        obj_idx: usize,
+        set: vk::DescriptorSet,
+    ) {
+        if obj_idx >= self.objects.len() {
+            return;
+        }
+        let obj = &mut self.objects[obj_idx];
+        if obj.texture.is_some() {
+            unsafe { self.device.device.device_wait_idle().ok(); }
+            if let Some(mut old) = obj.texture.take() {
+                old.cleanup(&self.device.device, &self.allocator);
+            }
+        }
+        obj.material_set = set;
+    }
+
     /// Replace mesh data at an existing object index.
     /// Old buffers are deferred for safe deletion after in-flight frames complete.
     pub fn replace_mesh(&mut self, obj_idx: usize, mesh: &Mesh) -> Result<()> {
@@ -573,6 +677,19 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// Direct access to the underlying Vulkan device handle (for code
+    /// that needs to free GPU resources owned outside the renderer
+    /// during shutdown).
+    pub fn ash_device(&self) -> &ash::Device {
+        &self.device.device
+    }
+
+    /// Shared handle to the GPU allocator used by all of the
+    /// renderer's image/buffer creation paths.
+    pub fn allocator_arc(&self) -> Arc<Mutex<Allocator>> {
+        self.allocator.clone()
     }
 
     /// Clear all render objects, deferring GPU buffer destruction until safe.
@@ -726,7 +843,10 @@ impl Renderer {
                 0.0,
             ),
             light_dir: light_dir_normalized,
-            light_color: Vec4::new(1.05, 0.82, 0.58, 0.22), // warm amber torchlight, moderate ambient so walls/textures stay readable
+            // Cool, dim moonlight-toned key light. Lower ambient pushes
+            // unlit surfaces into shadow so the dungeon feels enclosed
+            // and torch point lights carry the warm color punctuation.
+            light_color: Vec4::new(0.62, 0.66, 0.78, 0.13),
             fog_color: Vec4::new(self.fog_color[0], self.fog_color[1], self.fog_color[2], 0.0),
             fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 0.0),
             point_light_pos,

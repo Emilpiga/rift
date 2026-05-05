@@ -16,6 +16,12 @@ pub struct Input {
     right_clicked: Cell<bool>,
     last_mouse_pos: Option<(f64, f64)>,
     mouse_pos: (f32, f32),
+    /// Characters typed this frame (consumed by `take_chars_typed`).
+    chars_typed: Vec<char>,
+    /// Backspace pressed this frame (key auto-repeat respected).
+    backspace_pressed: u32,
+    /// Enter pressed this frame.
+    enter_pressed: bool,
 }
 
 impl Default for Input {
@@ -31,6 +37,9 @@ impl Default for Input {
             right_clicked: Cell::new(false),
             last_mouse_pos: None,
             mouse_pos: (0.0, 0.0),
+            chars_typed: Vec::new(),
+            backspace_pressed: 0,
+            enter_pressed: false,
         }
     }
 }
@@ -72,6 +81,41 @@ impl Input {
     /// Call at end of frame to snapshot key state.
     pub fn end_frame(&mut self) {
         self.prev_keys_held = self.keys_held.clone();
+        self.chars_typed.clear();
+        self.backspace_pressed = 0;
+        self.enter_pressed = false;
+    }
+
+    /// Push a typed character (printable). Called by the window event loop.
+    pub fn on_char(&mut self, ch: char) {
+        // Drop control characters; backspace/enter are tracked separately.
+        if !ch.is_control() {
+            self.chars_typed.push(ch);
+        }
+    }
+
+    /// Notify the input system that backspace was pressed (auto-repeat counts).
+    pub fn on_backspace(&mut self) {
+        self.backspace_pressed = self.backspace_pressed.saturating_add(1);
+    }
+
+    /// Notify that Enter / Return was pressed this frame.
+    pub fn on_enter(&mut self) {
+        self.enter_pressed = true;
+    }
+
+    /// Drain characters typed this frame.
+    pub fn chars_typed(&self) -> &[char] {
+        &self.chars_typed
+    }
+
+    /// Number of backspaces pressed this frame.
+    pub fn backspace_count(&self) -> u32 {
+        self.backspace_pressed
+    }
+
+    pub fn enter_just_pressed(&self) -> bool {
+        self.enter_pressed
     }
 
     pub fn on_mouse_button(&mut self, button: winit::event::MouseButton, pressed: bool) {

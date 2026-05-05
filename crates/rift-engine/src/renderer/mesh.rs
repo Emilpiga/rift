@@ -1011,6 +1011,28 @@ impl Mesh {
             indices.extend_from_slice(&[center_idx, center_idx + 1 + i as u32, center_idx + 1 + next as u32]);
         }
 
+        // Mirror disc on the other side (back-face) so the portal reads
+        // from any camera angle. Duplicate verts with flipped normal and
+        // reversed winding so it's still single-sided per face but the
+        // glowing surface is visible from both sides.
+        let back_center = vertices.len() as u32;
+        vertices.push(Vertex { position: Vec3::new(0.0, height * 0.5, 0.0), normal: -Vec3::Z, color: inner_color, uv: Vec2::new(0.5, 0.5) });
+        for i in 0..disc_segments {
+            let angle = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
+            let r = ring_radius * 0.85;
+            vertices.push(Vertex {
+                position: Vec3::new(angle.cos() * r, angle.sin() * (height * 0.45) + height * 0.5, 0.0),
+                normal: -Vec3::Z,
+                color: inner_color,
+                uv: Vec2::new(0.5, 0.5),
+            });
+        }
+        for i in 0..disc_segments {
+            let next = (i + 1) % disc_segments;
+            // Reverse winding so the back face's normal points -Z.
+            indices.extend_from_slice(&[back_center, back_center + 1 + next as u32, back_center + 1 + i as u32]);
+        }
+
         Self { vertices, indices }
     }
 
@@ -1195,6 +1217,59 @@ pub struct SkinnedMesh {
     /// Joint glTF-node-index → index into `joints`. Used by animation
     /// channels which reference target nodes by index, not by name.
     pub joint_index_by_node: std::collections::HashMap<u32, u16>,
+}
+
+/// Extract the bytes of the first base-color texture image referenced by
+/// any material in the glTF at `path`. Returns `None` if the file has
+/// no embedded image or no material binds a base color texture. The
+/// returned bytes are the original PNG/JPG payload (suitable for
+/// `image::load_from_memory`).
+pub fn extract_base_color_image_bytes<P: AsRef<std::path::Path>>(
+    path: P,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let original = path.as_ref().to_path_buf();
+    let candidates = [
+        original.clone(),
+        std::path::PathBuf::from("..").join(&original),
+        std::path::PathBuf::from("../..").join(&original),
+        std::path::PathBuf::from("../../..").join(&original),
+    ];
+    let resolved = match candidates.iter().find(|p| p.exists()).cloned() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let gltf = gltf::Gltf::open(&resolved)?;
+    let base_dir = resolved.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let buffers = gltf::import_buffers(&gltf.document, Some(base_dir), gltf.blob.clone())?;
+    let doc = gltf.document;
+
+    // Find the first material that has a pbrMetallicRoughness baseColorTexture.
+    for mat in doc.materials() {
+        if let Some(info) = mat.pbr_metallic_roughness().base_color_texture() {
+            let tex = info.texture();
+            let img = tex.source();
+            // Two possibilities: bufferView (embedded) or URI (external file).
+            let source = img.source();
+            match source {
+                gltf::image::Source::View { view, .. } => {
+                    let buf = &buffers[view.buffer().index()];
+                    let start = view.offset();
+                    let end = start + view.length();
+                    if end <= buf.len() {
+                        return Ok(Some(buf[start..end].to_vec()));
+                    }
+                }
+                gltf::image::Source::Uri { uri, .. } => {
+                    // Resolve relative to gltf's directory.
+                    let full = base_dir.join(uri);
+                    if let Ok(bytes) = std::fs::read(&full) {
+                        return Ok(Some(bytes));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 impl SkinnedMesh {
@@ -1386,6 +1461,49 @@ impl SkinnedMesh {
     /// Number of joints (palette size needed for rendering).
     pub fn joint_count(&self) -> usize { self.joints.len() }
 
+    /// Remap this mesh's `vertex_skin.joint_indices` to refer to the joint
+    /// ordering of `target_names` (joint name → palette index in the
+    /// target skeleton). Used when an attachment outfit (modular body /
+    /// legs / etc.) was authored against the same logical skeleton as
+    /// the player's base mesh and should be skinned with the player's
+    /// bone palette directly. Returns false (and leaves the mesh
+    /// untouched) if any of this mesh's joints is missing from the
+    /// target skeleton, in which case the caller should not re-skin the
+    /// attachment with that palette.
+    pub fn remap_joint_indices_to(
+        &mut self,
+        target_names: &std::collections::HashMap<String, u16>,
+    ) -> bool {
+        let mut remap: Vec<u16> = Vec::with_capacity(self.joints.len());
+        for j in &self.joints {
+            match target_names.get(&j.name) {
+                Some(&idx) => remap.push(idx),
+                None => {
+                    log::warn!(
+                        "attachment joint {:?} not found in target skeleton, skipping remap",
+                        j.name
+                    );
+                    return false;
+                }
+            }
+        }
+        for vs in &mut self.vertex_skin {
+            for slot in 0..4 {
+                let local = vs.joints[slot] as usize;
+                if local < remap.len() {
+                    vs.joints[slot] = remap[local];
+                }
+            }
+        }
+        // Rebuild name table to reflect the new index space.
+        self.joint_index_by_name = self
+            .joints
+            .iter()
+            .filter_map(|j| target_names.get(&j.name).map(|&i| (j.name.clone(), i)))
+            .collect();
+        true
+    }
+
     /// Build a per-joint mask in `[0, 1]` selecting "upper-body" joints
     /// (spine, neck, head, clavicles, arms, hands, weapons). Used by the
     /// animation layer system so a spell-cast clip can override the upper
@@ -1464,6 +1582,18 @@ impl SkinnedMesh {
     /// `out` is resized to match. `bone_palette[j]` should equal
     /// `current_joint_world[j] * inverse_bind[j]`.
     pub fn skin_to(&self, bone_palette: &[glam::Mat4], out: &mut Vec<Vertex>) {
+        self.skin_to_inflated(bone_palette, 0.0, out);
+    }
+
+    /// Same as `skin_to` but pushes every output vertex `inflate` units
+    /// along its (post-skinning) normal. Used to render outfit shells
+    /// just outside the base body skin so the two don't z-fight.
+    pub fn skin_to_inflated(
+        &self,
+        bone_palette: &[glam::Mat4],
+        inflate: f32,
+        out: &mut Vec<Vertex>,
+    ) {
         out.clear();
         out.reserve(self.bind_vertices.len());
         for (v, s) in self.bind_vertices.iter().zip(self.vertex_skin.iter()) {
@@ -1487,9 +1617,10 @@ impl SkinnedMesh {
             // good enough for game characters).
             let n3 = glam::Mat3::from_mat4(m);
             let n = (n3 * v.normal).normalize_or_zero();
+            let final_n = if n == glam::Vec3::ZERO { v.normal } else { n };
             out.push(Vertex {
-                position: p,
-                normal: if n == glam::Vec3::ZERO { v.normal } else { n },
+                position: p + final_n * inflate,
+                normal: final_n,
                 color: v.color,
                 uv: v.uv,
             });

@@ -15,6 +15,8 @@ pub mod animation;
 
 pub use renderer::Renderer;
 pub use renderer::forward::PointLight;
+pub use ash;
+pub use gpu_allocator;
 pub use renderer::mesh::Mesh;
 pub use renderer::camera::Camera;
 pub use renderer::particles::{ParticleSystem, Emitter, EmitterConfig, EmitterSpread};
@@ -22,4 +24,4 @@ pub use resources::gltf_loader;
 pub use ecs::World;
 pub use input::Input;
 pub use dungeon::{Floor, FloorConfig};
-pub use window::{Window, App};
+pub use window::{Window, App, LoadStatus};

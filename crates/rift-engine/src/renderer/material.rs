@@ -141,3 +141,21 @@ pub fn load_texture_from_file<P: AsRef<std::path::Path>>(
     log::info!("Loaded texture {:?}: {}x{}", resolved.file_name().unwrap_or_default(), w, h);
     Texture::from_rgba(device, allocator, queue, command_pool, w, h, &pixels)
 }
+
+/// Decode a PNG/JPG image from an in-memory byte buffer (e.g. one
+/// extracted from an embedded glTF bufferView) and upload it as an
+/// SRGB RGBA8 Texture.
+pub fn load_texture_from_memory(
+    device: &ash::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    bytes: &[u8],
+) -> Result<Texture> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| anyhow::anyhow!("texture decode from memory failed: {}", e))?
+        .to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    let pixels = img.into_raw();
+    Texture::from_rgba(device, allocator, queue, command_pool, w, h, &pixels)
+}

@@ -1,18 +1,16 @@
 use glam::{Mat4, Vec3};
-use rift_engine::combat::ability::AbilityId;
-use rift_engine::combat::talent::{AbilityModifier, TalentEffect};
-use rift_engine::combat::{Ability, Projectile};
-use rift_engine::ecs::components::{Collider, Enemy, Health, Player, Static, Transform, Velocity};
-use rift_engine::physics::{Aabb, Ray, raycast};
-use rift_engine::{Emitter, EmitterConfig, Mesh, Renderer};
-
-use crate::player::PlayerState;
+use crate::combat::Projectile;
+use crate::ecs::components::{Collider, Enemy, Static, Transform};
+use crate::physics::{Aabb, Ray, raycast};
+use crate::renderer::particles::{Emitter, EmitterConfig};
+use crate::renderer::mesh::Mesh;
+use crate::renderer::Renderer;
 
 const MAX_PROJECTILES: usize = 64;
 
 /// Manages active projectiles: spawning, physics, collision, rendering.
 /// Uses a fixed pool of pre-allocated render objects to avoid GPU buffer churn.
-pub struct ProjectileManager {
+pub struct ProjectilePool {
     pub projectiles: Vec<Projectile>,
     /// Maps each active projectile to its pool slot index.
     pub pool_slots: Vec<usize>,
@@ -39,7 +37,7 @@ pub struct AoeZone {
     pub tick_timer: f32,
 }
 
-impl ProjectileManager {
+impl ProjectilePool {
     pub fn new() -> Self {
         Self {
             projectiles: Vec::new(),
@@ -106,144 +104,22 @@ impl ProjectileManager {
     }
 
     /// Fire an ability, spawning projectiles.
-    pub fn fire_ability(
-        &mut self,
-        ability: &Ability,
-        origin: Vec3,
-        aim_dir: Vec3,
-        damage: f32,
-        player_state: &PlayerState,
-        world: &mut hecs::World,
-        _renderer: &mut Renderer,
-    ) {
-        match ability.id {
-            AbilityId::SteadyShot | AbilityId::MultiShot | AbilityId::RapidFire => {
-                let count = ability.projectile_count;
-                let spread = ability.spread_angle;
-
-                for i in 0..count {
-                    let angle_offset = if count > 1 {
-                        let t = i as f32 / (count - 1) as f32 - 0.5;
-                        t * spread
-                    } else {
-                        0.0
-                    };
-
-                    let rot = glam::Quat::from_rotation_y(angle_offset);
-                    let dir = rot * aim_dir;
-
-                    // Spawn from approximately the player's right-hand /
-                    // raised-arm position so projectiles appear to come out
-                    // of the casting hand. Offset is in world-space along
-                    // `aim_dir` plus a fixed shoulder height; this is a
-                    // visual approximation since we don't query the live
-                    // hand bone position here.
-                    let yaw = aim_dir.x.atan2(aim_dir.z);
-                    let right = glam::Quat::from_rotation_y(yaw) * glam::Vec3::new(0.30, 0.0, 0.0);
-                    let spawn_pos = origin
-                        + glam::Vec3::Y * 1.25
-                        + right
-                        + aim_dir * 0.55;
-                    let mut proj = Projectile::arrow(spawn_pos, dir, damage);
-
-                    // Apply talent pierce bonus
-                    for node in &player_state.talents.nodes {
-                        if node.current_rank > 0 {
-                            if let TalentEffect::AbilityMod {
-                                ability: mod_ability,
-                                modifier: AbilityModifier::Pierce(n),
-                            } = &node.effect
-                            {
-                                if *mod_ability == ability.id {
-                                    proj.pierce_remaining += n * node.current_rank as u32;
-                                }
-                            }
-                        }
-                    }
-
-                    // Allocate a pool slot for rendering
-                    if let Some(slot) = self.alloc_slot() {
-                        self.projectiles.push(proj);
-                        self.pool_slots.push(slot);
-                    }
-                    // If pool exhausted, projectile is simply not rendered (dropped)
-                }
-            }
-            AbilityId::EvasiveRoll => {
-                let dash_dist = 4.0;
-                for (_, (t, _, _)) in
-                    world.query_mut::<(&mut Transform, &Player, &mut Velocity)>()
-                {
-                    // Spawn afterimage puff at start position
-                    let puff = Emitter::new(t.position + Vec3::new(0.0, 0.5, 0.0), EmitterConfig::dodge_puff());
-                    _renderer.particle_system.add_emitter(puff);
-                    t.position += aim_dir * dash_dist;
-                }
-            }
-            AbilityId::RainOfArrows | AbilityId::MarkForDeath => {
-                let target_pos = origin + aim_dir * 5.0;
-                self.execute_placed(ability, target_pos, damage, world, _renderer);
-            }
+    /// Spawn a single projectile if the pool has a free slot.  Returns
+    /// `true` on success, `false` if the pool is exhausted (the
+    /// projectile is then silently dropped — visuals only).
+    pub fn queue_projectile(&mut self, proj: Projectile) -> bool {
+        if let Some(slot) = self.alloc_slot() {
+            self.projectiles.push(proj);
+            self.pool_slots.push(slot);
+            true
+        } else {
+            false
         }
     }
 
-    /// Fire a placed ability at a specific world position (used by targeting system).
-    pub fn fire_ability_at(
-        &mut self,
-        ability: &Ability,
-        _origin: Vec3,
-        _aim_dir: Vec3,
-        target_pos: Vec3,
-        damage: f32,
-        _player_state: &PlayerState,
-        world: &mut hecs::World,
-        renderer: &mut Renderer,
-    ) {
-        self.execute_placed(ability, target_pos, damage, world, renderer);
-    }
-
-    /// Execute a placed ability at the given world position.
-    fn execute_placed(
-        &mut self,
-        ability: &Ability,
-        target_pos: Vec3,
-        damage: f32,
-        world: &mut hecs::World,
-        renderer: &mut Renderer,
-    ) {
-        match ability.id {
-            AbilityId::RainOfArrows => {
-                // Visual: rain of arrows particle effect at target area
-                let rain_emitter = Emitter::new(
-                    target_pos + Vec3::new(0.0, 5.0, 0.0),
-                    EmitterConfig::rain_of_arrows([1.0, 0.8, 0.3]),
-                );
-                renderer.particle_system.add_emitter(rain_emitter);
-
-                // Create AoE damage zone (ticks 4 times over 2 seconds)
-                self.aoe_zones.push(AoeZone {
-                    position: target_pos,
-                    radius: 3.0,
-                    damage_per_tick: damage,
-                    tick_interval: 0.5,
-                    duration: 2.0,
-                    elapsed: 0.0,
-                    tick_timer: 0.0,
-                });
-            }
-            AbilityId::MarkForDeath => {
-                // MarkForDeath: instant damage
-                for (_, (t, _, health)) in
-                    world.query_mut::<(&Transform, &Enemy, &mut Health)>()
-                {
-                    let dist = (t.position - target_pos).length();
-                    if dist < 3.0 {
-                        health.current -= damage;
-                    }
-                }
-            }
-            _ => {}
-        }
+    /// Spawn an active AoE damage zone (e.g. Rain of Arrows).
+    pub fn queue_aoe(&mut self, zone: AoeZone) {
+        self.aoe_zones.push(zone);
     }
 
     /// Tick projectiles: move, collide with enemies, clean up dead ones.
@@ -305,9 +181,9 @@ impl ProjectileManager {
         // Apply damage from hits
         let mut damage_events: Vec<(Vec3, f32)> = Vec::new();
         for (entity, damage, pos) in &hits_to_apply {
-            if let Ok(mut health) = world.get::<&mut Health>(*entity) {
-                health.current -= damage;
-                damage_events.push((*pos, *damage));
+            let dealt = crate::combat::debuff::apply_damage(world, *entity, *damage);
+            if dealt > 0.0 {
+                damage_events.push((*pos, dealt));
             }
             // Spawn hit spark particles
             let emitter = Emitter::new(*pos, EmitterConfig::hit_spark([1.0, 0.8, 0.3]));
@@ -363,14 +239,20 @@ impl ProjectileManager {
             if zone.tick_timer >= zone.tick_interval {
                 zone.tick_timer -= zone.tick_interval;
 
-                // Damage all enemies in radius
-                for (_, (t, _, health)) in
-                    world.query_mut::<(&Transform, &Enemy, &mut Health)>()
-                {
-                    let dist = (t.position - zone.position).length();
-                    if dist < zone.radius {
-                        health.current -= zone.damage_per_tick;
-                        damage_events.push((t.position, zone.damage_per_tick));
+                // Snapshot enemies in radius first, then damage them
+                // through the centralised debuff-aware path.
+                let targets: Vec<(hecs::Entity, Vec3)> = world
+                    .query::<(&Transform, &Enemy)>()
+                    .iter()
+                    .filter(|(_, (t, _))| (t.position - zone.position).length() < zone.radius)
+                    .map(|(e, (t, _))| (e, t.position))
+                    .collect();
+                for (entity, pos) in targets {
+                    let dealt = crate::combat::debuff::apply_damage(
+                        world, entity, zone.damage_per_tick,
+                    );
+                    if dealt > 0.0 {
+                        damage_events.push((pos, dealt));
                     }
                 }
             }

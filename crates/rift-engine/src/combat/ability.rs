@@ -1,20 +1,9 @@
-/// Unique identifier for an ability.
+/// Opaque identifier for an ability. Engine treats this as a hashable
+/// key only — concrete IDs are defined by the game (see
+/// `rift-game/src/abilities.rs`). New classes / mods can introduce new
+/// IDs without touching the engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AbilityId {
-    // ─── Hunter abilities ─────────────────────
-    /// Basic attack: shoot a single arrow.
-    SteadyShot,
-    /// Multi-shot: fires 3 arrows in a spread.
-    MultiShot,
-    /// Rapid Fire: channel a burst of fast arrows in one direction.
-    RapidFire,
-    /// Rain of Arrows: AoE arrow barrage at target location.
-    RainOfArrows,
-    /// Evasive Roll: dodge roll, brief invulnerability.
-    EvasiveRoll,
-    /// Mark for Death: debuff target, increased damage taken.
-    MarkForDeath,
-}
+pub struct AbilityId(pub &'static str);
 
 /// How the ability is targeted before firing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +38,10 @@ pub struct Ability {
     pub duration: f32,
     /// How this ability is targeted.
     pub targeting: TargetingMode,
+    /// Declarative effect list executed by `ability_runtime::execute_ability`.
+    /// Each constructor populates this; new abilities only add new
+    /// effect entries here, no engine-side dispatch code needed.
+    pub effects: &'static [crate::combat::ability_runtime::AbilityEffect],
 }
 
 /// Runtime state for an ability on the action bar.
@@ -132,120 +125,3 @@ impl AbilitySlot {
     }
 }
 
-// ─── Hunter ability definitions ──────────────────────────────────────────────
-
-impl Ability {
-    pub fn steady_shot() -> Self {
-        Self {
-            id: AbilityId::SteadyShot,
-            name: "Steady Shot",
-            description: "Fire a precise arrow at the target.",
-            cooldown: 0.5, // ~2 attacks per second base rate
-            resource_cost: 0.0,
-            damage_mult: 1.0,
-            projectile_count: 1,
-            spread_angle: 0.0,
-            range: 12.0,
-            unlock_level: 1,
-            duration: 0.0,
-            targeting: TargetingMode::Instant,
-        }
-    }
-
-    pub fn multi_shot() -> Self {
-        Self {
-            id: AbilityId::MultiShot,
-            name: "Multi-Shot",
-            description: "Fire 3 arrows in a wide spread.",
-            cooldown: 4.0,
-            resource_cost: 15.0,
-            damage_mult: 0.7,
-            projectile_count: 3,
-            spread_angle: 0.5, // ~30 degrees total spread
-            range: 10.0,
-            unlock_level: 3,
-            duration: 0.0,
-            targeting: TargetingMode::Instant,
-        }
-    }
-
-    pub fn rapid_fire() -> Self {
-        Self {
-            id: AbilityId::RapidFire,
-            name: "Rapid Fire",
-            description: "Channel a burst of 6 rapid arrows.",
-            cooldown: 8.0,
-            resource_cost: 25.0,
-            damage_mult: 0.5,
-            projectile_count: 6,
-            spread_angle: 0.08, // Tight grouping
-            range: 12.0,
-            unlock_level: 7,
-            duration: 1.0, // 1 second channel
-            targeting: TargetingMode::Instant,
-        }
-    }
-
-    pub fn rain_of_arrows() -> Self {
-        Self {
-            id: AbilityId::RainOfArrows,
-            name: "Rain of Arrows",
-            description: "Call down a rain of arrows in an area.",
-            cooldown: 12.0,
-            resource_cost: 35.0,
-            damage_mult: 0.4,
-            projectile_count: 12,
-            spread_angle: 0.0, // AoE, not spread
-            range: 15.0,
-            unlock_level: 12,
-            duration: 2.0, // Arrows rain over 2 seconds
-            targeting: TargetingMode::Placed { radius: 3.0 },
-        }
-    }
-
-    pub fn evasive_roll() -> Self {
-        Self {
-            id: AbilityId::EvasiveRoll,
-            name: "Evasive Roll",
-            description: "Dodge roll in movement direction. Brief invulnerability.",
-            cooldown: 6.0,
-            resource_cost: 0.0,
-            damage_mult: 0.0,
-            projectile_count: 0,
-            spread_angle: 0.0,
-            range: 0.0,
-            unlock_level: 5,
-            duration: 0.3, // 0.3s invuln frames
-            targeting: TargetingMode::Instant,
-        }
-    }
-
-    pub fn mark_for_death() -> Self {
-        Self {
-            id: AbilityId::MarkForDeath,
-            name: "Mark for Death",
-            description: "Mark target. They take 25% increased damage for 6s.",
-            cooldown: 15.0,
-            resource_cost: 20.0,
-            damage_mult: 0.0,
-            projectile_count: 0,
-            spread_angle: 0.0,
-            range: 20.0,
-            unlock_level: 10,
-            duration: 6.0,
-            targeting: TargetingMode::Instant,
-        }
-    }
-
-    /// Get all hunter abilities (ordered by unlock level).
-    pub fn hunter_abilities() -> Vec<Self> {
-        vec![
-            Self::steady_shot(),
-            Self::multi_shot(),
-            Self::evasive_roll(),
-            Self::rapid_fire(),
-            Self::mark_for_death(),
-            Self::rain_of_arrows(),
-        ]
-    }
-}

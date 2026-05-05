@@ -36,24 +36,28 @@ void main() {
 
     // Diffuse — quantized into 3 bands for cel-shading.
     float diffRaw = max(dot(N, L), 0.0);
-    // Bands: shadow (0.35), mid (0.70), lit (1.0). Dark band kept >0 so unlit
-    // surfaces (back walls etc.) still read texture detail.
+    // Bands: shadow (0.30), mid (0.62), lit (0.85). Top band is no longer
+    // 1.0 so directly-lit walls don't blow out and lose their texture.
     float diff;
     if (diffRaw < 0.30) {
-        diff = mix(0.35, 0.70, smoothstep(0.25, 0.30, diffRaw));
+        diff = mix(0.30, 0.62, smoothstep(0.25, 0.30, diffRaw));
     } else if (diffRaw < 0.65) {
-        diff = mix(0.70, 1.0, smoothstep(0.60, 0.65, diffRaw));
+        diff = mix(0.62, 0.85, smoothstep(0.60, 0.65, diffRaw));
     } else {
-        diff = 1.0;
+        diff = 0.85;
     }
 
-    // Specular: thresholded toon highlight (small, subtle).
-    float specRaw = pow(max(dot(N, H), 0.0), 48.0);
-    float spec = smoothstep(0.55, 0.60, specRaw);
+    // Specular: thresholded toon highlight, very tight and dim. Killed
+    // entirely on near-horizontal surfaces (floors / table tops) so dry
+    // stone doesn't read as wet.
+    float specRaw = pow(max(dot(N, H), 0.0), 128.0);
+    float floorMask = smoothstep(0.80, 0.97, N.y);   // 0 walls, 1 floor up
+    float spec = smoothstep(0.75, 0.82, specRaw) * (1.0 - floorMask);
 
-    // Fresnel rim — subtle, only on near-grazing angles. Keeps the moody silhouette pop without washing surfaces.
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
-    vec3 rim = ubo.lightColor.rgb * fres * 0.35;
+    // Fresnel rim — very subtle, only on near-grazing vertical surfaces.
+    // Killed on floors so distant tiles don't catch the moonlight.
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);
+    vec3 rim = ubo.lightColor.rgb * fres * 0.18 * (1.0 - floorMask);
 
     vec3 texColor = texture(texSampler, fragUV).rgb;
     vec3 baseColor = fragColor * texColor;
@@ -81,14 +85,14 @@ void main() {
         s += texture(shadowMap, vec3(shadowUV.xy + vec2(-0.5, 0.5)*texelSize, shadowUV.z));
         s += texture(shadowMap, vec3(shadowUV.xy + vec2( 0.5, 0.5)*texelSize, shadowUV.z));
         shadow = s * 0.25;
-        // Lift the floor so shadowed surfaces aren't pitch-black (matches the
-        // toon palette's banded look).
-        shadow = mix(0.45, 1.0, shadow);
+        // Lift the floor for shadowed surfaces, but keep them noticeably
+        // darker than lit ones so the dungeon feels properly enclosed.
+        shadow = mix(0.30, 1.0, shadow);
     }
 
     vec3 lighting = baseColor * ambient
                   + baseColor * diff * ubo.lightColor.rgb * shadow
-                  + ubo.lightColor.rgb * spec * 0.25 * shadow
+                  + ubo.lightColor.rgb * spec * 0.10 * shadow
                   + rim;
 
     // Point lights
@@ -111,10 +115,10 @@ void main() {
                 ? mix(0.0, 0.6, smoothstep(0.45, 0.5, diffPRaw))
                 : 1.0;
             vec3 Hp = normalize(Lp + V);
-            float specPRaw = pow(max(dot(N, Hp), 0.0), 24.0);
-            float specP = smoothstep(0.45, 0.50, specPRaw);
+            float specPRaw = pow(max(dot(N, Hp), 0.0), 64.0);
+            float specP = smoothstep(0.70, 0.78, specPRaw) * (1.0 - floorMask);
             lighting += baseColor * diffP * lightCol * intensity * atten;
-            lighting += lightCol * specP * intensity * atten * 0.25;
+            lighting += lightCol * specP * intensity * atten * 0.12;
         }
     }
 

@@ -147,6 +147,63 @@ impl Floor {
     pub fn boss_room(&self) -> Option<&Room> {
         self.rooms.iter().find(|r| r.room_type == RoomType::BossRoom)
     }
+
+    /// Build a synthetic, BSP-free single-room floor used for the hub /
+    /// starting zone.  No enemies, no boss room — just a quiet square
+    /// chamber with a fixed spawn at the south end and a "centre" point
+    /// the caller can drop a return-to-rift portal on.
+    pub fn hub() -> Self {
+        const SIZE: usize = 18;     // grid is SIZE × SIZE walls
+        const ROOM: usize = 14;     // inner walkable square
+        let pad = (SIZE - ROOM) / 2;
+        let width = SIZE;
+        let depth = SIZE;
+        let mut tiles = vec![Tile::Wall; width * depth];
+        for z in pad..pad + ROOM {
+            for x in pad..pad + ROOM {
+                tiles[z * width + x] = Tile::Floor;
+            }
+        }
+        let room = Room {
+            x: pad,
+            z: pad,
+            width: ROOM,
+            depth: ROOM,
+            room_type: RoomType::Arena,
+        };
+        // Player spawns near the south wall, facing the portal in centre.
+        let spawn_pos = Vec3::new(
+            (pad + ROOM / 2) as f32,
+            0.5,
+            (pad + ROOM - 3) as f32,
+        );
+        let mut config = FloorConfig::for_floor(1);
+        config.width = width;
+        config.depth = depth;
+        config.base_enemy_count = 0;
+        config.enemies_per_floor = 0;
+        config.packs_per_room = 0;
+        config.mobs_per_pack = 0;
+        Self {
+            width,
+            depth,
+            tiles,
+            rooms: vec![room],
+            spawn_pos,
+            boss_room_center: Vec3::ZERO,
+            config,
+        }
+    }
+
+    /// Centre of the first arena-style room — useful for hub layouts to
+    /// position a return portal.
+    pub fn first_room_center(&self) -> Vec3 {
+        self.rooms
+            .iter()
+            .find(|r| r.room_type == RoomType::Arena)
+            .map(|r| r.center_world() + Vec3::new(0.0, 0.0, 0.0))
+            .unwrap_or(Vec3::ZERO)
+    }
 }
 
 /// Minimal seeded RNG (xorshift64).

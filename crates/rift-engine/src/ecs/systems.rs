@@ -1,7 +1,7 @@
 use glam::{Quat, Vec3};
 use hecs::World;
 
-use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, Health, Player, Renderable, Skinned, Transform, Velocity};
+use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, Health, Player, Renderable, Skinned, Transform, Velocity};
 use crate::animation::{self, Animator};
 use crate::input::Input;
 use crate::physics::{self, Aabb, Ray};
@@ -9,9 +9,29 @@ use crate::renderer::Renderer;
 
 /// Process player input and set velocity based on WASD keys.
 pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
-    for (_id, (transform, velocity, player)) in
-        world.query_mut::<(&Transform, &mut Velocity, &Player)>()
+    for (_id, (transform, velocity, player, health)) in
+        world.query_mut::<(&Transform, &mut Velocity, &Player, Option<&super::components::Health>)>()
     {
+        // Dead players don't move — freeze velocity so the death
+        // animation plays at their final position.
+        if let Some(h) = health {
+            if h.is_dead() {
+                velocity.linear = Vec3::ZERO;
+                continue;
+            }
+        }
+        // Full-body actions (rolls, jumps, lands) own the velocity for
+        // their duration. The game-side state machine drives velocity
+        // for `Roll`; `JumpStart` / `JumpLand` lock movement entirely;
+        // `JumpAir` permits limited air control below.
+        match player.action {
+            super::components::PlayerAction::Roll
+            | super::components::PlayerAction::JumpStart
+            | super::components::PlayerAction::JumpLand => {
+                continue;
+            }
+            _ => {}
+        }
         let mut dir = Vec3::ZERO;
 
         if input.is_key_held(winit::keyboard::KeyCode::KeyW) {
@@ -33,11 +53,24 @@ pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
         let move_dir = rot * dir;
 
         if move_dir.length_squared() > 0.0 {
-            velocity.linear = move_dir.normalize() * player.speed;
+            // In the air the player keeps lateral velocity but at reduced
+            // authority so jumps feel committed.
+            let air_factor = if matches!(
+                player.action,
+                super::components::PlayerAction::JumpAir,
+            ) {
+                0.85
+            } else {
+                1.0
+            };
+            let new_xz = move_dir.normalize() * player.speed * air_factor;
+            velocity.linear.x = new_xz.x;
+            velocity.linear.z = new_xz.z;
             // Face movement direction
             let _ = transform; // We'll update rotation below in movement system
-        } else {
-            velocity.linear = Vec3::ZERO;
+        } else if !matches!(player.action, super::components::PlayerAction::JumpAir) {
+            velocity.linear.x = 0.0;
+            velocity.linear.z = 0.0;
         }
 
         let _ = dt;
@@ -46,7 +79,41 @@ pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
 
 /// Apply velocity to transform.
 pub fn movement_system(world: &mut World, dt: f32) {
-    for (_id, (transform, velocity)) in world.query_mut::<(&mut Transform, &Velocity)>() {
+    // Players need vertical-velocity integration (jumping). Other
+    // entities stay flat on y=0.
+    const GRAVITY: f32 = 22.0;
+    for (_id, (transform, velocity, player)) in world.query_mut::<(&mut Transform, &mut Velocity, &mut Player)>() {
+        // Horizontal motion (XZ).
+        let horiz = Vec3::new(velocity.linear.x, 0.0, velocity.linear.z);
+        if horiz.length_squared() > 0.001 {
+            transform.position += horiz * dt;
+            let target_yaw = horiz.x.atan2(horiz.z);
+            let target_rot = Quat::from_rotation_y(target_yaw);
+            transform.rotation = transform.rotation.slerp(target_rot, (dt * 10.0).min(1.0));
+        }
+        // Vertical motion (gravity + jump).
+        if player.airborne || player.vy.abs() > 0.001 || transform.position.y > 0.001 {
+            player.vy -= GRAVITY * dt;
+            transform.position.y += player.vy * dt;
+            if transform.position.y <= 0.0 {
+                transform.position.y = 0.0;
+                player.vy = 0.0;
+                player.airborne = false;
+            } else {
+                player.airborne = true;
+            }
+        } else {
+            transform.position.y = 0.0;
+            player.airborne = false;
+            player.vy = 0.0;
+        }
+    }
+
+    for (_id, (transform, velocity, enemy, player)) in world.query_mut::<(&mut Transform, &Velocity, Option<&super::components::Enemy>, Option<&Player>)>() {
+        // Skip players — already handled above.
+        if player.is_some() {
+            continue;
+        }
         if velocity.linear.length_squared() > 0.001 {
             transform.position += velocity.linear * dt;
             // Keep entities on the ground plane. The skinned glTF character
@@ -54,12 +121,16 @@ pub fn movement_system(world: &mut World, dt: f32) {
             // floor (procedural cube meshes are centered, see movement of
             // those entities elsewhere if they need a different offset).
             transform.position.y = 0.0;
-            // Smoothly rotate to face movement direction.
-            // glTF convention: characters look down +Z in bind pose, so use
-            // the unsigned atan2 to face the velocity vector.
-            let target_yaw = velocity.linear.x.atan2(velocity.linear.z);
-            let target_rot = Quat::from_rotation_y(target_yaw);
-            transform.rotation = transform.rotation.slerp(target_rot, (dt * 10.0).min(1.0));
+            // Smoothly rotate to face movement direction — but only for
+            // the player and other non-enemy movers.  Enemies have their
+            // facing controlled by the AI system (so they keep looking at
+            // the player even when backpedaling), and we don't want to
+            // overwrite that here.
+            if enemy.is_none() {
+                let target_yaw = velocity.linear.x.atan2(velocity.linear.z);
+                let target_rot = Quat::from_rotation_y(target_yaw);
+                transform.rotation = transform.rotation.slerp(target_rot, (dt * 10.0).min(1.0));
+            }
         }
     }
 }
@@ -105,9 +176,26 @@ pub fn locomotion_anim_system(world: &mut World) {
     ];
     const IDLE_NAMES: &[&str] = &["Idle_Loop", "Idle"];
 
-    for (_id, (vel, set, animator)) in
-        world.query_mut::<(&Velocity, &AnimationSet, &mut Animator)>()
+    for (_id, (vel, set, animator, enemy_anim, health, player)) in
+        world.query_mut::<(&Velocity, &AnimationSet, &mut Animator, Option<&EnemyAnim>, Option<&super::components::Health>, Option<&Player>)>()
     {
+        // Skip locomotion overrides while a one-shot reaction (Death,
+        // HitRecieve, Bite_Front) is locked.
+        if let Some(ea) = enemy_anim {
+            if ea.lock_remaining > 0.0 { continue; }
+        }
+        // Dead players: leave the death clip running, don't snap back to
+        // Idle/Walk.
+        if let Some(h) = health {
+            if h.is_dead() { continue; }
+        }
+        // Skip while the player is mid-jump or mid-roll — those clips
+        // are driven by game-side code.
+        if let Some(p) = player {
+            if !matches!(p.action, super::components::PlayerAction::None) {
+                continue;
+            }
+        }
         let speed = vel.linear.length();
         let moving = vel.linear.length_squared() > STILL_THRESHOLD_SQ;
 
@@ -139,11 +227,85 @@ pub fn locomotion_anim_system(world: &mut World) {
     }
 }
 
+/// Drive one-shot reaction animations on enemies: `Death` when the
+/// entity becomes `Dying`, `HitRecieve` (note: misspelled in the asset
+/// pack) on health drops, and `Bite_Front` while in melee contact with
+/// the player. Should run AFTER `locomotion_anim_system` so it can
+/// override the chosen locomotion clip with the reaction.
+pub fn enemy_anim_system(world: &mut World, dt: f32) {
+    const HIT_LOCK: f32 = 0.55;     // length-ish of HitRecieve clips
+    const BITE_LOCK: f32 = 0.65;    // length-ish of Bite_Front clips
+    const DEATH_LOCK: f32 = 999.0;  // hold Death pose until despawn
+    const FADE: f32 = 0.10;
+
+    for (_id, (set, animator, health, ea, dying)) in world
+        .query_mut::<(&AnimationSet, &mut Animator, &Health, &mut EnemyAnim, Option<&Dying>)>()
+    {
+        // Tick the lock timer.
+        if ea.lock_remaining > 0.0 {
+            ea.lock_remaining = (ea.lock_remaining - dt).max(0.0);
+        }
+
+        // Death: triggered the moment the entity becomes Dying. We treat
+        // a positive `dying` reference as the trigger and use the lock
+        // to ensure we only swap once.
+        if dying.is_some() && ea.lock_remaining < DEATH_LOCK * 0.5 {
+            if let Some(clip) = set.find_any(&["Death"]) {
+                animator.cross_fade(clip, false, FADE);
+                animator.speed = 1.0;
+                ea.lock_remaining = DEATH_LOCK;
+            }
+            // Don't process hit/bite once dead.
+            ea.last_hp = health.current;
+            ea.attacking = false;
+            continue;
+        }
+
+        // HitRecieve: detect a health drop since last frame.
+        let took_damage = health.current < ea.last_hp - 0.001;
+        ea.last_hp = health.current;
+        if took_damage && ea.lock_remaining <= 0.0 {
+            if let Some(clip) = set.find_any(&["HitRecieve", "HitReceive", "Hit"]) {
+                animator.cross_fade(clip, false, FADE);
+                animator.speed = 1.0;
+                ea.lock_remaining = HIT_LOCK;
+                ea.attacking = false;
+                continue;
+            }
+        }
+
+        // Bite_Front: gameplay code sets `attacking = true` whenever the
+        // enemy is currently overlapping the player.
+        if ea.attacking && ea.lock_remaining <= 0.0 {
+            if let Some(clip) = set.find_any(&["Bite_Front", "Bite", "Attack"]) {
+                animator.cross_fade(clip, false, FADE);
+                animator.speed = 1.0;
+                ea.lock_remaining = BITE_LOCK;
+            }
+        }
+        // Always reset attacking — gameplay re-asserts it each frame
+        // while contact is active.
+        ea.attacking = false;
+    }
+}
+
 /// Advance every base Animator (and any active SpellCast layer) and re-skin
 /// each mesh into the renderer's per-frame dynamic vertex buffer.
 pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
+    // CPU skinning + clip sampling is the most expensive per-frame work
+    // for skinned characters. We always process the player, but for any
+    // other skinned entity we bail out early when:
+    //   1. the entity is farther than `SKIN_RADIUS` from the camera, OR
+    //   2. its bounding sphere is outside the view frustum.
+    // In those cases the dynamic vertex buffer keeps its last-uploaded
+    // pose, which is correct because the entity isn't visible anyway.
+    const SKIN_RADIUS: f32 = 22.0;
+    let skin_radius_sq = SKIN_RADIUS * SKIN_RADIUS;
+    let cam_pos = renderer.camera.position;
+    let frustum = renderer.camera.frustum_planes();
+
     let mut palette: Vec<glam::Mat4> = Vec::new();
-    for (_id, (renderable, skinned, animator, transform, mut cast, player)) in world
+    for (_id, (renderable, skinned, animator, transform, mut cast, player, atts)) in world
         .query_mut::<(
             &Renderable,
             &mut Skinned,
@@ -151,8 +313,24 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
             &Transform,
             Option<&mut super::components::SpellCast>,
             Option<&Player>,
+            Option<&mut super::components::SkinnedAttachments>,
         )>()
     {
+        let is_player = player.is_some();
+        if !is_player {
+            // Distance cull.
+            let dx = transform.position.x - cam_pos.x;
+            let dz = transform.position.z - cam_pos.z;
+            if dx * dx + dz * dz > skin_radius_sq {
+                continue;
+            }
+            // Frustum cull. Use a generous radius so loose-fitting bind
+            // poses aren't rejected at silhouettes.
+            if !renderer.camera.sphere_in_frustum(&frustum, transform.position, 2.0) {
+                continue;
+            }
+        }
+
         animator.advance(dt);
         if animator.clip.joint_count != skinned.mesh.joints.len() {
             continue; // mismatch — skip skinning, render bind pose
@@ -170,18 +348,12 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
                 (None, &[], 0.0)
             };
 
-        // Compute torso twist: the difference between aim yaw and body
-        // yaw, clamped so we never twist past ~120° (you'd see the rig
-        // tear apart). When the offset would exceed the limit, the body
-        // itself catches up via the player_input/movement systems.
+        // Compute torso twist: difference between aim yaw and body yaw,
+        // clamped so we never twist past ~120° (rig would tear apart).
         let twist = if let Some(p) = player {
             let aim = p.aim_dir;
             if aim.length_squared() > 1e-4 {
                 let aim_yaw = aim.x.atan2(aim.z);
-                // Extract the body's yaw directly from its forward vector
-                // (rotation * +Z) rather than via Euler decomposition,
-                // which has axis-ordering pitfalls. This matches the
-                // movement system's atan2(x, z) convention exactly.
                 let fwd = transform.rotation * Vec3::Z;
                 let body_yaw = fwd.x.atan2(fwd.z);
                 let mut delta = aim_yaw - body_yaw;
@@ -203,8 +375,33 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
         } else {
             animation::build_bone_palette(animator, &skinned.mesh.joints, &mut palette);
         }
+        // Skin the base body every frame. We never hide it under outfits:
+        // the outfit pieces are inflated slightly along their normals so
+        // they sit just outside the base skin (no z-fighting), and any
+        // body parts the outfit doesn't cover (head, neck, hands when
+        // there are no gloves) still render correctly.
         skinned.mesh.skin_to(&palette, &mut skinned.scratch);
         renderer.update_dynamic_vertices(renderable.object_index, &skinned.scratch);
+
+        // Re-skin attached outfit pieces with the same palette. They were
+        // remapped at load time so their joint indices reference the host
+        // skeleton's palette directly.
+        if let Some(atts) = atts {
+            // ~5mm of outward inflate is enough to clear the base skin
+            // without being visible as a gap.
+            const OUTFIT_INFLATE: f32 = 0.022;
+            let host_xform = transform.matrix();
+            for piece in &mut atts.pieces {
+                if piece.object_index >= renderer.objects.len() { continue }
+                if !piece.visible {
+                    renderer.objects[piece.object_index].model_matrix = glam::Mat4::ZERO;
+                    continue;
+                }
+                renderer.objects[piece.object_index].model_matrix = host_xform;
+                piece.mesh.skin_to_inflated(&palette, OUTFIT_INFLATE, &mut piece.scratch);
+                renderer.update_dynamic_vertices(piece.object_index, &piece.scratch);
+            }
+        }
     }
 }
 
@@ -220,6 +417,9 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
     const WEIGHT_RAMP: f32 = 8.0; // 1/seconds — about 0.125s to reach full weight
 
     for (entity, (cast, set)) in world.query_mut::<(&mut SpellCast, &AnimationSet)>() {
+        if cast.hit_cooldown > 0.0 {
+            cast.hit_cooldown = (cast.hit_cooldown - dt).max(0.0);
+        }
         if cast.phase == SpellPhase::Idle {
             cast.weight = (cast.weight - dt * WEIGHT_RAMP).max(0.0);
             continue;
@@ -234,6 +434,7 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
             SpellPhase::Entering => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
             SpellPhase::Shooting => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
             SpellPhase::Exiting => set.find_any(&["Spell_Simple_Exit", "Spell_Exit", "Cast_Exit"]),
+            SpellPhase::OneShot => cast.pending_oneshot.clone(),
             SpellPhase::Idle => None,
         };
         let Some(target_clip) = target_clip else {
@@ -247,9 +448,11 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                     }
                     cast.phase = SpellPhase::Exiting;
                 }
-                SpellPhase::Exiting => {
+                SpellPhase::Exiting | SpellPhase::OneShot => {
                     cast.phase = SpellPhase::Idle;
                     cast.layer_animator = None;
+                    cast.pending_oneshot = None;
+                    cast.oneshot_is_hit = false;
                 }
                 SpellPhase::Idle => {}
             }
@@ -278,6 +481,19 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
         } else {
             (cast.weight - dw).max(target_weight)
         };
+        // OneShot taper: in the last ~weight-ramp window before the clip
+        // ends, smoothly bring the layer weight down so the upper body
+        // settles back into the locomotion pose without a pop.
+        if cast.phase == SpellPhase::OneShot {
+            if let Some(la) = cast.layer_animator.as_ref() {
+                let remaining = (la.clip.duration - la.time).max(0.0);
+                let taper_window = 1.0 / WEIGHT_RAMP;
+                if remaining < taper_window {
+                    let t = (remaining / taper_window).clamp(0.0, 1.0);
+                    cast.weight = cast.weight.min(t);
+                }
+            }
+        }
 
         if let Some(la) = cast.layer_animator.as_ref() {
             let done = la.time >= la.clip.duration - 1e-3;
@@ -299,6 +515,13 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                             cast.layer_animator = None;
                             cast.fired = false;
                         }
+                    }
+                    SpellPhase::OneShot => {
+                        cast.phase = SpellPhase::Idle;
+                        cast.layer_animator = None;
+                        cast.pending_oneshot = None;
+                        cast.oneshot_is_hit = false;
+                        cast.weight = 0.0;
                     }
                     SpellPhase::Idle => {}
                 }
@@ -432,9 +655,12 @@ pub fn contact_damage_system(world: &mut World, dt: f32) {
 
     let (p_min, p_max) = player_col.bounds(player_pos);
 
-    // Check each enemy for overlap with player (skip dying enemies)
+    // Check each enemy for overlap with player (skip dying enemies).
+    // Also collect enemies that are currently in contact so we can
+    // mark their `EnemyAnim.attacking` flag for the bite animation.
     let mut damage_total = 0.0_f32;
-    for (_id, (transform, collider, enemy)) in
+    let mut biting_enemies: Vec<hecs::Entity> = Vec::new();
+    for (id, (transform, collider, enemy)) in
         world.query::<(&Transform, &Collider, &Enemy)>()
             .without::<&Dying>()
             .iter()
@@ -447,6 +673,13 @@ pub fn contact_damage_system(world: &mut World, dt: f32) {
             && p_max.z > e_min.z && p_min.z < e_max.z
         {
             damage_total += enemy.speed * 0.5 * dt; // Damage scales with enemy speed
+            biting_enemies.push(id);
+        }
+    }
+
+    for entity in biting_enemies {
+        if let Ok(mut ea) = world.get::<&mut EnemyAnim>(entity) {
+            ea.attacking = true;
         }
     }
 
@@ -528,6 +761,7 @@ pub fn despawn_system(world: &mut World, renderer: &mut Renderer) -> Vec<KillInf
     let dead: Vec<(hecs::Entity, Option<usize>, Option<f32>, bool, bool, glam::Vec3)> = world
         .query::<(&Health, Option<&Renderable>, Option<&Enemy>, Option<&Boss>, Option<&Elite>, &Transform)>()
         .without::<&Dying>()
+        .without::<&Player>()
         .iter()
         .filter(|(_, (h, _, _, _, _, _))| h.is_dead())
         .map(|(e, (_, r, enemy, boss, elite, t))| {
@@ -551,35 +785,44 @@ pub fn despawn_system(world: &mut World, renderer: &mut Renderer) -> Vec<KillInf
             is_boss,
             is_elite,
         });
-        // Start death animation instead of instant removal
+        // Skinned enemies play their own Death animation via
+        // `enemy_anim_system`, so we keep the corpse around longer
+        // (~1.4s) instead of doing the procedural shrink. The squash
+        // tick below also detects a Skinned component and skips the
+        // matrix override.
+        let is_skinned = world.get::<&Skinned>(entity).is_ok();
         let _ = world.insert_one(entity, Dying {
             timer: 0.0,
-            duration: 0.4,
+            duration: if is_skinned { 1.4 } else { 0.4 },
             original_scale: 1.0,
         });
         // Remove enemy AI/velocity so it stops moving
         let _ = world.remove_one::<Velocity>(entity);
     }
 
-    // Tick dying entities: shrink + flatten animation
-    let dying_data: Vec<(hecs::Entity, usize, f32, f32, glam::Vec3)> = world
-        .query::<(&Dying, &Renderable, &Transform)>()
+    // Tick dying entities: shrink + flatten animation (procedural enemies
+    // only; skinned ones play `Death` instead and the matrix is left
+    // untouched so the keyframes drive the pose).
+    let dying_data: Vec<(hecs::Entity, usize, f32, f32)> = world
+        .query::<(&Dying, &Renderable)>()
         .iter()
-        .map(|(e, (d, r, t))| (e, r.object_index, d.timer, d.duration, t.position))
+        .map(|(e, (d, r))| (e, r.object_index, d.timer, d.duration))
         .collect();
 
-    for (entity, obj_idx, timer, duration, _pos) in &dying_data {
-        let progress = (*timer / *duration).min(1.0);
-        // Shrink + squash: Y scale goes to 0, XZ expands slightly then collapses
-        let y_scale = 1.0 - progress;
-        let xz_scale = 1.0 + progress * 0.5 - progress * progress * 1.5;
-        let xz_scale = xz_scale.max(0.0);
+    for (entity, obj_idx, timer, duration) in &dying_data {
+        let is_skinned = world.get::<&Skinned>(*entity).is_ok();
+        if !is_skinned {
+            let progress = (*timer / *duration).min(1.0);
+            let y_scale = 1.0 - progress;
+            let xz_scale = 1.0 + progress * 0.5 - progress * progress * 1.5;
+            let xz_scale = xz_scale.max(0.0);
 
-        if *obj_idx < renderer.objects.len() {
-            let pos = renderer.objects[*obj_idx].model_matrix.col(3).truncate();
-            renderer.objects[*obj_idx].model_matrix =
-                glam::Mat4::from_translation(pos)
-                * glam::Mat4::from_scale(glam::Vec3::new(xz_scale, y_scale, xz_scale));
+            if *obj_idx < renderer.objects.len() {
+                let pos = renderer.objects[*obj_idx].model_matrix.col(3).truncate();
+                renderer.objects[*obj_idx].model_matrix =
+                    glam::Mat4::from_translation(pos)
+                    * glam::Mat4::from_scale(glam::Vec3::new(xz_scale, y_scale, xz_scale));
+            }
         }
 
         // Advance timer
@@ -604,8 +847,241 @@ pub fn despawn_system(world: &mut World, renderer: &mut Renderer) -> Vec<KillInf
                 renderer.objects[idx].model_matrix = glam::Mat4::ZERO;
             }
         }
+        // Stop any debuff aura emitters glued to this entity so they
+        // don't keep spawning particles at the corpse.
+        crate::combat::cleanup_debuff_visuals(world, renderer, entity);
         let _ = world.despawn(entity);
     }
 
     kills
+}
+
+/// Tunables and clip-name fallbacks for the player full-body action FSM.
+/// Game crates pass one of these into `player_action_pre_system` /
+/// `player_action_post_system`, so adding a new full-body action only
+/// needs an extra clip-name list — no code edits to the FSM itself.
+#[derive(Clone, Copy)]
+pub struct PlayerActionConfig {
+    /// Initial vertical velocity on a fresh jump (m/s).
+    pub jump_velocity: f32,
+    /// How long the JumpStart wind-up lasts before going airborne.
+    pub jump_start_dur: f32,
+    /// JumpLand recovery time before returning control to locomotion.
+    pub jump_land_dur: f32,
+    /// Constant XZ speed during a Roll.
+    pub roll_speed: f32,
+    /// Cross-fade duration into action clips (seconds).
+    pub fade_in: f32,
+    /// Cross-fade duration into the landing clip.
+    pub fade_in_land: f32,
+
+    pub jump_start_clips: &'static [&'static str],
+    pub jump_air_clips:   &'static [&'static str],
+    pub jump_land_clips:  &'static [&'static str],
+}
+
+impl Default for PlayerActionConfig {
+    fn default() -> Self {
+        Self {
+            jump_velocity: 9.5,
+            jump_start_dur: 0.10,
+            jump_land_dur: 0.30,
+            roll_speed: 11.0,
+            fade_in: 0.10,
+            fade_in_land: 0.08,
+            jump_start_clips: &["Jump_Start", "Jump_Begin", "Jump"],
+            jump_air_clips:   &["Jump", "Jump_Loop", "Jump_Air"],
+            jump_land_clips:  &["Jump_Land", "Land", "Landing"],
+        }
+    }
+}
+
+/// Pre-movement player FSM step:
+///   - decrements `Player::action_timer`,
+///   - advances JumpStart → JumpAir, expires JumpLand / Roll,
+///   - keeps roll velocity glued to `Player::aim_dir`,
+///   - consumes Space (when `accept_input`) to start a new jump.
+///
+/// `accept_input` should be `false` while the player is dying or a
+/// fade-to-black is in progress so input is ignored cleanly.
+pub fn player_action_pre_system(
+    world: &mut World,
+    input: &Input,
+    dt: f32,
+    cfg: &PlayerActionConfig,
+    accept_input: bool,
+) {
+    use super::components::PlayerAction;
+    // Find the player.
+    let Some(player_id) = world
+        .query::<&Player>()
+        .iter()
+        .map(|(e, _)| e)
+        .next()
+    else { return };
+
+    let dead = world
+        .get::<&Health>(player_id)
+        .map(|h| h.is_dead())
+        .unwrap_or(false);
+
+    let (action, action_timer, airborne, aim_dir) = match world.get::<&Player>(player_id) {
+        Ok(p) => (p.action, p.action_timer, p.airborne, p.aim_dir),
+        Err(_) => return,
+    };
+
+    if dead || !accept_input {
+        return;
+    }
+
+    // Hold roll velocity in `aim_dir` for the entire duration so the
+    // body slides instead of teleporting. Ease the speed down over the
+    // last ~third so the roll settles instead of stopping abruptly.
+    if matches!(action, PlayerAction::Roll) {
+        let dir = if aim_dir.length_squared() > 0.0001 {
+            aim_dir.normalize()
+        } else {
+            Vec3::Z
+        };
+        // `action_timer` is time-remaining. Hold full speed until the
+        // last `decel_window` seconds, then ease-out (cubic) to ~15%.
+        let decel_window = 0.35;
+        let min_scale = 0.15;
+        let scale = if action_timer >= decel_window {
+            1.0
+        } else {
+            let t = (action_timer / decel_window).clamp(0.0, 1.0);
+            // ease-out cubic: starts fast, settles smoothly
+            let eased = 1.0 - (1.0 - t).powi(3);
+            min_scale + (1.0 - min_scale) * eased
+        };
+        if let Ok(mut v) = world.get::<&mut Velocity>(player_id) {
+            v.linear.x = dir.x * cfg.roll_speed * scale;
+            v.linear.z = dir.z * cfg.roll_speed * scale;
+        }
+    }
+
+    // Advance timer and decide transitions.
+    let mut new_action = action;
+    let mut new_timer = (action_timer - dt).max(0.0);
+    let mut next_clip: Option<&[&str]> = None;
+    let mut next_loop = false;
+
+    match action {
+        PlayerAction::JumpStart => {
+            if new_timer <= 0.0 {
+                new_action = PlayerAction::JumpAir;
+                new_timer = 0.0;
+                next_clip = Some(cfg.jump_air_clips);
+                next_loop = true;
+            }
+        }
+        PlayerAction::JumpLand => {
+            if new_timer <= 0.0 {
+                new_action = PlayerAction::None;
+                new_timer = 0.0;
+            }
+        }
+        PlayerAction::Roll => {
+            if new_timer <= 0.0 {
+                new_action = PlayerAction::None;
+                new_timer = 0.0;
+                if let Ok(mut v) = world.get::<&mut Velocity>(player_id) {
+                    v.linear.x = 0.0;
+                    v.linear.z = 0.0;
+                }
+            }
+        }
+        PlayerAction::JumpAir | PlayerAction::None => {}
+    }
+
+    // Space → JumpStart (debounced by `key_just_pressed`).
+    let space_pressed = input.key_just_pressed(winit::keyboard::KeyCode::Space);
+    if space_pressed
+        && matches!(new_action, PlayerAction::None)
+        && !airborne
+    {
+        new_action = PlayerAction::JumpStart;
+        new_timer = cfg.jump_start_dur;
+        next_clip = Some(cfg.jump_start_clips);
+        next_loop = false;
+        if let Ok(mut p) = world.get::<&mut Player>(player_id) {
+            p.vy = cfg.jump_velocity;
+            p.airborne = true;
+        }
+    }
+
+    if new_action != action || (new_timer - action_timer).abs() > f32::EPSILON {
+        if let Ok(mut p) = world.get::<&mut Player>(player_id) {
+            p.action = new_action;
+            p.action_timer = new_timer;
+        }
+    }
+
+    if let Some(names) = next_clip {
+        let clip = world
+            .get::<&AnimationSet>(player_id)
+            .ok()
+            .and_then(|s| s.find_any(names));
+        if let Some(clip) = clip {
+            if let Ok(mut anim) = world.get::<&mut Animator>(player_id) {
+                anim.cross_fade(clip, next_loop, cfg.fade_in);
+                anim.speed = 1.0;
+            }
+        }
+    }
+}
+
+/// Post-movement player FSM step: detects ground contact while
+/// airborne and transitions JumpAir → JumpLand so the landing clip
+/// plays as soon as the feet touch.
+pub fn player_action_post_system(world: &mut World, cfg: &PlayerActionConfig) {
+    use super::components::PlayerAction;
+    let Some(player_id) = world
+        .query::<&Player>()
+        .iter()
+        .map(|(e, _)| e)
+        .next()
+    else { return };
+
+    // Dead players keep whatever full-body animation `trigger_player_death`
+    // set up — never overwrite it with a JumpLand clip on touchdown.
+    let dead = world
+        .get::<&Health>(player_id)
+        .map(|h| h.is_dead())
+        .unwrap_or(false);
+    if dead {
+        return;
+    }
+
+    let should_land = match world.get::<&Player>(player_id) {
+        Ok(p) => matches!(p.action, PlayerAction::JumpAir) && !p.airborne,
+        Err(_) => return,
+    };
+    if !should_land {
+        return;
+    }
+
+    if let Ok(mut p) = world.get::<&mut Player>(player_id) {
+        p.action = PlayerAction::JumpLand;
+        p.action_timer = cfg.jump_land_dur;
+    }
+    // Kill horizontal velocity on touchdown so the landing animation
+    // doesn't slide forward — the player gets control back as soon as
+    // JumpLand expires (`player_action_pre_system`).
+    if let Ok(mut v) = world.get::<&mut Velocity>(player_id) {
+        v.linear.x = 0.0;
+        v.linear.z = 0.0;
+    }
+
+    let clip = world
+        .get::<&AnimationSet>(player_id)
+        .ok()
+        .and_then(|s| s.find_any(cfg.jump_land_clips));
+    if let Some(clip) = clip {
+        if let Ok(mut anim) = world.get::<&mut Animator>(player_id) {
+            anim.cross_fade(clip, false, cfg.fade_in_land);
+            anim.speed = 1.0;
+        }
+    }
 }

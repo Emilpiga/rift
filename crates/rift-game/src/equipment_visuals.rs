@@ -1,284 +1,331 @@
-use glam::{Mat4, Vec3};
+//! Modular outfit visuals: load skinned outfit pieces (peasant + ranger sets
+//! from the `modular-character-outfits` pack) as attachments that ride on
+//! the player's bone palette, then toggle which ones are visible based on
+//! current equipment. Pieces share the host skeleton, so they animate
+//! perfectly with the body — no offsets or hand-tuned positioning needed.
+
+use std::sync::Arc;
+
+use rift_engine::ecs::components::{AttachmentPiece, SkinnedAttachments};
 use rift_engine::loot::item::{ItemRarity, ItemSlot};
 use rift_engine::loot::Equipment;
-use rift_engine::renderer::mesh::{Mesh, Vertex};
+use rift_engine::renderer::mesh::SkinnedMesh;
+use rift_engine::renderer::mesh::Mesh as PlainMesh;
 use rift_engine::Renderer;
 
-/// Visible equipment slots that get rendered on the player.
-const VISIBLE_SLOTS: &[ItemSlot] = &[
-    ItemSlot::Helmet,
-    ItemSlot::Chest,
-    ItemSlot::Boots,
-    ItemSlot::Weapon,
-];
+/// One outfit "set" in the modular pack. Each set ships a body, legs,
+/// arms, and feet piece, plus optional accessories (hood, pauldrons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OutfitSet {
+    Peasant,
+    Ranger,
+}
 
-/// Body-part offsets relative to player center (at feet).
-fn slot_offset(slot: ItemSlot) -> Vec3 {
-    match slot {
-        ItemSlot::Helmet => Vec3::new(0.0, 1.05, 0.0),  // top of head
-        ItemSlot::Chest => Vec3::new(0.0, 0.55, 0.0),   // torso center
-        ItemSlot::Boots => Vec3::new(0.0, 0.05, 0.0),   // feet
-        ItemSlot::Weapon => Vec3::new(0.45, 0.4, 0.0),  // right hand
-        _ => Vec3::ZERO,
+impl OutfitSet {
+    /// Pick an outfit set for an equipped item, based on rarity.
+    fn for_rarity(r: ItemRarity) -> Self {
+        match r {
+            ItemRarity::Common | ItemRarity::Magic => OutfitSet::Peasant,
+            _ => OutfitSet::Ranger,
+        }
+    }
+
+    fn texture(self) -> &'static str {
+        match self {
+            OutfitSet::Peasant => {
+                "assets/models/modular-character-outfits/Exports/glTF (Godot-Unreal)/Outfits/T_Peasant_BaseColor.png"
+            }
+            OutfitSet::Ranger => {
+                "assets/models/modular-character-outfits/Exports/glTF (Godot-Unreal)/Outfits/T_Ranger_BaseColor.png"
+            }
+        }
     }
 }
 
-/// Tracks render object indices for each visible equipment slot.
+/// Logical attachment role — which body region each piece covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceKind {
+    Body,
+    Arms,
+    Legs,
+    Feet,
+    Hood,
+}
+
+const ASSETS_DIR: &str =
+    "assets/models/modular-character-outfits/Exports/glTF (Godot-Unreal)/Modular Parts";
+
+fn piece_path(set: OutfitSet, kind: PieceKind) -> Option<String> {
+    let name = match (set, kind) {
+        (OutfitSet::Peasant, PieceKind::Body) => "Female_Peasant_Body.gltf",
+        (OutfitSet::Peasant, PieceKind::Arms) => "Female_Peasant_Arms.gltf",
+        (OutfitSet::Peasant, PieceKind::Legs) => "Female_Peasant_Legs.gltf",
+        (OutfitSet::Peasant, PieceKind::Feet) => "Female_Peasant_Feet.gltf",
+        (OutfitSet::Peasant, PieceKind::Hood) => return None, // no peasant hood
+        (OutfitSet::Ranger, PieceKind::Body) => "Female_Ranger_Body.gltf",
+        (OutfitSet::Ranger, PieceKind::Arms) => "Female_Ranger_Arms.gltf",
+        (OutfitSet::Ranger, PieceKind::Legs) => "Female_Ranger_Legs.gltf",
+        (OutfitSet::Ranger, PieceKind::Feet) => "Female_Ranger_Feet.gltf",
+        (OutfitSet::Ranger, PieceKind::Hood) => "Female_Ranger_Head_Hood.gltf",
+    };
+    Some(format!("{ASSETS_DIR}/{name}"))
+}
+
+/// Map equipment slot → which piece kinds it controls.
+fn slot_pieces(slot: ItemSlot) -> &'static [PieceKind] {
+    match slot {
+        // Equipping a chest swaps in the whole shirt+legs+arms look.
+        ItemSlot::Chest => &[PieceKind::Body, PieceKind::Arms, PieceKind::Legs],
+        ItemSlot::Boots => &[PieceKind::Feet],
+        ItemSlot::Helmet => &[PieceKind::Hood],
+        _ => &[],
+    }
+}
+
+/// Lifecycle of a single outfit piece.
+enum LoadState {
+    /// Registered but not yet loaded.
+    Pending,
+    /// Loaded and registered with the renderer. `att_index` is the slot
+    /// in `SkinnedAttachments::pieces`.
+    Ready { att_index: usize },
+    /// Load failed. We won't retry.
+    Failed,
+}
+
+/// Index into `EquipmentVisuals::pieces`.
+struct PieceIndex {
+    set: OutfitSet,
+    kind: PieceKind,
+    state: LoadState,
+}
+
 pub struct EquipmentVisuals {
-    /// (slot, render_object_index, currently_shown_rarity)
-    slots: Vec<(ItemSlot, usize, Option<ItemRarity>)>,
+    pieces: Vec<PieceIndex>,
+    /// Host skeleton's joint name → palette index. Captured at build
+    /// time so lazy-loaded pieces can remap their skin without us
+    /// having to thread the table through every call.
+    host_joints: std::collections::HashMap<String, u16>,
+    /// Shared per-set textures.  Each outfit set's BaseColor PNG is
+    /// 4096×4096 — we used to load it once per piece (4 or 5 times
+    /// per set!) which dominated the loading screen.  Now we upload
+    /// the texture once and bind the resulting descriptor set on
+    /// every piece of that outfit set.
+    shared_sets: std::collections::HashMap<OutfitSet, rift_engine::ash::vk::DescriptorSet>,
+    /// Owned shared textures (kept alive while the renderer holds
+    /// references).  Dropped on `clear()` together with the renderer
+    /// objects via `device_wait_idle`.
+    shared_textures: Vec<rift_engine::renderer::texture::Texture>,
 }
 
 impl EquipmentVisuals {
     pub fn new() -> Self {
-        Self { slots: Vec::new() }
-    }
-
-    /// Create render objects for all visible slots (initially hidden).
-    /// Call this after player spawn during floor generation.
-    pub fn init(&mut self, renderer: &mut Renderer) {
-        self.slots.clear();
-        for &slot in VISIBLE_SLOTS {
-            let mesh = slot_mesh(slot, [0.8, 0.8, 0.8]); // default gray, will be recolored
-            if renderer.add_mesh(&mesh, Mat4::ZERO).is_ok() {
-                let obj_idx = renderer.objects.len() - 1;
-                self.slots.push((slot, obj_idx, None));
-            }
+        Self {
+            pieces: Vec::new(),
+            host_joints: std::collections::HashMap::new(),
+            shared_sets: std::collections::HashMap::new(),
+            shared_textures: Vec::new(),
         }
     }
 
-    /// Update equipment visuals based on current equipment and player position.
-    /// Call each frame after render_sync_system.
-    pub fn sync(&mut self, equipment: &Equipment, player_pos: Vec3, renderer: &mut Renderer) {
-        for (slot, obj_idx, shown_rarity) in &mut self.slots {
-            let equipped = equipment.get(*slot);
+    /// Register every (set, kind) outfit slot we *might* show. Each
+    /// piece is left in the `Pending` state until `step_load` actually
+    /// loads it (one piece per call). This lets the engine's loading
+    /// screen tick a progress bar while glTFs decode + upload, instead
+    /// of doing all 9 in one stalling burst.
+    pub fn build_attachments(
+        &mut self,
+        _renderer: &mut Renderer,
+        host_joint_index_by_name: &std::collections::HashMap<String, u16>,
+    ) -> SkinnedAttachments {
+        self.pieces.clear();
+        self.host_joints = host_joint_index_by_name.clone();
+        let kinds = [
+            PieceKind::Body,
+            PieceKind::Arms,
+            PieceKind::Legs,
+            PieceKind::Feet,
+            PieceKind::Hood,
+        ];
+        for set in [OutfitSet::Peasant, OutfitSet::Ranger] {
+            for kind in kinds {
+                if piece_path(set, kind).is_none() { continue }
+                self.pieces.push(PieceIndex { set, kind, state: LoadState::Pending });
+            }
+        }
+        SkinnedAttachments::default()
+    }
 
-            match equipped {
-                Some(item) => {
-                    // If rarity changed, rebuild the mesh with new color in-place
-                    if *shown_rarity != Some(item.rarity) {
-                        *shown_rarity = Some(item.rarity);
-                        let color = item.rarity.color();
-                        let new_mesh = slot_mesh(*slot, color);
-                        renderer.replace_mesh(*obj_idx, &new_mesh).ok();
-                    }
+    /// Total number of pieces registered (for progress reporting).
+    pub fn total_pieces(&self) -> usize { self.pieces.len() }
 
-                    // Show the piece at the correct offset from player
-                    let offset = slot_offset(*slot);
-                    let world_pos = player_pos + offset;
+    /// Number of pieces that have been resolved (loaded successfully or
+    /// failed permanently). When this equals `total_pieces`, loading is
+    /// complete.
+    pub fn loaded_pieces(&self) -> usize {
+        self.pieces.iter().filter(|p| !matches!(p.state, LoadState::Pending)).count()
+    }
 
-                    // Scale based on slot
-                    let scale = match *slot {
-                        ItemSlot::Weapon => Vec3::new(0.12, 0.5, 0.12),
-                        ItemSlot::Helmet => Vec3::splat(0.22),
-                        ItemSlot::Chest => Vec3::new(0.42, 0.3, 0.3),
-                        ItemSlot::Boots => Vec3::new(0.32, 0.12, 0.25),
-                        _ => Vec3::splat(0.2),
-                    };
+    /// Load the next pending piece into `atts`. Returns `Some((set, kind))`
+    /// describing what was just loaded (for logging / labels), or `None`
+    /// if no pending pieces remain.
+    pub fn step_load(
+        &mut self,
+        renderer: &mut Renderer,
+        atts: &mut SkinnedAttachments,
+    ) -> Option<(OutfitSet, PieceKind)> {
+        let idx = self.pieces.iter().position(|p| matches!(p.state, LoadState::Pending))?;
+        let set = self.pieces[idx].set;
+        let kind = self.pieces[idx].kind;
+        let path = match piece_path(set, kind) {
+            Some(p) => p,
+            None => {
+                self.pieces[idx].state = LoadState::Failed;
+                return Some((set, kind));
+            }
+        };
+        let mut mesh = match SkinnedMesh::from_gltf(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("modular outfit load failed ({:?}): {}", path, e);
+                self.pieces[idx].state = LoadState::Failed;
+                return Some((set, kind));
+            }
+        };
+        if !mesh.remap_joint_indices_to(&self.host_joints) {
+            log::warn!("modular outfit {:?} joints don't match player skeleton", path);
+            self.pieces[idx].state = LoadState::Failed;
+            return Some((set, kind));
+        }
+        let mut bind_mesh = PlainMesh::empty();
+        bind_mesh.vertices = mesh.bind_vertices.clone();
+        bind_mesh.indices = mesh.indices.clone();
+        let obj_idx = match renderer.add_dynamic_mesh(&bind_mesh, glam::Mat4::ZERO) {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("renderer.add_dynamic_mesh failed: {}", e);
+                self.pieces[idx].state = LoadState::Failed;
+                return Some((set, kind));
+            }
+        };
+        // Bind the shared per-set texture, uploading it on first use
+        // so we only decode and GPU-upload each 4K BaseColor PNG once
+        // (instead of once per piece — that was the bulk of the
+        // outfit loading time).
+        if let Some(shared) = self.shared_set_for(set, renderer) {
+            renderer.set_object_shared_material(obj_idx, shared);
+        }
+        let att_index = atts.pieces.len();
+        atts.pieces.push(AttachmentPiece {
+            mesh: Arc::new(mesh),
+            object_index: obj_idx,
+            scratch: Vec::new(),
+            visible: false,
+        });
+        self.pieces[idx].state = LoadState::Ready { att_index };
+        Some((set, kind))
+    }
 
-                    if *obj_idx < renderer.objects.len() {
-                        renderer.objects[*obj_idx].model_matrix =
-                            Mat4::from_translation(world_pos) * Mat4::from_scale(scale);
-                    }
-                }
-                None => {
-                    // Hide the piece
-                    if *obj_idx < renderer.objects.len() {
-                        renderer.objects[*obj_idx].model_matrix = Mat4::ZERO;
-                    }
-                    *shown_rarity = None;
+    /// Toggle visibility of every piece based on what's currently equipped.
+    /// Always returns `false` for the (legacy) `hide_base` flag — we keep
+    /// the base body rendered and rely on a small outward inflate of the
+    /// outfit pieces during skinning to avoid z-fighting. This way any
+    /// body parts the outfit doesn't cover (head, hands) stay visible.
+    pub fn sync(
+        &mut self,
+        equipment: &Equipment,
+        atts: &mut SkinnedAttachments,
+        _renderer: &mut Renderer,
+    ) -> bool {
+        // Compute desired set per piece kind.
+        let mut want: [(bool, OutfitSet); 5] = [(false, OutfitSet::Peasant); 5];
+        let kind_index = |k: PieceKind| match k {
+            PieceKind::Body => 0,
+            PieceKind::Arms => 1,
+            PieceKind::Legs => 2,
+            PieceKind::Feet => 3,
+            PieceKind::Hood => 4,
+        };
+        for slot in [ItemSlot::Chest, ItemSlot::Boots, ItemSlot::Helmet] {
+            if let Some(item) = equipment.get(slot) {
+                let mut set = OutfitSet::for_rarity(item.rarity);
+                // The Peasant set has no hood mesh, so any helmet — even
+                // a Common one — is visualized with the Ranger hood. This
+                // keeps "I equipped a helmet" always producing a visible
+                // change on the character.
+                if slot == ItemSlot::Helmet { set = OutfitSet::Ranger; }
+                for &k in slot_pieces(slot) {
+                    want[kind_index(k)] = (true, set);
                 }
             }
         }
+
+        for i in 0..self.pieces.len() {
+            let (wanted, wanted_set) = want[kind_index(self.pieces[i].kind)];
+            let should_show = wanted && wanted_set == self.pieces[i].set;
+            if let LoadState::Ready { att_index } = self.pieces[i].state {
+                if let Some(piece) = atts.pieces.get_mut(att_index) {
+                    piece.visible = should_show;
+                }
+            }
+        }
+        false
     }
 
     pub fn clear(&mut self) {
-        self.slots.clear();
-    }
-}
-
-/// Generate a mesh for a specific equipment slot, tinted with a color.
-fn slot_mesh(slot: ItemSlot, color: [f32; 3]) -> Mesh {
-    let c = Vec3::from(color);
-    match slot {
-        ItemSlot::Helmet => helmet_mesh(c),
-        ItemSlot::Chest => chest_mesh(c),
-        ItemSlot::Boots => boots_mesh(c),
-        ItemSlot::Weapon => weapon_mesh(c),
-        _ => Mesh { vertices: Vec::new(), indices: Vec::new() },
-    }
-}
-
-/// Helmet: a crown/dome shape on top of the head.
-fn helmet_mesh(color: Vec3) -> Mesh {
-    use glam::Vec2;
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    let segments = 8u32;
-    let radius = 1.0_f32;
-    let height = 0.8_f32;
-    let rim_color = color * 1.2; // brighter rim
-
-    // Dome (half sphere approximation)
-    // Bottom ring
-    let center_idx = vertices.len() as u32;
-    vertices.push(Vertex { position: Vec3::new(0.0, height, 0.0), normal: Vec3::Y, color: rim_color.min(Vec3::ONE), uv: Vec2::new(0.5, 0.5) });
-
-    for i in 0..segments {
-        let angle0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let angle1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-        let idx = vertices.len() as u32;
-        let normal = Vec3::new(angle0.sin(), 0.3, angle0.cos()).normalize();
-
-        // Rim verts
-        vertices.push(Vertex { position: Vec3::new(angle0.sin() * radius, 0.0, angle0.cos() * radius), normal, color, uv: Vec2::new(0.5, 0.5) });
-        vertices.push(Vertex { position: Vec3::new(angle1.sin() * radius, 0.0, angle1.cos() * radius), normal, color, uv: Vec2::new(0.5, 0.5) });
-        // Mid ring (dome)
-        vertices.push(Vertex { position: Vec3::new(angle0.sin() * radius * 0.85, height * 0.6, angle0.cos() * radius * 0.85), normal: Vec3::new(angle0.sin(), 0.5, angle0.cos()).normalize(), color, uv: Vec2::new(0.5, 0.5) });
-        vertices.push(Vertex { position: Vec3::new(angle1.sin() * radius * 0.85, height * 0.6, angle1.cos() * radius * 0.85), normal: Vec3::new(angle1.sin(), 0.5, angle1.cos()).normalize(), color, uv: Vec2::new(0.5, 0.5) });
-
-        // Side quad (rim to mid)
-        indices.extend_from_slice(&[idx, idx+1, idx+3, idx+3, idx+2, idx]);
-        // Top triangles (mid to apex)
-        indices.extend_from_slice(&[center_idx, idx+2, idx+3]);
+        self.pieces.clear();
     }
 
-    Mesh { vertices, indices }
-}
+    /// Free GPU resources owned by the visuals (shared textures).  Must
+    /// run before the renderer's allocator is dropped.  The renderer
+    /// itself frees the per-object dynamic vertex buffers; we only
+    /// own the shared texture handles.
+    pub fn cleanup_gpu(
+        &mut self,
+        device: &rift_engine::ash::Device,
+        allocator: &std::sync::Arc<std::sync::Mutex<rift_engine::gpu_allocator::vulkan::Allocator>>,
+    ) {
+        for mut tex in self.shared_textures.drain(..) {
+            tex.cleanup(device, allocator);
+        }
+        self.shared_sets.clear();
+    }
 
-/// Chest: shoulder pads + body plate
-fn chest_mesh(color: Vec3) -> Mesh {
-    use glam::Vec2;
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    let v = |pos: Vec3, normal: Vec3| -> Vertex {
-        Vertex { position: pos, normal, color, uv: Vec2::new(0.5, 0.5) }
-    };
-
-    // Front plate (a trapezoid)
-    let base_idx = vertices.len() as u32;
-    vertices.push(v(Vec3::new(-1.0, -0.8, 0.55), Vec3::Z));
-    vertices.push(v(Vec3::new( 1.0, -0.8, 0.55), Vec3::Z));
-    vertices.push(v(Vec3::new( 0.8,  0.8, 0.55), Vec3::Z));
-    vertices.push(v(Vec3::new(-0.8,  0.8, 0.55), Vec3::Z));
-    indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
-
-    // Back plate
-    let base_idx = vertices.len() as u32;
-    vertices.push(v(Vec3::new( 1.0, -0.8, -0.45), -Vec3::Z));
-    vertices.push(v(Vec3::new(-1.0, -0.8, -0.45), -Vec3::Z));
-    vertices.push(v(Vec3::new(-0.8,  0.8, -0.45), -Vec3::Z));
-    vertices.push(v(Vec3::new( 0.8,  0.8, -0.45), -Vec3::Z));
-    indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
-
-    // Left shoulder pad
-    let brighter = (color * 1.1).min(Vec3::ONE);
-    let sv = |pos: Vec3, normal: Vec3| -> Vertex {
-        Vertex { position: pos, normal, color: brighter, uv: Vec2::new(0.5, 0.5) }
-    };
-    let base_idx = vertices.len() as u32;
-    vertices.push(sv(Vec3::new(-0.8, 0.5, -0.4), Vec3::new(-0.5, 0.5, 0.0).normalize()));
-    vertices.push(sv(Vec3::new(-0.8, 0.5,  0.4), Vec3::new(-0.5, 0.5, 0.0).normalize()));
-    vertices.push(sv(Vec3::new(-1.3, 0.9,  0.0), Vec3::new(-0.5, 0.8, 0.0).normalize()));
-    indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2]);
-
-    // Right shoulder pad
-    let base_idx = vertices.len() as u32;
-    vertices.push(sv(Vec3::new(0.8, 0.5,  0.4), Vec3::new(0.5, 0.5, 0.0).normalize()));
-    vertices.push(sv(Vec3::new(0.8, 0.5, -0.4), Vec3::new(0.5, 0.5, 0.0).normalize()));
-    vertices.push(sv(Vec3::new(1.3, 0.9,  0.0), Vec3::new(0.5, 0.8, 0.0).normalize()));
-    indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2]);
-
-    Mesh { vertices, indices }
-}
-
-/// Boots: two foot-shaped pieces.
-fn boots_mesh(color: Vec3) -> Mesh {
-    use glam::Vec2;
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    // Simple box boot shape for each foot
-    for side in [-1.0_f32, 1.0] {
-        let ox = side * 0.4; // lateral offset
-        let _base_idx = vertices.len() as u32;
-
-        let w = 0.5_f32; // width
-        let h = 0.8_f32; // height  
-        let d = 0.9_f32; // depth (front-to-back)
-
-        // 8 corners of a box
-        let positions = [
-            Vec3::new(ox - w*0.5, 0.0, -d*0.5),
-            Vec3::new(ox + w*0.5, 0.0, -d*0.5),
-            Vec3::new(ox + w*0.5, 0.0,  d*0.5),
-            Vec3::new(ox - w*0.5, 0.0,  d*0.5),
-            Vec3::new(ox - w*0.4, h,   -d*0.4),
-            Vec3::new(ox + w*0.4, h,   -d*0.4),
-            Vec3::new(ox + w*0.4, h,    d*0.3),
-            Vec3::new(ox - w*0.4, h,    d*0.3),
+    /// Get-or-upload the shared descriptor set for an outfit set.
+    fn shared_set_for(
+        &mut self,
+        set: OutfitSet,
+        renderer: &mut Renderer,
+    ) -> Option<rift_engine::ash::vk::DescriptorSet> {
+        if let Some(s) = self.shared_sets.get(&set) {
+            return Some(*s);
+        }
+        // Read the texture file once; resolve common parent prefixes
+        // so it works regardless of cwd, then decode + upload.
+        let path = set.texture();
+        let candidates = [
+            std::path::PathBuf::from(path),
+            std::path::PathBuf::from("..").join(path),
+            std::path::PathBuf::from("../..").join(path),
         ];
-
-        let faces: &[(usize, usize, usize, usize, Vec3)] = &[
-            (0, 1, 5, 4, -Vec3::Z), // back
-            (2, 3, 7, 6,  Vec3::Z), // front
-            (0, 3, 7, 4, -Vec3::X), // left
-            (1, 2, 6, 5,  Vec3::X), // right
-            (4, 5, 6, 7,  Vec3::Y), // top
-        ];
-
-        for &(a, b, c, d, normal) in faces {
-            let fi = vertices.len() as u32;
-            vertices.push(Vertex { position: positions[a], normal, color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: positions[b], normal, color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: positions[c], normal, color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: positions[d], normal, color, uv: Vec2::new(0.5, 0.5) });
-            indices.extend_from_slice(&[fi, fi+1, fi+2, fi+2, fi+3, fi]);
+        let resolved = candidates.iter().find(|p| p.exists())?;
+        let bytes = match std::fs::read(resolved) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("outfit texture read failed for {:?}: {}", resolved, e);
+                return None;
+            }
+        };
+        match renderer.upload_shared_texture_from_bytes(&bytes) {
+            Ok((tex, ds)) => {
+                self.shared_textures.push(tex);
+                self.shared_sets.insert(set, ds);
+                Some(ds)
+            }
+            Err(e) => {
+                log::warn!("outfit shared texture upload failed for {:?}: {}", path, e);
+                None
+            }
         }
     }
-
-    Mesh { vertices, indices }
-}
-
-/// Weapon: a blade shape.
-fn weapon_mesh(color: Vec3) -> Mesh {
-    use glam::Vec2;
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    let blade_color = color;
-    let hilt_color = Vec3::new(0.3, 0.25, 0.1); // brown hilt
-
-    // Blade — elongated diamond
-    let blade_len = 1.8_f32;
-    let blade_w = 0.2_f32;
-
-    // Front face
-    let bi = vertices.len() as u32;
-    vertices.push(Vertex { position: Vec3::new(0.0, 0.0, 0.0), normal: Vec3::Z, color: hilt_color, uv: Vec2::new(0.5, 0.5) });        // base
-    vertices.push(Vertex { position: Vec3::new(-blade_w, blade_len * 0.3, 0.02), normal: Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });  // left edge
-    vertices.push(Vertex { position: Vec3::new(0.0, blade_len, 0.0), normal: Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });  // tip
-    vertices.push(Vertex { position: Vec3::new(blade_w, blade_len * 0.3, 0.02), normal: Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });   // right edge
-    indices.extend_from_slice(&[bi, bi+1, bi+2, bi, bi+2, bi+3]);
-
-    // Back face
-    let bi = vertices.len() as u32;
-    vertices.push(Vertex { position: Vec3::new(0.0, 0.0, 0.0), normal: -Vec3::Z, color: hilt_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new(blade_w, blade_len * 0.3, -0.02), normal: -Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new(0.0, blade_len, 0.0), normal: -Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new(-blade_w, blade_len * 0.3, -0.02), normal: -Vec3::Z, color: blade_color, uv: Vec2::new(0.5, 0.5) });
-    indices.extend_from_slice(&[bi, bi+1, bi+2, bi, bi+2, bi+3]);
-
-    // Crossguard
-    let bi = vertices.len() as u32;
-    let cg_w = 0.4_f32;
-    let cg_h = 0.08_f32;
-    vertices.push(Vertex { position: Vec3::new(-cg_w, -cg_h, -0.03), normal: Vec3::Y, color: hilt_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new( cg_w, -cg_h, -0.03), normal: Vec3::Y, color: hilt_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new( cg_w,  cg_h,  0.03), normal: Vec3::Y, color: hilt_color, uv: Vec2::new(0.5, 0.5) });
-    vertices.push(Vertex { position: Vec3::new(-cg_w,  cg_h,  0.03), normal: Vec3::Y, color: hilt_color, uv: Vec2::new(0.5, 0.5) });
-    indices.extend_from_slice(&[bi, bi+1, bi+2, bi+2, bi+3, bi]);
-
-    Mesh { vertices, indices }
 }

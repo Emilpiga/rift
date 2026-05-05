@@ -1,5 +1,5 @@
 use glam::{Mat4, Vec3};
-use rift_engine::renderer::OverlayBatch;
+use crate::renderer::OverlayBatch;
 
 /// A floating damage number that rises and fades.
 struct FloatingText {

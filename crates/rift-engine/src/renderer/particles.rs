@@ -435,6 +435,31 @@ impl EmitterConfig {
     }
 
     /// Death explosion: big burst of particles.
+    /// Continuous "aura" emitter for status debuffs (poison, mark for
+    /// death, burn, slow).  Emits a steady stream of small floating
+    /// motes in the given color so it's instantly readable that the
+    /// enemy is afflicted.  `rate` is particles/sec, `size` is the
+    /// peak particle radius.
+    pub fn aura(rgb: [f32; 3], rate: f32, size: f32) -> Self {
+        Self {
+            spawn_rate: rate,
+            burst_count: 0,
+            lifetime: (0.45, 0.85),
+            speed: (0.4, 1.2),
+            size: (size * 0.4, size),
+            size_end: (0.0, size * 0.1),
+            color_start: [rgb[0], rgb[1], rgb[2], 0.85],
+            color_end: [rgb[0] * 0.7, rgb[1] * 0.7, rgb[2] * 0.7, 0.0],
+            gravity: -1.5, // motes drift upward
+            drag: 1.2,
+            spread: EmitterSpread::Column { radius: 0.45, height: 0.6 },
+            direction: Vec3::Y,
+            one_shot: false,
+            orbital_speed: (0.4, 1.0),
+            duration: 0.0,
+        }
+    }
+
     pub fn death_burst(color: [f32; 3]) -> Self {
         Self {
             spawn_rate: 0.0,

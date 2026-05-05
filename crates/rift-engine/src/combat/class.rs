@@ -1,16 +1,16 @@
 use super::attributes::AttributeType;
 
-/// Player class — determines primary attribute, base stats, and available abilities.
+/// Opaque class identifier. Engine treats this as a hashable key only —
+/// concrete IDs (`HUNTER`, `MAGE`, …) are defined by the game crate.
+/// Adding a new class is a game-side affair; the engine doesn't change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Class {
-    Hunter,
-    // Future: Warrior, Mage, etc.
-}
+pub struct ClassId(pub &'static str);
 
-/// Static configuration for a class.
+/// Static configuration for a class. Constructed by the game crate
+/// (one factory function per class) and handed to `PlayerState`.
 #[derive(Clone, Debug)]
 pub struct ClassConfig {
-    pub class: Class,
+    pub class: ClassId,
     pub name: &'static str,
     pub primary_attribute: AttributeType,
     /// Base HP at level 1.
@@ -29,24 +29,4 @@ pub struct ClassConfig {
     pub base_move_speed: f32,
     /// Attack range.
     pub base_range: f32,
-}
-
-impl Class {
-    pub fn config(self) -> ClassConfig {
-        match self {
-            Class::Hunter => ClassConfig {
-                class: Class::Hunter,
-                name: "Hunter",
-                primary_attribute: AttributeType::Agility,
-                base_hp: 80.0,
-                hp_per_level: 6.0,
-                base_damage: 8.0,
-                base_defense: 3.0,
-                base_attack_speed: 1.4,
-                base_crit_chance: 0.05,
-                base_move_speed: 6.0,
-                base_range: 12.0,
-            },
-        }
-    }
 }

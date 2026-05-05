@@ -2,19 +2,31 @@ use glam::{Mat4, Vec3};
 use rift_engine::ai::systems::AiAgent;
 use rift_engine::ai::{boss_behavior, brute_behavior, caster_behavior, elite_behavior, stalker_behavior, NavGrid};
 use rift_engine::ecs::components::{
-    AnimationSet, Boss, Collider, Elite, Enemy, EnemyKind, Health, Player, Renderable, Skinned, Static, Transform, Velocity,
+    AnimationSet, Boss, Collider, Elite, Enemy, EnemyAnim, EnemyKind, Health, Player, Renderable, Skinned, Static, Transform, Velocity,
 };
 use rift_engine::renderer::mesh::SkinnedMesh;
 use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 use std::sync::Arc;
 
+use crate::environment::EnvTextures;
+use crate::monsters::{MonsterCache, MonsterRole};
 use crate::player::PlayerState;
+use crate::props::PropLibrary;
 use crate::rift_state::RiftState;
 
 /// Manages floor generation: creating the dungeon, spawning entities.
 pub struct FloorManager {
     pub boss_room_center: Vec3,
     pub nav_grid: NavGrid,
+    pub monsters: MonsterCache,
+    pub props: PropLibrary,
+    pub env: EnvTextures,
+    /// Cache of the player's bound animation clips. Populated on the
+    /// first `spawn_player` call and reused on every subsequent floor
+    /// regeneration so we don't pay the glTF-load + bind cost again
+    /// (and so death / hit-reaction lookups don't ever miss because
+    /// the clip library failed to load mid-run).
+    player_anim_cache: Option<AnimationSet>,
 }
 
 impl FloorManager {
@@ -23,6 +35,10 @@ impl FloorManager {
         Self {
             boss_room_center: Vec3::ZERO,
             nav_grid: NavGrid::from_floor(&floor),
+            monsters: MonsterCache::default(),
+            props: PropLibrary::new(),
+            env: EnvTextures::default(),
+            player_anim_cache: None,
         }
     }
 
@@ -62,6 +78,7 @@ impl FloorManager {
         let floor_positions = floor.floor_positions();
         let floor_mesh = Mesh::dungeon_floor(&floor_positions, rift.floor);
         renderer.add_mesh(&floor_mesh, Mat4::IDENTITY)?;
+        let floor_obj_idx = renderer.objects.len() - 1;
 
         // Walls — batched into a single draw call, themed per floor (darker, more saturated)
         let wall_color = match rift.floor % 4 {
@@ -76,6 +93,16 @@ impl FloorManager {
         // Batch all walls into one big mesh for rendering
         let batched_walls = Mesh::batch_at_positions(&wall_mesh, &wall_positions);
         renderer.add_mesh(&batched_walls, Mat4::IDENTITY)?;
+        let wall_obj_idx = renderer.objects.len() - 1;
+
+        // Bind procedural stone textures to floor and walls.
+        self.env.ensure(renderer);
+        if let Some(set) = self.env.floor_set {
+            renderer.set_object_shared_material(floor_obj_idx, set);
+        }
+        if let Some(set) = self.env.wall_set {
+            renderer.set_object_shared_material(wall_obj_idx, set);
+        }
 
         // Still need individual ECS entities for collision
         for pos in &wall_positions {
@@ -86,113 +113,14 @@ impl FloorManager {
             ));
         }
 
-        // Player — try to load the rigged base character as a SkinnedMesh.
-        // For Phase 2b we render its bind pose (no animation yet) so this
-        // should look identical to the previous static load. Phase 3 will
-        // drive the bone palette from animation clips.
-        let player_path = "assets/models/base-characters/Base Characters/Godot - UE/Superhero_Female_FullBody.gltf";
-        let spawn = floor.spawn_pos;
-        let (player_obj_index, skinned_component) = match SkinnedMesh::from_gltf(player_path) {
-            Ok(skinned) => {
-                // Build a Mesh from the bind-pose vertices for initial upload.
-                // Using add_dynamic_mesh so we can re-skin per frame.
-                let mut bind_mesh = Mesh::empty();
-                bind_mesh.vertices = skinned.bind_vertices.clone();
-                bind_mesh.indices = skinned.indices.clone();
-                let idx = renderer.add_dynamic_mesh(&bind_mesh, Mat4::from_translation(spawn))?;
-                // Apply the female base color texture from the modular outfits pack.
-                let tex_path = "assets/models/modular-character-outfits/Textures/Base/T_Regular_Female_Dark_BaseColor.png";
-                if let Err(e) = renderer.set_object_texture(idx, tex_path) {
-                    log::warn!("Player texture load failed: {}", e);
-                }
-                let comp = Skinned {
-                    mesh: Arc::new(skinned),
-                    scratch: Vec::new(),
-                };
-                (idx, Some(comp))
-            }
-            Err(e) => {
-                log::warn!("Falling back to procedural player mesh: {}", e);
-                let cube = Mesh::cube();
-                renderer.add_mesh(&cube, Mat4::from_translation(spawn))?;
-                (renderer.objects.len() - 1, None)
-            }
-        };
+        // Decorate rooms with static fantasy props (barrels, benches, candles, …).
+        // Done before enemies spawn so the same seed picks consistent positions.
+        self.props.decorate(world, renderer, &floor, seed);
 
-        let player_entity = world.spawn((
-            Transform::from_position(spawn),
-            Velocity::default(),
-            Player {
-                speed: player_state.config.base_move_speed,
-                aim_dir: glam::Vec3::Z,
-                spine_joint: u32::MAX,
-            },
-            Collider::new(0.3, 0.5, 0.3),
-            Health::new(player_state.max_hp()),
-            Renderable { object_index: player_obj_index },
-        ));
-        if let Some(comp) = skinned_component {
-            // Load the animation library once, bind every clip to this
-            // skeleton, store them in an AnimationSet so the locomotion
-            // system can switch clips at runtime, and start with idle.
-            let anim_path = "assets/models/animation-library/Unreal-Godot/UAL1_Standard.glb";
-            let (anim_set, animator) = match rift_engine::animation::Clip::load_all(anim_path) {
-                Ok(clips) => {
-                    let mut set = AnimationSet::default();
-                    for clip in &clips {
-                        let bound = clip.bind_to_skeleton(
-                            &comp.mesh.joint_index_by_name,
-                            comp.mesh.joints.len(),
-                        );
-                        set.clips.insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
-                    }
-                    log::info!(
-                        "Bound {} animation clip(s) to player skeleton",
-                        set.clips.len(),
-                    );
-                    let mut names: Vec<&String> = set.clips.keys().collect();
-                    names.sort();
-                    log::info!("Available clips: {:?}", names);
-                    let initial = set.find_any(&["Idle_Loop", "Idle", "TPose"])
-                        .or_else(|| set.clips.values().next().cloned());
-                    let animator = initial.map(rift_engine::animation::Animator::new);
-                    (Some(set), animator)
-                }
-                Err(e) => {
-                    log::warn!("Animation library load failed: {}", e);
-                    (None, None)
-                }
-            };
-            world.insert_one(player_entity, comp).ok();
-            if let Some(set) = anim_set {
-                world.insert_one(player_entity, set).ok();
-            }
-            if let Some(anim) = animator {
-                world.insert_one(player_entity, anim).ok();
-            }
-            // Layered upper-body cast component. The mask comes from the
-            // skeleton itself (joints under spine/head/clavicle/arm/hand
-            // chain weight 1.0; legs and pelvis remain 0.0) so we can blend
-            // a Spell_Simple_* clip on top of locomotion without disturbing
-            // the run cycle on the lower body. Also captures the spine-root
-            // joint index for the cursor-aim torso twist.
-            let (mask_opt, spine_idx): (Option<Vec<f32>>, Option<usize>) =
-                match world.get::<&rift_engine::ecs::components::Skinned>(player_entity) {
-                    Ok(s) => (Some(s.mesh.upper_body_mask()), s.mesh.spine_root_joint()),
-                    Err(_) => (None, None),
-                };
-            if let Some(mask) = mask_opt {
-                world.insert_one(
-                    player_entity,
-                    rift_engine::ecs::components::SpellCast::new(mask),
-                ).ok();
-            }
-            if let Some(idx) = spine_idx {
-                if let Ok(mut p) = world.get::<&mut Player>(player_entity) {
-                    p.spine_joint = idx as u32;
-                }
-            }
-        }
+        // Player — spawned via shared helper so the hub generator can
+        // reuse the same skinned-character + animation-set bring-up.
+        let spawn = floor.spawn_pos;
+        self.spawn_player(world, renderer, spawn, player_state)?;
 
         // Enemies — pack-based spawning with mixed archetypes per pack
         let brute_mesh = Mesh::enemy();
@@ -260,16 +188,6 @@ impl FloorManager {
                         }
                     };
 
-                    let mesh = if is_elite {
-                        &elite_mesh
-                    } else {
-                        match kind {
-                            EnemyKind::Brute => &brute_mesh,
-                            EnemyKind::Stalker => &stalker_mesh,
-                            EnemyKind::Caster => &caster_mesh,
-                        }
-                    };
-
                     let hp = if is_elite {
                         floor_config.enemy_health * floor_config.elite_hp_mult
                     } else {
@@ -299,8 +217,57 @@ impl FloorManager {
                         }
                     };
 
-                    renderer.add_mesh(mesh, Mat4::from_translation(*pos))?;
-                    let obj_index = renderer.objects.len() - 1;
+                    // Pick the matching skinned monster, falling back to
+                    // the procedural mesh when the asset isn't available
+                    // (e.g. on first floor before monsters preload).
+                    let role = if is_elite { MonsterRole::Elite } else { MonsterRole::from_kind(kind) };
+                    // Make sure the role's shared texture+descriptor is
+                    // uploaded before we use it for this spawn.  This
+                    // happens at most once per role per process — every
+                    // subsequent spawn just reuses the same descriptor
+                    // set instead of allocating a fresh one.
+                    let shared_set = self.monsters
+                        .slot_mut(role)
+                        .as_mut()
+                        .and_then(|a| a.ensure_shared_material(renderer));
+                    let skinned_asset = self.monsters.get(role);
+                    let (obj_index, skinned_component, anim_set, animator) =
+                        if let Some(asset) = skinned_asset {
+                            let mut bind_mesh = Mesh::empty();
+                            bind_mesh.vertices = asset.mesh.bind_vertices.clone();
+                            bind_mesh.indices = asset.mesh.indices.clone();
+                            let scaled = Mat4::from_scale_rotation_translation(
+                                Vec3::splat(role.scale()),
+                                glam::Quat::IDENTITY,
+                                *pos,
+                            );
+                            let idx = renderer.add_dynamic_mesh(&bind_mesh, scaled)?;
+                            // Bind the shared per-role texture if it
+                            // uploaded successfully; otherwise the
+                            // monster falls back to the default white
+                            // material (still better than a crash).
+                            if let Some(set) = shared_set {
+                                renderer.set_object_shared_material(idx, set);
+                            }
+                            let comp = Skinned { mesh: asset.mesh.clone(), scratch: Vec::new() };
+                            let initial = asset.anims.find_any(&["Idle", "Idle_Loop"])
+                                .or_else(|| asset.anims.find_any(&["Walk", "Walk_Loop"]))
+                                .or_else(|| asset.anims.clips.values().next().cloned());
+                            let animator = initial.map(rift_engine::animation::Animator::new);
+                            (idx, Some(comp), Some(asset.anims.clone()), animator)
+                        } else {
+                            let mesh = if is_elite {
+                                &elite_mesh
+                            } else {
+                                match kind {
+                                    EnemyKind::Brute => &brute_mesh,
+                                    EnemyKind::Stalker => &stalker_mesh,
+                                    EnemyKind::Caster => &caster_mesh,
+                                }
+                            };
+                            renderer.add_mesh(mesh, Mat4::from_translation(*pos))?;
+                            (renderer.objects.len() - 1, None, None, None)
+                        };
 
                     let mut builder = hecs::EntityBuilder::new();
                     builder.add(Transform::from_position(*pos));
@@ -320,6 +287,12 @@ impl FloorManager {
                     builder.add(AiAgent::new(tree, *pack_center));
                     if is_elite {
                         builder.add(Elite::default());
+                    }
+                    if let Some(s) = skinned_component { builder.add(s); }
+                    if let Some(a) = anim_set { builder.add(a); }
+                    if let Some(a) = animator { builder.add(a); }
+                    if skinned_asset.is_some() {
+                        builder.add(EnemyAnim { last_hp: hp, attacking: false, lock_remaining: 0.0 });
                     }
 
                     world.spawn(builder.build());
@@ -352,39 +325,271 @@ impl FloorManager {
         Ok(())
     }
 
+    /// Generate the safe hub / starting zone: a single small stone room
+    /// with no enemies, no fog wall, no boss progress.  Returns the
+    /// world-space position of the centre point where the caller should
+    /// spawn the "enter the rift" portal.
+    pub fn generate_hub(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        player_state: &PlayerState,
+    ) -> anyhow::Result<Vec3> {
+        *world = hecs::World::new();
+        renderer.clear_objects();
+
+        let floor = Floor::hub();
+        self.boss_room_center = Vec3::ZERO;
+        self.nav_grid = NavGrid::from_floor(&floor);
+
+        // Calmer ambience for the hub: warm torchlit stone, less murk
+        // than the rift floors but still moody.
+        renderer.clear_color = [0.018, 0.014, 0.010, 1.0];
+        renderer.fog_color = [
+            renderer.clear_color[0] * 1.4 + 0.004,
+            renderer.clear_color[1] * 1.2 + 0.002,
+            renderer.clear_color[2] * 1.1 + 0.001,
+        ];
+
+        let floor_positions = floor.floor_positions();
+        let floor_mesh = Mesh::dungeon_floor(&floor_positions, 0);
+        renderer.add_mesh(&floor_mesh, Mat4::IDENTITY)?;
+        let floor_obj_idx = renderer.objects.len() - 1;
+
+        let wall_color = Vec3::new(0.30, 0.26, 0.22);
+        let wall_mesh = Mesh::wall_colored(wall_color);
+        let wall_positions = floor.wall_positions();
+        let batched_walls = Mesh::batch_at_positions(&wall_mesh, &wall_positions);
+        renderer.add_mesh(&batched_walls, Mat4::IDENTITY)?;
+        let wall_obj_idx = renderer.objects.len() - 1;
+
+        self.env.ensure(renderer);
+        if let Some(set) = self.env.floor_set {
+            renderer.set_object_shared_material(floor_obj_idx, set);
+        }
+        if let Some(set) = self.env.wall_set {
+            renderer.set_object_shared_material(wall_obj_idx, set);
+        }
+
+        for pos in &wall_positions {
+            world.spawn((
+                Transform::from_position(*pos + Vec3::new(0.0, 2.5, 0.0)),
+                Collider::new(0.5, 2.5, 0.5),
+                Static,
+            ));
+        }
+
+        // Light prop decoration is fine in the hub (banners, candles).
+        // Reuse the existing seeded pass with a fixed seed so the layout
+        // is stable across deaths.
+        self.props.decorate(world, renderer, &floor, 0xC0FFEE);
+
+        let spawn = floor.spawn_pos;
+        self.spawn_player(world, renderer, spawn, player_state)?;
+
+        let portal_pos = floor.first_room_center() + Vec3::new(0.0, 0.5, 0.0);
+        log::info!("Hub generated. Portal at {:?}", portal_pos);
+        Ok(portal_pos)
+    }
+
+    /// Shared player-entity construction used by both rift and hub
+    /// generation.  Loads the rigged base mesh, binds the animation
+    /// library, builds the upper-body spell-cast layer and inserts the
+    /// player into the world at `spawn`.
+    fn spawn_player(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        spawn: Vec3,
+        player_state: &PlayerState,
+    ) -> anyhow::Result<()> {
+        let (player_path, tex_path) = crate::classes::base_model_paths(player_state.gender);
+        let (player_obj_index, skinned_component) = match SkinnedMesh::from_gltf(player_path) {
+            Ok(skinned) => {
+                let mut bind_mesh = Mesh::empty();
+                bind_mesh.vertices = skinned.bind_vertices.clone();
+                bind_mesh.indices = skinned.indices.clone();
+                let idx = renderer.add_dynamic_mesh(&bind_mesh, Mat4::from_translation(spawn))?;
+                if let Err(e) = renderer.set_object_texture(idx, tex_path) {
+                    log::warn!("Player texture load failed: {}", e);
+                }
+                let comp = Skinned {
+                    mesh: Arc::new(skinned),
+                    scratch: Vec::new(),
+                };
+                (idx, Some(comp))
+            }
+            Err(e) => {
+                log::warn!("Falling back to procedural player mesh: {}", e);
+                let cube = Mesh::cube();
+                renderer.add_mesh(&cube, Mat4::from_translation(spawn))?;
+                (renderer.objects.len() - 1, None)
+            }
+        };
+
+        let player_entity = world.spawn((
+            Transform::from_position(spawn),
+            Velocity::default(),
+            Player {
+                speed: player_state.config.base_move_speed,
+                aim_dir: glam::Vec3::Z,
+                spine_joint: u32::MAX,
+                action: rift_engine::ecs::components::PlayerAction::default(),
+                action_timer: 0.0,
+                vy: 0.0,
+                airborne: false,
+            },
+            Collider::new(0.3, 0.5, 0.3),
+            Health::new(player_state.max_hp()),
+            Renderable { object_index: player_obj_index },
+        ));
+        if let Some(comp) = skinned_component {
+            // Bind / re-bind the animation library to this skeleton.
+            // The clip glTF is loaded from disk only the first time;
+            // subsequent floors clone the cached `AnimationSet` so a
+            // transient I/O failure can't strand the player without a
+            // Death / Hit clip mid-run.
+            let anim_set: Option<AnimationSet> = if let Some(cached) = self.player_anim_cache.as_ref() {
+                Some(cached.clone())
+            } else {
+                let anim_path = "assets/models/animation-library/Unreal-Godot/UAL1_Standard.glb";
+                match rift_engine::animation::Clip::load_all(anim_path) {
+                    Ok(clips) => {
+                        let mut set = AnimationSet::default();
+                        for clip in &clips {
+                            let bound = clip.bind_to_skeleton(
+                                &comp.mesh.joint_index_by_name,
+                                comp.mesh.joints.len(),
+                            );
+                            set.clips.insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
+                        }
+                        log::info!(
+                            "Bound {} animation clip(s) to player skeleton (cached)",
+                            set.clips.len(),
+                        );
+                        self.player_anim_cache = Some(set.clone());
+                        Some(set)
+                    }
+                    Err(e) => {
+                        log::warn!("Animation library load failed: {}", e);
+                        None
+                    }
+                }
+            };
+            let animator = anim_set
+                .as_ref()
+                .and_then(|set| {
+                    set.find_any(&["Idle_Loop", "Idle", "TPose"])
+                        .or_else(|| set.clips.values().next().cloned())
+                })
+                .map(rift_engine::animation::Animator::new);
+            world.insert_one(player_entity, comp).ok();
+            if let Some(set) = anim_set {
+                world.insert_one(player_entity, set).ok();
+            }
+            if let Some(anim) = animator {
+                world.insert_one(player_entity, anim).ok();
+            }
+            let (mask_opt, spine_idx): (Option<Vec<f32>>, Option<usize>) =
+                match world.get::<&rift_engine::ecs::components::Skinned>(player_entity) {
+                    Ok(s) => (Some(s.mesh.upper_body_mask()), s.mesh.spine_root_joint()),
+                    Err(_) => (None, None),
+                };
+            if let Some(mask) = mask_opt {
+                world.insert_one(
+                    player_entity,
+                    rift_engine::ecs::components::SpellCast::new(mask),
+                ).ok();
+            }
+            if let Some(idx) = spine_idx {
+                if let Ok(mut p) = world.get::<&mut Player>(player_entity) {
+                    p.spine_joint = idx as u32;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Spawn the rift boss.
     pub fn spawn_boss(
-        &self,
+        &mut self,
         world: &mut hecs::World,
         renderer: &mut Renderer,
         rift: &RiftState,
     ) {
-        let boss_mesh = Mesh::boss();
         let pos = self.boss_room_center;
+        let boss_health = 100.0 + rift.floor as f32 * 50.0;
 
-        if let Ok(()) = renderer.add_mesh(&boss_mesh, Mat4::from_translation(pos)) {
-            let obj_index = renderer.objects.len() - 1;
-            let boss_health = 100.0 + rift.floor as f32 * 50.0;
-
-            world.spawn((
-                Transform::from_position(pos),
-                Velocity::default(),
-                Enemy {
-                    speed: rift.boss_speed(),
-                    progress_value: 0.0,
-                    kind: EnemyKind::Brute,
-                },
-                Boss,
-                Collider::new(0.8, 0.9, 0.8),
-                Health::new(boss_health),
-                Renderable { object_index: obj_index },
-                AiAgent::new(boss_behavior(), pos),
-            ));
-
-            log::info!(
-                ">>> BOSS SPAWNED! HP: {:.0} | Location: boss room <<<",
-                boss_health
+        // Skinned boss if available, procedural cube otherwise.
+        let role = MonsterRole::Boss;
+        let shared_set = self.monsters
+            .slot_mut(role)
+            .as_mut()
+            .and_then(|a| a.ensure_shared_material(renderer));
+        let asset = self.monsters.get(role);
+        let (obj_index, skinned_component, anim_set, animator) = if let Some(asset) = asset {
+            let mut bind_mesh = Mesh::empty();
+            bind_mesh.vertices = asset.mesh.bind_vertices.clone();
+            bind_mesh.indices = asset.mesh.indices.clone();
+            let scaled = Mat4::from_scale_rotation_translation(
+                Vec3::splat(role.scale()),
+                glam::Quat::IDENTITY,
+                pos,
             );
+            match renderer.add_dynamic_mesh(&bind_mesh, scaled) {
+                Ok(idx) => {
+                    if let Some(set) = shared_set {
+                        renderer.set_object_shared_material(idx, set);
+                    }
+                    let comp = Skinned { mesh: asset.mesh.clone(), scratch: Vec::new() };
+                    let initial = asset.anims.find_any(&["Idle", "Idle_Loop", "Walk"])
+                        .or_else(|| asset.anims.clips.values().next().cloned());
+                    let animator = initial.map(rift_engine::animation::Animator::new);
+                    (idx, Some(comp), Some(asset.anims.clone()), animator)
+                }
+                Err(e) => {
+                    log::warn!("boss skinned mesh upload failed: {}", e);
+                    let cube = Mesh::boss();
+                    if let Err(e) = renderer.add_mesh(&cube, Mat4::from_translation(pos)) {
+                        log::warn!("boss fallback mesh failed: {}", e);
+                        return;
+                    }
+                    (renderer.objects.len() - 1, None, None, None)
+                }
+            }
+        } else {
+            let cube = Mesh::boss();
+            if let Err(e) = renderer.add_mesh(&cube, Mat4::from_translation(pos)) {
+                log::warn!("boss fallback mesh failed: {}", e);
+                return;
+            }
+            (renderer.objects.len() - 1, None, None, None)
+        };
+
+        let mut builder = hecs::EntityBuilder::new();
+        builder.add(Transform::from_position(pos));
+        builder.add(Velocity::default());
+        builder.add(Enemy {
+            speed: rift.boss_speed(),
+            progress_value: 0.0,
+            kind: EnemyKind::Brute,
+        });
+        builder.add(Boss);
+        builder.add(Collider::new(0.8, 0.9, 0.8));
+        builder.add(Health::new(boss_health));
+        builder.add(Renderable { object_index: obj_index });
+        builder.add(AiAgent::new(boss_behavior(), pos));
+        if let Some(s) = skinned_component { builder.add(s); }
+        if let Some(a) = anim_set { builder.add(a); }
+        if let Some(a) = animator { builder.add(a); }
+        if asset.is_some() {
+            builder.add(EnemyAnim { last_hp: boss_health, attacking: false, lock_remaining: 0.0 });
         }
+        world.spawn(builder.build());
+
+        log::info!(
+            ">>> BOSS SPAWNED! HP: {:.0} | Location: boss room <<<",
+            boss_health
+        );
     }
 }

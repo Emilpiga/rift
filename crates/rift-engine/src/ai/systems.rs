@@ -144,6 +144,15 @@ pub fn ai_system(world: &mut World, dt: f32, nav_grid: &NavGrid, wall_aabbs: &[A
             agent.blackboard.did_pathfind = false;
         }
 
+        // Snapshot facing-override state before we drop the agent borrow.
+        let target_pos_for_facing = agent.blackboard.target_pos;
+        let has_pending_attack = matches!(
+            agent.blackboard.pending_action,
+            Some(PendingAction::RangedShot { .. })
+                | Some(PendingAction::SlamTelegraph { .. })
+                | Some(PendingAction::LeapStart { .. })
+        );
+
         drop(agent);
 
         // Compute separation force from nearby enemies
@@ -160,6 +169,28 @@ pub fn ai_system(world: &mut World, dt: f32, nav_grid: &NavGrid, wall_aabbs: &[A
             } else {
                 // Even when idle, apply separation to prevent stacking
                 vel.linear = separation * speed * 0.5;
+            }
+        }
+
+        // Always face the target while it's known.  Without this,
+        // ranged enemies kiting backwards would face *away* from the
+        // player and snap-turn for one frame whenever they fire,
+        // which looks awful.  We smoothly slerp toward the target
+        // facing every frame so they keep looking at the player
+        // even while backpedaling, and snap the rotation when an
+        // attack is queued so the bolt aims accurately.
+        if let Some(target) = target_pos_for_facing {
+            if let Ok(mut tr) = world.get::<&mut Transform>(*entity) {
+                let to_t = target - tr.position;
+                if to_t.x.abs() + to_t.z.abs() > 1e-3 {
+                    let yaw = to_t.x.atan2(to_t.z);
+                    let target_rot = glam::Quat::from_rotation_y(yaw);
+                    if has_pending_attack {
+                        tr.rotation = target_rot;
+                    } else {
+                        tr.rotation = tr.rotation.slerp(target_rot, 0.18);
+                    }
+                }
             }
         }
     }

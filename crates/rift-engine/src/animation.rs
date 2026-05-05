@@ -523,14 +523,50 @@ pub fn build_bone_palette_layered(
         }
     }
 
-    // Apply torso twist: post-multiply the spine root's local rotation by
-    // a yaw. The pelvis local frame in standard humanoid rigs has its
-    // local +Y aligned with body-up, so a local Y rotation produces a
-    // world-Y twist on top of any animated motion. We do this *after*
-    // layer blending so it survives the cast-layer override.
+    // Apply torso twist.  We want the hips to *visually* rotate
+    // slightly with the upper body, but in a standard humanoid rig
+    // the pelvis is the root joint — rotating it would also rotate
+    // the legs, which makes the entire character pivot in place.
+    // To avoid that we:
+    //   1. apply 25% of the yaw to the pelvis (spine's parent),
+    //   2. apply the remaining 75% to the spine itself,
+    //   3. counter-rotate the *upper-leg* joints by the same 25% so
+    //      the legs cancel out the pelvis rotation and stay planted.
+    // The visual result: chest tracks the cursor exactly (full yaw),
+    // pelvis follows by ¼ of the yaw, feet/legs hold their ground.
     if let Some((spine_idx, yaw)) = twist {
         if spine_idx < n && yaw.abs() > 1e-4 {
-            r[spine_idx] = r[spine_idx] * Quat::from_rotation_y(yaw);
+            const HIP_FRACTION: f32 = 0.25;
+            let parent = joints[spine_idx].parent.map(|p| p as usize);
+            if let Some(hip_idx) = parent.filter(|&p| p < n) {
+                let hip_yaw = yaw * HIP_FRACTION;
+                r[hip_idx] = r[hip_idx] * Quat::from_rotation_y(hip_yaw);
+                r[spine_idx] = r[spine_idx]
+                    * Quat::from_rotation_y(yaw * (1.0 - HIP_FRACTION));
+                // Counter-rotate the legs so the hip rotation doesn't
+                // drag them along.  Any joint whose parent is the
+                // pelvis and whose name looks like a leg gets the
+                // inverse hip yaw applied to its local rotation.
+                let counter = Quat::from_rotation_y(-hip_yaw);
+                for i in 0..n {
+                    if joints[i].parent.map(|p| p as usize) != Some(hip_idx) {
+                        continue;
+                    }
+                    let lname = joints[i].name.to_ascii_lowercase();
+                    let is_leg = lname.contains("leg")
+                        || lname.contains("thigh")
+                        || lname.contains("upleg")
+                        || lname.contains("hip_l")
+                        || lname.contains("hip_r");
+                    // Skip the spine itself (also a child of the pelvis).
+                    if i == spine_idx || lname.contains("spine") { continue; }
+                    if is_leg {
+                        r[i] = counter * r[i];
+                    }
+                }
+            } else {
+                r[spine_idx] = r[spine_idx] * Quat::from_rotation_y(yaw);
+            }
         }
     }
 
