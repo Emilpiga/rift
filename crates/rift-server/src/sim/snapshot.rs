@@ -32,6 +32,9 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         if p.k.airborne {
             flags |= entity_flags::AIRBORNE;
         }
+        if p.hp <= 0.0 {
+            flags |= entity_flags::DEAD;
+        }
         entities.push(EntitySnapshot {
             net_id: p.net_id,
             kind: EntityKind::Player {

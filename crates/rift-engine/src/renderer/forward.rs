@@ -13,8 +13,7 @@ use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex};
 use crate::renderer::shadow::{self, ShadowMap};
 use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
-use crate::renderer::particle_renderer::ParticleRenderer;
-use crate::renderer::particles::ParticleSystem;
+use crate::renderer::vfx::{ParticleVfxRenderer, RibbonRenderer, VfxSystem};
 use crate::renderer::texture::Texture;
 use crate::renderer::uniform::{UniformBuffers, UniformData};
 use crate::vulkan::{
@@ -78,9 +77,18 @@ pub struct Renderer {
     // Overlay (HUD)
     pub overlay: OverlayRenderer,
     pub overlay_batch: OverlayBatch,
-    // Particles
-    pub particle_renderer: ParticleRenderer,
-    pub particle_system: ParticleSystem,
+    /// Declarative VFX system. Replaces the legacy imperative
+    /// emitter system entirely; every ability visual is now a
+    /// preset in [`crate::renderer::vfx::presets`].
+    pub vfx_system: VfxSystem,
+    /// Pipeline + per-frame instance buffers for VFX ribbon
+    /// layers (beams).
+    pub vfx_ribbon_renderer: RibbonRenderer,
+    /// Pipeline + per-frame instance buffers for VFX particle
+    /// layers. Maintains two pipelines (alpha/premultiplied and
+    /// additive); instances are partitioned by `blend` field at
+    /// upload time and drawn in two `cmd_draw_indexed` calls.
+    pub vfx_particle_renderer: ParticleVfxRenderer,
     // Deferred deletion queue for GPU buffers
     deletion_queue: Vec<(u64, GpuBuffer)>,
     // Ambient clear color (themed per floor)
@@ -89,6 +97,12 @@ pub struct Renderer {
     pub fog_color: [f32; 3],
     pub fog_start: f32,
     pub fog_end: f32,
+    /// World-space anchor used as the origin for fog distance.
+    /// Set per-frame by game code to the local player's position
+    /// so zooming the camera out doesn't drag the fog wall in
+    /// over the character. Falls back to the camera position
+    /// (camera-anchored fog) until the game writes one.
+    pub fog_origin: Vec3,
     // Dynamic point lights (populated each frame by game code)
     pub point_lights: Vec<PointLight>,
 }
@@ -219,13 +233,24 @@ impl Renderer {
             &device.device, &allocator, device.graphics_queue, command_pool,
             render_pass, swapchain.extent, &shader_dir,
         )?;
-        let overlay_batch = OverlayBatch::new();
+        let mut overlay_batch = OverlayBatch::new();
+        // Bind the batch to the renderer's shared icon UV
+        // registry. Icons stream in across many frames via
+        // `Renderer::step_load_icons`; the registry is mutated
+        // in place, so the batch sees them as they arrive
+        // without further hand-offs.
+        let (atlas_w, atlas_h) = overlay.atlas_size();
+        overlay_batch.bind_overlay_atlas(overlay.icon_uv_registry(), atlas_w, atlas_h);
 
-        let particle_renderer = ParticleRenderer::new(
+        let vfx_ribbon_renderer = RibbonRenderer::new(
             &device.device, &allocator, device.graphics_queue, command_pool,
             render_pass, swapchain.extent, uniforms.descriptor_set_layout, &shader_dir,
         )?;
-        let particle_system = ParticleSystem::new(4096);
+        let vfx_particle_renderer = ParticleVfxRenderer::new(
+            &device.device, &allocator, device.graphics_queue, command_pool,
+            render_pass, swapchain.extent, uniforms.descriptor_set_layout, &shader_dir,
+        )?;
+        let vfx_system = VfxSystem::new(8192);
 
         log::info!("Renderer initialized successfully");
 
@@ -259,13 +284,15 @@ impl Renderer {
             window_extent: [size.width, size.height],
             overlay,
             overlay_batch,
-            particle_renderer,
-            particle_system,
+            vfx_system,
+            vfx_ribbon_renderer,
+            vfx_particle_renderer,
             deletion_queue: Vec::new(),
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
             fog_start: 5.0,
             fog_end: 16.0,
+            fog_origin: Vec3::ZERO,
             point_lights: Vec::new(),
         })
     }
@@ -333,8 +360,12 @@ impl Renderer {
         // Recreate overlay pipeline
         self.overlay.recreate_pipeline(&self.device.device, self.render_pass, self.swapchain.extent, &self.shader_dir)?;
 
-        // Recreate particle pipeline
-        self.particle_renderer.recreate_pipeline(
+        // Recreate VFX ribbon pipeline alongside.
+        self.vfx_ribbon_renderer.recreate_pipeline(
+            &self.device.device, self.render_pass, self.swapchain.extent,
+            self.uniforms.descriptor_set_layout, &self.shader_dir,
+        )?;
+        self.vfx_particle_renderer.recreate_pipeline(
             &self.device.device, self.render_pass, self.swapchain.extent,
             self.uniforms.descriptor_set_layout, &self.shader_dir,
         )?;
@@ -776,6 +807,27 @@ impl Renderer {
         Ok(())
     }
 
+    /// Drive incremental icon-atlas streaming. Decodes + uploads
+    /// up to `budget` PNGs from `assets/icons/` per call so the
+    /// loading screen can stay responsive while ~hundreds of
+    /// icons are processed. Returns `(loaded, total)` for
+    /// progress reporting; loading is complete when
+    /// `loaded == total`.
+    pub fn step_load_icons(&mut self, budget: usize) -> Result<(usize, usize)> {
+        self.overlay.step_load_icons(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            budget,
+        )
+    }
+
+    /// Total icons discovered at startup (for progress UI).
+    pub fn total_icons(&self) -> usize { self.overlay.total_icons() }
+    /// Icons whose decode + upload has completed.
+    pub fn loaded_icons(&self) -> usize { self.overlay.loaded_icons() }
+
     pub fn draw_frame(&mut self) -> Result<()> {
         // Skip rendering when minimized
         if self.window_extent[0] == 0 || self.window_extent[1] == 0 {
@@ -849,6 +901,7 @@ impl Renderer {
             light_color: Vec4::new(0.62, 0.66, 0.78, 0.13),
             fog_color: Vec4::new(self.fog_color[0], self.fog_color[1], self.fog_color[2], 0.0),
             fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 0.0),
+            fog_origin: Vec4::new(self.fog_origin.x, self.fog_origin.y, self.fog_origin.z, 0.0),
             point_light_pos,
             point_light_color,
             point_light_count: Vec4::new(light_count as f32, 0.0, 0.0, 0.0),
@@ -867,9 +920,13 @@ impl Renderer {
             }
             // Frustum cull: extract world-space center from model matrix column 3
             let center = obj.model_matrix.w_axis.truncate();
-            // Distance cull: skip objects fully inside fog
-            let dist_to_cam = (center - self.camera.position).length();
-            if dist_to_cam - obj.bounds_radius > fog_cull_dist {
+            // Distance cull: skip objects fully outside the
+            // fog volume. Anchored on `fog_origin` (player) to
+            // match the shader's fog math — otherwise zooming
+            // the camera out would pop in geometry the player
+            // can still see.
+            let dist_to_fog_origin = (center - self.fog_origin).length();
+            if dist_to_fog_origin - obj.bounds_radius > fog_cull_dist {
                 continue;
             }
             if !self.camera.sphere_in_frustum(&frustum, center, obj.bounds_radius + 1.0) {
@@ -900,13 +957,19 @@ impl Renderer {
             &self.overlay_batch,
         )?;
 
-        // Upload particle instance data
-        let particle_instances = self.particle_system.instance_data();
-        self.particle_renderer.upload(
+        // Upload VFX ribbon instance data. Ribbons are rebuilt
+        // every frame from the live VfxSystem effect set.
+        self.vfx_ribbon_renderer.upload(
             frame,
             &self.device.device,
             &self.allocator,
-            &particle_instances,
+            self.vfx_system.ribbon_instances(),
+        )?;
+        self.vfx_particle_renderer.upload(
+            frame,
+            &self.device.device,
+            &self.allocator,
+            self.vfx_system.particle_instances(),
         )?;
 
         // Record: begin command buffer + render pass, draw 3D, draw overlay, end
@@ -1004,8 +1067,12 @@ impl Renderer {
                 device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
             }
 
-            // Particles (world-space, additive blending)
-            self.particle_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
+            // VFX ribbons (world-space, premultiplied additive).
+            // Drawn before particles so the spark/glow trails
+            // composite on top of the beam core.
+            self.vfx_ribbon_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
+            // VFX particles (world-space, two pipelines).
+            self.vfx_particle_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
 
             // Overlay (HUD)
             self.overlay.record(frame, device, cmd);
@@ -1196,7 +1263,8 @@ impl Drop for Renderer {
         self.shadow_map.cleanup(&self.device.device, &self.allocator);
         self.depth_buffer.cleanup(&self.device.device, &self.allocator);
         self.overlay.cleanup(&self.device.device, &self.allocator);
-        self.particle_renderer.cleanup(&self.device.device, &self.allocator);
+        self.vfx_ribbon_renderer.cleanup(&self.device.device, &self.allocator);
+        self.vfx_particle_renderer.cleanup(&self.device.device, &self.allocator);
 
         unsafe {
             for &fb in &self.framebuffers {

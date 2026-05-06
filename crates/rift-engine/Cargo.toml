@@ -21,6 +21,7 @@ bytemuck = { workspace = true }
 gltf = { workspace = true }
 hecs = { workspace = true }
 image = { workspace = true }
+rayon = { workspace = true }
 
 [build-dependencies]
 shaderc = "0.10.1"

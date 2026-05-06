@@ -13,11 +13,15 @@ use rift_net::{
     messages::{button_bits, InputCmd},
     ClientId, NetId,
 };
+use rift_game::attributes::Attributes;
+use rift_game::classes::{self, ClassId};
+use rift_game::experience::{Experience, LevelUpReward};
 use rift_game::kinematic::{self, loco, Kinematic};
+use rift_game::stats::CharacterStats;
 
-/// Default per-player starting health. Will become class-driven once
-/// the class config table is wired through.
-pub const DEFAULT_HP: f32 = 100.0;
+/// Default per-player level until the persisted level field is
+/// wired through. Drives `CharacterStats::compute`.
+pub const DEFAULT_LEVEL: u32 = 1;
 
 /// Component bundle for a connected player.
 #[derive(Clone, Debug)]
@@ -31,15 +35,73 @@ pub struct ServerPlayer {
     /// snapshots so the client can prune its prediction buffer.
     pub last_input_seq: u32,
     /// In-memory inventory of items the player has picked up this
-    /// session. Authoritative on the server. Persisted to the DB
-    /// is TODO (no `inventory_items` schema yet) — for now the
-    /// items live for the lifetime of the connection and ride
-    /// across floor transitions.
-    pub inventory: Vec<rift_game::loot::Item>,
+    /// session. Authoritative on the server. Persisted via the
+    /// `inventory_items` table; rows live across sessions and
+    /// floor transitions. The bag mirror only \u2014 anything
+    /// currently equipped sits in [`ServerPlayer::equipment`].
+    ///
+    /// **Sparse**: an `inventory[i] == None` is an empty slot the
+    /// player has carved out via drag-and-drop. The vector is
+    /// trimmed of trailing `None`s after every mutation so its
+    /// length tracks the highest occupied slot + 1.
+    pub inventory: Vec<Option<rift_game::loot::Item>>,
+    /// Currently-equipped items, keyed by
+    /// [`rift_game::loot::EquipSlot`]. Authoritative on the
+    /// server. Stat / damage formulas read from this set; the
+    /// bag never contributes affixes.
+    pub equipment: rift_game::loot::Equipment,
+    /// Per-character private stash. Lives in its own DB table
+    /// (`stash_items`) and is hydrated alongside `inventory` at
+    /// Hello time. Items here are pure storage — they never
+    /// contribute to stats and aren't visible from the bag UI
+    /// unless the player explicitly opens the chest. Sparse like
+    /// [`Self::inventory`].
+    pub stash: Vec<Option<rift_game::loot::Item>>,
+    /// Whether the owner currently has an active stash session
+    /// (i.e. is interacting with the chest in the hub). Gates
+    /// `DepositToStash` / `WithdrawFromStash` so out-of-band
+    /// transfer requests are dropped server-side.
+    pub stash_open: bool,
+    /// Class identity. Drives the [`ClassConfig`] used to compute
+    /// [`Self::stats`].
+    pub class: ClassId,
+    /// Character level. Used by [`CharacterStats::compute`] for
+    /// HP-per-level scaling.
+    pub level: u32,
+    /// Authoritative XP / level state. Source of truth for the
+    /// `ServerMsg::CharacterStats` reply pushed to the owning
+    /// client. `level` is mirrored in the dedicated `level`
+    /// field above so `CharacterStats::compute` can stay
+    /// pure-arg.
+    pub experience: Experience,
+    /// Per-attribute point allocation. Defaults to the class's
+    /// `Attributes::for_class` allocation until per-character
+    /// attribute points are persisted.
+    pub attrs: Attributes,
+    /// Cached snapshot of the derived combat stats. Recomputed
+    /// whenever inputs change ([`Self::recompute_stats`]); read
+    /// by the cast / projectile / channel pipelines so client
+    /// and server agree on the formulas.
+    pub stats: CharacterStats,
 }
 
 impl ServerPlayer {
-    pub fn fresh(client_id: ClientId, net_id: NetId, spawn: glam::Vec3) -> Self {
+    /// Build a fresh player record for `class`. Stats are computed
+    /// from the class config + default attributes + empty
+    /// equipment, so a freshly-spawned character matches
+    /// `CharacterStats::baseline`.
+    pub fn fresh(client_id: ClientId, net_id: NetId, spawn: glam::Vec3, class: ClassId) -> Self {
+        let class_config = classes::config_for(class);
+        let attrs = Attributes::for_class(class_config.primary_attribute);
+        let equipment = rift_game::loot::Equipment::new();
+        let stats = CharacterStats::compute(
+            &class_config,
+            &attrs,
+            DEFAULT_LEVEL,
+            &equipment.active_affix_sum(),
+            &rift_game::stats::StatModifiers::new(),
+        );
+        let hp_max = stats.max_hp;
         Self {
             client_id,
             net_id,
@@ -53,11 +115,79 @@ impl ServerPlayer {
                 airborne: false,
                 ..Default::default()
             },
-            hp_max: DEFAULT_HP,
-            hp: DEFAULT_HP,
+            hp_max,
+            hp: hp_max,
             last_input_seq: 0,
             inventory: Vec::new(),
+            equipment,
+            stash: Vec::new(),
+            stash_open: false,
+            class,
+            level: DEFAULT_LEVEL,
+            attrs,
+            stats,
+            experience: Experience::new(),
         }
+    }
+
+    /// Recompute [`Self::stats`] from the current equipment /
+    /// attributes / level. Rescales `hp` so the same percentage
+    /// of max HP is preserved across an `hp_max` change (e.g.
+    /// equipping a +Health item heals to the same fraction of
+    /// the new pool).
+    ///
+    /// Call after any mutation that changes a `compute` input:
+    /// equip / unequip, attribute respec (TBD), level up (TBD).
+    pub fn recompute_stats(&mut self) {
+        let class_config = classes::config_for(self.class);
+        let new_stats = CharacterStats::compute(
+            &class_config,
+            &self.attrs,
+            self.level,
+            &self.equipment.active_affix_sum(),
+            &rift_game::stats::StatModifiers::new(),
+        );
+        let hp_pct = if self.hp_max > 0.0 {
+            (self.hp / self.hp_max).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.hp_max = new_stats.max_hp;
+        self.hp = new_stats.max_hp * hp_pct;
+        self.stats = new_stats;
+    }
+
+    /// Per-cast damage scalar — `stats.damage / class.base_damage`.
+    /// Multiplied into each ability's authored `base_damage` so a
+    /// freshly-spawned (no gear, default attrs) character deals
+    /// the authored numbers, and gear / attributes scale every
+    /// ability uniformly.
+    pub fn damage_scalar(&self) -> f32 {
+        let class_config = classes::config_for(self.class);
+        if class_config.base_damage <= 0.0 {
+            1.0
+        } else {
+            self.stats.damage / class_config.base_damage
+        }
+    }
+
+    /// Grant XP. If one or more level-ups happen, the cached
+    /// `level` field is bumped, [`recompute_stats`] is called so
+    /// the HP pool reflects the new tier, and the (possibly
+    /// empty) reward list is returned for the caller to act on
+    /// (granting attribute / talent points lives a layer up).
+    pub fn grant_xp(&mut self, amount: u64) -> Vec<LevelUpReward> {
+        let rewards = self.experience.grant_xp(amount);
+        if !rewards.is_empty() {
+            self.level = self.experience.level;
+            // Heal-to-full feel on level up: keep current % then
+            // top off the gained HP. We just call recompute and
+            // then refill so a fresh-level character isn't stuck
+            // at the pre-level-up HP fraction.
+            self.recompute_stats();
+            self.hp = self.hp_max;
+        }
+        rewards
     }
 }
 
@@ -103,6 +233,14 @@ pub fn apply_inputs(
         if let Some(&entity) = sessions.get(&client_id) {
             if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
                 p.last_input_seq = cmd.seq;
+                // Dead players don't move. Still record `seq` so
+                // ack_seq stays current and the client's
+                // prediction buffer prunes correctly even after
+                // we stop applying input.
+                if p.hp <= 0.0 {
+                    p.k.velocity = glam::Vec3::ZERO;
+                    continue;
+                }
                 kinematic::apply_input(&mut p.k, cmd.move_dir, cmd.aim_dir, cmd.buttons);
             }
         }
@@ -136,5 +274,14 @@ pub fn snap_all_to(world: &mut hecs::World, spawn: glam::Vec3) {
         p.k.vy = 0.0;
         p.k.airborne = false;
         p.k.locomotion = loco::IDLE;
+    }
+}
+
+/// Restore every player to full HP. Called from the floor-change
+/// path so a player respawning at the hub after a death (or
+/// completing a rift) arrives alive.
+pub fn heal_all(world: &mut hecs::World) {
+    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
+        p.hp = p.hp_max;
     }
 }

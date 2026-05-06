@@ -1,0 +1,61 @@
+# --------------------------------------------------------------------
+# rift-server — headless dedicated server image.
+#
+# Multi-stage so the runtime image stays small and free of the Rust
+# toolchain. The server crate intentionally avoids rift-engine, so
+# this image does NOT pull Vulkan / winit / shaderc.
+#
+# Build:
+#   docker build -f Dockerfile.server -t rift-server:latest .
+#
+# Run (UDP — netcode/renet uses UDP, NOT TCP):
+#   docker run --rm -p 34000:34000/udp \
+#       -e DATABASE_URL=postgres://rift:rift@host:5432/rift \
+#       -e RIFT_PUBLIC=your.public.ip:34000 \
+#       rift-server:latest
+#
+# Notes for cloud hosts:
+#   * Railway, Render, Heroku, etc. only support inbound TCP/HTTP and
+#     are NOT a fit for this server. Use Fly.io (UDP supported), a
+#     Hetzner / DigitalOcean / Vultr VPS, or AWS EC2 with a UDP
+#     security-group rule.
+#   * Set RIFT_PUBLIC to whatever the player-facing IP:port is — the
+#     server includes that address in connect tokens, and clients
+#     reconnect to it after the initial handshake.
+# --------------------------------------------------------------------
+
+FROM rust:1.83-bookworm AS builder
+WORKDIR /src
+
+# sqlx uses rustls, so no libssl needed at build time. pkg-config
+# is harmless to keep around for any future *-sys dep.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy the workspace. We don't use cargo-chef caching here on
+# purpose — keeps the Dockerfile dead simple and the server crate
+# is tiny so a clean build is acceptable. Switch to cargo-chef if
+# this ever becomes painful.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --release -p rift-server
+
+# --------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --home-dir /app rift
+
+COPY --from=builder /src/target/release/rift-server /usr/local/bin/rift-server
+COPY --from=builder /src/crates/rift-persistence/migrations /app/migrations
+
+USER rift
+EXPOSE 34000/udp
+ENV RUST_LOG=info
+
+ENTRYPOINT ["/usr/local/bin/rift-server"]

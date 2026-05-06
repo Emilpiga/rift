@@ -18,6 +18,16 @@ pub struct Input {
     /// Whether the left mouse button is currently held down. Tracks
     /// hold-state for channeled ability inputs (the action button).
     left_mouse_down: bool,
+    /// `left_mouse_down` from the previous frame. Compared at
+    /// frame end to surface `left_just_released`. Not used by
+    /// the click-vs-hold path — that one consumes
+    /// `left_clicked` directly.
+    prev_left_mouse_down: bool,
+    /// True for one frame after the left mouse button is
+    /// released. Used by drag-and-drop to detect drop events
+    /// without consuming the press, the way `left_clicked`
+    /// would.
+    left_just_released: bool,
     mouse_pos: (f32, f32),
     /// Characters typed this frame (consumed by `take_chars_typed`).
     chars_typed: Vec<char>,
@@ -40,6 +50,8 @@ impl Default for Input {
             right_clicked: Cell::new(false),
             last_mouse_pos: None,
             left_mouse_down: false,
+            prev_left_mouse_down: false,
+            left_just_released: false,
             mouse_pos: (0.0, 0.0),
             chars_typed: Vec::new(),
             backspace_pressed: 0,
@@ -88,6 +100,8 @@ impl Input {
         self.chars_typed.clear();
         self.backspace_pressed = 0;
         self.enter_pressed = false;
+        self.left_just_released = false;
+        self.prev_left_mouse_down = self.left_mouse_down;
     }
 
     /// Push a typed character (printable). Called by the window event loop.
@@ -135,6 +149,8 @@ impl Input {
         if button == winit::event::MouseButton::Left {
             if pressed {
                 self.left_clicked.set(true);
+            } else if self.left_mouse_down {
+                self.left_just_released = true;
             }
             self.left_mouse_down = pressed;
         }
@@ -144,6 +160,21 @@ impl Input {
     /// hold-to-channel ability inputs.
     pub fn left_mouse_held(&self) -> bool {
         self.left_mouse_down
+    }
+
+    /// Whether the left mouse button became pressed this frame
+    /// (rising edge). Non-consuming; safe to call from multiple
+    /// places. Used by drag-and-drop to start a drag without
+    /// stealing the click from a single-click action elsewhere.
+    pub fn left_just_pressed(&self) -> bool {
+        self.left_mouse_down && !self.prev_left_mouse_down
+    }
+
+    /// Whether the left mouse button was released this frame
+    /// (falling edge). Non-consuming. Used by drag-and-drop to
+    /// detect the drop event.
+    pub fn left_just_released(&self) -> bool {
+        self.left_just_released
     }
 
     /// Returns true if left mouse was clicked this frame (consumes the click).

@@ -15,6 +15,22 @@
 use crate::ids::{ClientId, NetId, NetTick};
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of bag slots a player can carry. Mirrored on the
+/// client UI (`mp_inventory_ui.rs` lays out a 5×6 grid). The server
+/// enforces this on every `PickUpLoot`; the client checks it locally
+/// to avoid a wasted round-trip and to surface an instant warning.
+pub const INVENTORY_CAPACITY: usize = 30;
+
+/// Why the server refused a [`ClientMsg::PickUpLoot`]. Sent back to
+/// the requesting client only (loot stays on the ground for everyone
+/// else). Today there's a single reason; the enum exists so we can
+/// grow it (range, ownership window, weight, …) without a wire break.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PickupRejectReason {
+    /// Picker's bag has [`INVENTORY_CAPACITY`] filled slots.
+    InventoryFull,
+}
+
 // ─── Client → Server ─────────────────────────────────────────────────────
 
 /// Anything the client sends to the server.
@@ -112,6 +128,94 @@ pub enum ClientMsg {
     /// unreachable).
     RequestRoster {
         account_name: String,
+    },
+
+    /// Move the item at `inventory_index` (into the bag mirror
+    /// the client renders) into its default equipment slot. The
+    /// server validates the index, picks the canonical slot via
+    /// `Equipment::default_slot`, swaps in any previously-equipped
+    /// item, and replies with both a fresh `InventorySync` and an
+    /// `EquipmentSync` so client mirrors stay coherent. Reliable
+    /// on `Channel::Control` so a dropped equip never silently
+    /// loses the item.
+    EquipItem {
+        inventory_index: u32,
+    },
+
+    /// Move whatever's currently in `slot` back into the bag.
+    /// Server replies with the same dual sync as `EquipItem`. No-op
+    /// (silently dropped) if the slot is empty or the byte doesn't
+    /// match a known [`rift_game::loot::EquipSlot`].
+    UnequipItem {
+        slot: u8,
+    },
+
+    /// Ask the server to start a stash session. Server validates
+    /// the player is in the hub and within interact range of the
+    /// chest, marks the session as "stash open", and replies with
+    /// a fresh [`ServerMsg::StashSync`]. Reliable on
+    /// `Channel::Control`.
+    OpenStash,
+
+    /// Ask the server to end the current stash session. Future
+    /// `DepositToStash` / `WithdrawFromStash` are rejected until
+    /// a fresh `OpenStash` succeeds. Reliable on `Channel::Control`.
+    CloseStash,
+
+    /// Move the bag item at `inventory_index` into the stash.
+    /// Server validates the index + that a stash session is open,
+    /// then replies with both a fresh `InventorySync` and a fresh
+    /// `StashSync`. Reliable on `Channel::Control`.
+    DepositToStash {
+        inventory_index: u32,
+    },
+
+    /// Move the stash item at `stash_index` back into the bag.
+    /// Server validates the index + that a stash session is open,
+    /// then replies with both a fresh `InventorySync` and a fresh
+    /// `StashSync`. Reliable on `Channel::Control`.
+    WithdrawFromStash {
+        stash_index: u32,
+    },
+
+    /// Reorder the bag: swap the items at `a` and `b` (either may
+    /// be an empty slot, in which case the filled item moves into
+    /// the empty cell). Server replies with a fresh
+    /// `InventorySync`. Reliable on `Channel::Control`.
+    SwapInventorySlots {
+        a: u32,
+        b: u32,
+    },
+
+    /// Reorder the stash: swap the items at `a` and `b` (either
+    /// may be an empty slot, in which case the filled item moves
+    /// into the empty cell). Server validates a stash session is
+    /// open and replies with a fresh `StashSync`. Reliable on
+    /// `Channel::Control`.
+    SwapStashSlots {
+        a: u32,
+        b: u32,
+    },
+
+    /// Drop the bag item at `inventory_index` onto the ground at
+    /// the picker's current position. Server removes the row from
+    /// the bag, spawns a `ServerLoot` entity, and pushes the
+    /// usual `WorldEvent::LootDropped` so every observer's loot
+    /// pillar appears. Replies with a fresh `InventorySync` to
+    /// the picker. Reliable on `Channel::Control`.
+    DropInventoryItem {
+        inventory_index: u32,
+    },
+
+    /// Take whatever's currently in `slot` and place it into the
+    /// bag at `inventory_index` (extending the bag if the index
+    /// is past the end). Used by the inventory UI's drag-and-drop
+    /// path so the user can pick the destination slot, instead of
+    /// always appending to the end as `UnequipItem` does. Server
+    /// replies with fresh `InventorySync` + `EquipmentSync`.
+    UnequipToBagSlot {
+        slot: u8,
+        inventory_index: u32,
     },
 }
 
@@ -224,6 +328,43 @@ pub enum ServerMsg {
     /// [`WorldEvent`].
     Event(WorldEvent),
 
+    /// Full inventory replication for the local player. Sent once
+    /// per session right after [`ServerMsg::Welcome`] so the
+    /// freshly-connected client can hydrate its `mp_inventory`
+    /// from the persisted bag, and again whenever the server
+    /// authoritatively rewrites the bag (future: trades, loot
+    /// pruning). Items are addressed to *this* client only \u2014
+    /// other players' inventories are private.
+    ///
+    /// `items[i] == None` means slot `i` is empty. The bag is
+    /// sparse so drag-and-drop reorders preserve gaps.
+    InventorySync {
+        items: Vec<Option<ItemBlob>>,
+    },
+
+    /// Full equipment replication for the local player. Sent
+    /// alongside [`ServerMsg::InventorySync`] on session start
+    /// (so the equipped set is hot before the world appears) and
+    /// again after every authoritative equip / unequip. `slots`
+    /// only contains *filled* slots — absent entries are empty.
+    /// `slot` is the byte returned by
+    /// `rift_game::loot::EquipSlot::to_u8`. Reliable on
+    /// `Channel::Control`.
+    EquipmentSync {
+        slots: Vec<(u8, ItemBlob)>,
+    },
+
+    /// Full stash replication for the local player. Sent on the
+    /// server's reply to [`ClientMsg::OpenStash`] (with the freshly
+    /// loaded persisted rows) and again after every authoritative
+    /// deposit / withdraw. Reliable on `Channel::Control`. Items
+    /// are addressed to *this* client only — stashes are
+    /// per-character private storage. Sparse like
+    /// [`Self::InventorySync`].
+    StashSync {
+        items: Vec<Option<ItemBlob>>,
+    },
+
     /// Floor transition. The client clears its local world and
     /// regenerates from `(seed, index)` before applying the next
     /// snapshot. Carries the spawn position the server has placed
@@ -256,6 +397,15 @@ pub enum ServerMsg {
         claimed_by: ClientId,
     },
 
+    /// Sent only to the requester when their [`ClientMsg::PickUpLoot`]
+    /// was refused server-side (e.g. bag full). The drop stays on the
+    /// ground; the client uses this to show a warning and ignore the
+    /// pending request. Reliable on `Channel::Control`.
+    PickupRejected {
+        loot: NetId,
+        reason: PickupRejectReason,
+    },
+
     /// Server-initiated kick (idle timeout, version mismatch caught
     /// late, lobby closing). Renet will tear down the connection
     /// shortly after.
@@ -279,6 +429,40 @@ pub enum ServerMsg {
     /// avatar entity + renderer slot. Snapshots after this point will
     /// no longer carry the player's `net_id`.
     PlayerLeft { net_id: NetId },
+
+    /// Authoritative XP / level snapshot for the local character.
+    /// Sent once at Welcome and again whenever the server's
+    /// `Experience` row changes (kill XP, level up). Reliable on
+    /// `Channel::Control`. The client mirrors this into
+    /// `PlayerState::experience` and recomputes stats on level
+    /// change. `xp_to_next` is the threshold the client compares
+    /// `xp` against to draw the bar — server is the single
+    /// source of the formula so the bar can never lie.
+    CharacterStats {
+        level: u32,
+        xp: u64,
+        xp_to_next: u64,
+    },
+
+    /// Authoritative rift-progress snapshot for the current floor.
+    /// Drives the client's progress bar, boss-spawned banner, and
+    /// "enter portal" prompt. Sent on every change (kill,
+    /// boss-spawn, boss-kill, floor reset). Reliable on
+    /// `Channel::Control`.
+    RiftProgress {
+        /// Kills counted toward boss spawn so far.
+        progress: u32,
+        /// Kills required before the boss spawns.
+        required: u32,
+        /// `true` once the floor's boss has been spawned.
+        boss_spawned: bool,
+        /// `true` once the boss has been killed (sets
+        /// `floor_complete` simultaneously).
+        boss_killed: bool,
+        /// `true` once the floor is fully cleared and the player
+        /// can advance via the portal.
+        floor_complete: bool,
+    },
 }
 
 /// Per-tick snapshot. Phase 1 ships the *full* state every tick — we

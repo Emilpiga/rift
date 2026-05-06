@@ -253,6 +253,24 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
 
     k.position = new_pos;
 
+    // Stationary body-follow: when not running, exponentially
+    // pull body yaw toward aim yaw so the spine twist (clamped
+    // ±120° on the renderer) never has to hard-snap when the
+    // cursor sweeps past the back of the character. While
+    // running, body yaw is owned by velocity. Uses real `dt` so
+    // server (fixed tick) and client (per-frame extrapolation +
+    // per-snapshot replay) converge to the same yaw.
+    if k.locomotion == loco::IDLE && k.roll_remaining <= 0.0 {
+        const FOLLOW_RATE: f32 = 6.0; // 1/τ; τ ≈ 0.17 s
+        let mut delta = k.aim_yaw - k.yaw;
+        while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
+        while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+        let alpha = 1.0 - (-FOLLOW_RATE * dt).exp();
+        k.yaw += delta * alpha;
+        if k.yaw > std::f32::consts::PI { k.yaw -= std::f32::consts::TAU; }
+        if k.yaw < -std::f32::consts::PI { k.yaw += std::f32::consts::TAU; }
+    }
+
     // Tick the dodge-roll timer down. Cleared `action` flips back
     // to `NONE` so the snapshot pipeline puts the body back into
     // its locomotion blend on the very next tick.
@@ -265,10 +283,19 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
 }
 
 fn tile_at(floor: &Floor, x: f32, z: f32) -> Tile {
-    if x < 0.0 || z < 0.0 {
+    // Rendering convention: a tile at grid (i, j) is rendered with
+    // its centre at world (i, j), so it covers world space
+    // [i - 0.5, i + 0.5] × [j - 0.5, j + 0.5]. Map world → grid
+    // by snapping to the nearest centre, otherwise the collision
+    // grid sits half a tile off the visible geometry and the
+    // player merges into walls on one side while stopping short
+    // on the other.
+    let gx = (x + 0.5).floor();
+    let gz = (z + 0.5).floor();
+    if gx < 0.0 || gz < 0.0 {
         return Tile::Wall;
     }
-    floor.get(x.floor() as usize, z.floor() as usize)
+    floor.get(gx as usize, gz as usize)
 }
 
 fn tile_blocks_capsule(floor: &Floor, x: f32, z: f32, radius: f32) -> bool {

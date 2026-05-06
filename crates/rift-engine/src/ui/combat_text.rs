@@ -1,5 +1,5 @@
 use glam::{Mat4, Vec3};
-use crate::renderer::OverlayBatch;
+use crate::ui::im::{Color, Pos2, Ui, WorldUi};
 
 /// A floating damage number that rises and fades.
 struct FloatingText {
@@ -103,6 +103,23 @@ impl CombatTextSystem {
         });
     }
 
+    /// Spawn an arbitrary status notice (e.g. "Inventory full").
+    /// Rises like a damage number but with custom text + color so
+    /// gameplay systems can surface short, transient warnings to
+    /// the local player without needing a dedicated toast widget.
+    pub fn spawn_notice(&mut self, position: Vec3, text: impl Into<String>, color: [f32; 4]) {
+        self.texts.push(FloatingText {
+            world_pos: position + Vec3::new(0.0, 2.2, 0.0),
+            text: text.into(),
+            color,
+            age: 0.0,
+            lifetime: 1.6,
+            base_size: 22.0,
+            drift_x: 0.0,
+            rises: true,
+        });
+    }
+
     /// Advance time and remove expired texts.
     pub fn tick(&mut self, dt: f32) {
         for t in &mut self.texts {
@@ -111,53 +128,49 @@ impl CombatTextSystem {
         self.texts.retain(|t| t.age < t.lifetime);
     }
 
-    /// Render all active texts to the overlay batch.
-    pub fn render(&self, batch: &mut OverlayBatch, view_proj: Mat4, sw: f32, sh: f32) {
+    /// Render all active texts via the immediate-mode UI stack.
+    /// Uses [`WorldUi`] for projection so off-screen / behind-camera
+    /// anchors are skipped automatically; the per-text fade + pop
+    /// animation stays bespoke since no widget covers it.
+    pub fn render(&self, ui: &mut Ui<'_>, view_proj: Mat4) {
+        let mut wui = WorldUi::new(ui, view_proj);
         for t in &self.texts {
             let progress = t.age / t.lifetime;
 
-            // Vertical movement
+            // Vertical movement (world-space; rises for damage,
+            // sinks for player-took-damage).
             let vert = if t.rises {
-                t.age * 2.0 // rise upward
+                t.age * 2.0
             } else {
-                -t.age * 1.2 // sink downward for player damage
+                -t.age * 1.2
             };
             let world_pos = t.world_pos + Vec3::new(0.0, vert, 0.0);
 
-            // Project to screen
-            let clip = view_proj * world_pos.extend(1.0);
-            if clip.w <= 0.0 {
-                continue;
-            }
+            // Project; bail if off-screen / behind camera.
+            let Some(anchor) = wui.world_to_screen(world_pos) else { continue };
 
-            let ndc = clip.truncate() / clip.w;
-            if ndc.x < -1.5 || ndc.x > 1.5 || ndc.y < -1.5 || ndc.y > 1.5 {
-                continue;
-            }
-
-            let px = (ndc.x + 1.0) * 0.5 * sw + t.drift_x * progress;
-            let py = (ndc.y + 1.0) * 0.5 * sh;
-
-            // Fade out in last 40%
+            // Fade out in last 40%.
             let alpha = if progress > 0.6 {
                 1.0 - (progress - 0.6) / 0.4
             } else {
                 1.0
             };
 
-            // Scale: quick pop then settle
+            // Scale: quick pop then settle.
             let size = if progress < 0.08 {
-                t.base_size * (0.5 + progress * 6.25) // 50% → 100% in 0.08s
+                t.base_size * (0.5 + progress * 6.25)
             } else if progress < 0.15 {
-                t.base_size * (1.0 + (0.15 - progress) * 3.0) // overshoot then settle
+                t.base_size * (1.0 + (0.15 - progress) * 3.0)
             } else {
-                t.base_size * (1.0 - (progress - 0.15) * 0.15) // gentle shrink
+                t.base_size * (1.0 - (progress - 0.15) * 0.15)
             };
 
-            let color = [t.color[0], t.color[1], t.color[2], t.color[3] * alpha];
-
-            let text_w = batch.measure_text(&t.text, size);
-            batch.text(&t.text, px - text_w * 0.5, py, size, color, sw, sh);
+            let color = Color::rgba(t.color[0], t.color[1], t.color[2], t.color[3] * alpha);
+            let inner = wui.ui();
+            let tw = inner.measure_text(&t.text, size);
+            let px = anchor.x - tw * 0.5 + t.drift_x * progress;
+            let py = anchor.y;
+            inner.draw_text(Pos2::new(px, py), &t.text, size, color);
         }
     }
 

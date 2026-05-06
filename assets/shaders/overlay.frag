@@ -8,7 +8,11 @@ layout(location = 1) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    float alpha = texture(fontAtlas, fragUV).r;
-    // UV (0,0) = top-left of white pixel region (solid quads use that)
-    outColor = vec4(fragColor.rgb, fragColor.a * alpha);
+    // RGBA atlas: solid-colour rects sample the white pixel at
+    // UV(0,0) -> (1,1,1,1); font glyphs are stored as
+    // (1,1,1, mask); icons store full RGBA. Multiplying by the
+    // vertex colour lets callers tint glyphs/icons or fill rects
+    // with arbitrary colours through the same path.
+    vec4 tex = texture(fontAtlas, fragUV);
+    outColor = fragColor * tex;
 }

@@ -20,7 +20,6 @@ use hecs::Entity;
 use rift_game::abilities::ChannelEffect;
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
-use super::enemy::ServerEnemy;
 use super::player::ServerPlayer;
 use super::projectile::{apply_hits_to_enemies, Hit};
 
@@ -32,7 +31,11 @@ pub struct ServerChannel {
     pub tick_interval: f32,
     pub tick_acc: f32,
     pub effect: ChannelEffect,
-    pub damage_per_tick: f32,
+    /// Caster's crit chance at the time of cast (0..1). Frozen
+    /// for the duration of the channel; equipping a fresh ring
+    /// mid-cast won't retroactively boost crit.
+    pub crit_chance: f32,
+    pub crit_damage: f32,
     pub apply_debuff: Option<u8>,
     /// Direction the caster is aiming. Refreshed every server tick
     /// from the player's current `aim_yaw` so the beam follows the
@@ -97,6 +100,8 @@ pub fn tick(
             collect_hits_for_effect(
                 channel,
                 caster_pos,
+                caster_net_id,
+                tick_now,
                 enemies,
                 &mut hits,
             );
@@ -124,9 +129,14 @@ pub fn tick(
 fn collect_hits_for_effect(
     channel: &ServerChannel,
     caster_pos: Vec3,
+    caster_net_id: NetId,
+    tick_now: NetTick,
     enemies: &[(Entity, Vec3, NetId, f32)],
     hits: &mut Vec<Hit>,
 ) {
+    let crit_chance = channel.crit_chance;
+    let crit_damage = channel.crit_damage;
+    let salt = (channel.ability_id as u64) ^ (channel.tick_acc.to_bits() as u64);
     match channel.effect {
         ChannelEffect::AuraAroundCaster { radius, damage_per_tick } => {
             let r2 = radius * radius;
@@ -139,6 +149,14 @@ fn collect_hits_for_effect(
                         enemy_net_id: *nid,
                         enemy_pos: *en_pos,
                         damage: damage_per_tick,
+                        crit_chance,
+                        crit_damage,
+                        crit_seed: super::projectile::mix64(
+                            (tick_now.0 as u64)
+                                ^ ((nid.0 as u64) << 8)
+                                ^ ((caster_net_id.0 as u64) << 24)
+                                ^ salt.rotate_left(7),
+                        ),
                         apply_debuff: channel.apply_debuff,
                     });
                 }
@@ -174,6 +192,14 @@ fn collect_hits_for_effect(
                         enemy_net_id: *nid,
                         enemy_pos: *en_pos,
                         damage: damage_per_tick,
+                        crit_chance,
+                        crit_damage,
+                        crit_seed: super::projectile::mix64(
+                            (tick_now.0 as u64)
+                                ^ ((nid.0 as u64) << 8)
+                                ^ ((caster_net_id.0 as u64) << 24)
+                                ^ salt.rotate_left(7),
+                        ),
                         apply_debuff: channel.apply_debuff,
                     },
                 ));

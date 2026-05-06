@@ -2845,6 +2845,7 @@ dependencies = [
  "log",
  "notify",
  "raw-window-handle",
+ "rayon",
  "rift-dungeon",
  "rift-game",
  "shaderc",

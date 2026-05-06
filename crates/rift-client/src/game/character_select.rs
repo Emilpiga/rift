@@ -1,21 +1,27 @@
 //! Character selection / creation screen.
 //!
-//! Owns its own UI state machine (roster view → create form → delete
-//! confirmation) and renders entirely through the existing
-//! [`OverlayBatch`]. Also manages a single preview avatar in the world
-//! so the player sees the gender choice come to life.
+//! Owns its own UI state machine (account-entry → loading roster
+//! → roster list → create form → delete confirmation) and renders
+//! through the immediate-mode UI stack ([`rift_engine::ui::im`]).
+//! Also manages a single preview avatar in the world so the
+//! player sees the gender choice come to life.
 //!
 //! Public entry points:
 //!  - [`CharacterSelect::new`]: build initial state.
-//!  - [`CharacterSelect::update`]: tick UI, return any user-issued action.
-//!  - [`CharacterSelect::render`]: paint the overlay + preview backdrop.
+//!  - [`CharacterSelect::tick_preview`]: drive the preview avatar
+//!    (independent of the UI; needs `&mut World` and `&mut Renderer`).
+//!  - [`CharacterSelect::frame`]: run one frame's UI inside an
+//!    [`rift_engine::ui::im::Ui`]; returns the user-issued action.
 
 use glam::{Mat4, Vec3};
 use rift_engine::{
     animation::{Animator, Clip},
     ecs::components::{AnimationSet, Renderable, Skinned, Transform},
-    input::Input,
-    renderer::{mesh::SkinnedMesh, overlay::OverlayBatch},
+    renderer::mesh::SkinnedMesh,
+    ui::im::{
+        widgets::{label, text_field, title},
+        Button, Color, Frame, Id, Pad, Pos2, Rect, Stroke, Ui, Vec2,
+    },
     Mesh, Renderer,
 };
 use std::sync::Arc;
@@ -32,8 +38,8 @@ pub enum SelectAction {
     /// lookup against the server with this account name. Until
     /// the roster arrives the screen renders a "Loading…" stub.
     AccountConfirmed { name: String },
-    /// User confirmed a slot to play. Game should build the world and
-    /// transition to `Playing`.
+    /// User confirmed a slot to play. Game should build the world
+    /// and transition to `Playing`.
     Play {
         /// Account name typed in the entry view; used by the
         /// server to resolve / create the persistent `accounts`
@@ -45,20 +51,16 @@ pub enum SelectAction {
     Quit,
 }
 
-/// Sub-views the screen can be in.
-#[derive(Clone, Debug)]
-enum View {
-    /// Initial gate — enter the account name. Once confirmed we
-    /// remember it on the parent `CharacterSelect` and move to
-    /// the loading view until the server delivers a roster.
-    AccountEntry { name: String },
-    /// Account confirmed; waiting for the server's roster reply.
+/// Sub-views the screen can be in. Data that needs to persist
+/// across frames (typed names, half-filled forms) lives on the
+/// parent [`CharacterSelect`] — the variants here are
+/// discriminator-only so view switches stay cheap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ViewKind {
+    AccountEntry,
     LoadingRoster,
-    /// Roster list with Create / Play / Delete buttons.
     Roster,
-    /// Filling out the create form.
-    Create(CreateForm),
-    /// Confirming deletion of a roster slot.
+    Create,
     DeleteConfirm { idx: usize },
 }
 
@@ -96,16 +98,22 @@ fn roster_class_from_id(id: &str) -> rift_game::classes::ClassId {
 
 pub struct CharacterSelect {
     roster: CharacterRoster,
-    view: View,
-    /// Account name confirmed in the [`View::AccountEntry`] gate.
-    /// Empty string before that gate has been cleared.
+    view: ViewKind,
+    /// Account name typed in the [`ViewKind::AccountEntry`] gate.
+    /// Persists across frames; copied into [`Self::account_name`]
+    /// once confirmed so it survives the view transition into
+    /// `Roster`.
+    account_entry: String,
+    /// Account name confirmed in the entry gate. Empty before
+    /// confirmation. Sent with [`SelectAction::Play`].
     account_name: String,
-    /// Hovered button index (visual only).
-    hover: Option<u32>,
-    /// Time accumulator for the slow podium rotation.
+    /// In-progress create form. Reset each time we enter
+    /// [`ViewKind::Create`].
+    create_form: CreateForm,
+    /// Time accumulator for the slow podium rotation + caret blink.
     rotation_t: f32,
-    /// What the preview avatar currently represents. `None` means no
-    /// preview entity is alive in the world right now.
+    /// What the preview avatar currently represents. `None` means
+    /// no preview entity is alive in the world right now.
     preview_state: Option<PreviewState>,
     /// Cached animation library, lazily loaded the first time the
     /// preview spawns. Re-bound per-skeleton when gender changes.
@@ -118,29 +126,14 @@ struct PreviewState {
     gender: Gender,
 }
 
-// ─── Layout constants ────────────────────────────────────────────────────
-//
-// All in screen-pixel units; the renderer scales.
-
-const PANEL_BG: [f32; 4] = [0.05, 0.05, 0.07, 0.92];
-const PANEL_BORDER: [f32; 4] = [0.18, 0.16, 0.12, 1.0];
-const TEXT_PRIMARY: [f32; 4] = [0.95, 0.92, 0.84, 1.0];
-const TEXT_DIM: [f32; 4] = [0.65, 0.62, 0.55, 1.0];
-const TEXT_TITLE: [f32; 4] = [1.0, 0.84, 0.45, 1.0];
-const BTN_BG: [f32; 4] = [0.10, 0.10, 0.13, 0.95];
-const BTN_BG_HOVER: [f32; 4] = [0.18, 0.18, 0.22, 1.0];
-const BTN_BG_PRIMARY: [f32; 4] = [0.55, 0.32, 0.10, 1.0];
-const BTN_BG_PRIMARY_HOVER: [f32; 4] = [0.72, 0.45, 0.16, 1.0];
-const BTN_BG_DANGER: [f32; 4] = [0.45, 0.10, 0.10, 1.0];
-const BTN_BG_DANGER_HOVER: [f32; 4] = [0.65, 0.18, 0.18, 1.0];
-
 impl CharacterSelect {
     pub fn new() -> Self {
         Self {
             roster: CharacterRoster::new(),
-            view: View::AccountEntry { name: String::new() },
+            view: ViewKind::AccountEntry,
+            account_entry: String::new(),
             account_name: String::new(),
-            hover: None,
+            create_form: CreateForm::new(),
             rotation_t: 0.0,
             preview_state: None,
             anim_clips: None,
@@ -152,9 +145,9 @@ impl CharacterSelect {
     }
 
     /// Replace the local roster with a server-supplied one and
-    /// move past the `LoadingRoster` gate. Idempotent: callers can
-    /// re-invoke after a reconnect without resetting any other
-    /// view state.
+    /// move past the `LoadingRoster` gate. Idempotent: callers
+    /// can re-invoke after a reconnect without resetting any
+    /// other view state.
     pub fn apply_server_roster(
         &mut self,
         entries: Vec<rift_net::messages::RosterEntry>,
@@ -170,64 +163,41 @@ impl CharacterSelect {
             profile.level = e.level;
             self.roster.add(profile);
         }
-        if matches!(self.view, View::LoadingRoster) {
-            self.view = View::Roster;
-            self.hover = None;
+        if matches!(self.view, ViewKind::LoadingRoster) {
+            self.view = ViewKind::Roster;
         }
-    }
-
-    /// Run one frame's worth of input + UI logic. Returns the action
-    /// the surrounding `GameState` should perform.
-    pub fn update(
-        &mut self,
-        world: &mut hecs::World,
-        renderer: &mut Renderer,
-        input: &Input,
-        dt: f32,
-    ) -> SelectAction {
-        self.rotation_t += dt;
-        self.hover = None;
-
-        let (sw, sh) = renderer.screen_size();
-        let mouse = input.mouse_pos();
-        let clicked = input.left_clicked();
-
-        // Make sure the right preview is alive for the active view.
-        let desired_gender = self.desired_preview_gender();
-        self.ensure_preview(world, renderer, desired_gender);
-
-        // Drive camera at the podium.
-        self.update_preview_camera(world, renderer);
-
-        // Hit-test in display order: top-most UI first.
-        let action = match &self.view.clone() {
-            View::AccountEntry { name } => {
-                self.update_account_entry(name.clone(), input, mouse, clicked, sw, sh)
-            }
-            View::LoadingRoster => SelectAction::None,
-            View::Roster => self.update_roster(mouse, clicked, sw, sh),
-            View::Create(form) => self.update_create(form.clone(), input, mouse, clicked, sw, sh),
-            View::DeleteConfirm { idx } => self.update_delete(*idx, mouse, clicked, sw, sh),
-        };
-
-        action
     }
 
     // ─── Preview management ──────────────────────────────────────────
 
+    /// Drive the preview avatar (spawn / despawn / rotate /
+    /// camera). Pure side-effect on `world` and `renderer`; UI
+    /// is handled separately by [`Self::frame`].
+    pub fn tick_preview(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        dt: f32,
+    ) {
+        self.rotation_t += dt;
+        let desired_gender = self.desired_preview_gender();
+        self.ensure_preview(world, renderer, desired_gender);
+        self.update_preview_camera(world, renderer);
+    }
+
     fn desired_preview_gender(&self) -> Option<Gender> {
         match &self.view {
-            View::AccountEntry { .. } | View::LoadingRoster => None,
-            View::Create(form) => Some(form.gender),
-            View::Roster => self.roster.slots().first().map(|p| p.gender),
-            View::DeleteConfirm { idx } => self.roster.get(*idx).map(|p| p.gender),
+            ViewKind::AccountEntry | ViewKind::LoadingRoster => None,
+            ViewKind::Create => Some(self.create_form.gender),
+            ViewKind::Roster => self.roster.slots().first().map(|p| p.gender),
+            ViewKind::DeleteConfirm { idx } => self.roster.get(*idx).map(|p| p.gender),
         }
     }
 
-    /// Drop the preview avatar entity and free its render-object slot.
-    /// Called by `GameState` right before generating the hub so the
-    /// dynamic mesh slot can be reclaimed (and so the preview model
-    /// doesn't briefly appear inside the hub).
+    /// Drop the preview avatar entity and free its render-object
+    /// slot. Called by `GameState` right before generating the
+    /// hub so the dynamic mesh slot can be reclaimed (and so the
+    /// preview model doesn't briefly appear inside the hub).
     pub fn teardown_preview(&mut self, world: &mut hecs::World, renderer: &mut Renderer) {
         if let Some(prev) = self.preview_state.take() {
             if let Ok(r) = world.get::<&Renderable>(prev.entity) {
@@ -248,14 +218,12 @@ impl CharacterSelect {
     ) {
         let needs_rebuild = match (&self.preview_state, desired) {
             (None, None) => false,
-            (Some(_), None) => true, // tear down
-            (None, Some(_)) => true, // build
+            (Some(_), None) | (None, Some(_)) => true,
             (Some(s), Some(g)) => s.gender != g,
         };
         if !needs_rebuild {
             return;
         }
-        // Clear previous preview entity (and its render slot).
         if let Some(prev) = self.preview_state.take() {
             if let Ok(r) = world.get::<&Renderable>(prev.entity) {
                 let idx = r.object_index;
@@ -265,7 +233,6 @@ impl CharacterSelect {
             }
             let _ = world.despawn(prev.entity);
         }
-        // Spawn fresh preview at the podium.
         if let Some(gender) = desired {
             if let Some(entity) = self.spawn_preview_entity(world, renderer, gender) {
                 self.preview_state = Some(PreviewState { entity, gender });
@@ -288,15 +255,12 @@ impl CharacterSelect {
             }
         };
 
-        // Bind animation library to this skeleton.
         let clips = self.load_clips_lazy();
         let mut anim_set = AnimationSet::default();
         if let Some(clips) = clips {
             for clip in clips {
-                let bound = clip.bind_to_skeleton(
-                    &skinned.joint_index_by_name,
-                    skinned.joints.len(),
-                );
+                let bound =
+                    clip.bind_to_skeleton(&skinned.joint_index_by_name, skinned.joints.len());
                 anim_set
                     .clips
                     .insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
@@ -307,18 +271,18 @@ impl CharacterSelect {
             .or_else(|| anim_set.clips.values().next().cloned());
         let animator = idle_clip.map(Animator::new);
 
-        // Add the bind-pose mesh to the renderer as a dynamic skinned object.
         let mut bind_mesh = Mesh::empty();
         bind_mesh.vertices = skinned.bind_vertices.clone();
         bind_mesh.indices = skinned.indices.clone();
         let podium_pos = Vec3::new(0.0, 0.0, 0.0);
-        let obj_idx = match renderer.add_dynamic_mesh(&bind_mesh, Mat4::from_translation(podium_pos)) {
-            Ok(i) => i,
-            Err(e) => {
-                log::warn!("Preview mesh upload failed: {}", e);
-                return None;
-            }
-        };
+        let obj_idx =
+            match renderer.add_dynamic_mesh(&bind_mesh, Mat4::from_translation(podium_pos)) {
+                Ok(i) => i,
+                Err(e) => {
+                    log::warn!("Preview mesh upload failed: {}", e);
+                    return None;
+                }
+            };
         if let Err(e) = renderer.set_object_texture(obj_idx, tex_path) {
             log::warn!("Preview texture load failed: {}", e);
         }
@@ -363,17 +327,12 @@ impl CharacterSelect {
         // screen at near-full opacity, so we offset the camera so the
         // avatar reads in the empty right half (~73% of width).
         const OFFSET_X: f32 = -0.95;
-        // Slowly rotate the podium and stand the camera in front of it.
         if let Some(prev) = &self.preview_state {
             let rot = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0))
                 * Mat4::from_rotation_y(self.rotation_t * 0.35);
-            // Update the entity's Transform too so it rotates in sync
-            // (skinning_system reads Transform).
             if let Ok(mut t) = world.get::<&mut Transform>(prev.entity) {
                 t.rotation = glam::Quat::from_rotation_y(self.rotation_t * 0.35);
             }
-            // Also update the renderer model matrix in case skinning
-            // hasn't kicked in yet on the very first frame.
             let idx = world
                 .get::<&Renderable>(prev.entity)
                 .map(|r| r.object_index)
@@ -382,34 +341,13 @@ impl CharacterSelect {
                 renderer.objects[idx].model_matrix = rot;
             }
         }
-        // Camera: shifted to the left of world-origin so the avatar
-        // (which sits at origin) ends up on the right side of the
-        // viewport, clear of the UI panel.
         renderer.camera.position = Vec3::new(OFFSET_X, 1.4, 3.6);
         renderer.camera.target = Vec3::new(OFFSET_X, 1.0, 0.0);
-        // One-shot diagnostic.
-        if self.rotation_t < 0.1 {
-            if let Some(prev) = &self.preview_state {
-                let idx = world.get::<&Renderable>(prev.entity)
-                    .map(|r| r.object_index).unwrap_or(usize::MAX);
-                if idx < renderer.objects.len() {
-                    let m = renderer.objects[idx].model_matrix;
-                    log::info!(
-                        "Preview obj {}: center={:?} radius={} clear_color={:?}",
-                        idx, m.w_axis.truncate(), renderer.objects[idx].bounds_radius,
-                        renderer.clear_color,
-                    );
-                }
-            }
-        }
-        // Brighter backdrop so the avatar stands out.
         renderer.clear_color = [0.10, 0.10, 0.14, 1.0];
         renderer.fog_color = [0.12, 0.12, 0.16];
         renderer.fog_start = 8.0;
         renderer.fog_end = 30.0;
 
-        // Studio-style fill: warm key in front, cool rim from behind,
-        // soft top-fill so the figure reads even with low ambient.
         renderer.point_lights.clear();
         renderer.point_lights.push(rift_engine::PointLight {
             position: Vec3::new(1.4, 1.6, 2.4),
@@ -431,711 +369,396 @@ impl CharacterSelect {
         });
     }
 
-    // ─── View updates ────────────────────────────────────────────────
+    // ─── Per-frame UI ────────────────────────────────────────────────
 
-    /// Account-name gate. We block all roster activity until the
-    /// player has typed a non-empty name and confirmed it; this is
-    /// the value the server uses to look up / create their
-    /// persistent `accounts` row.
-    fn update_account_entry(
-        &mut self,
-        mut name: String,
-        input: &Input,
-        mouse: (f32, f32),
-        clicked: bool,
-        sw: f32,
-        sh: f32,
-    ) -> SelectAction {
-        for ch in input.chars_typed() {
-            if name.chars().count() < 18 && !ch.is_control() {
-                name.push(*ch);
+    /// Run one frame's worth of UI (input + draw fused). Returns
+    /// the action the surrounding `GameState` should perform.
+    pub fn frame(&mut self, ui: &mut Ui<'_>) -> SelectAction {
+        // Backdrop dim across the whole screen so the preview reads
+        // cleanly behind the panel.
+        let screen = ui.screen_rect();
+        ui.draw_rect(screen, Color::rgba(0.0, 0.0, 0.0, 0.35));
+
+        match self.view.clone() {
+            ViewKind::AccountEntry => self.frame_account_entry(ui),
+            ViewKind::LoadingRoster => {
+                self.frame_loading_roster(ui);
+                SelectAction::None
+            }
+            ViewKind::Roster => self.frame_roster(ui),
+            ViewKind::Create => self.frame_create(ui),
+            ViewKind::DeleteConfirm { idx } => {
+                // Render the roster behind the modal so the page
+                // identity persists during the confirmation.
+                let _ = self.frame_roster(ui);
+                self.frame_delete_confirm(ui, idx)
             }
         }
-        for _ in 0..input.backspace_count() {
-            name.pop();
-        }
+    }
 
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-        let confirm_btn = (panel_x + 30.0, panel_y + panel_h - 80.0, 160.0, 50.0);
-        let quit_btn = (panel_x + 210.0, panel_y + panel_h - 80.0, 120.0, 50.0);
+    /// Common left-side panel rect used by every full-screen view.
+    fn panel_rect(ui: &Ui<'_>) -> Rect {
+        let s = ui.screen_size();
+        Rect::from_xywh(s.x * 0.04, s.y * 0.10, s.x * 0.42, s.y * 0.80)
+    }
 
-        let mut hover_id: Option<u32> = None;
-        let can_confirm = !name.trim().is_empty();
-        let enter_pressed = input.enter_just_pressed() && can_confirm;
+    fn frame_account_entry(&mut self, ui: &mut Ui<'_>) -> SelectAction {
+        let panel = Self::panel_rect(ui);
+        let theme = *ui.theme();
+        let mut action = SelectAction::None;
 
-        if hit(mouse, confirm_btn) {
-            hover_id = Some(11);
-            if clicked && can_confirm {
-                let trimmed = name.trim().to_string();
+        Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let _ = title(ui, body.min, "ACCOUNT");
+            label(
+                ui,
+                body.min + Vec2::new(0.0, 44.0),
+                "Enter the account name to load your characters",
+            );
+
+            // Field label + text input.
+            label(ui, body.min + Vec2::new(0.0, 100.0), "Account name");
+            let field_rect = Rect::from_xywh(
+                body.x(),
+                body.y() + 122.0,
+                body.width(),
+                50.0,
+            );
+            let field_id = Id::root("char_select").child("account_field");
+            let resp = text_field(
+                ui,
+                field_id,
+                field_rect,
+                &mut self.account_entry,
+                "Type a name…",
+                18,
+                self.rotation_t,
+            );
+
+            label(
+                ui,
+                body.min + Vec2::new(0.0, 190.0),
+                "New name? A fresh account is created automatically.",
+            );
+
+            // Confirm + Quit row pinned to the bottom of the panel.
+            let can_confirm = !self.account_entry.trim().is_empty();
+            let btn_y = body.max.y - 50.0;
+            let confirm = Button::primary("Continue")
+                .enabled(can_confirm)
+                .show(
+                    ui,
+                    Rect::from_xywh(body.x(), btn_y, 160.0, 50.0),
+                );
+            let quit = Button::new("Quit").show(
+                ui,
+                Rect::from_xywh(body.x() + 180.0, btn_y, 120.0, 50.0),
+            );
+
+            // Fire on click, on Enter (when field is focused), or
+            // on Enter while the confirm button is hovered (so a
+            // mouse-only player still has Enter as a confirm key).
+            let enter = ui.input().enter_just_pressed() && (resp.focused || confirm.hovered);
+            if (confirm.clicked || enter) && can_confirm {
+                let trimmed = self.account_entry.trim().to_string();
                 self.account_name = trimmed.clone();
-                self.view = View::LoadingRoster;
-                self.hover = None;
-                return SelectAction::AccountConfirmed { name: trimmed };
+                self.view = ViewKind::LoadingRoster;
+                action = SelectAction::AccountConfirmed { name: trimmed };
+            } else if quit.clicked {
+                action = SelectAction::Quit;
             }
-        }
-        if hit(mouse, quit_btn) {
-            hover_id = Some(12);
-            if clicked {
-                return SelectAction::Quit;
-            }
-        }
-        if enter_pressed {
-            let trimmed = name.trim().to_string();
-            self.account_name = trimmed.clone();
-            self.view = View::LoadingRoster;
-            self.hover = None;
-            return SelectAction::AccountConfirmed { name: trimmed };
-        }
+        });
 
-        self.view = View::AccountEntry { name };
-        self.hover = hover_id;
-        SelectAction::None
+        action
     }
 
-    fn update_roster(
-        &mut self,
-        mouse: (f32, f32),
-        clicked: bool,
-        sw: f32,
-        sh: f32,
-    ) -> SelectAction {
-        // Layout: left half = roster panel, right half = preview backdrop.
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-
-        let row_h = 90.0;
-        let row_pad = 12.0;
-        let row_x = panel_x + 24.0;
-        let row_w = panel_w - 48.0;
-
-        let mut hover_id: Option<u32> = None;
-
-        // Slot rows.
-        for i in 0..MAX_CHARACTERS {
-            let y = panel_y + 110.0 + (i as f32) * (row_h + row_pad);
-            if let Some(profile) = self.roster.get(i) {
-                let _ = profile;
-                // Play button right side
-                let play_btn = (row_x + row_w - 220.0, y + 24.0, 90.0, 40.0);
-                if hit(mouse, play_btn) {
-                    hover_id = Some(100 + i as u32);
-                    if clicked {
-                        let p = self.roster.slots()[i].clone();
-                        return SelectAction::Play {
-                            account_name: self.account_name.clone(),
-                            profile: p,
-                        };
-                    }
-                }
-                let del_btn = (row_x + row_w - 110.0, y + 24.0, 90.0, 40.0);
-                if hit(mouse, del_btn) {
-                    hover_id = Some(200 + i as u32);
-                    if clicked {
-                        self.view = View::DeleteConfirm { idx: i };
-                        self.hover = hover_id;
-                        return SelectAction::None;
-                    }
-                }
-            } else if i == self.roster.len() && !self.roster.is_full() {
-                // Create-new placeholder row
-                let create_btn = (row_x, y, row_w, row_h);
-                if hit(mouse, create_btn) {
-                    hover_id = Some(900);
-                    if clicked {
-                        self.view = View::Create(CreateForm::new());
-                        self.hover = hover_id;
-                        return SelectAction::None;
-                    }
-                }
-            }
-        }
-
-        // Quit button bottom-left of the panel.
-        let quit_btn = (panel_x + 24.0, panel_y + panel_h - 60.0, 120.0, 40.0);
-        if hit(mouse, quit_btn) {
-            hover_id = Some(999);
-            if clicked {
-                return SelectAction::Quit;
-            }
-        }
-
-        self.hover = hover_id;
-        SelectAction::None
+    fn frame_loading_roster(&mut self, ui: &mut Ui<'_>) {
+        let panel = Self::panel_rect(ui);
+        let theme = *ui.theme();
+        Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let _ = title(ui, body.min, "ACCOUNT");
+            let dots = match (self.rotation_t * 1.5) as i32 % 4 {
+                0 => "",
+                1 => ".",
+                2 => "..",
+                _ => "...",
+            };
+            label(
+                ui,
+                body.min + Vec2::new(0.0, 44.0),
+                &format!("Loading roster for '{}'{dots}", self.account_name),
+            );
+        });
     }
 
-    fn update_create(
-        &mut self,
-        mut form: CreateForm,
-        input: &Input,
-        mouse: (f32, f32),
-        clicked: bool,
-        sw: f32,
-        sh: f32,
-    ) -> SelectAction {
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
+    fn frame_roster(&mut self, ui: &mut Ui<'_>) -> SelectAction {
+        let panel = Self::panel_rect(ui);
+        let theme = *ui.theme();
+        let mut action = SelectAction::None;
 
-        // Name text input — always receives typed chars while in this view.
-        for ch in input.chars_typed() {
-            if form.name.chars().count() < 18 && !ch.is_control() {
-                form.name.push(*ch);
-            }
-        }
-        for _ in 0..input.backspace_count() {
-            form.name.pop();
-        }
+        Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let _ = title(ui, body.min, "CHARACTER SELECT");
+            label(
+                ui,
+                body.min + Vec2::new(0.0, 44.0),
+                "Choose a character to enter the rift",
+            );
 
-        let mut hover_id: Option<u32> = None;
+            let row_h = 90.0;
+            let row_pad = 12.0;
 
-        // Gender toggle buttons.
-        let male_btn = (panel_x + 30.0, panel_y + 200.0, 140.0, 50.0);
-        let female_btn = (panel_x + 180.0, panel_y + 200.0, 140.0, 50.0);
-        if hit(mouse, male_btn) {
-            hover_id = Some(1);
-            if clicked {
-                form.gender = Gender::Male;
-            }
-        }
-        if hit(mouse, female_btn) {
-            hover_id = Some(2);
-            if clicked {
-                form.gender = Gender::Female;
-            }
-        }
+            for i in 0..MAX_CHARACTERS {
+                let y = body.y() + 88.0 + (i as f32) * (row_h + row_pad);
+                let row_rect = Rect::from_xywh(body.x(), y, body.width(), row_h);
 
-        // Class cycler (left/right arrows).
-        let class_count = class_options().len();
-        let class_left = (panel_x + 30.0, panel_y + 320.0, 40.0, 40.0);
-        let class_right = (panel_x + 280.0, panel_y + 320.0, 40.0, 40.0);
-        if hit(mouse, class_left) {
-            hover_id = Some(3);
-            if clicked {
-                form.class_idx = (form.class_idx + class_count - 1) % class_count;
-            }
-        }
-        if hit(mouse, class_right) {
-            hover_id = Some(4);
-            if clicked {
-                form.class_idx = (form.class_idx + 1) % class_count;
-            }
-        }
+                if let Some(profile) = self.roster.get(i) {
+                    // Row chrome.
+                    Frame::inset(&theme).show(ui, row_rect, |ui, inner| {
+                        ui.draw_text(
+                            inner.min + Vec2::new(8.0, 4.0),
+                            &profile.name,
+                            theme.fonts.size_lg,
+                            theme.colors.text,
+                        );
+                        let sub = format!(
+                            "Lv {}  -  {}  -  {}",
+                            profile.level,
+                            profile.gender.label(),
+                            classes::config_for(profile.class).name,
+                        );
+                        ui.draw_text(
+                            inner.min + Vec2::new(8.0, 36.0),
+                            &sub,
+                            theme.fonts.size_sm,
+                            theme.colors.text_dim,
+                        );
 
-        // Confirm + Cancel.
-        let can_confirm = !form.name.trim().is_empty();
-        let confirm_btn = (panel_x + 30.0, panel_y + panel_h - 80.0, 160.0, 50.0);
-        let cancel_btn = (panel_x + 210.0, panel_y + panel_h - 80.0, 120.0, 50.0);
-        let enter_pressed = input.enter_just_pressed() && can_confirm;
-        if hit(mouse, confirm_btn) {
-            hover_id = Some(5);
-            if clicked && can_confirm {
-                let (class_id, _) = class_options()[form.class_idx];
-                let profile = CharacterProfile::new(form.name.trim().to_string(), form.gender, class_id);
+                        let btn_y = inner.y() + 14.0;
+                        let play = Button::primary("Play").show_with_id(
+                            ui,
+                            Id::root("char_select").child(("play", i)),
+                            Rect::from_xywh(inner.max.x - 200.0, btn_y, 90.0, 40.0),
+                        );
+                        let del = Button::danger("Delete").show_with_id(
+                            ui,
+                            Id::root("char_select").child(("delete", i)),
+                            Rect::from_xywh(inner.max.x - 100.0, btn_y, 90.0, 40.0),
+                        );
+                        if play.clicked {
+                            let p = self.roster.slots()[i].clone();
+                            action = SelectAction::Play {
+                                account_name: self.account_name.clone(),
+                                profile: p,
+                            };
+                        } else if del.clicked {
+                            self.view = ViewKind::DeleteConfirm { idx: i };
+                        }
+                    });
+                } else if i == self.roster.len() && !self.roster.is_full() {
+                    // "+ Create new" row.
+                    let create = Button::new("+ Create New Character")
+                        .show_with_id(
+                            ui,
+                            Id::root("char_select").child(("create_slot", i)),
+                            row_rect,
+                        );
+                    if create.clicked {
+                        self.create_form = CreateForm::new();
+                        self.view = ViewKind::Create;
+                    }
+                } else {
+                    // Empty / locked slot — dashed placeholder.
+                    let dashed = Frame::inset(&theme)
+                        .with_fill(Color::rgba(0.06, 0.06, 0.08, 0.5))
+                        .with_stroke(Stroke::new(1.0, theme.colors.border));
+                    dashed.show_only(ui, row_rect);
+                    ui.draw_text(
+                        Pos2::new(row_rect.x() + 14.0, row_rect.y() + row_rect.height() * 0.5 - 7.0),
+                        "(empty slot)",
+                        theme.fonts.size_sm,
+                        theme.colors.text_muted,
+                    );
+                }
+            }
+
+            // Quit button bottom-left.
+            let quit = Button::new("Quit").show_with_id(
+                ui,
+                Id::root("char_select").child("roster_quit"),
+                Rect::from_xywh(body.x(), body.max.y - 40.0, 120.0, 40.0),
+            );
+            if quit.clicked {
+                action = SelectAction::Quit;
+            }
+        });
+
+        action
+    }
+
+    fn frame_create(&mut self, ui: &mut Ui<'_>) -> SelectAction {
+        let panel = Self::panel_rect(ui);
+        let theme = *ui.theme();
+        let action = SelectAction::None;
+
+        Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let _ = title(ui, body.min, "CREATE CHARACTER");
+
+            // Name field.
+            label(ui, body.min + Vec2::new(0.0, 60.0), "Name");
+            let name_rect = Rect::from_xywh(body.x(), body.y() + 82.0, body.width(), 50.0);
+            let name_resp = text_field(
+                ui,
+                Id::root("char_select").child("create_name"),
+                name_rect,
+                &mut self.create_form.name,
+                "Type a name…",
+                18,
+                self.rotation_t,
+            );
+
+            // Gender row.
+            label(ui, body.min + Vec2::new(0.0, 150.0), "Gender");
+            let male_rect = Rect::from_xywh(body.x(), body.y() + 172.0, 140.0, 50.0);
+            let female_rect = Rect::from_xywh(body.x() + 150.0, body.y() + 172.0, 140.0, 50.0);
+            let male_active = self.create_form.gender == Gender::Male;
+            let female_active = self.create_form.gender == Gender::Female;
+            let male_btn = if male_active {
+                Button::active("Male")
+            } else {
+                Button::new("Male")
+            };
+            let female_btn = if female_active {
+                Button::active("Female")
+            } else {
+                Button::new("Female")
+            };
+            if male_btn.show(ui, male_rect).clicked {
+                self.create_form.gender = Gender::Male;
+            }
+            if female_btn.show(ui, female_rect).clicked {
+                self.create_form.gender = Gender::Female;
+            }
+
+            // Class cycler.
+            label(ui, body.min + Vec2::new(0.0, 250.0), "Class");
+            let class_count = class_options().len();
+            let (_, class_name) = class_options()[self.create_form.class_idx];
+            let arrow_y = body.y() + 272.0;
+            let left = Button::new("<").show_with_id(
+                ui,
+                Id::root("char_select").child("class_left"),
+                Rect::from_xywh(body.x(), arrow_y, 40.0, 40.0),
+            );
+            // Centre name display.
+            let name_box = Rect::from_xywh(body.x() + 50.0, arrow_y, 190.0, 40.0);
+            Frame::inset(&theme).show_only(ui, name_box);
+            let tw = ui.measure_text(class_name, theme.fonts.size_lg);
+            ui.draw_text(
+                Pos2::new(
+                    name_box.x() + (name_box.width() - tw) * 0.5,
+                    name_box.y() + (name_box.height() - theme.fonts.size_lg) * 0.5,
+                ),
+                class_name,
+                theme.fonts.size_lg,
+                theme.colors.text,
+            );
+            let right = Button::new(">").show_with_id(
+                ui,
+                Id::root("char_select").child("class_right"),
+                Rect::from_xywh(body.x() + 250.0, arrow_y, 40.0, 40.0),
+            );
+            if left.clicked {
+                self.create_form.class_idx =
+                    (self.create_form.class_idx + class_count - 1) % class_count;
+            }
+            if right.clicked {
+                self.create_form.class_idx = (self.create_form.class_idx + 1) % class_count;
+            }
+
+            // Confirm + Cancel.
+            let can_confirm = !self.create_form.name.trim().is_empty();
+            let btn_y = body.max.y - 50.0;
+            let confirm = Button::primary("Confirm")
+                .enabled(can_confirm)
+                .show_with_id(
+                    ui,
+                    Id::root("char_select").child("create_confirm"),
+                    Rect::from_xywh(body.x(), btn_y, 160.0, 50.0),
+                );
+            let cancel = Button::new("Cancel").show_with_id(
+                ui,
+                Id::root("char_select").child("create_cancel"),
+                Rect::from_xywh(body.x() + 180.0, btn_y, 120.0, 50.0),
+            );
+            let enter = ui.input().enter_just_pressed() && name_resp.focused && can_confirm;
+            if (confirm.clicked || enter) && can_confirm {
+                let (class_id, _) = class_options()[self.create_form.class_idx];
+                let profile = CharacterProfile::new(
+                    self.create_form.name.trim().to_string(),
+                    self.create_form.gender,
+                    class_id,
+                );
                 self.roster.add(profile);
-                self.view = View::Roster;
-                self.hover = None;
-                return SelectAction::None;
+                self.view = ViewKind::Roster;
+            } else if cancel.clicked {
+                self.view = ViewKind::Roster;
             }
-        }
-        if hit(mouse, cancel_btn) {
-            hover_id = Some(6);
-            if clicked {
-                self.view = View::Roster;
-                self.hover = None;
-                return SelectAction::None;
-            }
-        }
-        if enter_pressed {
-            let (class_id, _) = class_options()[form.class_idx];
-            let profile = CharacterProfile::new(form.name.trim().to_string(), form.gender, class_id);
-            self.roster.add(profile);
-            self.view = View::Roster;
-            self.hover = None;
-            return SelectAction::None;
-        }
+        });
 
-        // Persist form state edits.
-        self.view = View::Create(form);
-        self.hover = hover_id;
-        SelectAction::None
+        action
     }
 
-    fn update_delete(
-        &mut self,
-        idx: usize,
-        mouse: (f32, f32),
-        clicked: bool,
-        sw: f32,
-        sh: f32,
-    ) -> SelectAction {
-        let cx = sw * 0.5;
-        let cy = sh * 0.5;
-        let yes_btn = (cx - 140.0, cy + 30.0, 120.0, 50.0);
-        let no_btn = (cx + 20.0, cy + 30.0, 120.0, 50.0);
-        let mut hover_id: Option<u32> = None;
-        if hit(mouse, yes_btn) {
-            hover_id = Some(7);
-            if clicked {
-                self.roster.remove(idx);
-                self.view = View::Roster;
-                self.hover = None;
-                return SelectAction::None;
-            }
-        }
-        if hit(mouse, no_btn) {
-            hover_id = Some(8);
-            if clicked {
-                self.view = View::Roster;
-                self.hover = None;
-                return SelectAction::None;
-            }
-        }
-        self.hover = hover_id;
-        SelectAction::None
-    }
+    fn frame_delete_confirm(&mut self, ui: &mut Ui<'_>, idx: usize) -> SelectAction {
+        // Modal dim covering the screen.
+        let screen = ui.screen_rect();
+        ui.with_layer(rift_engine::ui::im::Layer::Modal, |ui| {
+            ui.draw_rect(screen, Color::rgba(0.0, 0.0, 0.0, 0.55));
+        });
 
-    // ─── Rendering ───────────────────────────────────────────────────
-
-    pub fn render(&self, batch: &mut OverlayBatch, sw: f32, sh: f32) {
-        // Backdrop dim across the right half so the avatar reads cleanly.
-        batch.rect_px(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.35], sw, sh);
-
-        match &self.view {
-            View::AccountEntry { name } => self.draw_account_entry(batch, name, sw, sh),
-            View::LoadingRoster => self.draw_loading_roster(batch, sw, sh),
-            View::Roster => self.draw_roster(batch, sw, sh),
-            View::Create(form) => self.draw_create(batch, form, sw, sh),
-            View::DeleteConfirm { idx } => {
-                self.draw_roster(batch, sw, sh);
-                self.draw_delete_confirm(batch, *idx, sw, sh);
-            }
-        }
-    }
-
-    fn draw_loading_roster(&self, batch: &mut OverlayBatch, sw: f32, sh: f32) {
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-        draw_panel(batch, panel_x, panel_y, panel_w, panel_h, sw, sh);
-        batch.text(
-            "ACCOUNT",
-            panel_x + 24.0,
-            panel_y + 30.0,
-            32.0,
-            TEXT_TITLE,
-            sw,
-            sh,
-        );
-        let dots = match (self.rotation_t * 1.5) as i32 % 4 {
-            0 => "",
-            1 => ".",
-            2 => "..",
-            _ => "...",
-        };
-        batch.text(
-            &format!("Loading roster for '{}'{dots}", self.account_name),
-            panel_x + 24.0,
-            panel_y + 80.0,
-            16.0,
-            TEXT_DIM,
-            sw,
-            sh,
-        );
-    }
-
-    fn draw_account_entry(&self, batch: &mut OverlayBatch, name: &str, sw: f32, sh: f32) {        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-
-        draw_panel(batch, panel_x, panel_y, panel_w, panel_h, sw, sh);
-        batch.text(
-            "ACCOUNT",
-            panel_x + 24.0,
-            panel_y + 30.0,
-            32.0,
-            TEXT_TITLE,
-            sw,
-            sh,
-        );
-        batch.text(
-            "Enter the account name to load your characters",
-            panel_x + 24.0,
-            panel_y + 70.0,
-            14.0,
-            TEXT_DIM,
-            sw,
-            sh,
-        );
-
-        // Name field.
-        batch.text("Account name", panel_x + 30.0, panel_y + 130.0, 16.0, TEXT_DIM, sw, sh);
-        draw_panel_inner(batch, panel_x + 30.0, panel_y + 150.0, panel_w - 60.0, 50.0, sw, sh);
-        let display = if name.is_empty() {
-            "Type a name…".to_string()
-        } else {
-            let caret = if (self.rotation_t * 2.0) as i32 % 2 == 0 { "_" } else { " " };
-            format!("{}{}", name, caret)
-        };
-        let name_color = if name.is_empty() { TEXT_DIM } else { TEXT_PRIMARY };
-        batch.text(&display, panel_x + 46.0, panel_y + 164.0, 22.0, name_color, sw, sh);
-
-        // Helper text.
-        batch.text(
-            "New name? A fresh account is created automatically.",
-            panel_x + 30.0,
-            panel_y + 220.0,
-            13.0,
-            TEXT_DIM,
-            sw,
-            sh,
-        );
-
-        // Confirm + Quit.
-        let can_confirm = !name.trim().is_empty();
-        let confirm_color = if can_confirm {
-            if self.hover == Some(11) {
-                BTN_BG_PRIMARY_HOVER
-            } else {
-                BTN_BG_PRIMARY
-            }
-        } else {
-            [0.25, 0.20, 0.12, 1.0]
-        };
-        draw_button(
-            batch,
-            "Continue",
-            (panel_x + 30.0, panel_y + panel_h - 80.0, 160.0, 50.0),
-            confirm_color,
-            sw,
-            sh,
-        );
-        draw_button(
-            batch,
-            "Quit",
-            (panel_x + 210.0, panel_y + panel_h - 80.0, 120.0, 50.0),
-            if self.hover == Some(12) { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
-    }
-
-    fn draw_roster(&self, batch: &mut OverlayBatch, sw: f32, sh: f32) {
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-
-        draw_panel(batch, panel_x, panel_y, panel_w, panel_h, sw, sh);
-        batch.text(
-            "CHARACTER SELECT",
-            panel_x + 24.0,
-            panel_y + 30.0,
-            32.0,
-            TEXT_TITLE,
-            sw,
-            sh,
-        );
-        batch.text(
-            "Choose a character to enter the rift",
-            panel_x + 24.0,
-            panel_y + 70.0,
-            14.0,
-            TEXT_DIM,
-            sw,
-            sh,
-        );
-
-        let row_h = 90.0;
-        let row_pad = 12.0;
-        let row_x = panel_x + 24.0;
-        let row_w = panel_w - 48.0;
-
-        for i in 0..MAX_CHARACTERS {
-            let y = panel_y + 110.0 + (i as f32) * (row_h + row_pad);
-            if let Some(profile) = self.roster.get(i) {
-                draw_panel_inner(batch, row_x, y, row_w, row_h, sw, sh);
-                batch.text(&profile.name, row_x + 18.0, y + 14.0, 22.0, TEXT_PRIMARY, sw, sh);
-                let sub = format!(
-                    "Lv {}  -  {}  -  {}",
-                    profile.level,
-                    profile.gender.label(),
-                    classes::config_for(profile.class).name,
-                );
-                batch.text(&sub, row_x + 18.0, y + 46.0, 14.0, TEXT_DIM, sw, sh);
-
-                let play_hover = self.hover == Some(100 + i as u32);
-                let del_hover = self.hover == Some(200 + i as u32);
-                draw_button(
-                    batch,
-                    "Play",
-                    (row_x + row_w - 220.0, y + 24.0, 90.0, 40.0),
-                    if play_hover { BTN_BG_PRIMARY_HOVER } else { BTN_BG_PRIMARY },
-                    sw,
-                    sh,
-                );
-                draw_button(
-                    batch,
-                    "Delete",
-                    (row_x + row_w - 110.0, y + 24.0, 90.0, 40.0),
-                    if del_hover { BTN_BG_DANGER_HOVER } else { BTN_BG_DANGER },
-                    sw,
-                    sh,
-                );
-            } else if i == self.roster.len() && !self.roster.is_full() {
-                let create_hover = self.hover == Some(900);
-                draw_button(
-                    batch,
-                    "+ Create New Character",
-                    (row_x, y, row_w, row_h),
-                    if create_hover { BTN_BG_HOVER } else { BTN_BG },
-                    sw,
-                    sh,
-                );
-            } else {
-                // Empty slot (locked or unused)
-                draw_panel_dashed(batch, row_x, y, row_w, row_h, sw, sh);
-                batch.text(
-                    "(empty slot)",
-                    row_x + 18.0,
-                    y + row_h * 0.5 - 6.0,
-                    14.0,
-                    TEXT_DIM,
-                    sw,
-                    sh,
-                );
-            }
-        }
-
-        let quit_hover = self.hover == Some(999);
-        draw_button(
-            batch,
-            "Quit",
-            (panel_x + 24.0, panel_y + panel_h - 60.0, 120.0, 40.0),
-            if quit_hover { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
-    }
-
-    fn draw_create(&self, batch: &mut OverlayBatch, form: &CreateForm, sw: f32, sh: f32) {
-        let panel_w = sw * 0.42;
-        let panel_x = sw * 0.04;
-        let panel_y = sh * 0.10;
-        let panel_h = sh * 0.80;
-
-        draw_panel(batch, panel_x, panel_y, panel_w, panel_h, sw, sh);
-        batch.text(
-            "CREATE CHARACTER",
-            panel_x + 24.0,
-            panel_y + 30.0,
-            32.0,
-            TEXT_TITLE,
-            sw,
-            sh,
-        );
-
-        // Name field.
-        batch.text("Name", panel_x + 30.0, panel_y + 90.0, 16.0, TEXT_DIM, sw, sh);
-        draw_panel_inner(batch, panel_x + 30.0, panel_y + 110.0, panel_w - 60.0, 50.0, sw, sh);
-        let display = if form.name.is_empty() {
-            "Type a name…".to_string()
-        } else {
-            // Add a blinking caret.
-            let caret = if (self.rotation_t * 2.0) as i32 % 2 == 0 { "_" } else { " " };
-            format!("{}{}", form.name, caret)
-        };
-        let name_color = if form.name.is_empty() {
-            TEXT_DIM
-        } else {
-            TEXT_PRIMARY
-        };
-        batch.text(&display, panel_x + 46.0, panel_y + 124.0, 22.0, name_color, sw, sh);
-
-        // Gender.
-        batch.text("Gender", panel_x + 30.0, panel_y + 180.0, 16.0, TEXT_DIM, sw, sh);
-        let male_btn = (panel_x + 30.0, panel_y + 200.0, 140.0, 50.0);
-        let female_btn = (panel_x + 180.0, panel_y + 200.0, 140.0, 50.0);
-        let male_active = form.gender == Gender::Male;
-        let female_active = form.gender == Gender::Female;
-        draw_button(
-            batch,
-            "Male",
-            male_btn,
-            if male_active {
-                BTN_BG_PRIMARY
-            } else if self.hover == Some(1) {
-                BTN_BG_HOVER
-            } else {
-                BTN_BG
-            },
-            sw,
-            sh,
-        );
-        draw_button(
-            batch,
-            "Female",
-            female_btn,
-            if female_active {
-                BTN_BG_PRIMARY
-            } else if self.hover == Some(2) {
-                BTN_BG_HOVER
-            } else {
-                BTN_BG
-            },
-            sw,
-            sh,
-        );
-
-        // Class.
-        batch.text("Class", panel_x + 30.0, panel_y + 300.0, 16.0, TEXT_DIM, sw, sh);
-        let (_, class_name) = class_options()[form.class_idx];
-        draw_button(
-            batch,
-            "<",
-            (panel_x + 30.0, panel_y + 320.0, 40.0, 40.0),
-            if self.hover == Some(3) { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
-        draw_panel_inner(batch, panel_x + 80.0, panel_y + 320.0, 190.0, 40.0, sw, sh);
-        batch.text(class_name, panel_x + 100.0, panel_y + 332.0, 18.0, TEXT_PRIMARY, sw, sh);
-        draw_button(
-            batch,
-            ">",
-            (panel_x + 280.0, panel_y + 320.0, 40.0, 40.0),
-            if self.hover == Some(4) { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
-
-        // Confirm + Cancel.
-        let can_confirm = !form.name.trim().is_empty();
-        let confirm_color = if can_confirm {
-            if self.hover == Some(5) {
-                BTN_BG_PRIMARY_HOVER
-            } else {
-                BTN_BG_PRIMARY
-            }
-        } else {
-            [0.25, 0.20, 0.12, 1.0]
-        };
-        draw_button(
-            batch,
-            "Confirm",
-            (panel_x + 30.0, panel_y + panel_h - 80.0, 160.0, 50.0),
-            confirm_color,
-            sw,
-            sh,
-        );
-        draw_button(
-            batch,
-            "Cancel",
-            (panel_x + 210.0, panel_y + panel_h - 80.0, 120.0, 50.0),
-            if self.hover == Some(6) { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
-    }
-
-    fn draw_delete_confirm(&self, batch: &mut OverlayBatch, idx: usize, sw: f32, sh: f32) {
-        let cx = sw * 0.5;
-        let cy = sh * 0.5;
+        let theme = *ui.theme();
+        let s = ui.screen_size();
         let mw = 460.0;
         let mh = 200.0;
-        // Modal backdrop.
-        batch.rect_px(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.55], sw, sh);
-        draw_panel(batch, cx - mw * 0.5, cy - mh * 0.5, mw, mh, sw, sh);
+        let modal_rect = Rect::from_xywh(
+            (s.x - mw) * 0.5,
+            (s.y - mh) * 0.5,
+            mw,
+            mh,
+        );
         let name = self
             .roster
             .get(idx)
-            .map(|p| p.name.as_str())
-            .unwrap_or("?");
-        batch.text("Delete character?", cx - 110.0, cy - 70.0, 22.0, TEXT_TITLE, sw, sh);
-        let line = format!("\"{}\" will be permanently removed.", name);
-        batch.text(&line, cx - 180.0, cy - 30.0, 14.0, TEXT_DIM, sw, sh);
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "?".to_string());
 
-        draw_button(
-            batch,
-            "Delete",
-            (cx - 140.0, cy + 30.0, 120.0, 50.0),
-            if self.hover == Some(7) { BTN_BG_DANGER_HOVER } else { BTN_BG_DANGER },
-            sw,
-            sh,
-        );
-        draw_button(
-            batch,
-            "Cancel",
-            (cx + 20.0, cy + 30.0, 120.0, 50.0),
-            if self.hover == Some(8) { BTN_BG_HOVER } else { BTN_BG },
-            sw,
-            sh,
-        );
+        ui.with_layer(rift_engine::ui::im::Layer::Modal, |ui| {
+            Frame::panel(&theme)
+                .with_padding(Pad::all(20.0))
+                .show(ui, modal_rect, |ui, body| {
+                    let _ = title(ui, body.min, "Delete character?");
+                    label(
+                        ui,
+                        body.min + Vec2::new(0.0, 40.0),
+                        &format!("\"{}\" will be permanently removed.", name),
+                    );
+                    let btn_y = body.max.y - 50.0;
+                    let yes = Button::danger("Delete").show_with_id(
+                        ui,
+                        Id::root("char_select").child("del_yes"),
+                        Rect::from_xywh(body.x(), btn_y, 140.0, 50.0),
+                    );
+                    let no = Button::new("Cancel").show_with_id(
+                        ui,
+                        Id::root("char_select").child("del_no"),
+                        Rect::from_xywh(body.max.x - 140.0, btn_y, 140.0, 50.0),
+                    );
+                    if yes.clicked {
+                        self.roster.remove(idx);
+                        self.view = ViewKind::Roster;
+                    } else if no.clicked {
+                        self.view = ViewKind::Roster;
+                    }
+                });
+        });
+        SelectAction::None
     }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
-fn hit(mouse: (f32, f32), rect: (f32, f32, f32, f32)) -> bool {
-    let (mx, my) = mouse;
-    let (x, y, w, h) = rect;
-    mx >= x && mx <= x + w && my >= y && my <= y + h
-}
-
-fn draw_panel(batch: &mut OverlayBatch, x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) {
-    batch.rect_px(x, y, w, h, PANEL_BG, sw, sh);
-    // 2px border using four thin rects.
-    batch.rect_px(x, y, w, 2.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y + h - 2.0, w, 2.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y, 2.0, h, PANEL_BORDER, sw, sh);
-    batch.rect_px(x + w - 2.0, y, 2.0, h, PANEL_BORDER, sw, sh);
-}
-
-fn draw_panel_inner(batch: &mut OverlayBatch, x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) {
-    batch.rect_px(x, y, w, h, [0.10, 0.10, 0.13, 0.95], sw, sh);
-    batch.rect_px(x, y, w, 1.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y + h - 1.0, w, 1.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y, 1.0, h, PANEL_BORDER, sw, sh);
-    batch.rect_px(x + w - 1.0, y, 1.0, h, PANEL_BORDER, sw, sh);
-}
-
-fn draw_panel_dashed(batch: &mut OverlayBatch, x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) {
-    batch.rect_px(x, y, w, h, [0.06, 0.06, 0.08, 0.5], sw, sh);
-    let dash: f32 = 6.0;
-    let gap: f32 = 4.0;
-    let mut cx = x;
-    while cx < x + w {
-        let segw = (dash).min(x + w - cx);
-        batch.rect_px(cx, y, segw, 1.0, PANEL_BORDER, sw, sh);
-        batch.rect_px(cx, y + h - 1.0, segw, 1.0, PANEL_BORDER, sw, sh);
-        cx += dash + gap;
-    }
-}
-
-fn draw_button(
-    batch: &mut OverlayBatch,
-    label: &str,
-    rect: (f32, f32, f32, f32),
-    bg: [f32; 4],
-    sw: f32,
-    sh: f32,
-) {
-    let (x, y, w, h) = rect;
-    batch.rect_px(x, y, w, h, bg, sw, sh);
-    batch.rect_px(x, y, w, 1.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y + h - 1.0, w, 1.0, PANEL_BORDER, sw, sh);
-    batch.rect_px(x, y, 1.0, h, PANEL_BORDER, sw, sh);
-    batch.rect_px(x + w - 1.0, y, 1.0, h, PANEL_BORDER, sw, sh);
-    let label_size = 18.0;
-    let text_w = batch.measure_text(label, label_size);
-    let tx = x + (w - text_w) * 0.5;
-    let ty = y + (h - label_size) * 0.5;
-    batch.text(label, tx, ty, label_size, TEXT_PRIMARY, sw, sh);
 }

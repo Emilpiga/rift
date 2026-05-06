@@ -18,7 +18,8 @@
 //!
 //! # Module layout
 //!
-//! - [`stats`] — the fixed [`stats::Stat`] enum + sparse [`stats::StatBlock`].
+//! - [`crate::stats`] — the fixed [`crate::stats::Stat`] enum + sparse
+//!   [`crate::stats::StatBlock`] (re-exported here for back-compat).
 //! - [`items`] — [`items::BaseItem`] table, [`items::ItemSlot`] /
 //!   [`items::EquipSlot`], bias-tag constants.
 //! - [`affixes`] — [`affixes::AffixDef`], [`affixes::AffixEffect`],
@@ -32,8 +33,8 @@
 //!
 //! # Adding things later
 //!
-//! - **New stat?** Add a variant to [`stats::Stat`] + a wiring affix
-//!   in [`affixes::AFFIX_POOL`].
+//! - **New stat?** Add a variant to [`crate::stats::Stat`] + a wiring
+//!   affix in [`affixes::AFFIX_POOL`].
 //! - **New base?** Append a row to [`items::BaseItem`].
 //! - **New affix?** Append an [`affixes::AffixDef`] row, picking
 //!   `tags` for synergy and `rarity_min` for behavioural gating.
@@ -44,13 +45,14 @@
 pub mod ability_mods;
 pub mod affixes;
 pub mod drops;
+pub mod equipment;
 pub mod inventory;
 pub mod item;
 pub mod items;
 pub mod rarity;
 pub mod rng;
-pub mod stats;
 
+pub use crate::stats::{Stat, StatBlock};
 pub use ability_mods::AbilityMods;
 pub use affixes::{
     AbilityVariant, AffixDef, AffixEffect, ProcAction, ProcEvent, AFFIX_POOL,
@@ -59,6 +61,7 @@ pub use drops::{
     table_for, BaseItemSelector, LootEntry, LootTable, SlotFilter, BOSS_TABLE,
     BRUTE_TABLE, CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
 };
+pub use equipment::Equipment;
 pub use inventory::{Inventory, Loadout};
 pub use item::{Item, RolledAffix};
 pub use items::{
@@ -66,4 +69,3 @@ pub use items::{
 };
 pub use rarity::Rarity;
 pub use rng::LootRng;
-pub use stats::{Stat, StatBlock};

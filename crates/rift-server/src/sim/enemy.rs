@@ -12,6 +12,7 @@ use rift_game::kinematic::{self, loco, Kinematic};
 /// Wire role ids for replicated enemies. Stable, picked once and
 /// never reordered — clients use the byte directly to index their
 /// `MonsterCache`.
+#[allow(dead_code)] // BOSS is part of the wire contract.
 pub mod role {
     pub const BRUTE: u8 = 0;
     pub const STALKER: u8 = 1;
@@ -40,7 +41,10 @@ pub const DEATH_FADE_DUR: f32 = 1.6;
 
 /// Aggro pickup range — within this distance the closest player is
 /// chosen as the target. Outside this, the enemy idles in place.
-pub const AGGRO_RANGE: f32 = 12.0;
+/// Sized to comfortably exceed the typical viewport so enemies
+/// you can see are already reacting to you, instead of standing
+/// like statues until you're nearly on top of them.
+pub const AGGRO_RANGE: f32 = 22.0;
 /// How close the enemy must be before it stops moving and swings.
 pub const ATTACK_RANGE: f32 = 1.6;
 /// Damage dealt per successful melee hit.

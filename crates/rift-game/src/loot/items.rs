@@ -17,7 +17,7 @@
 //! `(affix.tags & base.allowed_tags) != 0` check — fast, and adding
 //! a new tag is a single `const`. No per-affix special-casing.
 
-use super::stats::Stat;
+use crate::stats::Stat;
 
 /// Tag constants used by [`BaseItem::allowed_tags`] /
 /// [`BaseItem::favored_tags`] and [`crate::loot::AffixDef::tags`].
@@ -95,6 +95,55 @@ pub enum EquipSlot {
     Amulet,
 }
 
+impl EquipSlot {
+    /// Stable wire / persistence ordering of every slot. Index in
+    /// this array doubles as the `u8` discriminant on the wire and
+    /// in the `equipped_slot` SMALLINT column.
+    pub const ALL: [EquipSlot; 9] = [
+        EquipSlot::Weapon,
+        EquipSlot::Helm,
+        EquipSlot::Chest,
+        EquipSlot::Legs,
+        EquipSlot::Hands,
+        EquipSlot::Boots,
+        EquipSlot::Ring1,
+        EquipSlot::Ring2,
+        EquipSlot::Amulet,
+    ];
+
+    /// Number of physical slots — also the length of
+    /// [`crate::loot::Equipment`]'s backing array.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// Stable index into [`EquipSlot::ALL`]. Used as the wire
+    /// byte and the `equipped_slot` smallint.
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`EquipSlot::to_u8`]. Returns `None` for bytes
+    /// outside the known table — keeps mismatched-build wire
+    /// frames from corrupting state.
+    pub fn from_u8(byte: u8) -> Option<EquipSlot> {
+        Self::ALL.get(byte as usize).copied()
+    }
+
+    /// Human-friendly label for HUD / tooltip.
+    pub fn label(self) -> &'static str {
+        match self {
+            EquipSlot::Weapon => "Weapon",
+            EquipSlot::Helm => "Helm",
+            EquipSlot::Chest => "Chest",
+            EquipSlot::Legs => "Legs",
+            EquipSlot::Hands => "Hands",
+            EquipSlot::Boots => "Boots",
+            EquipSlot::Ring1 => "Ring 1",
+            EquipSlot::Ring2 => "Ring 2",
+            EquipSlot::Amulet => "Amulet",
+        }
+    }
+}
+
 /// One row in the base-item table. All fields are `'static` so the
 /// table can live in a `pub const`.
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +161,12 @@ pub struct BaseItem {
     pub implicit: &'static [(Stat, f32)],
     /// Minimum item-level at which this base can drop.
     pub min_ilvl: u32,
+    /// Registry key for the inventory icon, matching the relative
+    /// stem produced by the engine's icon-discovery pass
+    /// (e.g. `"loot/Boots/Boots_1"`). Look-ups go through the
+    /// shared `IconUvRegistry`; an unknown key falls back to the
+    /// rarity-coloured placeholder.
+    pub icon: &'static str,
 }
 
 // ---------------------------------------------------------------------
@@ -142,6 +197,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: ANY_ELEMENT | CASTER,
         implicit: &[(Stat::Power, 6.0)],
         min_ilvl: 1,
+        icon: "",
     },
     BaseItem {
         id: "sword_basic",
@@ -152,6 +208,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: MELEE | CRIT,
         implicit: &[(Stat::Power, 8.0)],
         min_ilvl: 1,
+        icon: "",
     },
     BaseItem {
         id: "dagger_basic",
@@ -162,6 +219,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CRIT | SPEED,
         implicit: &[(Stat::Power, 5.0), (Stat::CritChance, 0.05)],
         min_ilvl: 1,
+        icon: "",
     },
     BaseItem {
         id: "wand_basic",
@@ -172,6 +230,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::Power, 5.0), (Stat::CooldownReduction, 0.04)],
         min_ilvl: 1,
+        icon: "",
     },
     // ---- Armor — Helm, Chest, Legs, Hands, Boots ---------------------
     // Each base picks one EquipSlot. New bases (different art / name /
@@ -185,6 +244,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 12.0), (Stat::Health, 15.0)],
         min_ilvl: 1,
+        icon: "loot/Helmets/Helmet_1",
     },
     BaseItem {
         id: "heavy_chest",
@@ -195,6 +255,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 24.0), (Stat::Health, 30.0)],
         min_ilvl: 1,
+        icon: "loot/BodyArmor/BodyArmor_1",
     },
     BaseItem {
         id: "light_chest",
@@ -205,6 +266,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: SPEED | CRIT,
         implicit: &[(Stat::Evasion, 0.05), (Stat::Health, 18.0)],
         min_ilvl: 1,
+        icon: "loot/BodyArmor/BodyArmor_2",
     },
     BaseItem {
         id: "light_boots",
@@ -215,6 +277,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: SPEED,
         implicit: &[(Stat::MoveSpeed, 0.05), (Stat::Evasion, 0.03)],
         min_ilvl: 1,
+        icon: "loot/Boots/Boots_1",
     },
     BaseItem {
         id: "robe_chest",
@@ -225,6 +288,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::Health, 14.0), (Stat::ResourceRegen, 0.08)],
         min_ilvl: 1,
+        icon: "loot/BodyArmor/BodyArmor_3",
     },
     BaseItem {
         id: "robe_hands",
@@ -235,6 +299,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | ANY_ELEMENT,
         implicit: &[(Stat::CooldownReduction, 0.03)],
         min_ilvl: 1,
+        icon: "loot/Gloves/Gloves_1",
     },
     BaseItem {
         id: "heavy_legs",
@@ -245,6 +310,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE,
         implicit: &[(Stat::Armor, 16.0), (Stat::Health, 20.0)],
         min_ilvl: 1,
+        icon: "loot/Pants/Pants_1",
     },
     // ---- Accessories — wildcards -------------------------------------
     BaseItem {
@@ -256,6 +322,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: 0,
         implicit: &[],
         min_ilvl: 1,
+        icon: "loot/Rings/Ring_1",
     },
     BaseItem {
         id: "amulet_basic",
@@ -266,5 +333,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: 0,
         implicit: &[(Stat::Health, 10.0)],
         min_ilvl: 1,
+        icon: "loot/Necklaces/Necklace_1",
     },
 ];

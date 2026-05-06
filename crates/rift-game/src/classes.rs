@@ -74,3 +74,13 @@ pub fn config_for(class: ClassId) -> ClassConfig {
         _ => hunter_config(),
     }
 }
+
+/// Resolve a wire / persisted class id string back to a `ClassId`.
+/// Falls back to [`HUNTER`] for unknown strings — the server uses
+/// this on the Hello path so a stale client can't crash us.
+pub fn class_from_str(s: &str) -> ClassId {
+    match s {
+        "hunter" => HUNTER,
+        _ => HUNTER,
+    }
+}

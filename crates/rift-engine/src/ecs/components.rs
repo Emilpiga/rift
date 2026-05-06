@@ -92,7 +92,16 @@ pub struct AnimationSet {
 
 impl AnimationSet {
     pub fn get(&self, name: &str) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
-        self.clips.get(&name.to_ascii_lowercase()).cloned()
+        // Avoid allocating a lowercased key string every frame by
+        // doing a case-insensitive linear scan. Clip counts per set
+        // are small (typically < 30) so this is faster in practice
+        // than the lowercased-key hash lookup it replaces.
+        for (k, v) in &self.clips {
+            if k.eq_ignore_ascii_case(name) {
+                return Some(v.clone());
+            }
+        }
+        None
     }
     /// Look up the first clip whose name matches any of `candidates` (case-insensitive).
     pub fn find_any(&self, candidates: &[&str]) -> Option<std::sync::Arc<crate::animation::BoundClip>> {

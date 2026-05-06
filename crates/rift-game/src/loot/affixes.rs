@@ -33,7 +33,7 @@ use crate::abilities::AbilityId;
 
 use super::items::tag::*;
 use super::rarity::Rarity;
-use super::stats::Stat;
+use crate::stats::Stat;
 
 /// What an affix actually *does*.
 ///

@@ -1,6 +1,20 @@
 /// Bitmap font using a simple 6x8 monospace pixel font.
-/// The atlas is a single-channel (R8) texture with glyphs laid out in a grid.
-/// First pixel (0,0) is guaranteed solid white for use as "no texture" UV.
+///
+/// The font lives in the top-left corner of a larger 256x256 RGBA
+/// overlay atlas \u2014 the rest of that atlas is reserved for icon
+/// glyphs (ability icons, item icons, ...) loaded by the renderer
+/// at startup. Glyph UVs are computed against the *full* atlas
+/// dimensions so callers can sample directly without scaling.
+///
+/// First pixel (0,0) is guaranteed solid white opaque so any
+/// vertex that wants a flat colour rect can use UV = (0,0).
+
+/// Side length of the combined overlay atlas in pixels.
+pub const OVERLAY_ATLAS_SIZE: u32 = 256;
+/// y-coordinate where the icon region starts. The font region is
+/// `0..ICON_REGION_Y` along the vertical axis. Kept aligned to a
+/// power-of-two so an icon row stays inside the texture cleanly.
+pub const ICON_REGION_Y: u32 = 64;
 
 pub struct GlyphInfo {
     pub u0: f32,
@@ -12,6 +26,7 @@ pub struct GlyphInfo {
 pub struct BitmapFont {
     pub glyph_width: u32,
     pub glyph_height: u32,
+    /// Full overlay atlas dimensions (font + icon region).
     pub atlas_width: u32,
     pub atlas_height: u32,
     cols: u32,
@@ -19,12 +34,22 @@ pub struct BitmapFont {
 
 impl BitmapFont {
     pub fn new() -> Self {
-        // 6x8 font, 16 columns x 6 rows = 96 glyphs (ASCII 32..127)
+        Self::with_atlas_size(OVERLAY_ATLAS_SIZE, OVERLAY_ATLAS_SIZE)
+    }
+
+    /// Construct a font that paints into an atlas of the given
+    /// dimensions. The font region itself is fixed-size (top-left
+    /// 97x48); growing the atlas just creates more room for the
+    /// icon region. Width must be at least the font's native
+    /// width and height must be at least `ICON_REGION_Y`.
+    pub fn with_atlas_size(atlas_width: u32, atlas_height: u32) -> Self {
+        // 6x8 font, 16 columns x 6 rows = 96 glyphs (ASCII 32..127).
+        // Glyphs occupy the top-left 97x48 region.
         Self {
             glyph_width: 6,
             glyph_height: 8,
-            atlas_width: 6 * 16 + 1, // +1 for white pixel column at left
-            atlas_height: 8 * 6,
+            atlas_width,
+            atlas_height,
             cols: 16,
         }
     }
@@ -51,18 +76,27 @@ impl BitmapFont {
         Some(GlyphInfo { u0, v0, u1, v1 })
     }
 
-    /// Generate the atlas pixel data (R8, single channel).
+    /// Generate the combined overlay atlas pixel data as RGBA8.
+    /// The font region (top-left) stores glyph masks as
+    /// `(255, 255, 255, mask)`; the icon region (`y >= ICON_REGION_Y`)
+    /// is left zeroed out for the renderer to fill at startup.
     pub fn atlas_data(&self) -> Vec<u8> {
         let w = self.atlas_width as usize;
         let h = self.atlas_height as usize;
-        let mut data = vec![0u8; w * h];
+        let mut data = vec![0u8; w * h * 4];
 
-        // Column 0: solid white pixels (for rect drawing UV)
-        for y in 0..h {
-            data[y * w] = 255;
+        // Column 0 of the font region: solid white opaque pixels
+        // \u2014 vertices that want a flat colour rect sample here.
+        let font_h = (self.glyph_height * 6) as usize; // 48
+        for y in 0..font_h {
+            let dst = y * w * 4;
+            data[dst] = 255;
+            data[dst + 1] = 255;
+            data[dst + 2] = 255;
+            data[dst + 3] = 255;
         }
 
-        // Render each glyph
+        // Render each glyph as white with alpha = mask bit.
         for code in 32u32..=126 {
             let index = code - 32;
             let col = (index % self.cols) as usize;
@@ -78,7 +112,11 @@ impl BitmapFont {
                         let px = base_x + gx;
                         let py = base_y + gy;
                         if px < w && py < h {
-                            data[py * w + px] = 255;
+                            let dst = (py * w + px) * 4;
+                            data[dst] = 255;
+                            data[dst + 1] = 255;
+                            data[dst + 2] = 255;
+                            data[dst + 3] = 255;
                         }
                     }
                 }

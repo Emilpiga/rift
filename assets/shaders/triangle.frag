@@ -8,6 +8,7 @@ layout(binding = 0) uniform UniformData {
     vec4 lightColor;
     vec4 fogColor;
     vec4 fogParams; // x = start, y = end
+    vec4 fogOrigin; // xyz = world-space anchor (player) for fog distance
     vec4 pointLightPos[8];   // xyz = position, w = radius
     vec4 pointLightColor[8]; // xyz = color, w = intensity
     vec4 pointLightCount;    // x = count
@@ -122,8 +123,11 @@ void main() {
         }
     }
 
-    // Distance fog
-    float dist = length(ubo.cameraPos.xyz - fragWorldPos);
+    // Distance fog. Anchored on the player (passed via
+    // `fogOrigin`) rather than the camera so zooming the
+    // camera out doesn't pull the fog wall in over the
+    // character.
+    float dist = length(ubo.fogOrigin.xyz - fragWorldPos);
     float fogFactor = clamp((dist - ubo.fogParams.x) / (ubo.fogParams.y - ubo.fogParams.x), 0.0, 1.0);
     // Smooth curve for more natural falloff
     fogFactor = fogFactor * fogFactor;

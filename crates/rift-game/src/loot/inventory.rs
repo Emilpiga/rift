@@ -4,7 +4,7 @@
 use super::ability_mods::AbilityMods;
 use super::item::Item;
 use super::items::{EquipSlot, ItemSlot};
-use super::stats::StatBlock;
+use crate::stats::StatBlock;
 
 /// All slots a character has, in stable display order.
 pub const ALL_SLOTS: &[EquipSlot] = &[

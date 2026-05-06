@@ -51,6 +51,16 @@ pub struct PersistedItem {
     pub ilvl: i32,
     /// `(affix string id, rolled value)` pairs.
     pub affixes: Vec<(String, f32)>,
+    /// `Some(slot_byte)` when this row is currently equipped
+    /// (matches `rift_game::loot::EquipSlot::to_u8`); `None` for
+    /// rows sitting in the bag. Fresh pickups default to `None`.
+    pub equipped_slot: Option<i16>,
+    /// 0-based position the player last saw this row at in the
+    /// bag (or stash). Equipped rows write a value too but it's
+    /// ignored on load since `equipped_slot` routes the row.
+    /// Append paths can leave this at 0 — the SQL writer will
+    /// pick `MAX(slot_index)+1` instead.
+    pub slot_index: i32,
 }
 
 /// Internal JSONB representation of a single affix entry. Kept
@@ -127,6 +137,41 @@ pub enum PersistenceMsg {
     AppendInventoryItem {
         character_id: Uuid,
         item: PersistedItem,
+    },
+
+    /// Replace every `inventory_items` row owned by
+    /// `character_id` with `items` in a single transaction.
+    /// Used by the equipment subsystem on every equip / unequip
+    /// (and any future bag rewrite) so the persisted snapshot is
+    /// always consistent with what the in-memory bag +
+    /// equipment hold. Inventories are small enough that
+    /// DELETE + INSERT every change is cheaper than threading a
+    /// per-item UUID through the in-memory `Item` type.
+    /// Fire-and-forget — a dropped write is recoverable on the
+    /// next gameplay action that re-syncs.
+    ResetCharacterInventory {
+        character_id: Uuid,
+        items: Vec<PersistedItem>,
+    },
+
+    /// Load every `stash_items` row belonging to `character_id`
+    /// in `acquired_at` order. Same response shape as
+    /// [`Self::LoadInventory`] — `equipped_slot` is always
+    /// `None` (the stash is pure storage). Used at Hello time.
+    LoadStash {
+        character_id: Uuid,
+        reply: oneshot::Sender<Result<Vec<PersistedItem>, PersistenceError>>,
+    },
+
+    /// Replace every `stash_items` row owned by `character_id`
+    /// with `items` in a single transaction. Mirrors
+    /// [`Self::ResetCharacterInventory`] in shape and is used
+    /// by every deposit / withdraw event to keep the persisted
+    /// stash snapshot consistent with the in-memory list.
+    /// Fire-and-forget.
+    ResetCharacterStash {
+        character_id: Uuid,
+        items: Vec<PersistedItem>,
     },
 }
 
@@ -215,6 +260,48 @@ impl PersistenceHandle {
     pub fn append_inventory_item(&self, character_id: Uuid, item: PersistedItem) -> bool {
         self.tx
             .send(PersistenceMsg::AppendInventoryItem { character_id, item })
+            .is_ok()
+    }
+
+    /// Queue a fire-and-forget bag-rewrite. Replaces every
+    /// inventory row owned by `character_id` with `items` in a
+    /// single transaction. Used after equip / unequip; see
+    /// [`PersistenceMsg::ResetCharacterInventory`].
+    pub fn reset_character_inventory(
+        &self,
+        character_id: Uuid,
+        items: Vec<PersistedItem>,
+    ) -> bool {
+        self.tx
+            .send(PersistenceMsg::ResetCharacterInventory { character_id, items })
+            .is_ok()
+    }
+
+    /// Load the persisted stash for `character_id`. Blocks the
+    /// calling thread until the worker replies — server uses
+    /// this once per session right after `load_inventory_blocking`
+    /// so the player's stash is hot before they enter the world.
+    pub fn load_stash_blocking(
+        &self,
+        character_id: Uuid,
+    ) -> Result<Vec<PersistedItem>, PersistenceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(PersistenceMsg::LoadStash { character_id, reply })
+            .map_err(|_| PersistenceError::WorkerGone)?;
+        rx.blocking_recv().map_err(|_| PersistenceError::WorkerGone)?
+    }
+
+    /// Queue a fire-and-forget stash rewrite. Replaces every
+    /// stash row owned by `character_id` with `items` in a
+    /// single transaction.
+    pub fn reset_character_stash(
+        &self,
+        character_id: Uuid,
+        items: Vec<PersistedItem>,
+    ) -> bool {
+        self.tx
+            .send(PersistenceMsg::ResetCharacterStash { character_id, items })
             .is_ok()
     }
 }
@@ -319,6 +406,33 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                     if let Err(e) = append_inventory_item(&pool, character_id, &item).await {
                         log::warn!(
                             "persistence: append item failed for {character_id}: {e}"
+                        );
+                    }
+                });
+            }
+            PersistenceMsg::ResetCharacterInventory { character_id, items } => {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = reset_character_inventory(&pool, character_id, &items).await {
+                        log::warn!(
+                            "persistence: reset inventory failed for {character_id}: {e}"
+                        );
+                    }
+                });
+            }
+            PersistenceMsg::LoadStash { character_id, reply } => {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let res = load_stash(&pool, character_id).await;
+                    let _ = reply.send(res);
+                });
+            }
+            PersistenceMsg::ResetCharacterStash { character_id, items } => {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = reset_character_stash(&pool, character_id, &items).await {
+                        log::warn!(
+                            "persistence: reset stash failed for {character_id}: {e}"
                         );
                     }
                 });
@@ -494,22 +608,25 @@ async fn load_inventory(
     pool: &PgPool,
     character_id: Uuid,
 ) -> Result<Vec<PersistedItem>, PersistenceError> {
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>)> = sqlx::query_as(
-        "SELECT base_id, rarity, ilvl, affixes \
-         FROM inventory_items \
-         WHERE character_id = $1 \
-         ORDER BY acquired_at, id",
-    )
-    .bind(character_id)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, Option<i16>, i32)> =
+        sqlx::query_as(
+            "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index \
+             FROM inventory_items \
+             WHERE character_id = $1 \
+             ORDER BY equipped_slot NULLS LAST, slot_index, acquired_at, id",
+        )
+        .bind(character_id)
+        .fetch_all(pool)
+        .await?;
     Ok(rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes)| PersistedItem {
+        .map(|(base_id, rarity, ilvl, affixes, equipped_slot, slot_index)| PersistedItem {
             base_id,
             rarity,
             ilvl,
             affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
+            equipped_slot,
+            slot_index,
         })
         .collect())
 }
@@ -529,10 +646,15 @@ async fn append_inventory_item(
             v: *v,
         })
         .collect();
+    // Pickups land at the end of the bag. Compute the next
+    // free `slot_index` inline so concurrent appends don't
+    // collide on a stale client-side counter.
     sqlx::query(
         "INSERT INTO inventory_items \
-         (id, character_id, base_id, rarity, ilvl, affixes) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, \
+            COALESCE((SELECT MAX(slot_index) + 1 FROM inventory_items \
+                      WHERE character_id = $2 AND equipped_slot IS NULL), 0))",
     )
     .bind(Uuid::new_v4())
     .bind(character_id)
@@ -540,7 +662,119 @@ async fn append_inventory_item(
     .bind(item.rarity)
     .bind(item.ilvl)
     .bind(sqlx::types::Json(affixes_json))
+    .bind(item.equipped_slot)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Replace every `inventory_items` row owned by `character_id`
+/// with `items` in a single transaction. Used by the equipment
+/// subsystem on every equip / unequip so the persisted snapshot
+/// stays consistent with the in-memory bag + equipped set
+/// without threading per-item UUIDs through the runtime `Item`.
+async fn reset_character_inventory(
+    pool: &PgPool,
+    character_id: Uuid,
+    items: &[PersistedItem],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM inventory_items WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    for item in items {
+        let affixes_json: Vec<AffixJson> = item
+            .affixes
+            .iter()
+            .map(|(id, v)| AffixJson { id: id.clone(), v: *v })
+            .collect();
+        sqlx::query(
+            "INSERT INTO inventory_items \
+             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(character_id)
+        .bind(&item.base_id)
+        .bind(item.rarity)
+        .bind(item.ilvl)
+        .bind(sqlx::types::Json(affixes_json))
+        .bind(item.equipped_slot)
+        .bind(item.slot_index)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Read every `stash_items` row belonging to `character_id`,
+/// oldest-first so the order in which the player deposited is
+/// preserved across sessions. Mirrors [`load_inventory`] but
+/// the persisted shape never includes an `equipped_slot`.
+async fn load_stash(
+    pool: &PgPool,
+    character_id: Uuid,
+) -> Result<Vec<PersistedItem>, PersistenceError> {
+    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32)> =
+        sqlx::query_as(
+            "SELECT base_id, rarity, ilvl, affixes, slot_index \
+             FROM stash_items \
+             WHERE character_id = $1 \
+             ORDER BY slot_index, acquired_at, id",
+        )
+        .bind(character_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(base_id, rarity, ilvl, affixes, slot_index)| PersistedItem {
+            base_id,
+            rarity,
+            ilvl,
+            affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
+            equipped_slot: None,
+            slot_index,
+        })
+        .collect())
+}
+
+/// Replace every `stash_items` row owned by `character_id`
+/// with `items` in a single transaction. Mirrors
+/// [`reset_character_inventory`] without the `equipped_slot`
+/// column.
+async fn reset_character_stash(
+    pool: &PgPool,
+    character_id: Uuid,
+    items: &[PersistedItem],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM stash_items WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    for item in items {
+        let affixes_json: Vec<AffixJson> = item
+            .affixes
+            .iter()
+            .map(|(id, v)| AffixJson { id: id.clone(), v: *v })
+            .collect();
+        sqlx::query(
+            "INSERT INTO stash_items \
+             (id, character_id, base_id, rarity, ilvl, affixes, slot_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(character_id)
+        .bind(&item.base_id)
+        .bind(item.rarity)
+        .bind(item.ilvl)
+        .bind(sqlx::types::Json(affixes_json))
+        .bind(item.slot_index)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }

@@ -16,18 +16,18 @@ use crate::animation::Animator;
 use crate::ecs::components::{
     AnimationSet, LocalPlayer, Player, SpellCast, SpellPhase, Transform, Velocity,
 };
-use crate::renderer::particles::{Emitter, EmitterConfig};
+use crate::renderer::vfx::{presets as vfx_presets, spec::Effect};
 use crate::renderer::Renderer;
 
-/// Map a declarative `ParticlePreset` to a concrete renderer emitter
-/// at the given world position.
-pub fn emitter_for_preset(preset: ParticlePreset, position: Vec3) -> Emitter {
+/// Map a declarative `ParticlePreset` to a concrete VFX [`Effect`].
+/// Routed through the declarative `vfx::presets` module rather
+/// than the legacy `EmitterConfig` builders so all ability
+/// visuals share one rendering path.
+pub fn effect_for_preset(preset: ParticlePreset) -> Effect {
     match preset {
-        ParticlePreset::DodgePuff => Emitter::new(position, EmitterConfig::dodge_puff()),
-        ParticlePreset::RainOfFire => {
-            Emitter::new(position, EmitterConfig::rain_of_fire())
-        }
-        ParticlePreset::Cast(rgb) => Emitter::new(position, EmitterConfig::hit_spark(rgb)),
+        ParticlePreset::DodgePuff => vfx_presets::dodge_puff(),
+        ParticlePreset::RainOfFire => vfx_presets::rain_of_fire(),
+        ParticlePreset::Cast(rgb) => vfx_presets::cast_spark(rgb),
     }
 }
 
@@ -59,8 +59,9 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
             AbilityEffect::SpawnAoeZone { visual, visual_y, .. } => {
                 if let Some(p) = visual {
                     let pos = ctx.placed_position();
-                    let emitter = emitter_for_preset(*p, pos + Vec3::new(0.0, *visual_y, 0.0));
-                    ctx.renderer.particle_system.add_emitter(emitter);
+                    ctx.renderer
+                        .vfx_system
+                        .spawn(effect_for_preset(*p), pos + Vec3::new(0.0, *visual_y, 0.0));
                 }
             }
             AbilityEffect::SetPlayerAction {
@@ -98,8 +99,9 @@ fn set_player_action(
     let Some((position, rotation)) = player_t else { return };
 
     if let Some(p) = emitter {
-        let e = emitter_for_preset(p, position + Vec3::new(0.0, 0.5, 0.0));
-        ctx.renderer.particle_system.add_emitter(e);
+        ctx.renderer
+            .vfx_system
+            .spawn(effect_for_preset(p), position + Vec3::new(0.0, 0.5, 0.0));
     }
 
     let body_dir = {

@@ -31,6 +31,19 @@ pub struct DeathCtx<'a> {
     pub next_loot_net_id: &'a mut u32,
     pub tick: NetTick,
     pub floor_index: u32,
+    /// One row per kill produced this tick. Drained by
+    /// [`super::Sim::step`] to bump rift progress, grant XP, and
+    /// detect the boss kill.
+    pub kills: &'a mut Vec<KillInfo>,
+}
+
+/// Per-kill information collected during damage subsystems and
+/// drained at the end of [`super::Sim::step`] for XP / progress
+/// bookkeeping.
+#[derive(Clone, Copy, Debug)]
+pub struct KillInfo {
+    /// Wire role byte (`role::BRUTE` ... `role::BOSS`).
+    pub role: u8,
 }
 
 /// Finalise a batch of kills queued by a damage subsystem:
@@ -59,6 +72,7 @@ pub fn finalise_kills(
             killer: None,
         });
         if let Some((role, pos)) = info {
+            ctx.kills.push(KillInfo { role });
             drop_for_enemy(
                 world,
                 ctx.next_loot_net_id,

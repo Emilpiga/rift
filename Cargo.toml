@@ -18,6 +18,7 @@ hecs = "0.10"
 shaderc = "0.10.1"
 notify = "8.2.0"
 bytemuck = { version = "1.14", features = ["derive"] }
+rayon = "1.10"
 # Networking (Phase 1 of MP): renet for the UDP transport with reliable +
 # unreliable channels, serde+bincode for the wire format. Kept in the
 # workspace table so any future binary (rift-server) shares the version.

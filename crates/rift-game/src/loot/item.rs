@@ -9,7 +9,7 @@ use super::affixes::{AffixDef, AffixEffect, AFFIX_POOL};
 use super::items::BaseItem;
 use super::rarity::Rarity;
 use super::rng::LootRng;
-use super::stats::StatBlock;
+use crate::stats::StatBlock;
 
 /// One realised affix on an item.
 #[derive(Clone, Debug)]

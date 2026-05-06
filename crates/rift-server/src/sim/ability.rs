@@ -16,7 +16,7 @@ use rift_net::{
 };
 
 pub use rift_game::abilities::id;
-pub use rift_game::abilities::{lookup, AbilityDef, AbilityKind};
+pub use rift_game::abilities::{lookup, AbilityKind};
 
 use super::player::ServerPlayer;
 use super::projectile::{ServerAoeZone, ServerProjectile};
@@ -60,6 +60,7 @@ pub fn cast(
     next_projectile_net_id: &mut u32,
     client_id: ClientId,
     ability_id: u8,
+    client_origin: [f32; 3],
     aim_dir: [f32; 2],
     placed_target: Option<[f32; 3]>,
     tick: NetTick,
@@ -77,13 +78,37 @@ pub fn cast(
     let Some(&entity) = sessions.get(&client_id) else {
         return;
     };
-    let (origin, caster_net_id) = match world.get::<&ServerPlayer>(entity) {
-        Ok(p) => (p.k.position, p.net_id),
-        Err(_) => return,
-    };
+    let (origin, caster_net_id, dmg_scalar, crit_chance, crit_damage) =
+        match world.get::<&ServerPlayer>(entity) {
+            Ok(p) => (
+                p.k.position,
+                p.net_id,
+                p.damage_scalar(),
+                p.stats.crit_chance,
+                p.stats.crit_damage,
+            ),
+            Err(_) => return,
+        };
+    // Pre-scale the ability's authored base damage by the caster's
+    // gear / attribute multiplier. Crit gets rolled per-hit on the
+    // damage-application path using the values stamped below.
+    let scaled_damage = ability.base_damage * dmg_scalar;
     let aim = {
         let v = glam::Vec2::from(aim_dir).normalize_or_zero();
         Vec3::new(v.x, 0.0, v.y)
+    };
+
+    // Trust the client's hand-position origin within a sanity
+    // radius of the simulated player position (~2 m). This lets
+    // projectiles visibly emerge from the casting hand on every
+    // observer's screen without enabling a teleport-the-spawn
+    // exploit. Out-of-range or zero origins fall back to the
+    // simulated body position.
+    let client_origin = Vec3::from_array(client_origin);
+    let trusted_origin = if client_origin.distance_squared(origin) <= 2.0 * 2.0 {
+        client_origin
+    } else {
+        origin + Vec3::Y * 1.25
     };
 
     events.push(WorldEvent::AbilityCast {
@@ -104,7 +129,7 @@ pub fn cast(
             pierce,
             apply_debuff,
         } => {
-            let spawn_pos = origin + Vec3::Y * 1.25 + aim * 0.55;
+            let spawn_pos = trusted_origin + aim * 0.25;
             for i in 0..count {
                 let angle_offset = if count > 1 {
                     let t = i as f32 / (count - 1) as f32 - 0.5;
@@ -124,7 +149,9 @@ pub fn cast(
                     position: spawn_pos,
                     velocity: dir * speed,
                     ttl,
-                    damage: ability.base_damage,
+                    damage: scaled_damage,
+                    crit_chance,
+                    crit_damage,
                     pierce_remaining: pierce,
                     size: 0.6,
                     apply_debuff,
@@ -141,11 +168,12 @@ pub fn cast(
                 .map(Vec3::from)
                 .unwrap_or(origin + aim * 5.0);
             aoe_zones.push(ServerAoeZone {
-                ability_id,
                 owner: caster_net_id,
                 position: Vec3::new(pos.x, 0.0, pos.z),
                 radius,
-                damage_per_tick: ability.base_damage,
+                damage_per_tick: scaled_damage,
+                crit_chance,
+                crit_damage,
                 tick_interval,
                 duration,
                 elapsed: 0.0,
@@ -172,7 +200,8 @@ pub fn cast(
                     tick_interval,
                     tick_acc: 0.0,
                     effect,
-                    damage_per_tick: ability.base_damage,
+                    crit_chance,
+                    crit_damage,
                     apply_debuff,
                     aim,
                     cancel_on_move,

@@ -5,6 +5,14 @@ pub struct Experience {
     pub level: u32,
     pub current_xp: u64,
     pub total_xp: u64,
+    /// Authoritative XP threshold for the next level. Mirrored
+    /// from the server's `ServerMsg::CharacterStats` so the bar
+    /// can never disagree with the server's level-up trigger.
+    /// `None` falls back to the local
+    /// `xp_for_level(level + 1)` formula \u2014 used in the
+    /// pre-connect / character-select preview where there's no
+    /// server to ask.
+    server_xp_to_next: Option<u64>,
 }
 
 impl Experience {
@@ -13,12 +21,21 @@ impl Experience {
             level: 1,
             current_xp: 0,
             total_xp: 0,
+            server_xp_to_next: None,
         }
+    }
+
+    /// Override the local `xp_for_level` formula with the value
+    /// the server just sent. Cleared by [`Self::grant_xp`] on a
+    /// level-up so the next bar segment falls back to the local
+    /// estimate until the next server message arrives.
+    pub fn set_xp_to_next(&mut self, value: u64) {
+        self.server_xp_to_next = Some(value);
     }
 
     /// XP required to reach next level from current level.
     pub fn xp_to_next_level(&self) -> u64 {
-        xp_for_level(self.level + 1)
+        self.server_xp_to_next.unwrap_or_else(|| xp_for_level(self.level + 1))
     }
 
     /// Progress to next level as 0.0–1.0.
@@ -39,6 +56,10 @@ impl Experience {
             if self.current_xp >= needed {
                 self.current_xp -= needed;
                 self.level += 1;
+                // The server will push a fresh threshold next
+                // tick; clear the cached value so the bar uses
+                // the local formula in the meantime.
+                self.server_xp_to_next = None;
                 rewards.push(LevelUpReward {
                     new_level: self.level,
                     attribute_points: attribute_points_for_level(self.level),
@@ -77,8 +98,20 @@ pub struct LevelUpReward {
 
 /// XP required to go from (level-1) to (level).
 /// Formula: 100 * level^1.5 (accelerating curve).
-fn xp_for_level(level: u32) -> u64 {
+///
+/// Public so the server can derive `current_xp` from a stored
+/// `(total_xp, level)` pair without re-implementing the curve.
+pub fn xp_for_level(level: u32) -> u64 {
     (100.0 * (level as f32).powf(1.5)) as u64
+}
+
+/// Cumulative XP required to reach `level` from level 1. Sum of
+/// [`xp_for_level`] over `2..=level`. Returns 0 for levels ≤ 1.
+pub fn total_xp_for_level(level: u32) -> u64 {
+    if level <= 1 {
+        return 0;
+    }
+    (2..=level).map(xp_for_level).sum()
 }
 
 /// Attribute points granted at a specific level.

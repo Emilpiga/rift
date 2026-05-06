@@ -18,6 +18,7 @@ pub struct UniformData {
     pub light_color: Vec4,   // xyz = color, w = ambient intensity
     pub fog_color: Vec4,     // xyz = fog color, w unused
     pub fog_params: Vec4,    // x = start dist, y = end dist, z = density, w unused
+    pub fog_origin: Vec4,    // xyz = world-space anchor for fog distance, w unused
     /// Point lights: [pos.xyz, radius] packed into vec4s, then [color.rgb, intensity]
     pub point_light_pos: [Vec4; 8],   // xyz = position, w = radius
     pub point_light_color: [Vec4; 8], // xyz = color, w = intensity

@@ -8,10 +8,8 @@ pub mod material;
 pub mod shadow;
 pub mod overlay;
 pub mod font;
-pub mod particles;
-pub mod particle_renderer;
+pub mod vfx;
 pub mod decals;
 
 pub use forward::Renderer;
 pub use overlay::{OverlayBatch, OverlayRenderer};
-pub use particles::{ParticleSystem, Emitter, EmitterConfig, EmitterSpread};

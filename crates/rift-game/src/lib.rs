@@ -25,4 +25,5 @@ pub mod experience;
 pub mod kinematic;
 pub mod loot;
 pub mod monsters;
+pub mod stats;
 pub mod talents;

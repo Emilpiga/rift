@@ -1,0 +1,22 @@
+# dockerignore for rift-server image. Trims the build context to
+# just the bits we actually compile — keeps `docker build` fast
+# and prevents leaking dev artefacts (target/, .git, IDE state).
+
+target/
+**/target/
+.git
+.github
+.vscode
+.idea
+*.md
+docs/
+
+# Massive art assets aren't needed for a headless server build.
+assets/icons
+assets/models
+assets/textures
+assets/shaders/*.spv
+
+# Local docker volume / dumps
+docker-compose.yml
+*.log

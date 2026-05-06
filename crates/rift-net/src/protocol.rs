@@ -41,9 +41,15 @@ pub struct NetSettings {
 impl Default for NetSettings {
     fn default() -> Self {
         Self {
-            // ~9 KB/tick × 30 Hz = ~270 KB/s ceiling per peer. Way
-            // above expected steady-state but cheap.
-            available_bytes_per_tick: 9 * 1024,
+            // ~32 KB/tick × 60 Hz transport rate = ~1.9 MB/s
+            // ceiling per peer. Headroom matters: a fully-loaded
+            // rift floor with 100+ enemies + projectiles + loot
+            // can push a single 20 Hz snapshot to 10–20 KB, and
+            // the previous 9 KB/tick budget left renet throttling
+            // the snapshot channel — dropped/late snapshots made
+            // enemies appear to freeze on the client even though
+            // server-side they were happily moving and swinging.
+            available_bytes_per_tick: 32 * 1024,
         }
     }
 }

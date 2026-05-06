@@ -1,6 +1,7 @@
 //! Talents — declarative tree shape + Hunter content.
 
 use crate::abilities::{self, AbilityId};
+use crate::stats::{Stat, StatModifiers};
 
 /// Unique identifier for a talent node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -190,6 +191,60 @@ impl TalentBonuses {
 
     fn apply_flat(&mut self, stat: TalentStat, value: f32) {
         self.apply_percent(stat, value);
+    }
+}
+
+impl TalentTree {
+    /// Convert this tree's invested ranks into a [`StatModifiers`]
+    /// suitable for [`crate::stats::CharacterStats::compute`].
+    /// Stats that have no `Stat` analogue (`Defense`, `Range`,
+    /// `ProjectileSpeed`) are skipped — they're either driven
+    /// elsewhere or not yet wired into the character sheet.
+    pub fn stat_modifiers(&self) -> StatModifiers {
+        let mut m = StatModifiers::new();
+        for node in &self.nodes {
+            if node.current_rank == 0 {
+                continue;
+            }
+            let val = match &node.effect {
+                TalentEffect::PercentBonus { stat, per_rank }
+                | TalentEffect::FlatBonus { stat, per_rank } => {
+                    (*stat, per_rank * node.current_rank as f32)
+                }
+                _ => continue,
+            };
+            let (tstat, v) = val;
+            // Map TalentStat -> Stat. Percent-style bonuses go on
+            // the percent channel; chance/multiplier stats go on
+            // flat (additive in their native unit).
+            match (tstat, &node.effect) {
+                (TalentStat::Damage, TalentEffect::PercentBonus { .. }) => {
+                    m.percent.add(Stat::Power, v);
+                }
+                (TalentStat::Damage, TalentEffect::FlatBonus { .. }) => {
+                    m.flat.add(Stat::Power, v);
+                }
+                (TalentStat::MaxHp, TalentEffect::PercentBonus { .. }) => {
+                    m.percent.add(Stat::Health, v);
+                }
+                (TalentStat::MaxHp, TalentEffect::FlatBonus { .. }) => {
+                    m.flat.add(Stat::Health, v);
+                }
+                (TalentStat::CritChance, _) => m.flat.add(Stat::CritChance, v),
+                (TalentStat::CritDamage, _) => m.flat.add(Stat::CritDamage, v),
+                (TalentStat::AttackSpeed, _) => m.flat.add(Stat::AttackSpeed, v),
+                (TalentStat::MoveSpeed, _) => m.flat.add(Stat::MoveSpeed, v),
+                (TalentStat::CooldownReduction, _) => {
+                    m.flat.add(Stat::CooldownReduction, v)
+                }
+                // Defense / Range / ProjectileSpeed: no `Stat`
+                // counterpart in the resolved sheet yet. Drop on
+                // the floor; if/when those become first-class
+                // we'll plumb them through.
+                _ => {}
+            }
+        }
+        m
     }
 }
 

@@ -1,26 +1,31 @@
 use rift_engine::ecs::components::{Boss, Debuffs, Enemy, Health, LocalPlayer, Player, Transform};
 use rift_engine::ai::NavGrid;
-use rift_engine::loot::item::ItemSlot;
-use rift_engine::loot::Equipment;
-use rift_engine::renderer::OverlayBatch;
+use rift_engine::ui::im::{
+    hp_color, Color, Id, ItemSlot, Pos2, ProgressBar, Rect, Tooltip, TooltipLine, Ui,
+};
 use glam::{Mat4, Vec3};
 
 use crate::game::PlayerState;
 use super::rift_state::RiftState;
 use rift_game::abilities::AbilitySlot;
 
-/// Render all HUD elements.
+/// Render all HUD elements via the immediate-mode UI stack.
 pub fn render_hud(
-    batch: &mut OverlayBatch,
+    ui: &mut Ui<'_>,
     world: &hecs::World,
     rift: &RiftState,
     player_state: &PlayerState,
-    equipment: &Equipment,
-    sw: f32,
-    sh: f32,
-    max_hp_bonus: f32,
+    level_up_flash: f32,
     in_hub: bool,
 ) {
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+    let sw = screen.x;
+    let sh = screen.y;
+
+    let stats = player_state.stats();
+    let max_hp_bonus = stats.max_hp - player_state.config.base_hp
+        - player_state.config.hp_per_level * player_state.experience.level as f32;
     // HP + XP bars: stacked, centered above the ability bar so the
     // player's vital stats sit right under their character.
     let hp_pct = world
@@ -31,138 +36,153 @@ pub fn render_hud(
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
 
-    // Ability bar lives at sh - 50; stack the bars 8 px above it.
-    let bar_w = 280.0;
-    let bar_h = 16.0;
-    let xp_h = 6.0;
+    // Ability bar lives at sh - 80 (see `render_ability_bar`);
+    // stack the HP/XP pair 16 px above it for a bit more breathing
+    // room than the original 8 px gap.
+    let bar_w = 360.0;
+    let bar_h = 22.0;
+    let xp_h = 9.0;
     let bars_total_h = bar_h + 2.0 + xp_h;
     let bar_x = (sw - bar_w) / 2.0;
-    let bar_y = sh - 50.0 - 8.0 - bars_total_h;
+    let bar_y = sh - 80.0 - 16.0 - bars_total_h;
 
-    // HP bar
-    batch.rect_px(bar_x, bar_y, bar_w, bar_h, [0.08, 0.08, 0.10, 0.85], sw, sh);
-    let hp_color = if hp_pct > 0.5 {
-        [0.45, 0.78, 0.30, 0.95]
-    } else if hp_pct > 0.25 {
-        [0.90, 0.70, 0.05, 0.95]
-    } else {
-        [0.92, 0.18, 0.18, 0.95]
-    };
-    batch.rect_px(bar_x, bar_y, bar_w * hp_pct, bar_h, hp_color, sw, sh);
-    // Border
-    batch.rect_px(bar_x, bar_y, bar_w, 1.5, [0.30, 0.30, 0.32, 0.9], sw, sh);
-    batch.rect_px(bar_x, bar_y + bar_h - 1.5, bar_w, 1.5, [0.30, 0.30, 0.32, 0.9], sw, sh);
-    batch.rect_px(bar_x, bar_y, 1.5, bar_h, [0.30, 0.30, 0.32, 0.9], sw, sh);
-    batch.rect_px(bar_x + bar_w - 1.5, bar_y, 1.5, bar_h, [0.30, 0.30, 0.32, 0.9], sw, sh);
+    // HP bar.
+    ProgressBar::new(hp_pct)
+        .fill(hp_color(hp_pct))
+        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
+        .show(ui, Rect::from_xywh(bar_x, bar_y, bar_w, bar_h));
 
-    // XP bar (slimmer, directly under the HP bar)
-    let xp_pct = player_state.experience.progress();
+    // XP bar (slimmer, directly under the HP bar).
+    let xp_pct = player_state.experience.progress().clamp(0.0, 1.0);
     let xp_y = bar_y + bar_h + 2.0;
-    batch.rect_px(bar_x, xp_y, bar_w, xp_h, [0.08, 0.08, 0.10, 0.85], sw, sh);
-    batch.rect_px(bar_x, xp_y, bar_w * xp_pct, xp_h, [0.45, 0.30, 0.85, 0.95], sw, sh);
+    let xp_now = player_state.experience.current_xp;
+    let xp_need = player_state.experience.xp_to_next_level();
+    let xp_label = format!("{xp_now} / {xp_need} XP");
+    ProgressBar::new(xp_pct)
+        .fill(Color::rgba(0.45, 0.30, 0.85, 0.95))
+        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
+        .rounded(false)
+        .show(ui, Rect::from_xywh(bar_x, xp_y, bar_w, xp_h));
+    // XP numerals sit just above the XP bar (the bar is too thin to
+    // center text inside).
+    let xp_text_size = 11.0;
+    let xp_text_w = ui.measure_text(&xp_label, xp_text_size);
+    ui.draw_text(
+        Pos2::new(bar_x + (bar_w - xp_text_w) * 0.5, xp_y - 1.0),
+        &xp_label,
+        xp_text_size,
+        Color::rgba(0.92, 0.92, 0.96, 0.95),
+    );
 
     // Level pip floats just to the left of the HP bar.
     let level_text = format!("Lv.{}", player_state.experience.level);
-    batch.text(&level_text, bar_x - 42.0, bar_y + 1.0, 13.0, [0.92, 0.92, 0.92, 1.0], sw, sh);
+    ui.draw_text(
+        Pos2::new(bar_x - 50.0, bar_y + 4.0),
+        &level_text,
+        15.0,
+        Color::rgba(0.92, 0.92, 0.92, 1.0),
+    );
 
-    // Rift progress bar (top-center, 300x16 px). Hidden in the hub.
+    // Level-up banner: appears top-center for ~2.5 s after the
+    // server confirms a level-up.
+    if level_up_flash > 0.001 {
+        let banner = format!("LEVEL UP!  Lv.{}", player_state.experience.level);
+        let size = theme.fonts.size_xl;
+        let tw = ui.measure_text(&banner, size);
+        let alpha = level_up_flash.min(1.0);
+        ui.draw_text(
+            Pos2::new((sw - tw) * 0.5, sh * 0.30),
+            &banner,
+            size,
+            Color::rgba(1.0, 0.85, 0.30, alpha),
+        );
+    }
+
+    // Rift progress bar (top-center). Hidden in the hub; replaced
+    // by a small "THE HUB" label so the screen anchor stays consistent.
     if !in_hub {
         let prog_pct = rift.progress_percent() / 100.0;
         let prog_w = 300.0;
         let prog_h = 16.0;
         let prog_x = (sw - prog_w) / 2.0;
         let prog_y = 10.0;
-        batch.rect_px(prog_x, prog_y, prog_w, prog_h, [0.1, 0.1, 0.1, 0.8], sw, sh);
-        batch.rect_px(prog_x, prog_y, prog_w * prog_pct, prog_h, [0.3, 0.5, 0.9, 0.9], sw, sh);
+        ProgressBar::new(prog_pct)
+            .fill(theme.colors.accent)
+            .track(Color::rgba(0.10, 0.10, 0.10, 0.80))
+            .border(theme.colors.border)
+            .show(ui, Rect::from_xywh(prog_x, prog_y, prog_w, prog_h));
 
-        // Floor indicator (top-right)
+        // Floor indicator (top-right) — segmented bar, one pip per
+        // floor cleared.
         let floor_w = 40.0;
         let floor_h = 20.0;
-        batch.rect_px(sw - floor_w - 10.0, 10.0, floor_w, floor_h, [0.2, 0.2, 0.3, 0.8], sw, sh);
-        let bars = (rift.floor as f32).min(10.0);
-        let bar_unit_w = (floor_w - 6.0) / 10.0;
-        for i in 0..bars as u32 {
-            batch.rect_px(
-                sw - floor_w - 10.0 + 3.0 + i as f32 * bar_unit_w,
-                14.0,
-                bar_unit_w - 1.0,
-                floor_h - 8.0,
-                [0.8, 0.7, 0.2, 0.9],
-                sw,
-                sh,
+        let floor_pct = (rift.floor as f32 / 10.0).clamp(0.0, 1.0);
+        ProgressBar::new(floor_pct)
+            .fill(Color::rgba(0.80, 0.70, 0.20, 0.90))
+            .track(Color::rgba(0.20, 0.20, 0.30, 0.80))
+            .border(theme.colors.border)
+            .pips(10)
+            .show(
+                ui,
+                Rect::from_xywh(sw - floor_w - 10.0, 10.0, floor_w, floor_h),
             );
-        }
     } else {
         // Hub label where the progress bar would normally sit.
         let label_w = 120.0;
         let label_h = 20.0;
         let lx = (sw - label_w) / 2.0;
         let ly = 10.0;
-        batch.rect_px(lx, ly, label_w, label_h, [0.08, 0.10, 0.16, 0.8], sw, sh);
-        batch.text("THE HUB", lx + 32.0, ly + 4.0, 13.0, [0.7, 0.85, 1.0, 1.0], sw, sh);
+        ui.draw_rounded_rect(
+            Rect::from_xywh(lx, ly, label_w, label_h),
+            theme.spacing.corner_radius,
+            Color::rgba(0.08, 0.10, 0.16, 0.80),
+        );
+        ui.draw_text(
+            Pos2::new(lx + 32.0, ly + 4.0),
+            "THE HUB",
+            13.0,
+            Color::rgba(0.7, 0.85, 1.0, 1.0),
+        );
     }
 
-    // Equipment slots (bottom-left, 6 slots: 32x32 each)
-    let slot_size = 32.0;
-    let slot_gap = 4.0;
-    let eq_x = 10.0;
-    let eq_y = sh - slot_size - 10.0;
-    let slots = [
-        equipment.get(ItemSlot::Weapon),
-        equipment.get(ItemSlot::Helmet),
-        equipment.get(ItemSlot::Chest),
-        equipment.get(ItemSlot::Boots),
-        equipment.get(ItemSlot::Ring),
-        equipment.get(ItemSlot::Amulet),
-    ];
-    for (i, slot) in slots.iter().enumerate() {
-        let sx = eq_x + i as f32 * (slot_size + slot_gap);
-        batch.rect_px(sx, eq_y, slot_size, slot_size, [0.15, 0.15, 0.2, 0.8], sw, sh);
-        if let Some(item) = slot {
-            let [r, g, b] = item.rarity.color();
-            batch.rect_px(
-                sx + 3.0,
-                eq_y + 3.0,
-                slot_size - 6.0,
-                slot_size - 6.0,
-                [r, g, b, 0.9],
-                sw,
-                sh,
-            );
-        }
-    }
-
-    // Portal indicator (if floor complete)
+    // Portal indicator (if floor complete).
     if rift.floor_complete {
         let tw = 200.0;
         let th = 16.0;
         let tx = (sw - tw) / 2.0;
         let ty = 35.0;
-        batch.rect_px(tx, ty, tw, th, [0.1, 0.15, 0.25, 0.85], sw, sh);
-        batch.text("ENTER THE PORTAL", tx + 30.0, ty + 2.0, 12.0, [0.4, 0.7, 1.0, 1.0], sw, sh);
+        ui.draw_rounded_rect(
+            Rect::from_xywh(tx, ty, tw, th),
+            theme.spacing.corner_radius,
+            Color::rgba(0.10, 0.15, 0.25, 0.85),
+        );
+        ui.draw_text(
+            Pos2::new(tx + 30.0, ty + 2.0),
+            "ENTER THE PORTAL",
+            12.0,
+            theme.colors.accent,
+        );
     }
 }
 
 /// Fullscreen black quad used by the death→hub fade transition.
-pub fn render_fade_to_black(batch: &mut OverlayBatch, alpha: f32, sw: f32, sh: f32) {
+pub fn render_fade_to_black(ui: &mut Ui<'_>, alpha: f32) {
     let a = alpha.clamp(0.0, 1.0);
     if a <= 0.001 { return; }
-    batch.rect_px(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, a], sw, sh);
+    ui.draw_rect(ui.screen_rect(), Color::rgba(0.0, 0.0, 0.0, a));
 }
 
 /// Off-screen / far-away boss locator. When the boss is alive but the
 /// player can't see them (off-screen, behind camera, or > ARROW_RANGE
 /// world units away), draw a glowing arrow at the screen edge pointing
 /// toward the boss in screen space.
-pub fn render_boss_arrow(
-    batch: &mut OverlayBatch,
-    world: &hecs::World,
-    view_proj: Mat4,
-    sw: f32,
-    sh: f32,
-) {
+pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
     const ARROW_RANGE_SQ: f32 = 16.0 * 16.0; // show arrow if boss > 16 m away
     const EDGE_PAD: f32 = 110.0;
+
+    let screen = ui.screen_size();
+    let sw = screen.x;
+    let sh = screen.y;
 
     // Find boss world position + player world position.
     let boss_pos: Option<Vec3> = world
@@ -221,7 +241,7 @@ pub fn render_boss_arrow(
     // Pulse a bit so it draws the eye.
     let dist = dist_sq.sqrt();
     let pulse = 0.75 + 0.25 * ((dist * 0.06).sin().abs());
-    let col = [1.00, 0.42, 0.05, (0.98 * pulse).clamp(0.7, 1.0)];
+    let col = Color::rgba(1.00, 0.42, 0.05, (0.98 * pulse).clamp(0.7, 1.0));
 
     // Tangent (perpendicular) to arrow heading; used to fan the head out.
     let tx = -ny;
@@ -232,7 +252,7 @@ pub fn render_boss_arrow(
     // axis-aligned rect; with `DOT_PITCH=1.5` they overlap into a clean
     // line, so the resulting shape reads as a single solid arrow rather
     // than a cloud of squares.
-    let mut line = |u0: f32, v0: f32, u1: f32, v1: f32, thickness: f32| {
+    let line = |ui: &mut Ui<'_>, u0: f32, v0: f32, u1: f32, v1: f32, thickness: f32| {
         let du = u1 - u0;
         let dv = v1 - v0;
         let line_len = (du * du + dv * dv).sqrt().max(1.0);
@@ -244,28 +264,19 @@ pub fn render_boss_arrow(
             let v = v0 + dv * t;
             let sx_ = ax + nx * u + tx * v;
             let sy_ = ay + ny * u + ty * v;
-            batch.rect_px(
-                sx_ - thickness * 0.5,
-                sy_ - thickness * 0.5,
-                thickness,
-                thickness,
+            ui.draw_rect(
+                Rect::from_xywh(
+                    sx_ - thickness * 0.5,
+                    sy_ - thickness * 0.5,
+                    thickness,
+                    thickness,
+                ),
                 col,
-                sw,
-                sh,
             );
         }
     };
 
     // Geometry of the arrow in local (u along heading, v perpendicular):
-    //
-    //                 tip (u = +HEAD_LEN, v = 0)
-    //                  /\
-    //                 /  \
-    //   wing_l ──────/    \────── wing_r       (u = 0, v = ±HALF_W)
-    //   shaft_l ────┤      ├──── shaft_r       (u = 0, v = ±SHAFT_W)
-    //               │      │
-    //               │      │
-    //   tail_l ─────┴──────┴───── tail_r       (u = -SHAFT_LEN)
     const HEAD_LEN: f32 = 22.0;     // tip -> wings
     const SHAFT_LEN: f32 = 26.0;    // wings -> tail
     const HALF_W: f32 = 22.0;       // half-width at wings (head base)
@@ -276,30 +287,26 @@ pub fn render_boss_arrow(
     let thick = 4.0;
 
     // Head outline (two leading edges of the V).
-    line(tip_u, 0.0, wing_u, HALF_W, thick);
-    line(tip_u, 0.0, wing_u, -HALF_W, thick);
+    line(ui, tip_u, 0.0, wing_u, HALF_W, thick);
+    line(ui, tip_u, 0.0, wing_u, -HALF_W, thick);
     // Notch joining wings to shaft.
-    line(wing_u, HALF_W, wing_u, SHAFT_W, thick);
-    line(wing_u, -HALF_W, wing_u, -SHAFT_W, thick);
+    line(ui, wing_u, HALF_W, wing_u, SHAFT_W, thick);
+    line(ui, wing_u, -HALF_W, wing_u, -SHAFT_W, thick);
     // Shaft sides + tail cap.
-    line(wing_u, SHAFT_W, tail_u, SHAFT_W, thick);
-    line(wing_u, -SHAFT_W, tail_u, -SHAFT_W, thick);
-    line(tail_u, SHAFT_W, tail_u, -SHAFT_W, thick);
+    line(ui, wing_u, SHAFT_W, tail_u, SHAFT_W, thick);
+    line(ui, wing_u, -SHAFT_W, tail_u, -SHAFT_W, thick);
+    line(ui, tail_u, SHAFT_W, tail_u, -SHAFT_W, thick);
 
     // Solid fill: scanlines parallel to the heading at uniform v steps.
-    let fill = [col[0], col[1], col[2], (col[3] * 0.65).clamp(0.0, 1.0)];
+    let fill_arr = col.0;
+    let fill = Color::rgba(fill_arr[0], fill_arr[1], fill_arr[2], (fill_arr[3] * 0.65).clamp(0.0, 1.0));
     let v_steps = 28;
     for i in 1..v_steps {
         let v = -HALF_W + (HALF_W * 2.0) * (i as f32 / v_steps as f32);
-        // Find left/right u bounds of the arrow at this v level.
         let av = v.abs();
-        // Head region: linear taper from tip(u=HEAD_LEN, v=0) to wing(u=0, v=±HALF_W).
-        // Shaft region: rectangle for |v| <= SHAFT_W between u=tail and u=wing.
         let in_head = av <= HALF_W;
         if !in_head { continue; }
-        // u_right: forward-most u at this v. Inside the triangular head.
         let head_u = HEAD_LEN * (1.0 - av / HALF_W);
-        // u_left: rear-most u. Equal to tail u inside the shaft, otherwise 0.
         let in_shaft_band = av <= SHAFT_W;
         let left_u = if in_shaft_band { tail_u } else { 0.0 };
         let dot_pitch: f32 = 1.6;
@@ -311,7 +318,7 @@ pub fn render_boss_arrow(
             let u = left_u + span * t;
             let sx_ = ax + nx * u + tx * v;
             let sy_ = ay + ny * u + ty * v;
-            batch.rect_px(sx_ - 1.5, sy_ - 1.5, 3.0, 3.0, fill, sw, sh);
+            ui.draw_rect(Rect::from_xywh(sx_ - 1.5, sy_ - 1.5, 3.0, 3.0), fill);
         }
     }
 }
@@ -323,17 +330,18 @@ pub fn render_boss_arrow(
 /// The map auto-scales: cell size is computed so the navgrid fits inside
 /// `MAP_PX × MAP_PX`.
 pub fn render_minimap(
-    batch: &mut OverlayBatch,
+    ui: &mut Ui<'_>,
     world: &hecs::World,
     nav: &NavGrid,
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
-    sw: f32,
-    sh: f32,
 ) {
     const MAP_PX: f32 = 320.0;
     const PADDING: f32 = 14.0;
     const MARGIN: f32 = 14.0;
+
+    let screen = ui.screen_size();
+    let sw = screen.x;
 
     let inner = MAP_PX - PADDING * 2.0;
     let cell = (inner / nav.width.max(nav.depth) as f32).max(1.0);
@@ -344,39 +352,34 @@ pub fn render_minimap(
     let map_y = MARGIN;
 
     // Frame
-    batch.rect_px(
-        map_x,
-        map_y,
-        MAP_PX,
-        MAP_PX,
-        [0.04, 0.05, 0.07, 0.78],
-        sw,
-        sh,
+    ui.draw_rect(
+        Rect::from_xywh(map_x, map_y, MAP_PX, MAP_PX),
+        Color::rgba(0.04, 0.05, 0.07, 0.78),
     );
     // Border
-    let border = [0.18, 0.20, 0.26, 0.95];
-    batch.rect_px(map_x, map_y, MAP_PX, 1.5, border, sw, sh);
-    batch.rect_px(map_x, map_y + MAP_PX - 1.5, MAP_PX, 1.5, border, sw, sh);
-    batch.rect_px(map_x, map_y, 1.5, MAP_PX, border, sw, sh);
-    batch.rect_px(map_x + MAP_PX - 1.5, map_y, 1.5, MAP_PX, border, sw, sh);
+    let border = Color::rgba(0.18, 0.20, 0.26, 0.95);
+    ui.draw_rect(Rect::from_xywh(map_x, map_y, MAP_PX, 1.5), border);
+    ui.draw_rect(Rect::from_xywh(map_x, map_y + MAP_PX - 1.5, MAP_PX, 1.5), border);
+    ui.draw_rect(Rect::from_xywh(map_x, map_y, 1.5, MAP_PX), border);
+    ui.draw_rect(Rect::from_xywh(map_x + MAP_PX - 1.5, map_y, 1.5, MAP_PX), border);
 
     // Centre the navgrid inside the framed area.
     let inner_x = map_x + (MAP_PX - map_w) * 0.5;
     let inner_y = map_y + (MAP_PX - map_h) * 0.5;
 
     // Walkable tiles
-    let floor_col = [0.32, 0.30, 0.26, 0.92];
+    let floor_col = Color::rgba(0.32, 0.30, 0.26, 0.92);
     for z in 0..nav.depth {
         for x in 0..nav.width {
             if nav.is_walkable(x, z) {
-                batch.rect_px(
-                    inner_x + x as f32 * cell,
-                    inner_y + z as f32 * cell,
-                    cell,
-                    cell,
+                ui.draw_rect(
+                    Rect::from_xywh(
+                        inner_x + x as f32 * cell,
+                        inner_y + z as f32 * cell,
+                        cell,
+                        cell,
+                    ),
                     floor_col,
-                    sw,
-                    sh,
                 );
             }
         }
@@ -388,8 +391,7 @@ pub fn render_minimap(
         let my = inner_y + p.z * cell;
         (mx, my)
     };
-    // True iff (mx,my) lies inside the framed minimap window (so we
-    // never paint dots on the surrounding HUD).
+    // True iff (mx,my) lies inside the framed minimap window.
     let in_frame = |mx: f32, my: f32| -> bool {
         mx >= map_x && mx <= map_x + MAP_PX && my >= map_y && my <= map_y + MAP_PX
     };
@@ -399,14 +401,9 @@ pub fn render_minimap(
         let (mx, my) = to_map(p);
         if in_frame(mx, my) {
             let s = (cell * 2.6).max(4.0);
-            batch.rect_px(
-                mx - s * 0.5,
-                my - s * 0.5,
-                s,
-                s,
-                [0.30, 0.75, 1.0, 0.95],
-                sw,
-                sh,
+            ui.draw_rect(
+                Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s),
+                Color::rgba(0.30, 0.75, 1.0, 0.95),
             );
         }
     }
@@ -419,11 +416,11 @@ pub fn render_minimap(
         let (mx, my) = to_map(t.position);
         if !in_frame(mx, my) { continue; }
         let (s, col) = if boss.is_some() {
-            ((cell * 2.4).max(4.0), [1.00, 0.55, 0.10, 1.0])
+            ((cell * 2.4).max(4.0), Color::rgba(1.00, 0.55, 0.10, 1.0))
         } else {
-            ((cell * 1.6).max(2.5), [0.92, 0.25, 0.22, 1.0])
+            ((cell * 1.6).max(2.5), Color::rgba(0.92, 0.25, 0.22, 1.0))
         };
-        batch.rect_px(mx - s * 0.5, my - s * 0.5, s, s, col, sw, sh);
+        ui.draw_rect(Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s), col);
     }
 
     // Player pip + facing tick
@@ -436,34 +433,23 @@ pub fn render_minimap(
         let (mx, my) = to_map(pp);
         if in_frame(mx, my) {
             let s = (cell * 1.9).max(3.0);
-            batch.rect_px(
-                mx - s * 0.5,
-                my - s * 0.5,
-                s,
-                s,
-                [0.95, 0.95, 0.98, 1.0],
-                sw,
-                sh,
+            ui.draw_rect(
+                Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s),
+                Color::rgba(0.95, 0.95, 0.98, 1.0),
             );
-            // Facing line: 4 pixels long in the player's heading direction.
+            // Facing line: short heading marker.
             let f = Vec3::new(player_facing.x, 0.0, player_facing.z);
             if f.length_squared() > 1e-4 {
                 let f = f.normalize();
                 let len = (cell * 3.5).max(6.0);
                 let dx = f.x * len;
                 let dz = f.z * len;
-                // Approximate the line as a stack of small rects.
                 let steps = 6;
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
-                    batch.rect_px(
-                        mx + dx * t - 1.0,
-                        my + dz * t - 1.0,
-                        2.0,
-                        2.0,
-                        [0.95, 0.95, 0.98, 0.85],
-                        sw,
-                        sh,
+                    ui.draw_rect(
+                        Rect::from_xywh(mx + dx * t - 1.0, my + dz * t - 1.0, 2.0, 2.0),
+                        Color::rgba(0.95, 0.95, 0.98, 0.85),
                     );
                 }
             }
@@ -472,23 +458,32 @@ pub fn render_minimap(
 }
 
 /// Generic interaction prompt centred just below mid-screen, used by
-/// the rift / hub portals.  `text` is the message body (e.g.
-/// "PRESS [F] TO ENTER THE RIFT").
-pub fn render_portal_prompt(batch: &mut OverlayBatch, text: &str, sw: f32, sh: f32) {
-    let tw = (text.len() as f32 * 8.5 + 36.0).max(220.0);
-    let th = 22.0;
-    let tx = (sw - tw) / 2.0;
-    let ty = sh * 0.62;
-    batch.rect_px(tx, ty, tw, th, [0.05, 0.08, 0.14, 0.78], sw, sh);
-    batch.text(
-        text,
-        tx + 18.0,
-        ty + 5.0,
-        12.0,
-        [0.55, 0.78, 1.0, 1.0],
-        sw,
-        sh,
-    );
+/// the rift / hub portals. `text` is the message body (e.g.
+/// "PRESS [F] TO ENTER THE RIFT"). Migrated onto the IM stack —
+/// uses `Frame` so the panel chrome (rounded corners, border)
+/// matches the rest of the UI without copy-pasting rect math.
+pub fn render_portal_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
+    use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Vec2};
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+    let label_size = 12.0;
+    let text_w = ui.measure_text(text, label_size);
+    let inner = Vec2::new(text_w, label_size);
+    let pad = Pad::symmetric(18.0, 5.0);
+    let outer_w = inner.x + pad.left + pad.right;
+    let outer_h = inner.y + pad.top + pad.bottom;
+    let rect = Rect::from_xywh((screen.x - outer_w) / 2.0, screen.y * 0.62, outer_w, outer_h);
+    let frame = Frame::panel(&theme)
+        .with_fill(Color::rgba(0.05, 0.08, 0.14, 0.92))
+        .with_padding(pad);
+    frame.show(ui, rect, |ui, body| {
+        ui.draw_text(
+            Pos2::new(body.x(), body.y()),
+            text,
+            label_size,
+            Color::rgba(0.55, 0.78, 1.0, 1.0),
+        );
+    });
 }
 
 /// Loot-pickup prompt — same chrome as [`render_portal_prompt`] but
@@ -496,18 +491,26 @@ pub fn render_portal_prompt(batch: &mut OverlayBatch, text: &str, sw: f32, sh: f
 /// can read the rarity at a glance. Placed slightly above the
 /// portal prompt anchor so the two never overlap.
 pub fn render_loot_prompt(
-    batch: &mut OverlayBatch,
+    ui: &mut rift_engine::ui::im::Ui<'_>,
     text: &str,
-    color: [f32; 4],
-    sw: f32,
-    sh: f32,
+    color: rift_engine::ui::im::Color,
 ) {
-    let tw = (text.len() as f32 * 8.5 + 36.0).max(220.0);
-    let th = 22.0;
-    let tx = (sw - tw) / 2.0;
-    let ty = sh * 0.70;
-    batch.rect_px(tx, ty, tw, th, [0.05, 0.05, 0.07, 0.82], sw, sh);
-    batch.text(text, tx + 18.0, ty + 5.0, 12.0, color, sw, sh);
+    use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Vec2};
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+    let label_size = 12.0;
+    let text_w = ui.measure_text(text, label_size);
+    let inner = Vec2::new(text_w, label_size);
+    let pad = Pad::symmetric(18.0, 5.0);
+    let outer_w = inner.x + pad.left + pad.right;
+    let outer_h = inner.y + pad.top + pad.bottom;
+    let rect = Rect::from_xywh((screen.x - outer_w) / 2.0, screen.y * 0.70, outer_w, outer_h);
+    let frame = Frame::panel(&theme)
+        .with_fill(Color::rgba(0.05, 0.05, 0.07, 0.92))
+        .with_padding(pad);
+    frame.show(ui, rect, |ui, body| {
+        ui.draw_text(Pos2::new(body.x(), body.y()), text, label_size, color);
+    });
 }
 
 /// Red screen-edge vignette shown briefly after the player takes damage.
@@ -515,8 +518,12 @@ pub fn render_loot_prompt(
 /// is preserved.  Implemented as four tapered borders + four corner
 /// triangles approximated by stacked rects (cheap; the overlay batch
 /// only supports rects).
-pub fn render_damage_flash(batch: &mut OverlayBatch, strength: f32, sw: f32, sh: f32) {
+pub fn render_damage_flash(ui: &mut Ui<'_>, strength: f32) {
     let s = strength.clamp(0.0, 1.0);
+    if s <= 0.001 { return; }
+    let screen = ui.screen_size();
+    let sw = screen.x;
+    let sh = screen.y;
     // Subtle border thickness; never grows large enough to obscure
     // gameplay near the screen edges.
     let t = 22.0 + 28.0 * s;
@@ -528,133 +535,110 @@ pub fn render_damage_flash(batch: &mut OverlayBatch, strength: f32, sw: f32, sh:
         let f = 1.0 - (i as f32 / STEPS as f32);
         let alpha = (0.22 * s * f).clamp(0.0, 0.32);
         let band = t * (1.0 - i as f32 / STEPS as f32);
-        let col = [0.78, 0.05, 0.05, alpha];
+        let col = Color::rgba(0.78, 0.05, 0.05, alpha);
         // top
-        batch.rect_px(0.0, 0.0, sw, band, col, sw, sh);
+        ui.draw_rect(Rect::from_xywh(0.0, 0.0, sw, band), col);
         // bottom
-        batch.rect_px(0.0, sh - band, sw, band, col, sw, sh);
+        ui.draw_rect(Rect::from_xywh(0.0, sh - band, sw, band), col);
         // left
-        batch.rect_px(0.0, 0.0, band, sh, col, sw, sh);
+        ui.draw_rect(Rect::from_xywh(0.0, 0.0, band, sh), col);
         // right
-        batch.rect_px(sw - band, 0.0, band, sh, col, sw, sh);
+        ui.draw_rect(Rect::from_xywh(sw - band, 0.0, band, sh), col);
     }
 }
 
-/// Render the ability bar (bottom-center).
-pub fn render_ability_bar(
-    batch: &mut OverlayBatch,
-    abilities: &AbilitySlot,
-    mouse_pos: (f32, f32),
-    sw: f32,
-    sh: f32,
-) {
-    let ab_size = 40.0;
-    let ab_gap = 4.0;
-    let ab_total_w = 6.0 * ab_size + 5.0 * ab_gap;
-    let ab_x = (sw - ab_total_w) / 2.0;
-    let ab_y = sh - ab_size - 10.0;
-    let ab_keys = ["LMB", "1", "2", "3", "4", "5"];
+/// Render the ability bar (bottom-center) via the immediate-mode UI.
+pub fn render_ability_bar(ui: &mut Ui<'_>, abilities: &AbilitySlot) {
+    const AB_SIZE: f32 = 64.0;
+    const AB_GAP: f32 = 6.0;
+    const AB_KEYS: [&str; 6] = ["LMB", "1", "2", "3", "4", "5"];
 
-    let mut hovered_slot: Option<usize> = None;
+    let screen = ui.screen_size();
+    let ab_total_w = 6.0 * AB_SIZE + 5.0 * AB_GAP;
+    let ab_x = (screen.x - ab_total_w) * 0.5;
+    let ab_y = screen.y - AB_SIZE - 16.0;
+
+    let mut hovered_idx: Option<usize> = None;
 
     for (i, slot) in abilities.slots.iter().enumerate() {
-        let sx = ab_x + i as f32 * (ab_size + ab_gap);
+        let pos = Pos2::new(ab_x + i as f32 * (AB_SIZE + AB_GAP), ab_y);
+        let id = Id::root("ability_bar").child(i);
 
-        // Check hover
-        if mouse_pos.0 >= sx && mouse_pos.0 <= sx + ab_size
-            && mouse_pos.1 >= ab_y && mouse_pos.1 <= ab_y + ab_size
-        {
-            hovered_slot = Some(i);
-        }
-
-        batch.rect_px(sx, ab_y, ab_size, ab_size, [0.12, 0.12, 0.18, 0.85], sw, sh);
-
+        let mut s = ItemSlot::new(AB_SIZE).key_label(AB_KEYS[i]);
         if let Some(state) = slot {
-            let ready = state.ready();
-            let color = if hovered_slot == Some(i) {
-                [0.4, 0.7, 1.0, 0.95] // brighter on hover
-            } else if ready {
-                [0.3, 0.6, 0.9, 0.9]
+            // `cooldown_progress()` returns elapsed/total; the
+            // overlay drains from full → empty as the cooldown
+            // ticks, so pass `1 - progress` (remaining fraction).
+            let remaining = 1.0 - state.cooldown_progress();
+            s = s.cooldown(remaining).enabled(state.ready());
+            if let Some(name) = state.ability.icon {
+                s = s.icon(name);
             } else {
-                [0.15, 0.2, 0.3, 0.7]
-            };
-            batch.rect_px(sx + 2.0, ab_y + 2.0, ab_size - 4.0, ab_size - 4.0, color, sw, sh);
-
-            if !ready {
-                let cd_pct = 1.0 - state.cooldown_progress();
-                let cd_h = (ab_size - 4.0) * cd_pct;
-                batch.rect_px(sx + 2.0, ab_y + 2.0, ab_size - 4.0, cd_h, [0.0, 0.0, 0.0, 0.6], sw, sh);
+                let abbrev = ability_abbrev(state.ability.name);
+                if let Some(ch) = abbrev.chars().next() {
+                    s = s.fallback_glyph(ch)
+                        .fallback_color(Color::rgba(0.6, 0.85, 1.0, 0.95));
+                }
             }
-
-            // Ability icon abbreviation
-            let abbrev = match state.ability.name {
-                "Steady Shot" => "SS",
-                "Multi-Shot" => "MS",
-                "Evasive Roll" => "ER",
-                "Rapid Fire" => "RF",
-                "Mark for Death" => "MK",
-                "Rain of Fire" => "RA",
-                _ => "??",
-            };
-            batch.text(abbrev, sx + 10.0, ab_y + 8.0, 14.0, [1.0, 1.0, 1.0, 0.9], sw, sh);
+        } else {
+            s = s.enabled(false);
         }
 
-        batch.text(ab_keys[i], sx + 2.0, ab_y + ab_size - 12.0, 10.0, [0.7, 0.7, 0.7, 0.8], sw, sh);
+        let resp = s.show(ui, pos, id);
+        if resp.hovered && slot.is_some() {
+            hovered_idx = Some(i);
+        }
     }
 
-    // Tooltip for hovered ability
-    if let Some(idx) = hovered_slot {
+    // Tooltip for hovered ability.
+    if let Some(idx) = hovered_idx {
         if let Some(Some(state)) = abilities.slots.get(idx) {
-            let tooltip_w = 220.0;
-            let tooltip_h = 70.0;
-            let tx = (sw - tooltip_w) / 2.0;
-            let ty = ab_y - tooltip_h - 8.0;
-
-            // Background
-            batch.rect_px(tx, ty, tooltip_w, tooltip_h, [0.08, 0.08, 0.12, 0.95], sw, sh);
-            // Border
-            batch.rect_px(tx, ty, tooltip_w, 1.0, [0.3, 0.5, 0.8, 0.8], sw, sh);
-            batch.rect_px(tx, ty + tooltip_h - 1.0, tooltip_w, 1.0, [0.3, 0.5, 0.8, 0.8], sw, sh);
-            batch.rect_px(tx, ty, 1.0, tooltip_h, [0.3, 0.5, 0.8, 0.8], sw, sh);
-            batch.rect_px(tx + tooltip_w - 1.0, ty, 1.0, tooltip_h, [0.3, 0.5, 0.8, 0.8], sw, sh);
-
-            // Name
-            batch.text(state.ability.name, tx + 8.0, ty + 6.0, 14.0, [1.0, 0.9, 0.5, 1.0], sw, sh);
-            // Description
-            batch.text(state.ability.description, tx + 8.0, ty + 24.0, 11.0, [0.8, 0.8, 0.8, 1.0], sw, sh);
-            // Stats line
-            let stats_text = if state.ability.cooldown > 0.0 {
-                format!("CD: {:.1}s | Dmg: {:.0}%", state.ability.cooldown, state.ability.damage_mult * 100.0)
+            let stats = if state.ability.cooldown > 0.0 {
+                format!(
+                    "CD: {:.1}s | Dmg: {:.0}%",
+                    state.ability.cooldown,
+                    state.ability.damage_mult * 100.0
+                )
             } else {
                 format!("Dmg: {:.0}%", state.ability.damage_mult * 100.0)
             };
-            batch.text(&stats_text, tx + 8.0, ty + 42.0, 11.0, [0.6, 0.8, 1.0, 0.9], sw, sh);
-            // Projectile info
-            if state.ability.projectile_count > 1 {
-                let proj_text = format!("Projectiles: {}", state.ability.projectile_count);
-                batch.text(&proj_text, tx + 8.0, ty + 55.0, 10.0, [0.7, 0.7, 0.7, 0.8], sw, sh);
+            let proj = if state.ability.projectile_count > 1 {
+                Some(format!("Projectiles: {}", state.ability.projectile_count))
+            } else {
+                None
+            };
+            let mut lines = vec![
+                TooltipLine::new(state.ability.name, 14.0, Color::rgba(1.0, 0.9, 0.5, 1.0)),
+                TooltipLine::new(state.ability.description, 11.0, Color::rgba(0.8, 0.8, 0.8, 1.0)),
+                TooltipLine::new(stats.as_str(), 11.0, Color::rgba(0.6, 0.8, 1.0, 0.9)),
+            ];
+            if let Some(ref p) = proj {
+                lines.push(TooltipLine::new(p.as_str(), 10.0, Color::rgba(0.7, 0.7, 0.7, 0.8)));
             }
+            // Anchor centred above the bar, then let the
+            // tooltip widget clamp inside the screen.
+            let tip_x = (screen.x - 220.0) * 0.5;
+            let tip_y = ab_y - 90.0;
+            Tooltip::new()
+                .min_width(220.0)
+                .show(ui, Pos2::new(tip_x, tip_y), &lines);
         }
     }
 }
 
 /// Render thin health bars above enemies that have taken damage.
-pub fn render_enemy_health_bars(
-    batch: &mut OverlayBatch,
-    world: &hecs::World,
-    view_proj: Mat4,
-    sw: f32,
-    sh: f32,
-) {
-    let bar_w = 52.0;
-    let bar_h = 6.0;
-    let y_offset = -24.0; // pixels above the projected position
-    let pip_size = 6.0;
-    let pip_gap = 2.0;
+pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
+    use rift_engine::ui::im::WorldUi;
+
+    const BAR_W: f32 = 52.0;
+    const BAR_H: f32 = 6.0;
+    const Y_OFFSET: f32 = -24.0;
+    const PIP_SIZE: f32 = 6.0;
+    const PIP_GAP: f32 = 2.0;
+
+    let mut wui = WorldUi::new(ui, view_proj);
 
     for (entity, (transform, _enemy, health)) in world.query::<(&Transform, &Enemy, &Health)>().iter() {
-        // Only show bar if enemy has taken damage OR carries any
-        // debuff (so debuff pips are still visible at full HP).
         let debuff_mask = world
             .get::<&Debuffs>(entity)
             .map(|d| d.mask)
@@ -664,56 +648,71 @@ pub fn render_enemy_health_bars(
             continue;
         }
 
-        // Project world position to screen
-        let world_pos = transform.position + glam::Vec3::new(0.0, 1.2, 0.0); // above head
-        let clip = view_proj * world_pos.extend(1.0);
+        let world_pos = transform.position + Vec3::new(0.0, 1.2, 0.0);
 
-        // Behind camera check
-        if clip.w <= 0.0 {
-            continue;
-        }
-
-        let ndc = clip.truncate() / clip.w;
-        // Off-screen check
-        if ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 {
-            continue;
-        }
-
-        // NDC to pixel coords (top-left origin)
-        let px = (ndc.x + 1.0) * 0.5 * sw;
-        let py = (ndc.y + 1.0) * 0.5 * sh; // Vulkan Y is flipped in proj already
-
-        let bx = px - bar_w * 0.5;
-        let by = py + y_offset;
-
-        if damaged {
+        let bar_rect = if damaged {
             let hp_pct = (health.current / health.max).clamp(0.0, 1.0);
-            // Background
-            batch.rect_px(bx, by, bar_w, bar_h, [0.0, 0.0, 0.0, 0.7], sw, sh);
-            // Health fill
+            // Enemy HP gradient (more saturated red than the
+            // friendly HP gradient since it's *their* HP draining).
             let color = if hp_pct > 0.5 {
-                [0.8, 0.1, 0.1, 0.9]
+                Color::rgba(0.8, 0.1, 0.1, 0.9)
             } else {
-                [0.9, 0.3, 0.0, 0.9]
+                Color::rgba(0.9, 0.3, 0.0, 0.9)
             };
-            batch.rect_px(bx, by, bar_w * hp_pct, bar_h, color, sw, sh);
-        }
+            wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color)
+        } else {
+            // No bar drawn, but we still want the anchor for pips.
+            wui.world_to_screen(world_pos)
+                .map(|anchor| Rect::from_xywh(anchor.x - BAR_W * 0.5, anchor.y + Y_OFFSET, BAR_W, BAR_H))
+        };
 
         // Debuff pips: one little square per active debuff,
-        // colored from the def. Stacked left-to-right just above
-        // the health bar (or at the bar's anchor if no HP bar
-        // was drawn).
+        // coloured from the registered def. Stacked left-to-right
+        // just above the bar.
         if debuff_mask != 0 {
-            let pips_y = by - pip_size - 2.0;
-            let mut x = bx;
-            for id in rift_game::debuffs::iter_mask(debuff_mask) {
-                let Some(def) = rift_game::debuffs::lookup(id) else { continue };
-                let [r, g, b] = def.color;
-                // 1px black outline so pips read on light walls.
-                batch.rect_px(x - 1.0, pips_y - 1.0, pip_size + 2.0, pip_size + 2.0, [0.0, 0.0, 0.0, 0.85], sw, sh);
-                batch.rect_px(x, pips_y, pip_size, pip_size, [r, g, b, 0.95], sw, sh);
-                x += pip_size + pip_gap;
+            if let Some(rect) = bar_rect {
+                let pips_y = rect.y() - PIP_SIZE - 2.0;
+                let mut x = rect.x();
+                for id in rift_game::debuffs::iter_mask(debuff_mask) {
+                    let Some(def) = rift_game::debuffs::lookup(id) else { continue };
+                    let [r, g, b] = def.color;
+                    // 1 px black outline so pips read on light walls.
+                    wui.ui().draw_rect(
+                        Rect::from_xywh(x - 1.0, pips_y - 1.0, PIP_SIZE + 2.0, PIP_SIZE + 2.0),
+                        Color::rgba(0.0, 0.0, 0.0, 0.85),
+                    );
+                    wui.ui().draw_rect(
+                        Rect::from_xywh(x, pips_y, PIP_SIZE, PIP_SIZE),
+                        Color::rgba(r, g, b, 0.95),
+                    );
+                    x += PIP_SIZE + PIP_GAP;
+                }
             }
         }
+    }
+}
+
+/// Two-letter shorthand for the ability-bar fallback when no icon
+/// is registered. Picks the initials of the first two words; falls
+/// back to the first two letters of a single-word name. Lower-case
+/// connector words ("of", "for", "the") are skipped so
+/// "Mark for Death" becomes `MD` instead of `MF`.
+fn ability_abbrev(name: &str) -> String {
+    const SKIP: &[&str] = &["of", "for", "the", "and", "to"];
+    let initials: Vec<char> = name
+        .split_whitespace()
+        .filter(|w| !SKIP.contains(&w.to_ascii_lowercase().as_str()))
+        .filter_map(|w| w.chars().next())
+        .map(|c| c.to_ascii_uppercase())
+        .take(2)
+        .collect();
+    if initials.len() >= 2 {
+        initials.into_iter().collect()
+    } else {
+        // Single-word name — use the first two letters.
+        let mut chars = name.chars();
+        let a = chars.next().unwrap_or('?').to_ascii_uppercase();
+        let b = chars.next().unwrap_or(a).to_ascii_uppercase();
+        format!("{a}{b}")
     }
 }

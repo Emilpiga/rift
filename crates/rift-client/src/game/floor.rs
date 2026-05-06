@@ -19,6 +19,11 @@ pub struct FloorManager {
     pub monsters: MonsterCache,
     pub props: Props,
     pub env: EnvTextures,
+    /// World position of the hub stash chest, set at the end of
+    /// [`Self::generate_hub`]. `None` when the active floor is a
+    /// rift floor (the chest only exists in the hub). Read by
+    /// `GameState::tick_stash_chest` for the proximity prompt.
+    pub stash_chest_pos: Option<Vec3>,
 }
 
 impl FloorManager {
@@ -30,6 +35,7 @@ impl FloorManager {
             monsters: MonsterCache::default(),
             props: Props::new(),
             env: EnvTextures::default(),
+            stash_chest_pos: None,
         }
     }
 
@@ -45,6 +51,9 @@ impl FloorManager {
     ) -> anyhow::Result<()> {
         *world = hecs::World::new();
         renderer.clear_objects();
+        // Rift floors don't host the chest; clear any stale
+        // hub-floor position so proximity tests can't false-fire.
+        self.stash_chest_pos = None;
 
         let config = FloorConfig::for_floor(rift.floor);
         let seed = seed_override
@@ -68,10 +77,11 @@ impl FloorManager {
             renderer.clear_color[1] * 1.2 + 0.002,
             renderer.clear_color[2] * 1.1 + 0.001,
         ];
-        // Tight, claustrophobic fog for the rift floors (restore the
-        // engine defaults in case we just came back from the bright hub).
-        renderer.fog_start = 5.0;
-        renderer.fog_end = 16.0;
+        // Moody-but-readable fog for the rift floors. Pushed out from
+        // the original 5..16 wall so the player can actually see the
+        // room they're in (without losing the dungeon-y atmosphere).
+        renderer.fog_start = 10.0;
+        renderer.fog_end = 32.0;
 
         // Floor mesh — only walkable tiles, batched into one draw
         let floor_positions = floor.floor_positions();
@@ -155,25 +165,41 @@ impl FloorManager {
         // Bright sunny meadow ambience: pale-blue sky, soft warm haze.
         renderer.clear_color = [0.55, 0.78, 0.95, 1.0];
         renderer.fog_color = [0.78, 0.88, 0.96];
-        // Push fog out so the forest border reads clearly and the
-        // meadow feels open instead of murky.
-        renderer.fog_start = 14.0;
-        renderer.fog_end = 42.0;
+        // Tight circular fog horizon: the playable hub is roughly
+        // 30 m across, so we let the player see ~12 m before
+        // everything dissolves into pale-blue haze. Combined with
+        // the oversized grass disc below, this produces the
+        // "mysterious circular platform" effect — the floor never
+        // visibly ends, it just fades into mist.
+        renderer.fog_start = 7.0;
+        renderer.fog_end = 14.0;
 
-        // Grass floor mesh — reuse the dungeon-floor batched geometry
-        // (UVs match `EnvTextures::ensure_grass`).
-        let floor_positions = floor.floor_positions();
-        let floor_mesh = Mesh::dungeon_floor(&floor_positions, 0);
-        renderer.add_mesh(&floor_mesh, Mat4::IDENTITY)?;
-        let floor_obj_idx = renderer.objects.len() - 1;
-
+        // Hub floor: use the oversized grass-apron disc only.
+        // The dungeon-floor batch tints itself with a per-floor
+        // base color (dark stone for floor_num 0), which left a
+        // visibly darker square patch over the playable tiles
+        // even when the grass texture was bound. Drawing just
+        // the apron \u2014 which uses a neutral white tint and
+        // world-space UVs \u2014 gives a single uniform grass
+        // surface across the whole hub. Wall collision still
+        // comes from `wall_positions` below; the inner floor
+        // mesh was always purely visual.
+        let hub_centre = Vec3::new(
+            (floor.width / 2) as f32,
+            -0.01,
+            (floor.depth / 2) as f32,
+        );
+        let apron = Mesh::ground_disc(hub_centre, 80.0, 96, Vec3::splat(1.0));
+        renderer.add_mesh(&apron, Mat4::IDENTITY)?;
+        let apron_obj_idx = renderer.objects.len() - 1;
         self.env.ensure_grass(renderer);
         if let Some(set) = self.env.grass_floor_set {
-            renderer.set_object_shared_material(floor_obj_idx, set);
+            renderer.set_object_shared_material(apron_obj_idx, set);
         }
 
-        // No wall mesh — trees take its place visually. We still keep
-        // colliders on every wall tile so the hub stays bounded.
+        // Wall colliders only — no wall mesh, no tree perimeter. The
+        // fog horizon hides the floor edge so the hub reads as a
+        // mysterious circular platform floating in mist.
         let wall_positions = floor.wall_positions();
         for pos in &wall_positions {
             world.spawn((
@@ -186,6 +212,23 @@ impl FloorManager {
         // Outdoor decoration: forest border + ground scatter.
         // Fixed seed = stable layout across deaths.
         props::nature::decorate_hub(&mut self.props, world, renderer, &floor, 0xC0FFEE);
+
+        // Player stash chest. Sits a couple of tiles to the south-east
+        // of the central portal so it's visible from the spawn point
+        // without blocking the walk-up to the portal. Yaw rotates it
+        // ~30° so the lid faces the spawn approach.
+        let portal_centre = floor.first_room_center();
+        let stash_pos = portal_centre + Vec3::new(2.6, 0.0, 2.2);
+        self.props.spawn(
+            world,
+            renderer,
+            &props::nature::STASH_CHEST,
+            stash_pos,
+            std::f32::consts::FRAC_PI_6 * -1.0,
+            (0, 0),
+            None,
+        );
+        self.stash_chest_pos = Some(stash_pos);
 
         let spawn = floor.spawn_pos;
         self.spawn_player(world, renderer, spawn, player_state, anim_cache)?;
@@ -299,5 +342,8 @@ pub fn spawn_remote_enemy_entity(
         attacking: false,
         lock_remaining: 0.0,
     });
+    if matches!(role, MonsterRole::Boss) {
+        builder.add(rift_engine::ecs::components::Boss);
+    }
     Ok(world.spawn(builder.build()))
 }

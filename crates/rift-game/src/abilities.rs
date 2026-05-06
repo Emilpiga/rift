@@ -106,6 +106,12 @@ pub struct Ability {
     pub wire_id: u8,
     pub name: &'static str,
     pub description: &'static str,
+    /// Filename stem (no extension) of the icon under
+    /// `assets/icons/` to render in HUD slots / tooltips.
+    /// `None` falls back to a coloured placeholder + 2-letter
+    /// abbreviation. Co-located with the ability so adding a
+    /// new ability + icon is a single-file change.
+    pub icon: Option<&'static str>,
     /// Cooldown in seconds.
     pub cooldown: f32,
     /// Resource cost (if any).
@@ -401,6 +407,7 @@ pub fn steady_shot() -> Ability {
         wire_id: id::STEADY_SHOT,
         name: "Steady Shot",
         description: "Fire a precise arrow at the target.",
+        icon: Some("Hunter_3"),
         cooldown: 0.5,
         resource_cost: 0.0,
         damage_mult: 1.0,
@@ -426,6 +433,7 @@ pub fn multi_shot() -> Ability {
         wire_id: id::MULTI_SHOT,
         name: "Multi-Shot",
         description: "Fire 3 arrows in a wide spread.",
+        icon: Some("Hunter_18"),
         cooldown: 4.0,
         resource_cost: 15.0,
         damage_mult: 0.7,
@@ -451,6 +459,7 @@ pub fn rapid_fire() -> Ability {
         wire_id: id::RAPID_FIRE,
         name: "Rapid Fire",
         description: "Channel a burst of 6 rapid arrows.",
+        icon: None,
         cooldown: 8.0,
         resource_cost: 25.0,
         damage_mult: 0.5,
@@ -476,6 +485,7 @@ pub fn rain_of_arrows() -> Ability {
         wire_id: id::RAIN_OF_ARROWS,
         name: "Rain of Fire",
         description: "Call down a rain of fire in an area. Burns enemies caught inside.",
+        icon: Some("FireMage_35"),
         cooldown: 12.0,
         resource_cost: 35.0,
         damage_mult: 0.4,
@@ -502,6 +512,7 @@ pub fn evasive_roll() -> Ability {
         wire_id: id::EVASIVE_ROLL,
         name: "Evasive Roll",
         description: "Dodge roll in movement direction. Brief invulnerability.",
+        icon: Some("Monk_27"),
         cooldown: 6.0,
         resource_cost: 0.0,
         damage_mult: 0.0,
@@ -528,6 +539,7 @@ pub fn mark_for_death() -> Ability {
         wire_id: id::MARK_FOR_DEATH,
         name: "Mark for Death",
         description: "Mark target. They take 25% increased damage for 6s.",
+        icon: None,
         cooldown: 15.0,
         resource_cost: 20.0,
         damage_mult: 0.0,
@@ -554,6 +566,7 @@ pub fn frost_ray() -> Ability {
         wire_id: id::FROST_RAY,
         name: "Frost Ray",
         description: "Channel a freezing beam. Slows and damages.",
+        icon: Some("FrostMage_7"),
         cooldown: 0.0,
         resource_cost: 0.0,
         damage_mult: 0.2,
@@ -577,6 +590,7 @@ pub fn whirlwind() -> Ability {
         wire_id: id::WHIRLWIND,
         name: "Whirlwind",
         description: "Spin in place, damaging nearby foes.",
+        icon: Some("Barbarian_18"),
         cooldown: 9.0,
         resource_cost: 25.0,
         damage_mult: 0.275,

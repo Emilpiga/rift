@@ -1,11 +1,19 @@
 use anyhow::Result;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
+use std::sync::{Arc, RwLock};
 
 use crate::hot_reload;
 use crate::renderer::font::BitmapFont;
 use crate::vulkan::buffer::{self, GpuBuffer};
 use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
+
+/// Shared `name -> [u0,v0,u1,v1]` icon registry. Owned by
+/// `OverlayRenderer` (which mutates it as PNGs stream in during
+/// loading) and read by `OverlayBatch::icon` at draw time. The
+/// shared handle lets the batch see new icons without an
+/// explicit hand-off after each load step.
+pub type IconUvRegistry = Arc<RwLock<std::collections::HashMap<String, [f32; 4]>>>;
 
 /// A 2D vertex for the overlay (screen-space NDC).
 #[repr(C)]
@@ -54,6 +62,10 @@ pub struct OverlayBatch {
     pub vertices: Vec<OverlayVertex>,
     pub indices: Vec<u32>,
     font: BitmapFont,
+    /// Shared registry populated by `OverlayRenderer` as icon
+    /// PNGs stream in during loading. Cloned `Arc` \u2014 mutations
+    /// from the renderer become visible here automatically.
+    icon_uv: IconUvRegistry,
 }
 
 impl OverlayBatch {
@@ -62,7 +74,24 @@ impl OverlayBatch {
             vertices: Vec::new(),
             indices: Vec::new(),
             font: BitmapFont::new(),
+            icon_uv: IconUvRegistry::default(),
         }
+    }
+
+    /// Bind to the renderer's shared icon UV registry and resync
+    /// the batch's internal font to match the actual overlay-atlas
+    /// dimensions. The atlas grows in height with the icon count;
+    /// without this resync, glyph UVs would still be computed
+    /// against the default size and sample into the icon region.
+    /// Called once by the renderer after `OverlayRenderer::new`.
+    pub fn bind_overlay_atlas(
+        &mut self,
+        icon_uv: IconUvRegistry,
+        atlas_width: u32,
+        atlas_height: u32,
+    ) {
+        self.icon_uv = icon_uv;
+        self.font = BitmapFont::with_atlas_size(atlas_width, atlas_height);
     }
 
     pub fn clear(&mut self) {
@@ -97,6 +126,94 @@ impl OverlayBatch {
         let ndc_w = (w / screen_w) * 2.0;
         let ndc_h = (h / screen_h) * 2.0;
         self.rect(ndc_x, ndc_y, ndc_w, ndc_h, color);
+    }
+
+    /// Filled rounded rectangle in pixel coordinates. `radius` is
+    /// the corner radius in pixels (clamped to half the smaller
+    /// side). Decomposed into a centre quad, four edge quads, and
+    /// four corner triangle fans so the result is a real circle in
+    /// pixel space (compensates for non-square viewports).
+    ///
+    /// For `radius <= 0.0` falls back to [`Self::rect_px`] so the
+    /// caller can pass `theme.spacing.corner_radius` unconditionally.
+    pub fn rounded_rect_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if radius <= 0.0 || w <= 0.0 || h <= 0.0 {
+            if w > 0.0 && h > 0.0 {
+                self.rect_px(x, y, w, h, color, screen_w, screen_h);
+            }
+            return;
+        }
+        let r = radius.min(w * 0.5).min(h * 0.5);
+
+        // Centre.
+        self.rect_px(x + r, y + r, w - 2.0 * r, h - 2.0 * r, color, screen_w, screen_h);
+        // Top + bottom edges (between the two top/bottom corners).
+        self.rect_px(x + r, y, w - 2.0 * r, r, color, screen_w, screen_h);
+        self.rect_px(x + r, y + h - r, w - 2.0 * r, r, color, screen_w, screen_h);
+        // Left + right edges.
+        self.rect_px(x, y + r, r, h - 2.0 * r, color, screen_w, screen_h);
+        self.rect_px(x + w - r, y + r, r, h - 2.0 * r, color, screen_w, screen_h);
+
+        // Corner fans. Segment count scales with radius so small
+        // radii don't pay for unnecessary triangles, but a 32 px
+        // dialog corner still looks smooth.
+        let segments = (r.ceil() as u32).clamp(3, 16);
+        // (centre_x, centre_y, start_angle, end_angle)
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const PI: f32 = std::f32::consts::PI;
+        let corners: [(f32, f32, f32); 4] = [
+            (x + r,         y + r,         PI),                  // TL: PI .. 1.5*PI
+            (x + w - r,     y + r,         1.5 * PI),             // TR: 1.5PI .. 2PI
+            (x + w - r,     y + h - r,     0.0),                  // BR: 0 .. PI/2
+            (x + r,         y + h - r,     HALF_PI),              // BL: PI/2 .. PI
+        ];
+        for (cx, cy, start) in corners {
+            self.corner_fan_px(cx, cy, r, start, HALF_PI, segments, color, screen_w, screen_h);
+        }
+    }
+
+    /// Triangle-fan helper used by [`Self::rounded_rect_px`]. Emits
+    /// `segments` triangles spanning `[start, start + sweep]` (radians)
+    /// around `(cx, cy)` with radius `r`.
+    fn corner_fan_px(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        start: f32,
+        sweep: f32,
+        segments: u32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let centre = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex { position: to_ndc(cx, cy), color, uv });
+        let step = sweep / segments as f32;
+        for i in 0..=segments {
+            let a = start + step * i as f32;
+            let px = cx + a.cos() * r;
+            let py = cy + a.sin() * r;
+            self.vertices.push(OverlayVertex { position: to_ndc(px, py), color, uv });
+            if i > 0 {
+                let last = centre + i;
+                self.indices.extend_from_slice(&[centre, last - 1, last]);
+            }
+        }
     }
 
     /// Draw a text string at pixel position (top-left origin).
@@ -142,6 +259,62 @@ impl OverlayBatch {
         text.len() as f32 * self.font.glyph_width as f32 * scale
     }
 
+    /// Draw a registered icon at pixel position (top-left origin).
+    /// `name` matches the key the renderer registered the icon
+    /// under (typically the PNG filename without extension, e.g.
+    /// "Hunter_3"). `tint` is multiplied with the icon's RGBA \u2014
+    /// pass `[1.0, 1.0, 1.0, 1.0]` to keep the original colours.
+    /// Silently no-ops on an unknown name so callers can fall
+    /// back to a placeholder rect / glyph without branching.
+    pub fn icon(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tint: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> bool {
+        let Some(&[u0, v0, u1, v1]) = self.icon_uv.read().unwrap().get(name) else {
+            return false;
+        };
+        let ndc_x = (x / screen_w) * 2.0 - 1.0;
+        let ndc_y = (y / screen_h) * 2.0 - 1.0;
+        let ndc_w = (w / screen_w) * 2.0;
+        let ndc_h = (h / screen_h) * 2.0;
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x, ndc_y],
+            color: tint,
+            uv: [u0, v0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x + ndc_w, ndc_y],
+            color: tint,
+            uv: [u1, v0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x + ndc_w, ndc_y + ndc_h],
+            color: tint,
+            uv: [u1, v1],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x, ndc_y + ndc_h],
+            color: tint,
+            uv: [u0, v1],
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        true
+    }
+
+    /// True when an icon was registered under `name`.
+    pub fn has_icon(&self, name: &str) -> bool {
+        self.icon_uv.read().unwrap().contains_key(name)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
@@ -161,6 +334,35 @@ pub struct OverlayRenderer {
     vertex_buffers: Vec<Option<GpuBuffer>>,
     index_buffers: Vec<Option<GpuBuffer>>,
     index_counts: Vec<u32>,
+    /// Shared registry of `name -> uv-rect` for icons painted
+    /// into the atlas. Populated incrementally by
+    /// [`Self::step_load_icons`]. Hand the clone to
+    /// `OverlayBatch::bind_overlay_atlas` once at startup; new
+    /// entries are visible automatically thereafter.
+    icon_uv: IconUvRegistry,
+    /// Final dimensions of the composited overlay atlas. Width is
+    /// fixed but height grows with the icon count, so consumers
+    /// (e.g. `OverlayBatch`'s glyph UVs) need to be resynced.
+    atlas_width: u32,
+    atlas_height: u32,
+    /// Icon PNGs discovered at startup, paired with their
+    /// registry key (the path stem relative to `assets/icons/`,
+    /// using forward slashes — e.g. `loot/Boots/Boots_1` or
+    /// `Hunter_3`). Consumed in order by [`Self::step_load_icons`]
+    /// across many frames so the loading screen stays responsive.
+    /// Indexed via [`Self::next_icon_idx`] rather than popped
+    /// from the front — popping a `Vec`'s head is O(n).
+    pending_icon_paths: Vec<(std::path::PathBuf, String)>,
+    /// Cursor into [`Self::pending_icon_paths`] of the next
+    /// icon to decode. When `next_icon_idx >= pending_icon_paths.len()`
+    /// streaming is complete.
+    next_icon_idx: usize,
+    /// Total icons discovered (for progress reporting).
+    total_icons: usize,
+    /// Icons whose decode + upload has completed (or been
+    /// permanently skipped). Used as the slot index for the
+    /// next icon and as the "loaded" half of progress.
+    loaded_icons: usize,
 }
 
 impl OverlayRenderer {
@@ -173,11 +375,26 @@ impl OverlayRenderer {
         extent: vk::Extent2D,
         shader_dir: &std::path::Path,
     ) -> Result<Self> {
-        // Create font atlas texture
-        let font = BitmapFont::new();
+        // Build the overlay atlas in two stages:
+        //   1. Synchronously paint the font glyphs (top-left
+        //      97x48 region) so the loading screen \u2014 which
+        //      starts drawing the very next frame \u2014 has working
+        //      glyph UVs.
+        //   2. Stream icon PNGs in across many frames via
+        //      [`Self::step_load_icons`] so decode + resampling
+        //      work doesn't stall the window before the loading
+        //      screen appears.
+        //
+        // The atlas image is sized up-front to fit every PNG in
+        // `assets/icons/`; the icon region starts as zeros and
+        // is filled in via sub-region uploads as icons load.
+        let icon_paths = discover_icon_paths();
+        let total_icons = icon_paths.len();
+        let atlas_w = crate::renderer::font::OVERLAY_ATLAS_SIZE;
+        let atlas_h = compute_atlas_height(total_icons as u32);
+
+        let font = BitmapFont::with_atlas_size(atlas_w, atlas_h);
         let atlas_data = font.atlas_data();
-        let atlas_w = font.atlas_width;
-        let atlas_h = font.atlas_height;
 
         let (font_image, font_allocation) = Self::create_font_image(
             device, allocator, queue, command_pool, &atlas_data, atlas_w, atlas_h,
@@ -196,6 +413,11 @@ impl OverlayRenderer {
             device, render_pass, extent, descriptor_set_layout, shader_dir,
         )?;
 
+        log::info!(
+            "overlay: atlas {}x{}, {} icon(s) queued for streaming load",
+            atlas_w, atlas_h, total_icons,
+        );
+
         Ok(Self {
             pipeline,
             pipeline_layout,
@@ -209,7 +431,222 @@ impl OverlayRenderer {
             vertex_buffers: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             index_buffers: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             index_counts: vec![0; MAX_FRAMES_IN_FLIGHT],
+            icon_uv: IconUvRegistry::default(),
+            atlas_width: atlas_w,
+            atlas_height: atlas_h,
+            pending_icon_paths: icon_paths,
+            next_icon_idx: 0,
+            total_icons,
+            loaded_icons: 0,
         })
+    }
+
+    /// Final dimensions of the composited overlay atlas. The
+    /// height grows with the icon count, so callers that compute
+    /// UVs in pixel space need this to normalize correctly.
+    pub fn atlas_size(&self) -> (u32, u32) {
+        (self.atlas_width, self.atlas_height)
+    }
+
+    /// Cloneable handle to the shared icon UV registry. Pass to
+    /// `OverlayBatch::bind_overlay_atlas` once at startup; later
+    /// `step_load_icons` calls update it in place.
+    pub fn icon_uv_registry(&self) -> IconUvRegistry {
+        self.icon_uv.clone()
+    }
+
+    /// Total icons discovered at startup (for progress UI).
+    pub fn total_icons(&self) -> usize { self.total_icons }
+    /// Icons whose decode + upload has completed.
+    pub fn loaded_icons(&self) -> usize { self.loaded_icons }
+
+    /// Decode + upload up to `budget` queued icon PNGs into the
+    /// atlas's icon region, registering each one's UV rect.
+    /// All icons in this call are batched into a single staging
+    /// buffer and a single command-buffer submit, which is far
+    /// cheaper than one submit per icon (the previous approach
+    /// idled the GPU on a fence wait between every 48×48 copy).
+    /// Returns `(loaded, total)` for progress reporting; loading
+    /// is complete when `loaded == total`.
+    pub fn step_load_icons(
+        &mut self,
+        device: &ash::Device,
+        allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        budget: usize,
+    ) -> Result<(usize, usize)> {
+        use crate::renderer::font::ICON_REGION_Y;
+        use image::imageops::FilterType;
+
+        // (slot, name, pixels) for each icon that decoded
+        // successfully and fits in the atlas. Built up in CPU
+        // memory first, then committed to the GPU in a single
+        // submit at the end of the call.
+        let mut decoded: Vec<(u32, String, Vec<u8>)> = Vec::new();
+        let icon_byte_count = (ICON_SLOT_PX * ICON_SLOT_PX * 4) as usize;
+
+        // Reserve the slot range we're about to fill before
+        // decoding so the parallel decode pass can run without
+        // touching `self`. Track entries that fit the atlas;
+        // those that don't are dropped with a warning.
+        let mut jobs: Vec<(u32, std::path::PathBuf, String)> = Vec::with_capacity(budget);
+        for _ in 0..budget {
+            if self.next_icon_idx >= self.pending_icon_paths.len() { break; }
+            let (path, name) = {
+                let entry = &self.pending_icon_paths[self.next_icon_idx];
+                (entry.0.clone(), entry.1.clone())
+            };
+            self.next_icon_idx += 1;
+            let slot = self.loaded_icons as u32;
+            // Charge the slot regardless of outcome — a failed
+            // icon still consumes its slot so progress
+            // monotonically advances and slot indices stay
+            // aligned with the originally discovered order.
+            self.loaded_icons += 1;
+
+            let col = slot % ICON_COLS;
+            let row = slot / ICON_COLS;
+            let x0 = col * ICON_SLOT_PX;
+            let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
+            if x0 + ICON_SLOT_PX > self.atlas_width
+                || y0 + ICON_SLOT_PX > self.atlas_height
+            {
+                log::warn!("overlay: atlas full — dropping icon {name} (slot {slot})");
+                continue;
+            }
+            jobs.push((slot, path, name));
+        }
+
+        // Decode + resize in parallel. PNG decompression and the
+        // Catmull-Rom resize are both CPU-bound and embarrassingly
+        // parallel; with ~330 icons this drops the loading screen
+        // from O(seconds) to O(hundreds of ms) on a multi-core box.
+        use rayon::prelude::*;
+        let decoded_par: Vec<Option<(u32, String, Vec<u8>)>> = jobs
+            .into_par_iter()
+            .map(|(slot, path, name)| {
+                let img = match image::open(&path) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        log::warn!(
+                            "overlay: failed to load icon {}: {e}",
+                            path.display(),
+                        );
+                        return None;
+                    }
+                };
+                let resized = img
+                    .resize_exact(ICON_SLOT_PX, ICON_SLOT_PX, FilterType::CatmullRom)
+                    .to_rgba8();
+                Some((slot, name, resized.into_raw()))
+            })
+            .collect();
+        for entry in decoded_par.into_iter().flatten() {
+            decoded.push(entry);
+        }
+
+        if decoded.is_empty() {
+            return Ok((self.loaded_icons, self.total_icons));
+        }
+
+        // Single staging buffer holding every icon's pixels back
+        // to back. Each icon owns a contiguous slice; the buffer
+        // offset of icon `i` is `i * icon_byte_count`.
+        let mut staging_bytes: Vec<u8> = Vec::with_capacity(decoded.len() * icon_byte_count);
+        for (_, _, pixels) in &decoded {
+            staging_bytes.extend_from_slice(pixels);
+        }
+        let staging = buffer::create_host_buffer(
+            device, allocator, &staging_bytes,
+            vk::BufferUsageFlags::TRANSFER_SRC, "icon_staging_batch",
+        )?;
+
+        let cmd = Self::begin_single_time_commands(device, command_pool)?;
+        let subresource = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1,
+            base_array_layer: 0, layer_count: 1,
+        };
+        unsafe {
+            // One SHADER_READ_ONLY -> TRANSFER_DST barrier covers
+            // every copy in this batch.
+            let to_dst = vk::ImageMemoryBarrier::default()
+                .image(self.font_image)
+                .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::SHADER_READ)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .subresource_range(subresource);
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[], &[], &[to_dst],
+            );
+
+            // Build one BufferImageCopy per decoded icon. They all
+            // share the same source buffer, just different offsets
+            // and image_offset rects.
+            let regions: Vec<vk::BufferImageCopy> = decoded.iter().enumerate().map(|(i, (slot, _, _))| {
+                let col = slot % ICON_COLS;
+                let row = slot / ICON_COLS;
+                let x0 = col * ICON_SLOT_PX;
+                let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
+                vk::BufferImageCopy::default()
+                    .buffer_offset((i * icon_byte_count) as u64)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: x0 as i32, y: y0 as i32, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width: ICON_SLOT_PX, height: ICON_SLOT_PX, depth: 1,
+                    })
+            }).collect();
+            device.cmd_copy_buffer_to_image(
+                cmd, staging.buffer, self.font_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions,
+            );
+
+            // TRANSFER_DST -> SHADER_READ_ONLY
+            let to_read = vk::ImageMemoryBarrier::default()
+                .image(self.font_image)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .subresource_range(subresource);
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[], &[], &[to_read],
+            );
+        }
+        Self::end_single_time_commands(device, command_pool, queue, cmd)?;
+
+        let mut staging = staging;
+        staging.cleanup(device, allocator);
+
+        // Now that the GPU upload is committed, register the UVs
+        // so subsequent draws can resolve these icons.
+        let mut registry = self.icon_uv.write().unwrap();
+        for (slot, name, _) in decoded {
+            let col = slot % ICON_COLS;
+            let row = slot / ICON_COLS;
+            let x0 = col * ICON_SLOT_PX;
+            let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
+            let u0 = x0 as f32 / self.atlas_width as f32;
+            let v0 = y0 as f32 / self.atlas_height as f32;
+            let u1 = (x0 + ICON_SLOT_PX) as f32 / self.atlas_width as f32;
+            let v1 = (y0 + ICON_SLOT_PX) as f32 / self.atlas_height as f32;
+            registry.insert(name, [u0, v0, u1, v1]);
+        }
+
+        Ok((self.loaded_icons, self.total_icons))
     }
 
     /// Upload overlay batch to GPU. Call once per frame before recording.
@@ -491,7 +928,7 @@ impl OverlayRenderer {
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8_UNORM)
+            .format(vk::Format::R8G8B8A8_UNORM)
             .extent(vk::Extent3D { width, height, depth: 1 })
             .mip_levels(1)
             .array_layers(1)
@@ -581,7 +1018,7 @@ impl OverlayRenderer {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8_UNORM)
+            .format(vk::Format::R8G8B8A8_UNORM)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0, level_count: 1,
@@ -592,6 +1029,12 @@ impl OverlayRenderer {
     }
 
     fn create_sampler(device: &ash::Device) -> Result<vk::Sampler> {
+        // NEAREST for both filters \u2014 the bitmap font glyphs sit
+        // edge-to-edge in the atlas with no padding, so LINEAR
+        // would bleed neighbouring glyphs into each other. Icons
+        // are pre-resized to their slot size, so NEAREST renders
+        // them 1:1 without aliasing as long as the HUD slot size
+        // matches `ICON_SLOT_PX`.
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::NEAREST)
@@ -665,3 +1108,87 @@ impl OverlayRenderer {
         }
     }
 }
+
+/// Side length of one icon slot in the overlay atlas, in pixels.
+const ICON_SLOT_PX: u32 = 48;
+/// How many icons fit per atlas row.
+const ICON_COLS: u32 = 4;
+
+/// Discover every `*.png` under `assets/icons/` recursively and
+/// return their `(path, key)` pairs sorted by key. The key is the
+/// path relative to `assets/icons/` with the `.png` extension
+/// stripped and `\` rewritten to `/` so look-ups work the same
+/// on Windows and POSIX.
+///
+/// Sorting makes slot indices deterministic across runs (read-dir
+/// order isn't guaranteed); the slot index doesn't matter for
+/// look-up since names are the key, but stable layout helps when
+/// debugging the atlas image. A missing/unreadable directory
+/// yields an empty list — the engine still boots, HUD just falls
+/// back.
+///
+/// Subdirectories are scoped into the key (e.g.
+/// `assets/icons/loot/Boots/Boots_1.png` ⇒ `loot/Boots/Boots_1`)
+/// so collisions between e.g. flat ability icons (`Hunter_3`)
+/// and slot-scoped item icons (`loot/Boots/Boots_1`) are
+/// impossible by construction.
+fn discover_icon_paths() -> Vec<(std::path::PathBuf, String)> {
+    let base_dir = std::path::Path::new("assets").join("icons");
+    let mut out: Vec<(std::path::PathBuf, String)> = Vec::new();
+    if !base_dir.exists() {
+        log::warn!(
+            "overlay: icon dir {} not present; HUD will fall back to placeholders",
+            base_dir.display(),
+        );
+        return out;
+    }
+    let mut stack: Vec<std::path::PathBuf> = vec![base_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(e) => {
+                log::warn!("overlay: icon dir {} not readable ({e})", dir.display());
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let is_png = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("png"))
+                .unwrap_or(false);
+            if !is_png {
+                continue;
+            }
+            let rel = match path.strip_prefix(&base_dir) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            // Drop the .png extension and normalise separators.
+            let mut key = rel.with_extension("").to_string_lossy().into_owned();
+            if std::path::MAIN_SEPARATOR != '/' {
+                key = key.replace(std::path::MAIN_SEPARATOR, "/");
+            }
+            out.push((path, key));
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+/// Compute the overlay-atlas height needed to fit `icon_count`
+/// icon slots below the font region. Always at least
+/// `OVERLAY_ATLAS_SIZE` so the atlas stays square at minimum.
+/// Width is fixed; only height grows.
+fn compute_atlas_height(icon_count: u32) -> u32 {
+    use crate::renderer::font::{ICON_REGION_Y, OVERLAY_ATLAS_SIZE};
+    let rows = (icon_count + ICON_COLS - 1) / ICON_COLS;
+    let needed = ICON_REGION_Y + rows * ICON_SLOT_PX;
+    needed.max(OVERLAY_ATLAS_SIZE)
+}
+

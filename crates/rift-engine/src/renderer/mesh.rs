@@ -606,6 +606,41 @@ impl Mesh {
         Self { vertices, indices }
     }
 
+    /// Flat horizontal disc centred at `center`. Used by the hub to
+    /// extend the ground far beyond the playable area so the floor's
+    /// hard edge fades into the fog instead of cutting off in mid-air.
+    /// UVs are world-space so a tiling grass / stone material maps
+    /// continuously with the main dungeon floor.
+    pub fn ground_disc(center: Vec3, radius: f32, segments: u32, color: Vec3) -> Self {
+        let segments = segments.max(8);
+        let mut vertices = Vec::with_capacity((segments + 1) as usize);
+        let mut indices = Vec::with_capacity((segments * 3) as usize);
+
+        // Centre vertex.
+        vertices.push(Vertex {
+            position: center,
+            normal: Vec3::Y,
+            color,
+            uv: Vec2::new(center.x, center.z),
+        });
+        for i in 0..segments {
+            let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let p = Vec3::new(center.x + a.cos() * radius, center.y, center.z + a.sin() * radius);
+            vertices.push(Vertex {
+                position: p,
+                normal: Vec3::Y,
+                color,
+                uv: Vec2::new(p.x, p.z),
+            });
+        }
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            indices.extend_from_slice(&[0, 1 + next, 1 + i]);
+        }
+
+        Self { vertices, indices }
+    }
+
     /// A small glowing loot orb (diamond-shaped, colored by rarity).
     pub fn loot_orb(color: [f32; 3]) -> Self {
         let v = |pos: [f32; 3], normal: [f32; 3]| Vertex {
@@ -905,14 +940,21 @@ impl Mesh {
 
     /// Fireball: a glowing emissive sphere built as a low-poly UV sphere.
     /// Vertex colors interpolate from a hot white core to orange edges so it
-    /// reads as a fireball even without point lights. Diameter ≈ 0.45 units.
+    /// reads as a fireball even without point lights. The colours are pushed
+    /// well above 1.0 so the bloom pass picks the body up as a bright
+    /// glowing core, and the edge tint is a deeper orange-red so the sphere
+    /// reads against the fireball trail's embers instead of disappearing
+    /// into them. Diameter ≈ 0.55 units.
     pub fn fireball() -> Self {
-        let radius = 0.22_f32;
-        let stacks = 8usize;
-        let sectors = 12usize;
+        let radius = 0.27_f32;
+        let stacks = 10usize;
+        let sectors = 16usize;
 
-        let core = glam::Vec3::new(1.0, 1.0, 0.85);   // white-hot core hint
-        let edge = glam::Vec3::new(1.0, 0.45, 0.05);  // orange flame
+        // HDR core / edge — bloom picks these up so the projectile
+        // looks like a self-lit ball of fire even before the trail
+        // particles draw on top of it.
+        let core = glam::Vec3::new(4.5, 3.8, 1.6);  // white-hot HDR core
+        let edge = glam::Vec3::new(2.4, 0.6, 0.05); // saturated orange flame
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity((stacks + 1) * (sectors + 1));
         for i in 0..=stacks {
@@ -955,82 +997,148 @@ impl Mesh {
         Self { vertices, indices }
     }
 
-    /// Portal: a vertical ring/torus-like shape with glowing inner surface.
+    /// Portal: a glowing vertical ring with a swirled, layered
+    /// inner surface. Built as:
+    ///   * an outer torus frame (deep arcane blue),
+    ///   * a thinner inner torus rim (bright cyan),
+    ///   * a multi-ring inner disc whose vertex colours fall off
+    ///     from a hot white core through cyan to deep blue at the
+    ///     edge, mirrored on the back face so the portal reads
+    ///     from any camera angle.
     pub fn portal() -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let segments = 24;
-        let ring_radius = 1.0_f32;
-        let tube_radius = 0.12_f32;
-        let height = 1.8_f32;
+        let segments: u32 = 48;
+        let ring_radius = 1.15_f32;
+        let tube_radius = 0.16_f32;
+        let height = 2.1_f32;
+        let cy_offset = height * 0.5;
 
-        // Outer ring (vertical ellipse)
-        let outer_color = Vec3::new(0.2, 0.5, 1.0);
-        let inner_color = Vec3::new(0.6, 0.9, 1.0);
+        // HDR-ish vertex colours. The forward shader treats vertex
+        // colour as emissive-tinted so values >1.0 push the
+        // bloom pass.
+        let frame_color = Vec3::new(0.25, 0.55, 1.6);
+        let rim_color = Vec3::new(0.7, 1.4, 2.4);
+        let core_color = Vec3::new(2.6, 2.8, 3.0);
+        let mid_color = Vec3::new(0.9, 1.6, 2.6);
+        let edge_color = Vec3::new(0.15, 0.45, 1.4);
 
-        for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let next_angle = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+        // Helper: emit a torus ring with the given radii and colour.
+        let push_torus = |vertices: &mut Vec<Vertex>,
+                              indices: &mut Vec<u32>,
+                              big_r: f32,
+                              tube_r: f32,
+                              color: Vec3| {
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
 
-            let cx = angle.cos() * ring_radius;
-            let cy = angle.sin() * (height * 0.5) + height * 0.5;
-            let nx = next_angle.cos() * ring_radius;
-            let ny = next_angle.sin() * (height * 0.5) + height * 0.5;
+                let (sx0, sy0) = (a0.cos() * big_r, a0.sin() * (height * 0.5) + cy_offset);
+                let (sx1, sy1) = (a1.cos() * big_r, a1.sin() * (height * 0.5) + cy_offset);
+                let n0 = Vec3::new(a0.cos(), a0.sin(), 0.0).normalize();
+                let n1 = Vec3::new(a1.cos(), a1.sin(), 0.0).normalize();
+                let base = vertices.len() as u32;
 
-            // Tube cross-section (4 verts per segment)
-            let normal_out = Vec3::new(angle.cos(), angle.sin(), 0.0).normalize();
-            let base_idx = vertices.len() as u32;
+                // 4 verts per segment: front-outer, front-inner-z (+z), back-outer, back-inner (-z).
+                vertices.push(Vertex { position: Vec3::new(sx0 + n0.x * tube_r, sy0 + n0.y * tube_r, tube_r), normal: n0, color, uv: Vec2::new(0.5, 0.5) });
+                vertices.push(Vertex { position: Vec3::new(sx0 - n0.x * tube_r, sy0 - n0.y * tube_r, -tube_r), normal: n0, color, uv: Vec2::new(0.5, 0.5) });
+                vertices.push(Vertex { position: Vec3::new(sx1 - n1.x * tube_r, sy1 - n1.y * tube_r, -tube_r), normal: n1, color, uv: Vec2::new(0.5, 0.5) });
+                vertices.push(Vertex { position: Vec3::new(sx1 + n1.x * tube_r, sy1 + n1.y * tube_r, tube_r), normal: n1, color, uv: Vec2::new(0.5, 0.5) });
 
-            // Outer face of tube
-            vertices.push(Vertex { position: Vec3::new(cx - tube_radius * angle.cos(), cy - tube_radius * angle.sin(), -tube_radius), normal: normal_out, color: outer_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(cx + tube_radius * angle.cos(), cy + tube_radius * angle.sin(), -tube_radius), normal: normal_out, color: outer_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(nx + tube_radius * next_angle.cos(), ny + tube_radius * next_angle.sin(), -tube_radius), normal: normal_out, color: outer_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(nx - tube_radius * next_angle.cos(), ny - tube_radius * next_angle.sin(), -tube_radius), normal: normal_out, color: outer_color, uv: Vec2::new(0.5, 0.5) });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+            }
+        };
 
-            indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
-        }
+        // Outer frame torus.
+        push_torus(&mut vertices, &mut indices, ring_radius, tube_radius, frame_color);
+        // Bright inner rim torus, sitting just inside the frame.
+        push_torus(&mut vertices, &mut indices, ring_radius * 0.92, tube_radius * 0.55, rim_color);
 
-        // Inner disc (the "portal surface" — glowing flat disc)
-        let disc_segments = 16;
+        // Multi-ring inner disc with a radial colour gradient. Three
+        // concentric rings: r = 0 (core), 0.55 (mid), 0.95 (edge).
+        // We emit triangles between the rings so the gradient is
+        // smooth across the disc.
+        let disc_segments: u32 = 32;
+        let disc_r = ring_radius * 0.88;
+
+        // Centre vertex.
         let center_idx = vertices.len() as u32;
-        vertices.push(Vertex { position: Vec3::new(0.0, height * 0.5, 0.0), normal: Vec3::Z, color: inner_color, uv: Vec2::new(0.5, 0.5) });
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, cy_offset, 0.0),
+            normal: Vec3::Z,
+            color: core_color,
+            uv: Vec2::new(0.5, 0.5),
+        });
 
-        for i in 0..disc_segments {
-            let angle = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
-            let r = ring_radius * 0.85;
-            vertices.push(Vertex {
-                position: Vec3::new(angle.cos() * r, angle.sin() * (height * 0.45) + height * 0.5, 0.0),
-                normal: Vec3::Z,
-                color: inner_color,
-                uv: Vec2::new(0.5, 0.5),
-            });
-        }
+        let push_ring =
+            |vertices: &mut Vec<Vertex>, r_xz: f32, r_y: f32, color: Vec3, normal: Vec3| -> u32 {
+                let start = vertices.len() as u32;
+                for i in 0..disc_segments {
+                    let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
+                    vertices.push(Vertex {
+                        position: Vec3::new(a.cos() * r_xz, a.sin() * r_y + cy_offset, 0.0),
+                        normal,
+                        color,
+                        uv: Vec2::new(0.5, 0.5),
+                    });
+                }
+                start
+            };
+
+        let mid_start = push_ring(&mut vertices, disc_r * 0.55, height * 0.45 * 0.55, mid_color, Vec3::Z);
+        let edge_start = push_ring(&mut vertices, disc_r, height * 0.45, edge_color, Vec3::Z);
+
+        // Core fan (centre → mid ring).
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[center_idx, center_idx + 1 + i as u32, center_idx + 1 + next as u32]);
+            indices.extend_from_slice(&[
+                center_idx,
+                mid_start + i,
+                mid_start + next,
+            ]);
+        }
+        // Mid → edge ring band.
+        for i in 0..disc_segments {
+            let next = (i + 1) % disc_segments;
+            indices.extend_from_slice(&[
+                mid_start + i,
+                edge_start + i,
+                edge_start + next,
+                mid_start + i,
+                edge_start + next,
+                mid_start + next,
+            ]);
         }
 
-        // Mirror disc on the other side (back-face) so the portal reads
-        // from any camera angle. Duplicate verts with flipped normal and
-        // reversed winding so it's still single-sided per face but the
-        // glowing surface is visible from both sides.
+        // Back-face mirror so the portal reads from behind too.
         let back_center = vertices.len() as u32;
-        vertices.push(Vertex { position: Vec3::new(0.0, height * 0.5, 0.0), normal: -Vec3::Z, color: inner_color, uv: Vec2::new(0.5, 0.5) });
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, cy_offset, 0.0),
+            normal: -Vec3::Z,
+            color: core_color,
+            uv: Vec2::new(0.5, 0.5),
+        });
+        let back_mid_start = push_ring(&mut vertices, disc_r * 0.55, height * 0.45 * 0.55, mid_color, -Vec3::Z);
+        let back_edge_start = push_ring(&mut vertices, disc_r, height * 0.45, edge_color, -Vec3::Z);
         for i in 0..disc_segments {
-            let angle = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
-            let r = ring_radius * 0.85;
-            vertices.push(Vertex {
-                position: Vec3::new(angle.cos() * r, angle.sin() * (height * 0.45) + height * 0.5, 0.0),
-                normal: -Vec3::Z,
-                color: inner_color,
-                uv: Vec2::new(0.5, 0.5),
-            });
+            let next = (i + 1) % disc_segments;
+            indices.extend_from_slice(&[
+                back_center,
+                back_mid_start + next,
+                back_mid_start + i,
+            ]);
         }
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
-            // Reverse winding so the back face's normal points -Z.
-            indices.extend_from_slice(&[back_center, back_center + 1 + next as u32, back_center + 1 + i as u32]);
+            indices.extend_from_slice(&[
+                back_mid_start + i,
+                back_edge_start + next,
+                back_edge_start + i,
+                back_mid_start + i,
+                back_mid_start + next,
+                back_edge_start + next,
+            ]);
         }
 
         Self { vertices, indices }

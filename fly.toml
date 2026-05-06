@@ -1,0 +1,45 @@
+# fly.io deployment config for rift-server.
+#
+# fly.io is one of the very few PaaS hosts that exposes raw UDP
+# directly. The renet/netcode transport REQUIRES UDP, so this is
+# the path of least resistance for a hosted dedicated server.
+#
+# One-time setup (after `flyctl auth login`):
+#   flyctl launch --copy-config --no-deploy
+#   flyctl postgres create --name rift-db && flyctl postgres attach rift-db
+#   flyctl ips allocate-v4
+#   flyctl secrets set RIFT_PUBLIC=$(flyctl ips list -j | jq -r '.[0].Address'):34000
+#   flyctl deploy
+#
+# Re-deploy after a code change:
+#   flyctl deploy
+#
+# Tail logs:
+#   flyctl logs
+
+app = "rift-server"
+primary_region = "ams"   # pick whichever region is closest to you
+
+[build]
+  dockerfile = "Dockerfile.server"
+
+[env]
+  RUST_LOG    = "info"
+  RIFT_BIND   = "0.0.0.0:34000"
+
+# UDP service. fly.io rewrites the inbound dst port to internal_port
+# inside the VM. Keep them identical so RIFT_PUBLIC matches the
+# external port the client connects to.
+[[services]]
+  protocol     = "udp"
+  internal_port = 34000
+
+  [[services.ports]]
+    port = 34000
+
+# 256 MB / shared CPU is plenty for a 4-player session. Bump
+# `memory_mb` first if you start hitting OOMs.
+[[vm]]
+  cpu_kind   = "shared"
+  cpus       = 1
+  memory_mb  = 256

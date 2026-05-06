@@ -1,0 +1,426 @@
+//! Declarative effect description — pure data, no runtime state.
+//!
+//! Built out of small composable pieces:
+//!
+//! - An [`Effect`] is a list of [`Layer`]s rendered together.
+//! - [`Layer::Particles`] drives a billboard particle layer.
+//! - [`Layer::Ribbon`] drives a beam-style ribbon between an
+//!   origin and a tip.
+//! - [`Gradient`] is a multi-stop HDR colour ramp evaluated over
+//!   life. Use HDR (RGB > 1) on additive layers for bloom.
+//! - [`Curve`] is a multi-stop scalar ramp (size, alpha, etc.).
+//! - [`SpawnShape`] picks the spawn distribution.
+//! - [`ForceField`] composes external forces (gravity, drag,
+//!   orbit, curl noise) per layer.
+//! - [`SpriteShape`] selects the procedural fragment shape
+//!   (soft glow, hard spark, smoky puff). No texture assets yet.
+//!
+//! All of these are `Clone + Debug` and cheap to copy; effects
+//! are intended to be `pub const fn` builders the gameplay
+//! layer composes once and clones at spawn time.
+
+use glam::Vec3;
+
+/// Top-level effect description: a stack of independent layers
+/// rendered together. Layers share the same world transform but
+/// are otherwise independent (own particles / ribbon, own
+/// blend, own duration).
+#[derive(Clone, Debug)]
+pub struct Effect {
+    /// Lifetime of the *spawning side* of every layer in
+    /// seconds. Particles already in flight when the effect
+    /// expires are still allowed to age out naturally. `0.0`
+    /// means infinite — the caller (channel UI, persistent
+    /// emitter) is responsible for despawning.
+    pub duration: f32,
+    pub layers: Vec<Layer>,
+}
+
+/// One renderable layer in an [`Effect`].
+#[derive(Clone, Debug)]
+pub enum Layer {
+    /// Billboard particle cloud — the bread-and-butter VFX
+    /// primitive. See [`ParticleSpec`].
+    Particles(ParticleSpec),
+    /// Two-endpoint camera-aligned ribbon, used for beams and
+    /// laser-style abilities. Origin / tip are supplied at spawn
+    /// time and updated every frame by the gameplay layer; the
+    /// spec only holds appearance data. See [`RibbonSpec`].
+    Ribbon(RibbonSpec),
+}
+
+// ─── Particles ────────────────────────────────────────────────────────────
+
+/// Per-layer billboard particle description.
+#[derive(Clone, Debug)]
+pub struct ParticleSpec {
+    pub spawn: SpawnShape,
+    pub emission: EmissionMode,
+    /// Initial speed range [min, max]. Direction is determined by
+    /// the [`SpawnShape`].
+    pub speed: (f32, f32),
+    /// Particle lifetime [min, max] in seconds.
+    pub lifetime: (f32, f32),
+    /// Forces applied every tick, in declaration order.
+    pub forces: Vec<ForceField>,
+    /// Size over normalised life (`0.0 = born`, `1.0 = dead`).
+    /// At least one stop required.
+    pub size: Curve,
+    /// Colour over normalised life. HDR (any channel > 1.0)
+    /// boosts brightness for additive blends.
+    pub color: Gradient,
+    /// Procedural fragment shape evaluated per pixel.
+    pub sprite: SpriteShape,
+    pub blend: BlendMode,
+    /// Multiplier on the sprite's procedural alpha. Lets a
+    /// single gradient/sprite drive several visual densities.
+    pub opacity: f32,
+}
+
+/// How the spawner emits particles over time.
+#[derive(Clone, Copy, Debug)]
+pub enum EmissionMode {
+    /// Continuous emission at `rate` particles / second. Used
+    /// for auras, beams, persistent loot pillars.
+    Continuous { rate: f32 },
+    /// Single one-shot burst, `count` particles at t = 0. Used
+    /// for hit sparks, dodge puffs, death explosions.
+    Burst { count: u32 },
+    /// Hybrid: an initial burst followed by continuous emission
+    /// for the layer's duration. Mirrors the legacy
+    /// `EmitterConfig::burst_count + spawn_rate` pair.
+    BurstAndContinuous { burst: u32, rate: f32 },
+}
+
+/// Where new particles are born.
+#[derive(Clone, Copy, Debug)]
+pub enum SpawnShape {
+    /// Single anchor point. Velocity direction comes from the
+    /// `forces` list (e.g. an Inertial force seeded from the
+    /// caller's aim direction) or is left zero.
+    Point,
+    /// Random direction on the unit sphere centred at the anchor.
+    /// Speed scales the emitted vector. Position is the anchor.
+    Sphere,
+    /// Random direction within `half_angle` radians of `axis`.
+    Cone { axis: Vec3, half_angle: f32 },
+    /// Cylindrical column (XZ disc + Y extent) for upward spew
+    /// (loot beams, portals).
+    Column { radius: f32, height: f32, axis: Vec3 },
+    /// Thin-disc ring of radius `radius` on the XZ plane —
+    /// targeting reticles, ground impacts.
+    Ring { radius: f32, thickness: f32 },
+    /// Filled disc on the XZ plane — RoF column top, AoE start.
+    Disc { radius: f32 },
+    /// Line segment between `a` and `b` relative to the spawn
+    /// anchor. Used by trail-style emitters that drop sparks
+    /// along a beam each frame.
+    Line { a: Vec3, b: Vec3 },
+}
+
+impl Default for SpawnShape {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
+/// Composable forces applied to particles every tick. Order
+/// matters: each force reads the post-previous-force velocity.
+#[derive(Clone, Copy, Debug)]
+pub enum ForceField {
+    /// Constant downward (or arbitrary-axis) acceleration in m/s².
+    /// Positive `strength` = accelerate along `axis`.
+    Gravity { axis: Vec3, strength: f32 },
+    /// Exponential velocity damping, `coefficient` per second.
+    /// `1.0` halves velocity in ~0.7 s; `4.0` kills it fast.
+    Drag { coefficient: f32 },
+    /// Tangential velocity around `axis` through the particle's
+    /// origin. Positive = CCW looking down the axis.
+    Orbit { axis: Vec3, speed: f32 },
+    /// Curl-noise turbulence: smooth divergence-free force field
+    /// driven by hash noise. `frequency` is roughly 1 / wave-
+    /// length in metres; `strength` is acceleration scale.
+    /// Phase advances with effect time so the field animates.
+    Curl { frequency: f32, strength: f32 },
+    /// Constant directional velocity bias added each frame —
+    /// useful for trail particles that should drift along a
+    /// beam without inheriting per-particle randomness.
+    Wind { velocity: Vec3 },
+}
+
+// ─── Ribbon ───────────────────────────────────────────────────────────────
+
+/// Two-endpoint camera-aligned strip. The renderer expands a
+/// quad each frame from the ribbon's current `origin` / `tip`
+/// world points and the camera right-vector, so the ribbon is
+/// always face-on regardless of beam direction.
+#[derive(Clone, Debug)]
+pub struct RibbonSpec {
+    /// Width in world metres at full HDR core (thin near the
+    /// edges via the gradient alpha).
+    pub width: f32,
+    /// Multi-stop colour gradient sampled across the *width*
+    /// (`v` axis: 0 = one edge, 1 = other edge). HDR encoded
+    /// the same way as [`ParticleSpec::color`].
+    pub cross_gradient: Gradient,
+    /// Optional gradient sampled along the *length* (`u` axis).
+    /// `None` = constant 1.0 along the beam. Lets us fade in
+    /// at the hand and pulse along the shaft without authoring
+    /// a texture.
+    pub length_gradient: Option<Gradient>,
+    /// Procedural noise applied to the ribbon brightness for
+    /// flow / shimmer. `None` = a clean static beam.
+    pub noise: Option<RibbonNoise>,
+    pub blend: BlendMode,
+}
+
+/// Procedural-noise parameters layered on top of the ribbon's
+/// gradient evaluation. Implemented in the fragment shader as
+/// scrolling hash noise — no texture asset required.
+#[derive(Clone, Copy, Debug)]
+pub struct RibbonNoise {
+    /// World-units to one noise tile along the beam length.
+    /// Smaller = denser noise.
+    pub tile: f32,
+    /// Length-direction scroll speed in tiles / second. Beam
+    /// `flow` is mostly this.
+    pub scroll: f32,
+    /// Mix factor: 0 = no noise, 1 = noise fully replaces base
+    /// brightness. Typical 0.3 .. 0.6.
+    pub strength: f32,
+    /// Number of octaves to fold in (1..=4). Higher = more
+    /// detail, more cost.
+    pub octaves: u8,
+}
+
+// ─── Curves & gradients ───────────────────────────────────────────────────
+
+/// One stop in a [`Curve`].
+#[derive(Clone, Copy, Debug)]
+pub struct CurveStop {
+    /// Position along the curve, `0.0..=1.0`.
+    pub t: f32,
+    pub value: f32,
+}
+
+/// Multi-stop scalar curve sampled at `t in [0, 1]`. Values
+/// outside the stops clamp to the nearest endpoint.
+#[derive(Clone, Debug)]
+pub struct Curve {
+    pub stops: Vec<CurveStop>,
+}
+
+impl Curve {
+    /// Constant value over the whole life.
+    pub fn constant(v: f32) -> Self {
+        Self {
+            stops: vec![CurveStop { t: 0.0, value: v }],
+        }
+    }
+
+    /// Two-stop linear ramp from `a` at t=0 to `b` at t=1.
+    pub fn linear(a: f32, b: f32) -> Self {
+        Self {
+            stops: vec![
+                CurveStop { t: 0.0, value: a },
+                CurveStop { t: 1.0, value: b },
+            ],
+        }
+    }
+
+    /// Construct from an iterator of `(t, value)` tuples. Stops
+    /// should be supplied in increasing `t`.
+    pub fn from_stops(it: impl IntoIterator<Item = (f32, f32)>) -> Self {
+        Self {
+            stops: it
+                .into_iter()
+                .map(|(t, value)| CurveStop { t, value })
+                .collect(),
+        }
+    }
+
+    /// Sample at `t in [0, 1]`. Linear interpolation between
+    /// neighbouring stops; clamps outside the range.
+    pub fn sample(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        if self.stops.is_empty() {
+            return 0.0;
+        }
+        if t <= self.stops[0].t {
+            return self.stops[0].value;
+        }
+        if t >= self.stops[self.stops.len() - 1].t {
+            return self.stops[self.stops.len() - 1].value;
+        }
+        for w in self.stops.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if t >= a.t && t <= b.t {
+                let span = (b.t - a.t).max(1e-6);
+                let local = (t - a.t) / span;
+                return a.value + (b.value - a.value) * local;
+            }
+        }
+        self.stops[self.stops.len() - 1].value
+    }
+}
+
+/// One stop in a [`Gradient`].
+#[derive(Clone, Copy, Debug)]
+pub struct GradientStop {
+    /// Position along the gradient, `0.0..=1.0`.
+    pub t: f32,
+    /// HDR RGBA — encode brightness in the RGB channels (e.g.
+    /// `[2.4, 0.6, 0.1, 1.0]` for a hot-orange ember).
+    pub color: [f32; 4],
+}
+
+/// Multi-stop HDR colour gradient. `sample(t)` linearly
+/// interpolates between neighbouring stops. RGB channels are
+/// HDR-friendly (free to exceed 1.0 — additive blends will
+/// bloom; alpha blends will saturate).
+#[derive(Clone, Debug)]
+pub struct Gradient {
+    pub stops: Vec<GradientStop>,
+}
+
+impl Gradient {
+    /// Constant colour over the whole gradient.
+    pub fn constant(rgba: [f32; 4]) -> Self {
+        Self {
+            stops: vec![GradientStop { t: 0.0, color: rgba }],
+        }
+    }
+
+    /// Two-stop linear from `a` at t=0 to `b` at t=1.
+    pub fn linear(a: [f32; 4], b: [f32; 4]) -> Self {
+        Self {
+            stops: vec![
+                GradientStop { t: 0.0, color: a },
+                GradientStop { t: 1.0, color: b },
+            ],
+        }
+    }
+
+    /// Builder convenience: append `(t, rgba)` to the existing
+    /// stop list. Stops should be supplied in increasing `t`.
+    pub fn stop(mut self, t: f32, rgba: [f32; 4]) -> Self {
+        self.stops.push(GradientStop { t, color: rgba });
+        self
+    }
+
+    /// Construct from an iterator of `(t, rgba)` tuples.
+    pub fn from_stops(it: impl IntoIterator<Item = (f32, [f32; 4])>) -> Self {
+        Self {
+            stops: it
+                .into_iter()
+                .map(|(t, color)| GradientStop { t, color })
+                .collect(),
+        }
+    }
+
+    pub fn sample(&self, t: f32) -> [f32; 4] {
+        let t = t.clamp(0.0, 1.0);
+        if self.stops.is_empty() {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+        if t <= self.stops[0].t {
+            return self.stops[0].color;
+        }
+        if t >= self.stops[self.stops.len() - 1].t {
+            return self.stops[self.stops.len() - 1].color;
+        }
+        for w in self.stops.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if t >= a.t && t <= b.t {
+                let span = (b.t - a.t).max(1e-6);
+                let local = (t - a.t) / span;
+                return [
+                    a.color[0] + (b.color[0] - a.color[0]) * local,
+                    a.color[1] + (b.color[1] - a.color[1]) * local,
+                    a.color[2] + (b.color[2] - a.color[2]) * local,
+                    a.color[3] + (b.color[3] - a.color[3]) * local,
+                ];
+            }
+        }
+        self.stops[self.stops.len() - 1].color
+    }
+}
+
+// ─── Sprite & blend ───────────────────────────────────────────────────────
+
+/// Procedural fragment shape. Selected by the shader through an
+/// integer instance field; no texture assets involved. Numeric
+/// values are part of the wire to the GPU — keep them stable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SpriteShape {
+    /// Soft Gaussian glow — the workhorse. Useful for embers,
+    /// magic dust, generic alpha particles.
+    SoftGlow = 0,
+    /// Hard-edged radial spark — tight bright core, no halo.
+    /// Useful for hit sparks at additive blend.
+    Spark = 1,
+    /// Smoky puff: low-frequency hash noise modulating a soft
+    /// disc. Animates with the particle's seed.
+    Smoke = 2,
+    /// Four-point crystalline burst — frost shards, ice crackle.
+    Shard = 3,
+    /// Filled ring (hollow centre) — shockwaves, AoE rings.
+    Ring = 4,
+}
+
+impl Default for SpriteShape {
+    fn default() -> Self {
+        Self::SoftGlow
+    }
+}
+
+/// How the layer composites against the framebuffer. The
+/// renderer maintains one pipeline per blend mode and submits
+/// alpha-blended layers before additive ones each frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BlendMode {
+    /// Standard `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`. Use for
+    /// solid puffs, smoke, anything that should darken what's
+    /// behind it.
+    Alpha = 0,
+    /// `(SRC_ALPHA, ONE)` additive. Use for glows, embers,
+    /// beams — anything that should brighten the scene.
+    Additive = 1,
+    /// `(ONE, ONE_MINUS_SRC_ALPHA)` premultiplied alpha — used
+    /// when the gradient already encodes opacity in the RGB.
+    Premultiplied = 2,
+}
+
+impl Default for BlendMode {
+    fn default() -> Self {
+        Self::Alpha
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curve_clamp() {
+        let c = Curve::linear(2.0, 8.0);
+        assert!((c.sample(-1.0) - 2.0).abs() < 1e-6);
+        assert!((c.sample(2.0) - 8.0).abs() < 1e-6);
+        assert!((c.sample(0.5) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gradient_three_stop() {
+        let g = Gradient::from_stops([
+            (0.0, [0.0, 0.0, 0.0, 1.0]),
+            (0.5, [1.0, 0.0, 0.0, 1.0]),
+            (1.0, [1.0, 1.0, 1.0, 0.0]),
+        ]);
+        assert_eq!(g.sample(0.0), [0.0, 0.0, 0.0, 1.0]);
+        let mid = g.sample(0.25);
+        assert!((mid[0] - 0.5).abs() < 1e-5);
+        assert_eq!(g.sample(1.0), [1.0, 1.0, 1.0, 0.0]);
+    }
+}
