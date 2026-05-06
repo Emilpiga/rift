@@ -227,6 +227,7 @@ impl Sim {
         player::heal_all(&mut self.world);
         enemy::despawn_all(&mut self.world);
         projectile::despawn_all(&mut self.world);
+        projectile::despawn_all_enemy(&mut self.world);
         loot::despawn_all(&mut self.world);
         self.aoe_zones.clear();
         channel::clear_all(&mut self.world);
@@ -693,6 +694,82 @@ impl Sim {
         true
     }
 
+    /// Deposit the bag item at `inventory_index` into a specific
+    /// `stash_index`. If the destination is already occupied the
+    /// two items swap (the prior stash occupant goes back to the
+    /// freed bag slot). Grows the stash with `None` placeholders
+    /// when `stash_index` is past the current length, then trims
+    /// trailing `None`s on both containers.
+    pub fn deposit_to_stash_slot(
+        &mut self,
+        client_id: ClientId,
+        inventory_index: usize,
+        stash_index: usize,
+    ) -> bool {
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        // Source must hold an item.
+        let Some(item) = p.inventory.get_mut(inventory_index).and_then(|s| s.take()) else {
+            return false;
+        };
+        // Grow stash if dest is past the end.
+        if stash_index >= p.stash.len() {
+            p.stash.resize_with(stash_index + 1, || None);
+        }
+        // Swap-or-place: if the dest slot is occupied, the prior
+        // occupant returns to the freed bag slot.
+        let displaced = p.stash[stash_index].take();
+        p.stash[stash_index] = Some(item);
+        if let Some(prev) = displaced {
+            // Re-grow the bag if needed (in practice we just
+            // emptied that index, so it always fits).
+            if inventory_index >= p.inventory.len() {
+                p.inventory.resize_with(inventory_index + 1, || None);
+            }
+            p.inventory[inventory_index] = Some(prev);
+        }
+        trim_trailing_none(&mut p.inventory);
+        trim_trailing_none(&mut p.stash);
+        true
+    }
+
+    /// Withdraw the stash item at `stash_index` into a specific
+    /// `inventory_index`. Mirror of `deposit_to_stash_slot`.
+    pub fn withdraw_from_stash_slot(
+        &mut self,
+        client_id: ClientId,
+        stash_index: usize,
+        inventory_index: usize,
+    ) -> bool {
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        let Some(item) = p.stash.get_mut(stash_index).and_then(|s| s.take()) else {
+            return false;
+        };
+        if inventory_index >= p.inventory.len() {
+            p.inventory.resize_with(inventory_index + 1, || None);
+        }
+        let displaced = p.inventory[inventory_index].take();
+        p.inventory[inventory_index] = Some(item);
+        if let Some(prev) = displaced {
+            if stash_index >= p.stash.len() {
+                p.stash.resize_with(stash_index + 1, || None);
+            }
+            p.stash[stash_index] = Some(prev);
+        }
+        trim_trailing_none(&mut p.inventory);
+        trim_trailing_none(&mut p.stash);
+        true
+    }
+
     /// Snapshot the player's stash as a flat list of rolled
     /// items. Used by the persistence layer to produce a
     /// `ResetCharacterStash` payload after every deposit /
@@ -878,10 +955,19 @@ impl Sim {
         player::apply_inputs(&mut self.world, &self.sessions, &mut self.pending_inputs);
         player::integrate_motion(&mut self.world, &self.floor, dt);
 
-        // 2. Enemies: AI tick (queues melee damage), then
-        //    integrate motion.
+        // 2. Enemies: AI tick (queues melee damage + ranged
+        //    shot requests), then integrate motion and spawn
+        //    any caster bolts the AI asked for.
         let player_targets = player::target_positions(&self.world);
-        let melee_damage = enemy::tick_ai(&mut self.world, &player_targets, dt);
+        let ai_outcome = enemy::tick_ai(&mut self.world, &player_targets, dt);
+        let melee_damage = ai_outcome.melee_damage;
+        for shot in &ai_outcome.shots {
+            projectile::spawn_caster_bolt(
+                &mut self.world,
+                shot,
+                &mut self.next_projectile_net_id,
+            );
+        }
         enemy::integrate_motion(&mut self.world, &self.floor, dt);
 
         // 3. Apply queued enemy → player melee damage. Players
@@ -911,6 +997,17 @@ impl Sim {
         //    direct kills both run through `loot::finalise_kills`
         //    (which emits `Death`, rolls drops, and despawns).
         let enemies = enemy::snapshot_for_collision(&self.world);
+        // Enemy → player projectiles. Tick'd outside the
+        // `DeathCtx` scope below since enemy bolts only damage
+        // players, never enemies, and the player damage path
+        // needs its own borrow of `pending_events` /
+        // `pending_player_deaths`. Collected here, applied after
+        // the player-projectile / AoE / channel ticks so the
+        // event ordering stays consistent (bolt damage always
+        // lands after any same-tick player hits).
+        let enemy_proj_damage =
+            projectile::tick_enemy(&mut self.world, &self.floor, &player_targets, dt);
+
         let mut kills: Vec<loot::KillInfo> = Vec::new();
         let mut ctx = loot::DeathCtx {
             events: &mut self.pending_events,
@@ -939,6 +1036,25 @@ impl Sim {
         //    drop expired entries. Runs last so DoT events ride
         //    out on this frame's snapshot.
         debuff::tick(&mut self.world, &mut ctx, dt);
+
+        // Apply the enemy-projectile damage collected before the
+        // `DeathCtx` scope. Done here, after `ctx` is dropped, so
+        // the player-damage path can borrow `pending_events` /
+        // `pending_player_deaths` without aliasing.
+        if !enemy_proj_damage.is_empty() {
+            apply_player_damage(
+                &mut self.world,
+                &mut self.pending_events,
+                &mut self.pending_player_deaths,
+                enemy_proj_damage,
+            );
+            if !self.pending_player_deaths.is_empty()
+                && self.floor_index != 0
+                && self.hub_respawn_timer.is_none()
+            {
+                self.hub_respawn_timer = Some(HUB_RESPAWN_DELAY);
+            }
+        }
 
         // 7. Death-fade: tick the death timer on dying enemies and
         //    despawn rows whose timer hit zero. Kept separate from
@@ -1080,6 +1196,7 @@ impl Sim {
             attack_cooldown: 0.0,
             attack_anim_remaining: 0.0,
             dying_remaining: 0.0,
+            ai_phase: enemy::AiPhase::default(),
         };
         self.world
             .spawn((enemy, debuff::DebuffStack::default()));

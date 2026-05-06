@@ -997,6 +997,59 @@ impl Mesh {
         Self { vertices, indices }
     }
 
+    /// Caster bolt — smaller violet-cored sphere used to render
+    /// enemy caster projectiles. Same UV-sphere construction as
+    /// [`Self::fireball`] but with a tighter radius and a cool
+    /// arcane palette so the bolt reads distinctly from the
+    /// player's fireball even at a glance.
+    pub fn caster_bolt() -> Self {
+        let radius = 0.18_f32;
+        let stacks = 8usize;
+        let sectors = 12usize;
+
+        // HDR core / edge in violet-arcane palette. Bloom picks
+        // these up so the bolt glows in dim dungeon lighting.
+        let core = glam::Vec3::new(3.4, 1.2, 4.6); // hot violet-white core
+        let edge = glam::Vec3::new(1.4, 0.2, 2.8); // saturated indigo edge
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity((stacks + 1) * (sectors + 1));
+        for i in 0..=stacks {
+            let v = i as f32 / stacks as f32;
+            let phi = v * std::f32::consts::PI;
+            let y = phi.cos();
+            let r = phi.sin();
+            for j in 0..=sectors {
+                let u = j as f32 / sectors as f32;
+                let theta = u * std::f32::consts::TAU;
+                let x = r * theta.cos();
+                let z = r * theta.sin();
+                let n = glam::Vec3::new(x, y, z).normalize_or_zero();
+                let pos = n * radius;
+                let fade = (1.0 - (y.abs() * 0.6)).max(0.4);
+                let color = edge.lerp(core, fade * 0.55);
+                vertices.push(Vertex {
+                    position: pos,
+                    normal: n,
+                    color,
+                    uv: glam::Vec2::new(u, v),
+                });
+            }
+        }
+
+        let stride = sectors + 1;
+        let mut indices: Vec<u32> = Vec::with_capacity(stacks * sectors * 6);
+        for i in 0..stacks {
+            for j in 0..sectors {
+                let a = (i * stride + j) as u32;
+                let b = ((i + 1) * stride + j) as u32;
+                let c = ((i + 1) * stride + j + 1) as u32;
+                let d = (i * stride + j + 1) as u32;
+                indices.extend_from_slice(&[a, b, c, c, d, a]);
+            }
+        }
+
+        Self { vertices, indices }
+    }
     /// Portal: a glowing vertical ring with a swirled, layered
     /// inner surface. Built as:
     ///   * an outer torus frame (deep arcane blue),

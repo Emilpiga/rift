@@ -201,6 +201,14 @@ pub enum StashRequest {
     /// server grows the stash with `None` placeholders to fit
     /// and then trims back to the last filled slot.
     Swap { a: u32, b: u32 },
+    /// Deposit an inventory item into a specific stash slot.
+    /// If the destination is occupied the two items swap
+    /// (occupant comes back to `inventory_index`); if empty,
+    /// the item simply moves into the requested slot.
+    DepositToSlot { inventory_index: u32, stash_index: u32 },
+    /// Withdraw a stash item into a specific bag slot.
+    /// Same swap semantics as `DepositToSlot`.
+    WithdrawToSlot { stash_index: u32, inventory_index: u32 },
 }
 
 /// Outgoing equip / unequip request shape, queued by the

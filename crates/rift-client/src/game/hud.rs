@@ -1,4 +1,6 @@
-use rift_engine::ecs::components::{Boss, Debuffs, Enemy, Health, LocalPlayer, Player, Transform};
+use rift_engine::ecs::components::{
+    Boss, Debuffs, Enemy, Health, LocalPlayer, Player, RemotePlayer, Transform,
+};
 use rift_engine::ai::NavGrid;
 use rift_engine::ui::im::{
     hp_color, Color, Id, ItemSlot, Pos2, ProgressBar, Rect, Tooltip, TooltipLine, Ui,
@@ -692,10 +694,48 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
     }
 }
 
-/// Two-letter shorthand for the ability-bar fallback when no icon
-/// is registered. Picks the initials of the first two words; falls
-/// back to the first two letters of a single-word name. Lower-case
-/// connector words ("of", "for", "the") are skipped so
+/// Render thin health bars above remote (party-member) avatars.
+/// Mirrors `render_enemy_health_bars` styling but in green so the
+/// player can tell teammates apart from enemies at a glance, and
+/// always draws the bar (even at full HP) since seeing a teammate's
+/// max HP is useful tactical info, unlike enemies where a full bar
+/// is just visual noise.
+///
+/// Should only be called inside rift floors — in the hub, drawing
+/// HP bars over idle teammates standing around is just clutter.
+pub fn render_remote_player_health_bars(
+    ui: &mut Ui<'_>,
+    world: &hecs::World,
+    view_proj: Mat4,
+) {
+    use rift_engine::ui::im::WorldUi;
+
+    const BAR_W: f32 = 56.0;
+    const BAR_H: f32 = 6.0;
+    // A bit higher than enemies — players are taller than most
+    // mobs and the bar would otherwise clip into the head.
+    const Y_OFFSET: f32 = -32.0;
+
+    let mut wui = WorldUi::new(ui, view_proj);
+    for (_e, (transform, _rp, health)) in world
+        .query::<(&Transform, &RemotePlayer, &Health)>()
+        .iter()
+    {
+        let hp_pct = (health.current / health.max).clamp(0.0, 1.0);
+        let world_pos = transform.position + Vec3::new(0.0, 1.6, 0.0);
+        // Friendly green → amber → red as HP drops, so a low-HP
+        // teammate visually pops the same way the local HP bar
+        // does.
+        let color = if hp_pct > 0.5 {
+            Color::rgba(0.25, 0.75, 0.25, 0.9)
+        } else if hp_pct > 0.25 {
+            Color::rgba(0.85, 0.7, 0.1, 0.9)
+        } else {
+            Color::rgba(0.9, 0.25, 0.15, 0.9)
+        };
+        wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color);
+    }
+}
 /// "Mark for Death" becomes `MD` instead of `MF`.
 fn ability_abbrev(name: &str) -> String {
     const SKIP: &[&str] = &["of", "for", "the", "and", "to"];

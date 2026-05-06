@@ -170,12 +170,29 @@ pub enum ClientMsg {
         inventory_index: u32,
     },
 
+    /// Like `DepositToStash` but moves the item into a specific
+    /// stash slot. If the slot is already occupied the two items
+    /// swap (the previous stash occupant is placed back into
+    /// `inventory_index`). Reliable on `Channel::Control`.
+    DepositToStashSlot {
+        inventory_index: u32,
+        stash_index: u32,
+    },
+
     /// Move the stash item at `stash_index` back into the bag.
     /// Server validates the index + that a stash session is open,
     /// then replies with both a fresh `InventorySync` and a fresh
     /// `StashSync`. Reliable on `Channel::Control`.
     WithdrawFromStash {
         stash_index: u32,
+    },
+
+    /// Like `WithdrawFromStash` but places the item into a
+    /// specific bag slot. Same swap semantics as
+    /// `DepositToStashSlot`. Reliable on `Channel::Control`.
+    WithdrawFromStashSlot {
+        stash_index: u32,
+        inventory_index: u32,
     },
 
     /// Reorder the bag: swap the items at `a` and `b` (either may

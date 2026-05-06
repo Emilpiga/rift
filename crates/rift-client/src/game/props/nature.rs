@@ -27,17 +27,9 @@ const fn ground(gltf: &'static str, scale: f32, weight: u32) -> PropAsset {
 /// Inner-room scatter: never solid.
 pub const SCATTER: &[PropAsset] = &[
     ground("assets/models/nature-props/glTF/Grass_Common_Short.gltf", 0.45, 8),
-    ground("assets/models/nature-props/glTF/Grass_Common_Tall.gltf",  0.45, 6),
     ground("assets/models/nature-props/glTF/Grass_Wispy_Short.gltf",  0.45, 5),
-    ground("assets/models/nature-props/glTF/Grass_Wispy_Tall.gltf",   0.45, 4),
-    ground("assets/models/nature-props/glTF/Clover_1.gltf",           0.45, 4),
-    ground("assets/models/nature-props/glTF/Clover_2.gltf",           0.45, 4),
-    ground("assets/models/nature-props/glTF/Flower_3_Single.gltf",    0.45, 2),
-    ground("assets/models/nature-props/glTF/Flower_4_Single.gltf",    0.45, 2),
     ground("assets/models/nature-props/glTF/Pebble_Round_2.gltf",     0.50, 2),
     ground("assets/models/nature-props/glTF/Pebble_Round_4.gltf",     0.50, 2),
-    ground("assets/models/nature-props/glTF/Pebble_Square_2.gltf",    0.50, 2),
-    ground("assets/models/nature-props/glTF/Pebble_Square_5.gltf",    0.50, 2),
 ];
 
 /// Player stash chest, placed once at a fixed spot in the hub. Solid
@@ -88,10 +80,10 @@ pub fn decorate_hub(
         &ScatterPlacement {
             assets: SCATTER,
             count: scatter_count,
-            min_spacing: 0.35,
+            min_spacing: 0.45,
             avoid: &avoid,
             sub_tile_jitter: 0.40,
-            scale_jitter: (0.80, 1.40),
+            scale_jitter: (0.50, 0.80),
         },
     );
 }

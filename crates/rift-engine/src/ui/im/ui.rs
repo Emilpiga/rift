@@ -288,12 +288,31 @@ impl<'a> Ui<'a> {
         }
 
         // Release while latent (no movement) → it was a click.
-        // We *don't* clear the drag here; `take_drop` resolves
-        // it on release for the destination side.
+        // Clear the latent drag so subsequent presses can open
+        // a fresh one. (For *active* drags the release is
+        // resolved by `take_drop` / `take_drop_outside`, which
+        // both clear the drag themselves; the latent path has
+        // no such consumer, so without this step a single
+        // click leaves stale latent state in `self.state.drag`
+        // and every subsequent click is blocked by the
+        // `is_none()` guard above.)
         if hovered && self.input.left_just_released() {
             if let Some(drag) = self.state.drag.as_ref() {
                 if drag.source == id && !drag.active {
                     clicked_no_drag = true;
+                }
+            }
+        }
+        // Belt-and-braces: any time the mouse goes up, if the
+        // current drag is still latent (never crossed the
+        // threshold), drop it. This covers the case where the
+        // user presses on slot A, releases on empty space, and
+        // then expects slot B to be clickable — the latent
+        // drag from A would otherwise persist forever.
+        if self.input.left_just_released() {
+            if let Some(drag) = self.state.drag.as_ref() {
+                if !drag.active {
+                    self.state.drag = None;
                 }
             }
         }

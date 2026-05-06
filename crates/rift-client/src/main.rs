@@ -233,6 +233,17 @@ impl RiftApp {
         if let Some(&pos) = net.last_positions.get(&entity) {
             state.decals.spawn_blood(pos, &state.wall_aabbs, renderer);
         }
+        // Remote player death: play the death clip on their
+        // avatar so observers see them topple instead of just
+        // freezing in their last pose. The local player's death
+        // clip is driven from `trigger_player_death` (catch-all
+        // health detect) since the snapshot's hp=0 row arrives
+        // before the reliable Death event.
+        if Some(entity) != net.our_net_id() {
+            if let Some(&avatar) = net.avatar_entities.get(&entity) {
+                rift_client::game::state::trigger_remote_death(&mut state.world, avatar);
+            }
+        }
     }
 
     /// Spawn the AoE-zone visual for a server-confirmed cast and
@@ -504,6 +515,18 @@ impl RiftApp {
                 }
                 StashRequest::Swap { a, b } => {
                     net.request_swap_stash_slots(a, b);
+                }
+                StashRequest::DepositToSlot {
+                    inventory_index,
+                    stash_index,
+                } => {
+                    net.request_deposit_to_stash_slot(inventory_index, stash_index);
+                }
+                StashRequest::WithdrawToSlot {
+                    stash_index,
+                    inventory_index,
+                } => {
+                    net.request_withdraw_from_stash_slot(stash_index, inventory_index);
                 }
             }
         }

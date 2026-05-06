@@ -192,12 +192,20 @@ impl SpellCast {
 
     /// Begin a new cast. Captures the ability + aim + damage so the
     /// projectile can be spawned later when we reach the Shoot phase.
+    ///
+    /// Skips the `Entering` wind-up phase and jumps straight to
+    /// `Shooting`. The local visual fire is suppressed (`fired = true`)
+    /// because the server owns projectile spawn under multiplayer
+    /// authority — the client just needs the Shoot clip to play for
+    /// upper-body feedback. This makes LMB / Multishot feel snappy:
+    /// the cast pose appears the same frame the click lands instead
+    /// of after the wind-up clip's full duration.
     pub fn begin(&mut self, ability: rift_game::abilities::Ability, aim_dir: glam::Vec3, damage: f32) {
-        self.phase = SpellPhase::Entering;
+        self.phase = SpellPhase::Shooting;
         self.pending_ability = Some(ability);
         self.pending_aim_dir = aim_dir;
         self.pending_damage = damage;
-        self.fired = false;
+        self.fired = true;
         self.channeling = false;
     }
 

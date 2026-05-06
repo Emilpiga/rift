@@ -230,6 +230,13 @@ pub mod id {
     pub const RAIN_OF_ARROWS: u8 = 5;
     pub const FROST_RAY: u8 = 6;
     pub const WHIRLWIND: u8 = 7;
+
+    // Enemy ability ids start at 64 to leave room for player
+    // abilities to grow without colliding. Wire is u8 so the
+    // upper half is plenty. Clients dispatch projectile mesh /
+    // VFX off these ids in `world_sync` — never reorder, only
+    // append.
+    pub const ENEMY_CASTER_BOLT: u8 = 64;
 }
 
 /// What an ability does on the authoritative side. Visuals are not

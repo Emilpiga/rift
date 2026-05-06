@@ -296,3 +296,123 @@ pub(super) fn apply_hits_to_enemies(
     }
     super::loot::finalise_kills(world, ctx, dead);
 }
+
+// ── Enemy → player projectiles ────────────────────────────────
+//
+// Mirrors `ServerProjectile` but targets players instead of
+// enemies. Kept as a separate type so player projectiles don't
+// have to carry a `team` flag everywhere — and so the client's
+// existing `EntityKind::Projectile` rendering still works
+// unmodified, distinguishing the two purely off `ability_id`.
+
+/// One in-flight enemy-cast projectile (e.g. caster bolt).
+#[derive(Clone, Debug)]
+pub struct ServerEnemyProjectile {
+    pub net_id: NetId,
+    /// Wire ability id — clients dispatch mesh / VFX off this.
+    /// Currently always [`rift_game::abilities::id::ENEMY_CASTER_BOLT`].
+    pub ability_id: u8,
+    /// Net id of the caster. Kept for future telemetry / kill
+    /// attribution; not currently read by the damage path.
+    #[allow(dead_code)]
+    pub owner: NetId,
+    pub position: Vec3,
+    pub velocity: Vec3,
+    pub ttl: f32,
+    pub damage: f32,
+    pub size: f32,
+}
+
+/// Sphere radius used for enemy-projectile↔player XZ collision.
+/// Slightly bigger than the enemy hit radius — players are
+/// taller and the bolt should connect on glancing blows so the
+/// telegraph reads as a real threat instead of a free dodge.
+pub const PLAYER_HIT_RADIUS: f32 = 0.5;
+
+/// Despawn every `ServerEnemyProjectile` in the world. Called on
+/// floor change.
+pub fn despawn_all_enemy(world: &mut hecs::World) {
+    let stale: Vec<Entity> = world
+        .query::<&ServerEnemyProjectile>()
+        .iter()
+        .map(|(e, _)| e)
+        .collect();
+    for e in stale {
+        let _ = world.despawn(e);
+    }
+}
+
+/// Integrate every enemy projectile, run XZ collision against
+/// players, and queue damage rows for `apply_player_damage` to
+/// consume. Returns `(player_entity, damage)` pairs the caller
+/// applies once the world borrow ends.
+///
+/// Despawns dead projectiles (TTL expired, hit a wall, or
+/// landed a hit). Enemy bolts don't pierce.
+pub fn tick_enemy(
+    world: &mut hecs::World,
+    floor: &Floor,
+    players: &[(Entity, Vec3)],
+    dt: f32,
+) -> Vec<(Entity, f32)> {
+    let mut damage: Vec<(Entity, f32)> = Vec::new();
+    let mut to_despawn: Vec<Entity> = Vec::new();
+    for (pe, proj) in world.query_mut::<&mut ServerEnemyProjectile>() {
+        proj.position += proj.velocity * dt;
+        proj.ttl -= dt;
+        if proj.ttl <= 0.0 {
+            to_despawn.push(pe);
+            continue;
+        }
+        if hits_wall(floor, proj.position) {
+            to_despawn.push(pe);
+            continue;
+        }
+        // First-hit-wins: the bolt detonates on the first player
+        // it overlaps. No pierce, no friendly fire (we never
+        // collision-check enemies here so caster bolts can't
+        // damage other casters).
+        let mut consumed = false;
+        for (player_entity, ppos) in players {
+            let dx = proj.position.x - ppos.x;
+            let dz = proj.position.z - ppos.z;
+            let dist_xz = (dx * dx + dz * dz).sqrt();
+            if dist_xz < PLAYER_HIT_RADIUS + proj.size * 0.5 {
+                damage.push((*player_entity, proj.damage));
+                consumed = true;
+                break;
+            }
+        }
+        if consumed {
+            to_despawn.push(pe);
+        }
+    }
+    for e in to_despawn {
+        let _ = world.despawn(e);
+    }
+    damage
+}
+
+/// Spawn one enemy bolt entity from a [`super::enemy::EnemyShot`]
+/// emitted by the AI tick. Reuses the player-projectile net-id
+/// allocator so all replicated projectiles share one id space —
+/// clients don't care whether a `Projectile` row is ours or the
+/// caster's, only what its `ability_id` is.
+pub fn spawn_caster_bolt(
+    world: &mut hecs::World,
+    shot: &super::enemy::EnemyShot,
+    next_projectile_net_id: &mut u32,
+) {
+    let net_id = NetId(*next_projectile_net_id);
+    *next_projectile_net_id = next_projectile_net_id.wrapping_add(1).max(0x4000_0000);
+    world.spawn((ServerEnemyProjectile {
+        net_id,
+        ability_id: rift_game::abilities::id::ENEMY_CASTER_BOLT,
+        owner: shot.owner,
+        position: shot.origin,
+        velocity: shot.aim * super::enemy::caster::BOLT_SPEED,
+        ttl: super::enemy::caster::BOLT_TTL,
+        damage: super::enemy::caster::BOLT_DAMAGE,
+        size: 0.45,
+    },));
+}

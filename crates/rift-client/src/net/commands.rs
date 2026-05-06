@@ -270,6 +270,48 @@ impl NetClient {
         );
     }
 
+    /// Deposit the bag item at `inventory_index` into a specific
+    /// `stash_index`. Swap-or-place: if the stash slot is
+    /// occupied, the prior occupant moves back to the freed bag
+    /// slot. Server replies with fresh `InventorySync` +
+    /// `StashSync`.
+    pub fn request_deposit_to_stash_slot(
+        &mut self,
+        inventory_index: u32,
+        stash_index: u32,
+    ) {
+        log::debug!(
+            "net: -> DepositToStashSlot inv={inventory_index} stash={stash_index}"
+        );
+        self.send(
+            Channel::Control,
+            &ClientMsg::DepositToStashSlot {
+                inventory_index,
+                stash_index,
+            },
+        );
+    }
+
+    /// Withdraw the stash item at `stash_index` into a specific
+    /// `inventory_index`. Mirror of
+    /// `request_deposit_to_stash_slot`.
+    pub fn request_withdraw_from_stash_slot(
+        &mut self,
+        stash_index: u32,
+        inventory_index: u32,
+    ) {
+        log::debug!(
+            "net: -> WithdrawFromStashSlot stash={stash_index} inv={inventory_index}"
+        );
+        self.send(
+            Channel::Control,
+            &ClientMsg::WithdrawFromStashSlot {
+                stash_index,
+                inventory_index,
+            },
+        );
+    }
+
     /// Reorder the bag: swap the items at slots `a` and `b`.
     /// Either may be empty (past the current bag length) — the
     /// server will grow the bag with placeholders to fit and

@@ -494,9 +494,15 @@ fn handle_drop(
         (DragSource::Bag(idx), DropTarget::Equip(_)) => {
             pending.push(EquipRequest::Equip { inventory_index: idx as u32 });
         }
-        // Bag → Stash: deposit
-        (DragSource::Bag(idx), DropTarget::Stash(_)) if stash_open => {
-            stash_pending.push(StashRequest::Deposit { inventory_index: idx as u32 });
+        // Bag → Stash: deposit into the dropped-on slot if
+        // possible, otherwise fall back to the index-less
+        // "send to stash" op (DropTarget::Stash carries the
+        // hovered slot index when the cursor was over a slot).
+        (DragSource::Bag(a), DropTarget::Stash(b)) if stash_open => {
+            stash_pending.push(StashRequest::DepositToSlot {
+                inventory_index: a as u32,
+                stash_index: b as u32,
+            });
         }
         // Equip → Bag(idx): unequip into a specific slot
         (DragSource::Equip(slot), DropTarget::Bag(idx)) => {
@@ -505,10 +511,12 @@ fn handle_drop(
                 inventory_index: idx as u32,
             });
         }
-        // Stash → Bag: withdraw (server appends; UI slot hint
-        // lost but acceptable).
-        (DragSource::Stash(idx), DropTarget::Bag(_)) if stash_open => {
-            stash_pending.push(StashRequest::Withdraw { stash_index: idx as u32 });
+        // Stash → Bag(idx): withdraw to the dropped-on slot.
+        (DragSource::Stash(a), DropTarget::Bag(b)) if stash_open => {
+            stash_pending.push(StashRequest::WithdrawToSlot {
+                stash_index: a as u32,
+                inventory_index: b as u32,
+            });
         }
         // Stash → Stash: reorder
         (DragSource::Stash(a), DropTarget::Stash(b)) if stash_open && a != b => {

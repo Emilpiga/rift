@@ -48,6 +48,11 @@ pub struct ProjectileRender {
     pub anchor_pos: Vec3,
     pub anchor_vel: Vec3,
     pub yaw: f32,
+    /// Wire ability id, retained so the detonation VFX can
+    /// match the bolt's color scheme (warm fireball burst for
+    /// player abilities, violet arcane burst for enemy caster
+    /// bolts).
+    pub ability: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +541,17 @@ impl NetClient {
                 // from the previous floor; drop them so the next
                 // floor's snapshot path starts from a clean map.
                 self.last_positions.clear();
+                // Drop the snapshot mirror too. Otherwise the last
+                // pre-respawn snapshot (which still has hp=0 / DEAD
+                // for the player who died) survives the LoadFloor
+                // handler and is read by `sync_local_player` next
+                // frame — clobbering the freshly-spawned local
+                // entity's full HP back to 0 and re-triggering the
+                // death FSM, which strands `player_dying = true`
+                // permanently. Clearing here means `sync_local_player`
+                // is a no-op until the first post-respawn snapshot
+                // populates `self.remote` with valid data.
+                self.remote.clear();
                 // The binary will wipe the world via
                 // `apply_net_transition` next frame, invalidating
                 // every Entity handle we held. Drop the maps so

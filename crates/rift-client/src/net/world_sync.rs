@@ -200,6 +200,16 @@ impl NetClient {
                 if let Ok(mut p) = world.get::<&mut Player>(entity) {
                     p.aim_dir = Vec3::new(display_aim_yaw.sin(), 0.0, display_aim_yaw.cos());
                 }
+                // Mirror health_pct onto the remote avatar's Health
+                // component so HUD widgets (e.g. world-space remote
+                // health bars) can read it the same way they read
+                // enemy / local-player health. `Health.max` was set
+                // to a placeholder at spawn — the bar code only
+                // looks at `current / max`, so the placeholder is
+                // fine as long as we keep `current` in sync.
+                if let Ok(mut h) = world.get::<&mut Health>(entity) {
+                    h.current = h.max * re.health_pct;
+                }
             }
             // Jump: when the snapshot says the remote is airborne,
             // tag its `Player.action = JumpAir` and cross-fade to
@@ -464,36 +474,51 @@ impl NetClient {
                 renderer.vfx_system.despawn(trail_id);
             }
             if let Some(visual) = self.projectile_render.remove(&net_id) {
-                renderer.vfx_system.spawn(
-                    rift_engine::renderer::vfx::presets::fireball_explosion(),
-                    visual.render_pos,
-                );
+                let burst = if visual.ability
+                    == rift_game::abilities::id::ENEMY_CASTER_BOLT as u16
+                {
+                    rift_engine::renderer::vfx::presets::caster_bolt_impact()
+                } else {
+                    rift_engine::renderer::vfx::presets::fireball_explosion()
+                };
+                renderer.vfx_system.spawn(burst, visual.render_pos);
             }
         }
 
         // Spawn newcomers. Allocate the mesh slot first, then
         // attach a trail emitter at the spawn position so the
-        // first frame already has visible embers.
-        let to_spawn: Vec<(NetId, Vec3, Vec3, f32)> = self
+        // first frame already has visible embers. Player
+        // projectiles use the warm fireball mesh + trail; enemy
+        // caster bolts use a smaller violet mesh + arcane trail
+        // so they're instantly distinguishable in combat.
+        let to_spawn: Vec<(NetId, Vec3, Vec3, f32, u16)> = self
             .remote
             .iter()
             .filter(|(nid, _)| !self.projectile_objects.contains_key(nid))
             .filter_map(|(nid, re)| match re.kind {
-                EntityKind::Projectile { .. } => {
-                    Some((*nid, re.position, re.velocity, re.yaw))
+                EntityKind::Projectile { ability } => {
+                    Some((*nid, re.position, re.velocity, re.yaw, ability))
                 }
                 _ => None,
             })
             .collect();
-        for (net_id, pos, vel, yaw) in to_spawn {
-            let mesh = rift_engine::renderer::mesh::Mesh::fireball();
+        for (net_id, pos, vel, yaw, ability) in to_spawn {
+            let is_enemy_bolt =
+                ability == rift_game::abilities::id::ENEMY_CASTER_BOLT as u16;
+            let mesh = if is_enemy_bolt {
+                rift_engine::renderer::mesh::Mesh::caster_bolt()
+            } else {
+                rift_engine::renderer::mesh::Mesh::fireball()
+            };
             if renderer.add_mesh(&mesh, Mat4::ZERO).is_ok() {
                 let idx = renderer.objects.len() - 1;
                 self.projectile_objects.insert(net_id, idx);
-                let trail_id = renderer.vfx_system.spawn(
-                    rift_engine::renderer::vfx::presets::fireball_trail(),
-                    pos,
-                );
+                let trail_effect = if is_enemy_bolt {
+                    rift_engine::renderer::vfx::presets::caster_bolt_trail()
+                } else {
+                    rift_engine::renderer::vfx::presets::fireball_trail()
+                };
+                let trail_id = renderer.vfx_system.spawn(trail_effect, pos);
                 self.projectile_trails.insert(net_id, trail_id);
                 self.projectile_render.insert(
                     net_id,
@@ -502,6 +527,7 @@ impl NetClient {
                         anchor_pos: pos,
                         anchor_vel: vel,
                         yaw,
+                        ability,
                     },
                 );
             }
