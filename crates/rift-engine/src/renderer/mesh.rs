@@ -1045,7 +1045,20 @@ impl Mesh {
     ///
     /// Skinning data (joints/weights) is *ignored* here — this is the static
     /// loader. Use `SkinnedMesh::from_gltf` (added in Phase 2) for skinning.
+    ///
+    /// Uses [`AssetServer::global`] for image-decode dedup.
+    /// Prefer [`Self::from_gltf_with_assets`] when you have an
+    /// `AssetServer` handy; new code should accept one explicitly.
     pub fn from_gltf<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        Self::from_gltf_with_assets(path, crate::assets::AssetServer::global())
+    }
+
+    /// Variant that takes an explicit [`AssetServer`] for the
+    /// base-colour texture cache.
+    pub fn from_gltf_with_assets<P: AsRef<std::path::Path>>(
+        path: P,
+        assets: &crate::assets::AssetServer,
+    ) -> anyhow::Result<Self> {
         let original = path.as_ref().to_path_buf();
         let candidates = [
             original.clone(),
@@ -1075,7 +1088,7 @@ impl Mesh {
             .ok_or_else(|| anyhow::anyhow!("gltf has no scenes: {:?}", resolved))?;
 
         for node in scene.nodes() {
-            visit_node(&node, glam::Mat4::IDENTITY, &buffers, &mut mesh);
+            visit_node_inner(&node, glam::Mat4::IDENTITY, &buffers, base_dir, assets, &mut mesh);
         }
 
         if mesh.vertices.is_empty() {
@@ -1100,10 +1113,12 @@ impl Mesh {
     }
 }
 
-fn visit_node(
+fn visit_node_inner(
     node: &gltf::Node,
     parent: glam::Mat4,
     buffers: &[gltf::buffer::Data],
+    base_dir: &std::path::Path,
+    assets: &crate::assets::AssetServer,
     out: &mut Mesh,
 ) {
     let local = glam::Mat4::from_cols_array_2d(&node.transform().matrix());
@@ -1129,10 +1144,20 @@ fn visit_node(
                 .read_colors(0)
                 .map(|c| c.into_rgb_f32().collect());
 
-            // Material base color factor (no texture sampling here — we keep the
-            // engine's default brick texture for now and tint with vertex color).
-            let base_color = prim.material().pbr_metallic_roughness().base_color_factor();
+            // Material base colour: factor + (optional) texture sampled
+            // at each vertex's UV and baked into vertex colour. This is
+            // a cheap stand-in for binding per-primitive material sets
+            // and is what makes the nature-prop pack actually look
+            // like trees / leaves / mushrooms instead of pure white.
+            let pbr = prim.material().pbr_metallic_roughness();
+            let base_color = pbr.base_color_factor();
             let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
+            let base_tex = pbr.base_color_texture().and_then(|info| {
+                match info.texture().source().source() {
+                    gltf::image::Source::Uri { uri, .. } => assets.load_image(base_dir, uri),
+                    _ => None,
+                }
+            });
 
             let base_idx = out.vertices.len() as u32;
             for i in 0..positions.len() {
@@ -1140,10 +1165,13 @@ fn visit_node(
                 let p_world = (world * p_local).truncate();
                 let n_local = glam::Vec3::from(normals[i]);
                 let n_world = (normal_mat * n_local).normalize_or_zero();
-                let color = match &colors {
+                let mut color = match &colors {
                     Some(c) => glam::Vec3::from(c[i]) * tint,
                     None => tint,
                 };
+                if let Some(img) = &base_tex {
+                    color *= img.sample(uvs[i]);
+                }
                 out.vertices.push(Vertex {
                     position: p_world,
                     normal: if n_world == glam::Vec3::ZERO { glam::Vec3::Y } else { n_world },
@@ -1166,7 +1194,7 @@ fn visit_node(
     }
 
     for child in node.children() {
-        visit_node(&child, world, buffers, out);
+        visit_node_inner(&child, world, buffers, base_dir, assets, out);
     }
 }
 
@@ -1536,6 +1564,57 @@ impl SkinnedMesh {
             }
         }
         weight
+    }
+
+    /// Find a joint whose name matches one of the left-hand naming
+    /// conventions (`hand_l`, `left_hand`, `mixamorig:LeftHand`,
+    /// etc.). Used as the spawn anchor for hand-held VFX like the
+    /// Frost Ray beam — most casting animations in the UAL pack
+    /// raise the left hand for the spell pose.
+    pub fn left_hand_joint(&self) -> Option<usize> {
+        let lc = |s: &str| s.to_ascii_lowercase();
+        self.joints.iter().enumerate().find_map(|(i, j)| {
+            let n = lc(&j.name);
+            let is_hand = n.contains("hand")
+                && !n.contains("forearm")
+                && !n.contains("lower")
+                && !n.contains("upper")
+                && !n.contains("finger")
+                && !n.contains("thumb");
+            let is_left = n.contains("left")
+                || n.ends_with("_l")
+                || n.contains(".l")
+                || n.contains("_l_")
+                || n.contains("lhand");
+            if is_hand && is_left { Some(i) } else { None }
+        })
+    }
+
+    /// Find a joint whose name matches one of the right-hand naming
+    /// conventions (`hand_r`, `right_hand`, `mixamorig:RightHand`,
+    /// etc.). Returns the deepest such joint (i.e. the actual hand,
+    /// not the wrist/forearm). Used as the spawn anchor for hand-held
+    /// VFX like the Frost Ray beam.
+    pub fn right_hand_joint(&self) -> Option<usize> {
+        let lc = |s: &str| s.to_ascii_lowercase();
+        // Score candidates so we pick the deepest hand joint (so that
+        // a child like `righthand_end` doesn't beat `righthand`,
+        // but `righthand` always beats `rightforearm`).
+        self.joints.iter().enumerate().find_map(|(i, j)| {
+            let n = lc(&j.name);
+            let is_hand = n.contains("hand")
+                && !n.contains("forearm")
+                && !n.contains("lower")
+                && !n.contains("upper")
+                && !n.contains("finger")
+                && !n.contains("thumb");
+            let is_right = n.contains("right")
+                || n.ends_with("_r")
+                || n.contains(".r")
+                || n.contains("_r_")
+                || n.contains("rhand");
+            if is_hand && is_right { Some(i) } else { None }
+        })
     }
 
     /// Index of the lowest joint in the spine chain — the joint where a

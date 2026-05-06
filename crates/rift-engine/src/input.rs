@@ -15,6 +15,9 @@ pub struct Input {
     left_clicked: Cell<bool>,
     right_clicked: Cell<bool>,
     last_mouse_pos: Option<(f64, f64)>,
+    /// Whether the left mouse button is currently held down. Tracks
+    /// hold-state for channeled ability inputs (the action button).
+    left_mouse_down: bool,
     mouse_pos: (f32, f32),
     /// Characters typed this frame (consumed by `take_chars_typed`).
     chars_typed: Vec<char>,
@@ -36,6 +39,7 @@ impl Default for Input {
             left_clicked: Cell::new(false),
             right_clicked: Cell::new(false),
             last_mouse_pos: None,
+            left_mouse_down: false,
             mouse_pos: (0.0, 0.0),
             chars_typed: Vec::new(),
             backspace_pressed: 0,
@@ -128,9 +132,18 @@ impl Input {
                 self.last_mouse_pos = None;
             }
         }
-        if button == winit::event::MouseButton::Left && pressed {
-            self.left_clicked.set(true);
+        if button == winit::event::MouseButton::Left {
+            if pressed {
+                self.left_clicked.set(true);
+            }
+            self.left_mouse_down = pressed;
         }
+    }
+
+    /// Whether the left mouse button is currently held. Used by
+    /// hold-to-channel ability inputs.
+    pub fn left_mouse_held(&self) -> bool {
+        self.left_mouse_down
     }
 
     /// Returns true if left mouse was clicked this frame (consumes the click).

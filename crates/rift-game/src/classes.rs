@@ -1,11 +1,36 @@
-//! Class roster — pure content. The engine owns the `ClassConfig`
-//! shape; this module declares which classes the game ships and their
-//! base stats. New classes get added here without touching the engine.
+//! Class roster — pure content. Owns `ClassConfig` / `ClassId` shapes,
+//! plus the Hunter base config and avatar model paths.
 
-use rift_engine::combat::{ClassConfig, ClassId};
-use rift_engine::combat::attributes::AttributeType;
-
+use crate::attributes::AttributeType;
 use crate::character::Gender;
+
+/// Opaque class identifier. Treated as a hashable key only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ClassId(pub &'static str);
+
+/// Static configuration for a class.
+#[derive(Clone, Debug)]
+pub struct ClassConfig {
+    pub class: ClassId,
+    pub name: &'static str,
+    pub primary_attribute: AttributeType,
+    /// Base HP at level 1.
+    pub base_hp: f32,
+    /// HP gained per level.
+    pub hp_per_level: f32,
+    /// Base damage (before weapon/attributes).
+    pub base_damage: f32,
+    /// Base defense (before armor/attributes).
+    pub base_defense: f32,
+    /// Base attack speed (attacks per second).
+    pub base_attack_speed: f32,
+    /// Base crit chance (0.0 - 1.0).
+    pub base_crit_chance: f32,
+    /// Base movement speed.
+    pub base_move_speed: f32,
+    /// Attack range.
+    pub base_range: f32,
+}
 
 pub const HUNTER: ClassId = ClassId("hunter");
 

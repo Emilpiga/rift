@@ -372,6 +372,7 @@ pub fn build_bone_palette(
     animator: &Animator,
     joints: &[crate::renderer::mesh::Joint],
     out: &mut Vec<Mat4>,
+    mut world_out: Option<&mut Vec<Mat4>>,
 ) {
     let n = joints.len();
     out.clear();
@@ -427,6 +428,10 @@ pub fn build_bone_palette(
     for i in 0..n {
         out[i] = world[i] * joints[i].inverse_bind;
     }
+    if let Some(w) = world_out.as_deref_mut() {
+        w.clear();
+        w.extend_from_slice(&world);
+    }
 }
 
 /// Sample a base animator and a layered animator together, where the layer
@@ -449,6 +454,7 @@ pub fn build_bone_palette_layered(
     twist: Option<(usize, f32)>,
     joints: &[crate::renderer::mesh::Joint],
     out: &mut Vec<Mat4>,
+    mut world_out: Option<&mut Vec<Mat4>>,
 ) {
     let n = joints.len();
     out.clear();
@@ -582,5 +588,9 @@ pub fn build_bone_palette_layered(
     }
     for i in 0..n {
         out[i] = world[i] * joints[i].inverse_bind;
+    }
+    if let Some(w) = world_out.as_deref_mut() {
+        w.clear();
+        w.extend_from_slice(&world);
     }
 }

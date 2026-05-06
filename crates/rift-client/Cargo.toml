@@ -1,0 +1,20 @@
+[package]
+name = "rift-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rift-engine = { path = "../rift-engine" }
+rift-game = { path = "../rift-game" }
+rift-net = { path = "../rift-net" }
+rift-dungeon = { path = "../rift-dungeon" }
+hecs = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+winit = { workspace = true }
+env_logger = { workspace = true }
+
+[[bin]]
+name = "rift"
+path = "src/main.rs"

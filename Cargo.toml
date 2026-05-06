@@ -1,12 +1,12 @@
 [workspace]
-members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game"]
+members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence"]
 resolver = "2"
 
 [workspace.dependencies]
 ash = "0.38"
 ash-window = "0.13"
 winit = "0.30"
-glam = { version = "0.32.1", features = ["bytemuck"] }
+glam = { version = "0.32.1", features = ["bytemuck", "serde"] }
 raw-window-handle = "0.6"
 log = "0.4"
 env_logger = "0.11"
@@ -18,3 +18,10 @@ hecs = "0.10"
 shaderc = "0.10.1"
 notify = "8.2.0"
 bytemuck = { version = "1.14", features = ["derive"] }
+# Networking (Phase 1 of MP): renet for the UDP transport with reliable +
+# unreliable channels, serde+bincode for the wire format. Kept in the
+# workspace table so any future binary (rift-server) shares the version.
+renet = "0.0.16"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+thiserror = "1"

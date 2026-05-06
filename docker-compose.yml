@@ -1,0 +1,38 @@
+# Local development stack for rift.
+#
+# Brings up a Postgres instance the rift-server connects to for
+# character + account persistence. Defaults are intentionally
+# trivial — this is a localhost dev tool, not a production config.
+#
+# Usage:
+#   docker compose up -d            # start postgres in the background
+#   docker compose down             # stop (data persists in volume)
+#   docker compose down -v          # stop + wipe data
+#
+# rift-server then runs with:
+#   --database-url postgres://rift:rift@127.0.0.1:55432/rift
+# (which is the default if you omit the flag entirely).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rift-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rift
+      POSTGRES_PASSWORD: rift
+      POSTGRES_DB: rift
+    ports:
+      # Host port 55432 to dodge a native postgres install that
+      # may already own 5432 on developer Windows machines.
+      - "55432:5432"
+    volumes:
+      - rift-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rift -d rift"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  rift-pgdata:

@@ -1,0 +1,20 @@
+[package]
+name = "rift-net"
+version = "0.1.0"
+edition = "2021"
+
+# Networking layer for Rift Crawler.
+#
+# This crate contains *no* renderer, ECS, or game logic — only the
+# wire types and transport helpers shared by the client (rift-game)
+# and the dedicated server (rift-server, planned). Keeping it
+# dependency-light is intentional: pulling rift-net into rift-server
+# must not transitively pull Vulkan / windowing / etc.
+
+[dependencies]
+renet = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }

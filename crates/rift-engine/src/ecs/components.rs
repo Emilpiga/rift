@@ -47,6 +47,12 @@ pub struct Skinned {
     /// Reusable scratch buffer for skinned vertices, sized to mesh.bind_vertices.len().
     /// Stored here to avoid per-frame allocation. (Empty until first skin pass.)
     pub scratch: Vec<crate::renderer::mesh::Vertex>,
+    /// Per-joint world transforms in **mesh-local** space, refreshed
+    /// every frame the entity is skinned. Other systems (e.g. beam
+    /// VFX, weapon attachments) read this to anchor world-space
+    /// effects to bones. Multiply by the entity's `Transform.matrix()`
+    /// to get a true world-space pose.
+    pub joint_worlds: Vec<glam::Mat4>,
 }
 
 /// One outfit piece riding on top of a `Skinned` entity. The piece's
@@ -132,7 +138,7 @@ pub struct SpellCast {
     /// Ability captured at trigger time. Cloned so cooldown state on the
     /// `Abilities` resource has already been advanced and we don't need to
     /// re-acquire it when the projectile actually spawns.
-    pub pending_ability: Option<crate::combat::Ability>,
+    pub pending_ability: Option<rift_game::abilities::Ability>,
     /// Aim direction captured at trigger time (xz horizontal).
     pub pending_aim_dir: glam::Vec3,
     /// Damage captured at trigger time. Spent at the moment of fire.
@@ -149,6 +155,11 @@ pub struct SpellCast {
     /// allowed to interrupt itself / resists being interrupted by
     /// pickups but yields to spell casts).
     pub oneshot_is_hit: bool,
+    /// `true` while the player is channeling. Tells the cast
+    /// system to loop the Enter clip and not auto-advance to
+    /// `Shooting` / `Exiting` when it ends. Cleared by
+    /// [`SpellCast::cancel`] and on `Idle`.
+    pub channeling: bool,
 }
 
 impl SpellCast {
@@ -165,18 +176,35 @@ impl SpellCast {
             pending_oneshot: None,
             hit_cooldown: 0.0,
             oneshot_is_hit: false,
+            channeling: false,
         }
     }
     pub fn is_active(&self) -> bool { self.phase != SpellPhase::Idle }
 
     /// Begin a new cast. Captures the ability + aim + damage so the
     /// projectile can be spawned later when we reach the Shoot phase.
-    pub fn begin(&mut self, ability: crate::combat::Ability, aim_dir: glam::Vec3, damage: f32) {
+    pub fn begin(&mut self, ability: rift_game::abilities::Ability, aim_dir: glam::Vec3, damage: f32) {
         self.phase = SpellPhase::Entering;
         self.pending_ability = Some(ability);
         self.pending_aim_dir = aim_dir;
         self.pending_damage = damage;
         self.fired = false;
+        self.channeling = false;
+    }
+
+    /// Begin a *channeled* cast. Like [`Self::begin`] but instructs
+    /// the cast system to loop the Enter clip and stay in the
+    /// channeling pose until [`Self::cancel`] is called. Used for
+    /// abilities like Frost Ray / Whirlwind whose duration is
+    /// driven by the player holding the action button rather than
+    /// a fixed clip length.
+    pub fn begin_channel(&mut self, ability: rift_game::abilities::Ability, aim_dir: glam::Vec3) {
+        self.phase = SpellPhase::Entering;
+        self.pending_ability = Some(ability);
+        self.pending_aim_dir = aim_dir;
+        self.pending_damage = 0.0;
+        self.fired = true; // channels never fire a single projectile
+        self.channeling = true;
     }
 
     /// Begin a one-shot upper-body action (e.g. picking loot off the
@@ -208,6 +236,17 @@ impl SpellCast {
         self.oneshot_is_hit = true;
         self.hit_cooldown = 0.55;
     }
+
+    /// Force the cast layer back to `Exiting` so the player drops
+    /// out of the channeled pose immediately. Used when a channel
+    /// is cancelled (button release / movement / server end).
+    pub fn cancel(&mut self) {
+        if self.phase == SpellPhase::Idle { return; }
+        self.phase = SpellPhase::Exiting;
+        self.fired = true;
+        self.pending_ability = None;
+        self.channeling = false;
+    }
 }
 
 /// Player marker component.
@@ -223,6 +262,10 @@ pub struct Player {
     /// Index of the spine-root joint to apply the torso twist to, or
     /// `usize::MAX` if unset / not a skinned player.
     pub spine_joint: u32,
+    /// Index of the right-hand joint, used as the spawn anchor for
+    /// hand-held VFX (Frost Ray beam, etc.). `u32::MAX` if the
+    /// rig has no detectable hand joint.
+    pub hand_joint: u32,
     /// Active full-body action (jump / roll). Drives whether `player_input_system`
     /// and `locomotion_anim_system` should leave the entity alone, and lets
     /// game-side code know which clip to play.
@@ -238,21 +281,35 @@ pub struct Player {
     pub airborne: bool,
 }
 
-/// Current full-body action driving the player's locomotion / animation
-/// override. `None` means normal locomotion (Idle/Walk/Jog/Sprint).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PlayerAction {
-    #[default]
-    None,
-    /// Liftoff windup; `Jump_Start` clip is playing.
-    JumpStart,
-    /// Airborne body loop; `Jump` clip is playing on a loop.
-    JumpAir,
-    /// Recovery on landing; `Jump_Land` clip is playing.
-    JumpLand,
-    /// Evasive dodge roll; `Roll` clip is playing and game-side code
-    /// is driving forward velocity for the duration.
-    Roll,
+// `PlayerAction` lives in `rift_game::components`; re-exported here
+// so existing `crate::ecs::components::PlayerAction` paths in engine
+// systems still resolve.
+pub use rift_game::components::PlayerAction;
+
+/// Marker indicating this entity's kinematics are owned by an
+/// external authority (e.g. the multiplayer client's prediction
+/// state, which is reconciled against the server). SP systems
+/// like `player_input_system`, `movement_system`, and
+/// `collision_system` skip entities carrying this marker so they
+/// don't fight whoever is driving the Transform.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NetControlled;
+
+/// Marker for the player entity owned by THIS client. SP-only
+/// concerns (camera follow, HUD readouts, input dispatch, ability
+/// casting, pickup) filter on this component so that remote
+/// player entities (which carry `Player + NetControlled` but NOT
+/// `LocalPlayer`) don't accidentally drive the local UI/camera.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalPlayer;
+
+/// Marker for player entities owned by another client. Drives
+/// "remote-player" specific behavior (snapshot-driven kinematics,
+/// no input dispatch) and lets SP systems skip them where needed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemotePlayer {
+    /// The remote's stable network id, for snapshot lookup.
+    pub net_id: u32,
 }
 
 /// Velocity component for movement.
@@ -280,6 +337,15 @@ pub struct Enemy {
     /// How much rift progress this enemy gives when killed.
     pub progress_value: f32,
     pub kind: EnemyKind,
+}
+
+/// Active-debuff bitmask on an entity. One bit per
+/// `rift_game::debuffs::id::*`. The HUD reads this to paint
+/// indicator pips above the entity. Owned by network sync on the
+/// client, by the simulation on the server.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Debuffs {
+    pub mask: u32,
 }
 
 /// Marks an entity as a rift boss.

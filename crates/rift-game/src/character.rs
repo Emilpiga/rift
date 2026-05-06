@@ -3,10 +3,17 @@
 //! until multiplayer/DB work begins; for now everything lives in this
 //! struct for the lifetime of the process.
 
-use rift_engine::combat::ClassId;
+use crate::classes::ClassId;
 
 /// Hard cap on simultaneous character slots in the roster.
 pub const MAX_CHARACTERS: usize = 5;
+
+/// Stable wire-byte mapping for `Gender`. Decoupled from rift-net so
+/// the conversion glue lives wherever the wire type is decoded.
+pub mod gender_byte {
+    pub const MALE: u8 = 0;
+    pub const FEMALE: u8 = 1;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Gender {
@@ -20,6 +27,24 @@ impl Gender {
             Gender::Male => "Male",
             Gender::Female => "Female",
         }
+    }
+
+    /// Encode to the stable wire byte. Pair with [`Gender::from_wire_byte`].
+    pub fn to_wire_byte(self) -> u8 {
+        match self {
+            Gender::Male => gender_byte::MALE,
+            Gender::Female => gender_byte::FEMALE,
+        }
+    }
+
+    /// Decode from a wire byte. Returns `None` for unknown bytes so
+    /// future variants can be added without crashing old peers.
+    pub fn from_wire_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            gender_byte::MALE => Gender::Male,
+            gender_byte::FEMALE => Gender::Female,
+            _ => return None,
+        })
     }
 }
 

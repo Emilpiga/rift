@@ -1,0 +1,23 @@
+[package]
+name = "rift-server"
+version = "0.1.0"
+edition = "2021"
+
+# Headless dedicated-server binary for Rift Crawler.
+#
+# This crate is intentionally lean: it pulls rift-net for the wire
+# format and renet endpoint, plus hecs for a future ECS world to tick.
+# It MUST NOT depend on rift-engine (which transitively pulls Vulkan,
+# winit, gltf, etc.) — the whole point of the dedicated server is to
+# be runnable on a headless box.
+
+[dependencies]
+rift-net = { path = "../rift-net" }
+rift-dungeon = { path = "../rift-dungeon" }
+rift-game = { path = "../rift-game" }
+rift-persistence = { path = "../rift-persistence" }
+hecs = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }

@@ -1,7 +1,7 @@
 use glam::{Quat, Vec3};
 use hecs::World;
 
-use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, Health, Player, Renderable, Skinned, Transform, Velocity};
+use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, Health, LocalPlayer, Player, Renderable, Skinned, Transform, Velocity};
 use crate::animation::{self, Animator};
 use crate::input::Input;
 use crate::physics::{self, Aabb, Ray};
@@ -9,8 +9,14 @@ use crate::renderer::Renderer;
 
 /// Process player input and set velocity based on WASD keys.
 pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
-    for (_id, (transform, velocity, player, health)) in
-        world.query_mut::<(&Transform, &mut Velocity, &Player, Option<&super::components::Health>)>()
+    for (_id, (transform, velocity, player, health, _local)) in
+        world.query_mut::<(
+            &Transform,
+            &mut Velocity,
+            &Player,
+            Option<&super::components::Health>,
+            &LocalPlayer,
+        )>()
     {
         // Dead players don't move — freeze velocity so the death
         // animation plays at their final position.
@@ -82,10 +88,14 @@ pub fn movement_system(world: &mut World, dt: f32) {
     // Players need vertical-velocity integration (jumping). Other
     // entities stay flat on y=0.
     const GRAVITY: f32 = 22.0;
-    for (_id, (transform, velocity, player)) in world.query_mut::<(&mut Transform, &mut Velocity, &mut Player)>() {
+    for (_id, (transform, velocity, player, net)) in world.query_mut::<(&mut Transform, &mut Velocity, &mut Player, Option<&super::components::NetControlled>)>() {
+        // Networked players: horizontal motion is owned by the
+        // net client's prediction loop, but we still let vertical
+        // jump physics run locally (Phase 4.2 doesn't sync jumps).
+        let net_controlled = net.is_some();
         // Horizontal motion (XZ).
         let horiz = Vec3::new(velocity.linear.x, 0.0, velocity.linear.z);
-        if horiz.length_squared() > 0.001 {
+        if !net_controlled && horiz.length_squared() > 0.001 {
             transform.position += horiz * dt;
             let target_yaw = horiz.x.atan2(horiz.z);
             let target_rot = Quat::from_rotation_y(target_yaw);
@@ -371,9 +381,13 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
             animation::build_bone_palette_layered(
                 animator, layer_anim, layer_mask, layer_weight, twist,
                 &skinned.mesh.joints, &mut palette,
+                Some(&mut skinned.joint_worlds),
             );
         } else {
-            animation::build_bone_palette(animator, &skinned.mesh.joints, &mut palette);
+            animation::build_bone_palette(
+                animator, &skinned.mesh.joints, &mut palette,
+                Some(&mut skinned.joint_worlds),
+            );
         }
         // Skin the base body every frame. We never hide it under outfits:
         // the outfit pieces are inflated slightly along their normals so
@@ -425,14 +439,31 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
             continue;
         }
 
-        // We deliberately skip the Spell_Simple_Shoot clip on the cast
-        // layer: it dips the hand briefly which looks like a flinch right
-        // as the projectile spawns. Instead we fire at the Enter→Exit
-        // boundary, so the hand stays raised through the release and the
-        // Exit clip provides the natural recovery motion.
+        // Cast layer clips:
+        //   * Entering: wind-up clip raises the hand to the casting
+        //     pose. Projectile / damage fires on the transition out
+        //     of this phase, so the released visual lines up with
+        //     the start of the Shoot clip.
+        //   * Shooting: release clip (the hand snaps forward as
+        //     the spell leaves it). Plays once, then transitions
+        //     to Exiting.
+        //   * Exiting: recovery clip back to neutral.
+        //
+        // Channels use a different clip stack so the body keeps a
+        // sustained "casting" pose for the whole hold duration.
         let target_clip = match cast.phase {
+            SpellPhase::Entering if cast.channeling => set.find_any(&[
+                "Spell_Simple_Idle_Loop",
+                "Spell_Idle_Loop",
+                "Cast_Loop",
+                "Channel_Loop",
+                "Spell_Double_Shoot",
+                "Spell_Simple_Enter",
+                "Spell_Enter",
+                "Cast_Enter",
+            ]),
             SpellPhase::Entering => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
-            SpellPhase::Shooting => set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"]),
+            SpellPhase::Shooting => set.find_any(&["Spell_Simple_Shoot", "Spell_Shoot", "Cast_Shoot", "Spell_Simple_Enter"]),
             SpellPhase::Exiting => set.find_any(&["Spell_Simple_Exit", "Spell_Exit", "Cast_Exit"]),
             SpellPhase::OneShot => cast.pending_oneshot.clone(),
             SpellPhase::Idle => None,
@@ -440,14 +471,14 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
         let Some(target_clip) = target_clip else {
             // Missing clip for this phase — fall through gracefully.
             match cast.phase {
-                SpellPhase::Entering => cast.phase = SpellPhase::Shooting,
-                SpellPhase::Shooting => {
+                SpellPhase::Entering => {
                     if !cast.fired {
                         fire_events.push((entity, cast.pending_aim_dir, cast.pending_damage));
                         cast.fired = true;
                     }
-                    cast.phase = SpellPhase::Exiting;
+                    cast.phase = SpellPhase::Shooting;
                 }
+                SpellPhase::Shooting => cast.phase = SpellPhase::Exiting,
                 SpellPhase::Exiting | SpellPhase::OneShot => {
                     cast.phase = SpellPhase::Idle;
                     cast.layer_animator = None;
@@ -471,6 +502,15 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                     la.looping = false;
                     cast.layer_animator = Some(la);
                 }
+            }
+        }
+        // Channels keep the Enter clip looping until the player
+        // releases the action button (or the server expires it).
+        // We flag `looping` here every frame so a fresh cross-fade
+        // doesn't reset it.
+        if cast.channeling {
+            if let Some(la) = cast.layer_animator.as_mut() {
+                la.looping = true;
             }
         }
 
@@ -500,13 +540,25 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
             if done {
                 match cast.phase {
                     SpellPhase::Entering => {
-                        // Fire at the end of the wind-up so the projectile
-                        // leaves the hand at its highest, fully-extended pose.
-                        if !cast.fired {
-                            fire_events.push((entity, cast.pending_aim_dir, cast.pending_damage));
-                            cast.fired = true;
+                        // While channeling we never auto-advance —
+                        // the Enter clip is looping and the layer
+                        // sits at full weight until `cancel()` is
+                        // called.
+                        if cast.channeling {
+                            // No-op: looping animator handles
+                            // wraparound on its own.
+                        } else {
+                            // Fire at the end of the wind-up so the
+                            // projectile leaves the hand at its
+                            // highest, fully-extended pose. The
+                            // Shoot clip plays next and visually
+                            // sells the release.
+                            if !cast.fired {
+                                fire_events.push((entity, cast.pending_aim_dir, cast.pending_damage));
+                                cast.fired = true;
+                            }
+                            cast.phase = SpellPhase::Shooting;
                         }
-                        cast.phase = SpellPhase::Exiting;
                     }
                     SpellPhase::Shooting => cast.phase = SpellPhase::Exiting,
                     SpellPhase::Exiting => {
@@ -514,6 +566,7 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                             cast.phase = SpellPhase::Idle;
                             cast.layer_animator = None;
                             cast.fired = false;
+                            cast.channeling = false;
                         }
                     }
                     SpellPhase::OneShot => {
@@ -535,7 +588,10 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
 /// Make the camera follow the player with a third-person offset.
 /// Pulls the camera forward if a wall is between the player and the camera.
 pub fn camera_follow_system(world: &World, renderer: &mut Renderer, input: &Input, wall_aabbs: &[Aabb]) {
-    for (_id, (transform, _player)) in world.query::<(&Transform, &Player)>().iter() {
+    for (_id, (transform, _player, _local)) in world
+        .query::<(&Transform, &Player, &super::components::LocalPlayer)>()
+        .iter()
+    {
         let target = transform.position + Vec3::new(0.0, 0.8, 0.0);
 
         let yaw = input.camera_yaw();
@@ -570,9 +626,14 @@ pub fn camera_follow_system(world: &World, renderer: &mut Renderer, input: &Inpu
 /// Uses AABB overlap + minimum penetration push-out.
 pub fn collision_system(world: &mut World, wall_colliders: &[(Vec3, Collider)]) {
     // Resolve dynamic entities (those with Velocity) against statics
-    for (_id, (transform, collider, _vel)) in
-        world.query_mut::<(&mut Transform, &Collider, &mut Velocity)>()
+    for (_id, (transform, collider, _vel, net)) in
+        world.query_mut::<(&mut Transform, &Collider, &mut Velocity, Option<&super::components::NetControlled>)>()
     {
+        // Networked players: collision is server-authoritative,
+        // resolved by the prediction sim against the dungeon grid.
+        if net.is_some() {
+            continue;
+        }
         let pos = transform.position;
         let (dyn_min, dyn_max) = collider.bounds(pos);
 
@@ -848,8 +909,10 @@ pub fn despawn_system(world: &mut World, renderer: &mut Renderer) -> Vec<KillInf
             }
         }
         // Stop any debuff aura emitters glued to this entity so they
-        // don't keep spawning particles at the corpse.
-        crate::combat::cleanup_debuff_visuals(world, renderer, entity);
+        // don't keep spawning particles at the corpse. (No-op now —
+        // debuff system is server-authoritative; kept as a marker.)
+        let _ = entity;
+        let _ = renderer;
         let _ = world.despawn(entity);
     }
 
@@ -912,9 +975,11 @@ pub fn player_action_pre_system(
     accept_input: bool,
 ) {
     use super::components::PlayerAction;
-    // Find the player.
+    // Find the *local* player. The remote-player entities also
+    // carry `Player`, so an unfiltered query would non-deterministically
+    // pick a remote and stomp its FSM state with our keyboard.
     let Some(player_id) = world
-        .query::<&Player>()
+        .query::<(&Player, &LocalPlayer)>()
         .iter()
         .map(|(e, _)| e)
         .next()
@@ -1037,8 +1102,10 @@ pub fn player_action_pre_system(
 /// plays as soon as the feet touch.
 pub fn player_action_post_system(world: &mut World, cfg: &PlayerActionConfig) {
     use super::components::PlayerAction;
+    // Filter to the local player; remote-player entities carry
+    // `Player` too and we mustn't transition their FSM here.
     let Some(player_id) = world
-        .query::<&Player>()
+        .query::<(&Player, &LocalPlayer)>()
         .iter()
         .map(|(e, _)| e)
         .next()

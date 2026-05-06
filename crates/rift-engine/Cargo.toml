@@ -5,6 +5,8 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
+rift-dungeon = { path = "../rift-dungeon" }
+rift-game = { path = "../rift-game" }
 ash = { workspace = true }
 ash-window = { workspace = true }
 winit = { workspace = true }

@@ -1,25 +1,15 @@
-pub mod class;
-pub mod attributes;
-pub mod experience;
-pub mod ability;
-pub mod ability_runtime;
-pub mod debuff;
-pub mod talent;
-pub mod projectile;
-pub mod projectile_pool;
+//! Engine-side combat runtime.
+//!
+//! Declarative ability/class/talent/attribute/experience types live in
+//! `rift_game`. This module only contains the engine-side pieces:
+//!  - `ability_runtime`: client-side cast FSM + particle dispatch
+//!  - `projectile`: in-engine arrow geometry (rendering only)
 
-pub use class::{ClassId, ClassConfig};
-pub use attributes::{Attributes, AttributeType, AttributeScaling};
-pub use experience::{Experience, LevelUpReward};
-pub use ability::{Ability, AbilityId, AbilitySlot, AbilityState, TargetingMode};
+pub mod ability_runtime;
+pub mod projectile;
+
 pub use ability_runtime::{
-    execute_ability, execute_ability_instant, execute_ability_placed, AbilityCtx, AbilityEffect,
-    ActionMovement, ParticlePreset, SpawnOffset,
+    emitter_for_preset, execute_ability, execute_ability_instant, execute_ability_placed,
+    AbilityCtx,
 };
-pub use debuff::{
-    apply_damage, cleanup_debuff_visuals, debuff_tick_system, Debuff, DebuffKind, DebuffVisual,
-    Debuffs,
-};
-pub use talent::{TalentTree, TalentNode, TalentId};
 pub use projectile::{Projectile, ProjectileKind};
-pub use projectile_pool::{ProjectilePool, AoeZone};

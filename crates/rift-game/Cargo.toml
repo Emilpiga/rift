@@ -3,16 +3,15 @@ name = "rift-game"
 version = "0.1.0"
 edition = "2021"
 
+# Declarative gameplay data crate. No renderer, no wire format, no ECS
+# systems. Just types that describe how the game should look and feel.
+# Engine and server consume these types; the client crate stitches
+# them together with the renderer.
+
 [dependencies]
-rift-engine = { path = "../rift-engine" }
-rift-math = { path = "../rift-math" }
+rift-dungeon = { path = "../rift-dungeon" }
 hecs = { workspace = true }
 glam = { workspace = true }
+serde = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
-winit = { workspace = true }
-env_logger = { workspace = true }
-
-[[bin]]
-name = "rift"
-path = "src/main.rs"

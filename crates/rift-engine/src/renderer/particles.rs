@@ -543,23 +543,42 @@ impl EmitterConfig {
         }
     }
 
-    /// Rain of Arrows: area bombardment falling particles.
-    pub fn rain_of_arrows(color: [f32; 3]) -> Self {
+    /// Rain of Fire: continuous downpour of flaming embers over a
+    /// circular area, used by the "Rain of Fire" AoE ability.
+    /// Particles spawn at the top of a 5 m column and fall under
+    /// gravity, fading from bright yellow to dark red as they
+    /// burn out. The emitter `duration` matches the ability's
+    /// damage zone duration so the visual ends with the zone.
+    pub fn rain_of_fire() -> Self {
         Self {
-            spawn_rate: 45.0,
-            burst_count: 12,
-            lifetime: (0.3, 0.6),
-            speed: (8.0, 12.0),
-            size: (0.2, 0.4),
-            size_end: (0.1, 0.2),
-            color_start: [color[0], color[1], color[2], 1.0],
-            color_end: [color[0] * 0.4, color[1] * 0.3, 0.0, 0.8],
-            gravity: 18.0,
-            drag: 0.2,
-            spread: EmitterSpread::Column { radius: 2.5, height: 0.5 },
+            spawn_rate: 90.0,
+            burst_count: 14,
+            // Long lifetime so embers launched from the top of the
+            // column have time to fall the full ~5 m under gravity
+            // before they expire. Drag is kept low for the same
+            // reason — too much drag and the particles plateau
+            // mid-air and fade out before reaching the ground.
+            lifetime: (1.4, 1.9),
+            // Strong initial downward velocity so the column looks
+            // like it's actively raining instead of drifting.
+            speed: (6.0, 10.0),
+            size: (0.18, 0.32),
+            size_end: (0.04, 0.10),
+            // Bright yellow-orange flame core fading to a dim,
+            // smouldering red. Alpha eases out so embers don't
+            // pop off-screen at end-of-life.
+            color_start: [1.6, 0.8, 0.15, 1.0],
+            color_end:   [0.9, 0.10, 0.0, 0.0],
+            gravity: 22.0,
+            drag: 0.05,
+            spread: EmitterSpread::Column { radius: 3.0, height: 0.5 },
             direction: -Vec3::Y,
             one_shot: false,
             orbital_speed: (0.0, 0.0),
+            // Match the ability's zone duration so the visual
+            // stops the same moment the damage ticks stop. The
+            // particle simulator keeps already-spawned embers
+            // alive until their own lifetime expires.
             duration: 2.0,
         }
     }
@@ -600,6 +619,54 @@ impl EmitterConfig {
             drag: 3.0,
             spread: EmitterSpread::Sphere,
             direction: Vec3::ZERO,
+            one_shot: true,
+            orbital_speed: (0.0, 0.0),
+            duration: 0.0,
+        }
+    }
+
+    /// Frost Ray beam trail: tiny one-shot puff of icy particles that
+    /// drift forward along the beam, used to add motion / pulse to
+    /// the otherwise-static beam mesh.
+    ///
+    /// Spawn at random points along the beam every frame; `direction`
+    /// is the beam's forward unit vector.
+    pub fn frost_beam_spark(direction: Vec3) -> Self {
+        Self {
+            spawn_rate: 0.0,
+            burst_count: 3,
+            lifetime: (0.18, 0.35),
+            speed: (2.0, 4.5),
+            size: (0.06, 0.12),
+            size_end: (0.0, 0.03),
+            color_start: [0.75, 0.95, 1.0, 0.95],
+            color_end: [0.40, 0.70, 1.0, 0.0],
+            gravity: -1.5,
+            drag: 4.0,
+            spread: EmitterSpread::Cone(0.55), // ~31° half-angle
+            direction,
+            one_shot: true,
+            orbital_speed: (0.0, 0.0),
+            duration: 0.0,
+        }
+    }
+
+    /// Frost Ray impact: cold burst on each pierced target and at
+    /// the beam's terminal point (wall / end of range).
+    pub fn frost_impact() -> Self {
+        Self {
+            spawn_rate: 0.0,
+            burst_count: 14,
+            lifetime: (0.22, 0.55),
+            speed: (2.5, 5.0),
+            size: (0.08, 0.15),
+            size_end: (0.0, 0.04),
+            color_start: [0.80, 0.95, 1.0, 1.0],
+            color_end: [0.30, 0.55, 0.95, 0.0],
+            gravity: 4.0,
+            drag: 3.5,
+            spread: EmitterSpread::Sphere,
+            direction: Vec3::Y,
             one_shot: true,
             orbital_speed: (0.0, 0.0),
             duration: 0.0,
