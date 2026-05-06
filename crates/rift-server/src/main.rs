@@ -17,7 +17,7 @@
 //! same; behind a Cloudflare/NAT relay they differ.
 
 use std::{
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     time::{Duration, Instant},
 };
 
@@ -1243,13 +1243,19 @@ fn parse_args() -> Args {
     //   DATABASE_URL     — Postgres connection string. Empty string
     //                      or `disabled` skips persistence (same as
     //                      `--no-db`).
+    // Resolve to a SocketAddr but accept hostnames (e.g. Fly.io's
+    // `fly-global-services:34000`) in addition to literal IPs.
+    fn resolve_bind(s: &str) -> SocketAddr {
+        s.to_socket_addrs()
+            .unwrap_or_else(|e| panic!("invalid bind address {s:?}: {e}"))
+            .next()
+            .unwrap_or_else(|| panic!("bind address {s:?} resolved to no addrs"))
+    }
     let mut bind: SocketAddr = match std::env::var("RIFT_BIND") {
-        Ok(v) if !v.is_empty() => v.parse().expect("invalid RIFT_BIND"),
+        Ok(v) if !v.is_empty() => resolve_bind(&v),
         _ => match std::env::var("PORT") {
-            Ok(p) if !p.is_empty() => format!("0.0.0.0:{p}")
-                .parse()
-                .expect("invalid PORT"),
-            _ => "0.0.0.0:34000".parse().unwrap(),
+            Ok(p) if !p.is_empty() => resolve_bind(&format!("0.0.0.0:{p}")),
+            _ => resolve_bind("0.0.0.0:34000"),
         },
     };
     let mut public: Option<SocketAddr> = match std::env::var("RIFT_PUBLIC") {
@@ -1266,7 +1272,7 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--bind" => {
                 if let Some(v) = iter.next() {
-                    bind = v.parse().expect("invalid --bind address");
+                    bind = resolve_bind(&v);
                 }
             }
             "--public" => {

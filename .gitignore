@@ -1,3 +1,18 @@
 /target
 *.spv
 *.log
+
+# Packaged client builds (rebuild with scripts/package-client.*)
+/dist/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

@@ -632,8 +632,17 @@ struct Args {
     connect: Option<SocketAddr>,
 }
 
+/// Compile-time default server address baked into the client. Set
+/// at build time via the `RIFT_DEFAULT_SERVER` env var (read by
+/// `build.rs`); falls back to the local dev server. Players who
+/// just double-click `rift.exe` connect here without needing a
+/// flag. Override at runtime with `--connect`, `RIFT_SERVER`, or
+/// `--offline`.
+const DEFAULT_SERVER: Option<&str> = option_env!("RIFT_DEFAULT_SERVER");
+
 fn parse_args() -> Args {
     let mut connect: Option<SocketAddr> = None;
+    let mut explicit_offline = false;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -641,14 +650,46 @@ fn parse_args() -> Args {
                 let v = iter.next().expect("--connect requires an address");
                 connect = Some(v.parse().expect("invalid --connect address"));
             }
+            "--offline" => {
+                explicit_offline = true;
+            }
             "--help" | "-h" => {
-                eprintln!("rift [--connect host:port]");
+                eprintln!(
+                    "rift [--connect host:port] [--offline]\n\
+                     \n\
+                     Defaults to the server baked in at build time\n\
+                     (RIFT_DEFAULT_SERVER), or to the RIFT_SERVER env\n\
+                     var if set. Pass --offline to skip multiplayer\n\
+                     entirely."
+                );
                 std::process::exit(0);
             }
             other => {
                 eprintln!("unknown argument: {other}");
                 std::process::exit(2);
             }
+        }
+    }
+    // Resolution order: explicit --connect > $RIFT_SERVER >
+    // compile-time default. --offline trumps everything.
+    if connect.is_none() && !explicit_offline {
+        if let Ok(env_addr) = std::env::var("RIFT_SERVER") {
+            if !env_addr.is_empty() {
+                connect = Some(
+                    env_addr
+                        .parse()
+                        .expect("invalid RIFT_SERVER address"),
+                );
+            }
+        }
+    }
+    if connect.is_none() && !explicit_offline {
+        if let Some(default) = DEFAULT_SERVER {
+            connect = Some(
+                default
+                    .parse()
+                    .expect("invalid RIFT_DEFAULT_SERVER baked at build time"),
+            );
         }
     }
     Args { connect }

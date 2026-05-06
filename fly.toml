@@ -5,11 +5,18 @@
 # the path of least resistance for a hosted dedicated server.
 #
 # One-time setup (after `flyctl auth login`):
-#   flyctl launch --copy-config --no-deploy
-#   flyctl postgres create --name rift-db && flyctl postgres attach rift-db
+#   flyctl launch --copy-config --no-deploy --region arn
+#   flyctl postgres create --name rift-db --region arn
+#   flyctl postgres attach rift-db
 #   flyctl ips allocate-v4
-#   flyctl secrets set RIFT_PUBLIC=$(flyctl ips list -j | jq -r '.[0].Address'):34000
+#   flyctl secrets set RIFT_PUBLIC=<that-ip>:34000
 #   flyctl deploy
+#
+# `--region` is required on first launch even with `--copy-config`
+# because the wizard creates the app *before* it reads fly.toml.
+# Pick from `flyctl platform regions`; `arn` (Stockholm) is the
+# default below. Change it to match the region closest to you AND
+# keep this file in sync.
 #
 # Re-deploy after a code change:
 #   flyctl deploy
@@ -18,28 +25,42 @@
 #   flyctl logs
 
 app = "rift-server"
-primary_region = "ams"   # pick whichever region is closest to you
+primary_region = "arn"
 
 [build]
   dockerfile = "Dockerfile.server"
 
 [env]
-  RUST_LOG    = "info"
-  RIFT_BIND   = "0.0.0.0:34000"
+  RUST_LOG = "info"
+  # Bind to the special Fly hostname rather than 0.0.0.0. On Fly,
+  # inbound UDP arrives on a different internal interface than
+  # 0.0.0.0 default-routes out through, which causes responses to
+  # egress with a different source IP. Netcode's anti-spoofing
+  # rejects those packets, breaking the handshake. Binding to
+  # `fly-global-services` ensures responses go out the same NIC.
+  RIFT_BIND = "fly-global-services:34000"
 
 # UDP service. fly.io rewrites the inbound dst port to internal_port
 # inside the VM. Keep them identical so RIFT_PUBLIC matches the
 # external port the client connects to.
+#
+# auto_stop / auto_start MUST be off for UDP. Fly's edge can wake
+# a stopped machine on inbound HTTP, but UDP packets are silently
+# dropped against a stopped VM, so the very first connect attempt
+# would time out before the machine boots.
 [[services]]
-  protocol     = "udp"
+  protocol = "udp"
   internal_port = 34000
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
 
   [[services.ports]]
     port = 34000
 
 # 256 MB / shared CPU is plenty for a 4-player session. Bump
-# `memory_mb` first if you start hitting OOMs.
+# memory_mb first if you start hitting OOMs.
 [[vm]]
-  cpu_kind   = "shared"
-  cpus       = 1
-  memory_mb  = 256
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

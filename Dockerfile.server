@@ -24,7 +24,7 @@
 #     reconnect to it after the initial handshake.
 # --------------------------------------------------------------------
 
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 WORKDIR /src
 
 # sqlx uses rustls, so no libssl needed at build time. pkg-config

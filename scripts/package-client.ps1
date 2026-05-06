@@ -4,10 +4,35 @@
 # touching Cargo.
 #
 # Usage:
+#   # Bake the server address into the binary so playtesters can
+#   # just double-click rift.exe with no flags:
+#   .\scripts\package-client.ps1 -Server 137.66.39.118:34000
+#
+#   # Or take whatever's already in $env:RIFT_DEFAULT_SERVER:
+#   $env:RIFT_DEFAULT_SERVER = "137.66.39.118:34000"
 #   .\scripts\package-client.ps1
+#
+#   # Build a "no default, must pass --connect" client:
+#   .\scripts\package-client.ps1 -Server ""
+
+[CmdletBinding()]
+param(
+    # Address baked into the client at compile time. Players who
+    # run rift.exe with no flags connect here. Leave empty to
+    # ship a build that requires --connect.
+    [string]$Server = $env:RIFT_DEFAULT_SERVER
+)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -Path (Join-Path $PSScriptRoot '..')
+
+if ($Server) {
+    Write-Host "==> baking RIFT_DEFAULT_SERVER=$Server"
+    $env:RIFT_DEFAULT_SERVER = $Server
+} else {
+    Write-Host "==> no server baked in; clients will need --connect"
+    Remove-Item Env:RIFT_DEFAULT_SERVER -ErrorAction SilentlyContinue
+}
 
 Write-Host '==> cargo build --release -p rift-client'
 cargo build --release -p rift-client
@@ -28,14 +53,27 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 Write-Host '==> staging binary + assets'
 Copy-Item 'target\release\rift.exe' (Join-Path $stage 'rift.exe')
 Copy-Item -Recurse 'assets' (Join-Path $stage 'assets')
+
+$serverLine = if ($Server) {
+    "Connects automatically to $Server."
+} else {
+    "Run with --connect HOST:PORT to join a server."
+}
 @"
 Rift Crawler — playtest build ($host_triple)
 
 Run the game:
     rift.exe
 
-Connect to a server:
+$serverLine
+
+Override the baked-in server (if any):
     rift.exe --connect HOST:PORT
+or set the env var:
+    set RIFT_SERVER=HOST:PORT
+
+Skip multiplayer entirely:
+    rift.exe --offline
 
 Notes:
 * You need a Vulkan-capable GPU + a modern driver. Every
