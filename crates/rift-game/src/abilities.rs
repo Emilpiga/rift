@@ -63,10 +63,10 @@ pub enum VfxKind {
     FireballTrail,
     /// Warm orange burst played at fireball detonation.
     FireballImpact,
-    /// Violet/indigo trail for enemy caster bolts.
-    CasterBoltTrail,
-    /// Violet/indigo burst played at caster-bolt detonation.
-    CasterBoltImpact,
+    /// Violet/indigo trail for enemy arcane bolts.
+    ArcaneBoltTrail,
+    /// Violet/indigo burst played at arcane-bolt detonation.
+    ArcaneBoltImpact,
     /// Sustained ribbon-and-glow effect rendered along the Frost
     /// Ray beam.
     FrostRay,
@@ -85,8 +85,8 @@ pub enum VfxKind {
 pub enum MeshKind {
     /// Warm orange `Mesh::fireball` (player projectiles).
     Fireball,
-    /// Smaller violet `Mesh::caster_bolt` (enemy bolts).
-    CasterBolt,
+    /// Smaller violet `Mesh::arcane_bolt` (enemy bolts).
+    ArcaneBolt,
 }
 
 /// Per-ability-shape visual recipe. Exactly one variant is
@@ -432,7 +432,7 @@ pub mod id {
     // upper half is plenty. Clients dispatch projectile mesh /
     // VFX off these ids in `world_sync` — never reorder, only
     // append.
-    pub const ENEMY_CASTER_BOLT: u8 = 64;
+    pub const ENEMY_ARCANE_BOLT: u8 = 64;
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -894,9 +894,9 @@ pub static REGISTRY: &[Ability] = &[
     // (`ability.visuals.shape`) works uniformly for player and
     // enemy projectiles on the client.
     Ability {
-        id: AbilityId("enemy_caster_bolt"),
-        wire_id: id::ENEMY_CASTER_BOLT,
-        name: "Caster Bolt",
+        id: AbilityId("enemy_arcane_bolt"),
+        wire_id: id::ENEMY_ARCANE_BOLT,
+        name: "Arcane Bolt",
         description: "",
         icon: None,
         cooldown: 0.0,
@@ -918,9 +918,9 @@ pub static REGISTRY: &[Ability] = &[
         visuals: AbilityVisuals {
             cast_spark: None,
             shape: ShapeVisuals::Projectile {
-                mesh: MeshKind::CasterBolt,
-                trail: VfxKind::CasterBoltTrail,
-                impact: VfxKind::CasterBoltImpact,
+                mesh: MeshKind::ArcaneBolt,
+                trail: VfxKind::ArcaneBoltTrail,
+                impact: VfxKind::ArcaneBoltImpact,
                 scale: 0.6,
             },
         },

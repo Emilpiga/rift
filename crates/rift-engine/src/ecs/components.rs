@@ -338,6 +338,20 @@ pub struct RemotePlayer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ghost;
 
+/// Transient marker placed on the local player while the
+/// `LayToIdle` (get-up-from-corpse) animation is still
+/// playing. Engine input / locomotion systems do **not**
+/// treat `GhostRising` as alive — the avatar stays frozen on
+/// the floor pose until the rise anim finishes, at which
+/// point the client swaps `GhostRising` for [`Ghost`] and
+/// movement unlocks. `remaining` is seeded from the rise
+/// clip's duration and counted down by the client's
+/// gameplay tick.
+#[derive(Clone, Copy, Debug)]
+pub struct GhostRising {
+    pub remaining: f32,
+}
+
 /// Velocity component for movement.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Velocity {

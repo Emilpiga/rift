@@ -21,6 +21,18 @@ use serde::{Deserialize, Serialize};
 /// to avoid a wasted round-trip and to surface an instant warning.
 pub const INVENTORY_CAPACITY: usize = 30;
 
+/// Time (in seconds) every living player must keep their
+/// `ToggleShrineChannel` intent active while standing within
+/// the shrine's interact radius before the revive triggers.
+/// Shared by server (channel tick) and client (HUD bar).
+pub const SHRINE_CHANNEL_DURATION: f32 = 3.0;
+
+/// Interact radius of a revive shrine in world units. The server
+/// uses this to validate `ToggleShrineChannel` requests and to
+/// auto-cancel a player's channel intent when they walk out;
+/// the client mirrors it for the F-prompt range check.
+pub const SHRINE_INTERACT_RADIUS: f32 = 2.5;
+
 /// Why the server refused a [`ClientMsg::PickUpLoot`]. Sent back to
 /// the requesting client only (loot stays on the ground for everyone
 /// else). Today there's a single reason; the enum exists so we can
@@ -270,6 +282,19 @@ pub enum ClientMsg {
     /// already voted (no changing your mind). Reliable on
     /// `Channel::Control`.
     RiftExitVoteCast { yes: bool },
+
+    /// Set the local player's revive-shrine channel intent.
+    /// `Some(shrine)` means "I am holding F within range of
+    /// this shrine right now"; `None` means "I released F /
+    /// walked out of range / I'm not channeling anything."
+    /// The client edge-triggers this whenever its computed
+    /// intent changes (key transitions or range transitions),
+    /// so the wire traffic stays sparse. Server validates
+    /// alive + within radius before accepting `Some`. The
+    /// channel itself only ticks while every living player on
+    /// the floor has matching `Some` intent. Reliable on
+    /// `Channel::Control`.
+    SetShrineChannel { shrine: Option<NetId> },
 }
 
 /// One voter's choice in an active [`VoteState`]. `Pending` means
@@ -654,6 +679,24 @@ pub enum EntityKind {
         /// lookup roundtrip.
         item: ItemBlob,
     },
+    /// A revive shrine sitting on the floor. Rare spawn on
+    /// rift floors >= 2. While ALL living players on the floor
+    /// are channeling it (proximity + F-press intent), `progress`
+    /// ramps from 0 to 255 over `SHRINE_CHANNEL_DURATION` seconds;
+    /// on completion the server revives every ghost on the
+    /// floor and broadcasts [`WorldEvent::PlayersRevived`].
+    /// `channelers` / `required` give the HUD a "1 / 2 channeling"
+    /// readout without needing to track player positions client-
+    /// side. `required` is 0 when no living players exist (which
+    /// the channel-tick gate also rejects).
+    ReviveShrine {
+        /// Channel progress, 0..=255 mapping to 0.0..=1.0.
+        progress: u8,
+        /// Living players currently channeling this shrine.
+        channelers: u8,
+        /// Living players on the floor (channel target count).
+        required: u8,
+    },
 }
 
 /// Wire-serialisable rolled item. Reconstructable via
@@ -744,5 +787,17 @@ pub enum WorldEvent {
     PlayerGhosted {
         entity: NetId,
         position: [f32; 3],
+    },
+
+    /// One or more ghosts have been revived back to full HP by
+    /// a completed revive shrine channel. Each NetId in the
+    /// list refers to a player who was a ghost (or in the
+    /// down-pose) before the channel completed. Clients use
+    /// this to clear their local ghost-tint / vignette and
+    /// spawn a celebration VFX at each revived position. The
+    /// shrine entity itself is despawned in the same tick so
+    /// the next snapshot drops its row.
+    PlayersRevived {
+        entities: Vec<NetId>,
     },
 }

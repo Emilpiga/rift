@@ -997,12 +997,12 @@ impl Mesh {
         Self { vertices, indices }
     }
 
-    /// Caster bolt — smaller violet-cored sphere used to render
-    /// enemy caster projectiles. Same UV-sphere construction as
+    /// Arcane bolt — smaller violet-cored sphere used to render
+    /// enemy arcane projectiles. Same UV-sphere construction as
     /// [`Self::fireball`] but with a tighter radius and a cool
     /// arcane palette so the bolt reads distinctly from the
     /// player's fireball even at a glance.
-    pub fn caster_bolt() -> Self {
+    pub fn arcane_bolt() -> Self {
         let radius = 0.18_f32;
         let stacks = 8usize;
         let sectors = 12usize;

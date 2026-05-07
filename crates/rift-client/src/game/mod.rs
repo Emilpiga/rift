@@ -23,6 +23,7 @@ pub mod mp_inventory_ui;
 pub mod loot_system;
 pub mod portal_system;
 pub mod stash_system;
+pub mod shrine_system;
 pub mod spellbook;
 
 pub use player_state::PlayerState;

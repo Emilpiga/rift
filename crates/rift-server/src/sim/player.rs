@@ -96,6 +96,12 @@ pub struct ServerPlayer {
     /// down in `Sim::step`. When it reaches 0 we flip
     /// `is_ghost = true` and clear the timer.
     pub ghost_rise_timer: Option<f32>,
+    /// `Some(shrine_net_id)` while this player is holding the
+    /// channel intent on a revive shrine. Set / cleared by
+    /// `ClientMsg::ToggleShrineChannel`. Auto-cleared by
+    /// `shrine::tick` when the player walks out of range,
+    /// dies, or the shrine despawns.
+    pub channeling_shrine: Option<NetId>,
 }
 
 impl ServerPlayer {
@@ -139,6 +145,7 @@ impl ServerPlayer {
             loadout: Loadout::default_hero(),
             is_ghost: false,
             ghost_rise_timer: None,
+            channeling_shrine: None,
         }
     }
 
@@ -312,13 +319,30 @@ pub fn snap_all_to(world: &mut hecs::World, spawn: glam::Vec3) {
     }
 }
 
-/// Restore every player to full HP. Called from the floor-change
-/// path so a player respawning at the hub after a death (or
-/// completing a rift) arrives alive.
+/// Restore every player to full HP and clear any ghost state.
+/// Called from the hub-return path (manual exit-vote, party
+/// wipe respawn, login) where the team is back in the safe
+/// zone and should arrive alive.
 pub fn heal_all(world: &mut hecs::World) {
     for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
         p.hp = p.hp_max;
         p.is_ghost = false;
         p.ghost_rise_timer = None;
+    }
+}
+
+/// Restore living players to full HP but leave ghosts as
+/// ghosts. Called when the team advances deeper into the rift
+/// (boss-kill auto-advance): living players carry on full, but
+/// dead teammates follow along still in spectator mode rather
+/// than getting a free resurrection. Players in the down-pose
+/// (post-death, pre-rise) keep their armed `ghost_rise_timer`
+/// so the rise still triggers on the new floor.
+pub fn heal_living(world: &mut hecs::World) {
+    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
+        if p.is_dead_or_ghosting() {
+            continue;
+        }
+        p.hp = p.hp_max;
     }
 }

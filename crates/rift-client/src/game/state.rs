@@ -118,6 +118,10 @@ pub struct GameState {
     pub channel: ChannelState,
     /// Server-mirrored loot visuals, pickup queue, and inventory.
     pub loot: LootClientState,
+    /// Server-mirrored revive-shrine visuals + local channel
+    /// intent. Spawned/despawned in lockstep with snapshot
+    /// `EntityKind::ReviveShrine` rows.
+    pub shrines: super::sub_state::ShrineClientState,
 
     /// Top-level state (character-select vs playing).
     app_state: AppState,
@@ -204,6 +208,7 @@ impl GameState {
             net: NetState::default(),
             channel: ChannelState::default(),
             loot: LootClientState::default(),
+            shrines: super::sub_state::ShrineClientState::default(),
             app_state: AppState::CharacterSelect,
             character_select: character_select::CharacterSelect::new(),
             anim_cache: character_spawn::AnimLibraryCache::new(),
@@ -307,6 +312,13 @@ impl GameState {
         self.loot.drops.clear();
         self.loot.pending_pickups.clear();
         self.loot.claimed_ids.clear();
+        // Same wipe applies to revive-shrine visuals: the VFX
+        // emitters are invalidated by the `clear_all` above so
+        // we just need to drop the bookkeeping list.
+        self.shrines.visuals.clear();
+        self.shrines.local_intent = None;
+        self.shrines.prev_local_intent = None;
+        self.shrines.channel_beam = None;
         // Stash UI must close on transition: the chest only
         // exists in the hub, and a stale "stash open" flag
         // would cause bag clicks to deposit into nothing.
@@ -531,6 +543,31 @@ impl GameState {
             input,
         );
 
+        // Revive shrines: hover prompt + F-press toggles channel
+        // intent. Server is authority on actual progress; we
+        // surface the prompt + queue the toggle here.
+        let local_ghost = self.net.local_ghost_cached;
+        super::shrine_system::tick(
+            &mut self.shrines,
+            &self.world,
+            input,
+            &mut self.net,
+            &mut self.hud_prompt,
+            local_ghost,
+        );
+        // Drive the local player's channel pose + beam VFX.
+        // Edge-detects `local_intent` so the SpellCast layer
+        // animator + ribbon emitter fire exactly once per
+        // toggle. While active, refreshes endpoints each frame.
+        let pid = self.player_id();
+        super::shrine_system::tick_channel_pose(
+            &mut self.shrines,
+            &mut self.world,
+            renderer,
+            pid,
+            local_ghost,
+        );
+
         // ECS systems
         let action_cfg = PlayerActionConfig::default();
         let accept_input = !self.is_player_dead();
@@ -582,6 +619,10 @@ impl GameState {
         if now_ghost && !self.prev_local_ghost {
             self.trigger_player_rise();
         }
+        // Tick down the rise-anim countdown so the local player
+        // gets the `Ghost` marker (and movement unlocks) only
+        // after `LayToIdle` finishes.
+        self.tick_ghost_rise(dt);
         // Inverse edge: ghost → respawned. Strip the `Ghost`
         // marker so the engine's dead-gates re-engage if HP
         // somehow lands at 0 again before the world is rebuilt
@@ -590,6 +631,9 @@ impl GameState {
         if !now_ghost && self.prev_local_ghost {
             if let Some(pid) = self.player_id() {
                 let _ = self.world.remove_one::<rift_engine::ecs::components::Ghost>(pid);
+                let _ = self
+                    .world
+                    .remove_one::<rift_engine::ecs::components::GhostRising>(pid);
             }
         }
         self.prev_local_ghost = now_ghost;
@@ -809,6 +853,20 @@ impl GameState {
             if vote.active || vote.cooldown_remaining > 0.0 {
                 hud::render_exit_vote(&mut ui, vote, self.net.our_net_id_cached);
             }
+        }
+        // Revive-shrine progress: surface whenever any shrine on
+        // the floor has a non-zero channel count, so even idle
+        // observers see their teammate's progress without having
+        // to be in range themselves. Picks the shrine with the
+        // most progress (effectively the only active one).
+        if let Some(v) = self
+            .shrines
+            .visuals
+            .iter()
+            .filter(|v| v.channelers > 0 || v.progress > 0.0)
+            .max_by(|a, b| a.progress.partial_cmp(&b.progress).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            hud::render_shrine_progress(&mut ui, v.progress, v.channelers, v.required.max(1));
         }
         if let Some((net_id, _)) = nearest_loot {
             if let Some(drop) = self.loot.drops.iter().find(|d| d.net_id == net_id) {
@@ -1348,18 +1406,11 @@ impl GameState {
     /// `prev_local_ghost`).
     fn trigger_player_rise(&mut self) {
         use rift_engine::animation::Animator;
-        use rift_engine::ecs::components::{AnimationSet, Ghost, SpellCast};
+        use rift_engine::ecs::components::{AnimationSet, Ghost, GhostRising, SpellCast};
 
         log::info!("Player rose as ghost (rift floor {}).", self.rift.floor);
 
         let Some(player_id) = self.player_id() else { return };
-
-        // Tag the local avatar with `Ghost` so the engine systems
-        // that gate on `Health::is_dead()` (locomotion, input,
-        // jump-land, roll dispatch) treat us as alive even though
-        // HP is still 0. Removed in `reset_for_regeneration` on
-        // respawn.
-        let _ = self.world.insert_one(player_id, Ghost);
 
         // Asset pack ships `LayToIdle` (UAL2) which is the perfect
         // get-up-from-corpse-pose anim. Fall back to plain Idle
@@ -1376,19 +1427,33 @@ impl GameState {
             cast.oneshot_is_hit = false;
         }
         if let Some(clip) = lay_to_idle {
-            // `LayToIdle` is a one-shot get-up animation. After it
-            // finishes the animator holds the last frame (standing
-            // idle pose); locomotion_anim_system then takes over
-            // once the player starts moving (Ghost marker bypasses
-            // the dead-gate).
+            // `LayToIdle` is a one-shot get-up animation. Tag the
+            // avatar with `GhostRising` (with the clip's duration
+            // as countdown) so engine systems keep the dead-gate
+            // engaged - movement / input stay locked while the
+            // rise plays. `tick_ghost_rise` swaps the marker for
+            // `Ghost` once the timer hits 0.
+            let duration = clip.duration.max(0.1);
             if let Ok(mut anim) = self.world.get::<&mut Animator>(player_id) {
                 anim.cross_fade(clip, false, 0.25);
                 anim.speed = 1.0;
             }
+            // 0.25s crossfade + clip duration. Leave a small buffer
+            // (0.1s) so the standing pose is fully visible before
+            // input unlocks.
+            let _ = self.world.insert_one(
+                player_id,
+                GhostRising {
+                    remaining: duration + 0.1,
+                },
+            );
             return;
         }
 
-        // Fallback: straight idle crossfade.
+        // Fallback: no `LayToIdle` clip in the rig. Skip straight
+        // to ghost mode + idle loop - better than freezing the
+        // player on the down-pose forever.
+        let _ = self.world.insert_one(player_id, Ghost);
         let candidates: &[&str] = &["Idle_Loop", "Idle", "Idle01", "Idle_01", "Idle02"];
         let clip = match self.world.get::<&AnimationSet>(player_id) {
             Ok(set) => set.find_any(candidates),
@@ -1401,6 +1466,29 @@ impl GameState {
         if let Ok(mut anim) = self.world.get::<&mut Animator>(player_id) {
             anim.cross_fade(clip, true, 0.35);
             anim.speed = 1.0;
+        }
+    }
+
+    /// Tick the [`GhostRising`] countdown on the local player and
+    /// promote them to a full [`Ghost`] once the rise anim has
+    /// finished playing. While `GhostRising` is present, engine
+    /// systems still see the avatar as dead so movement / input
+    /// stay locked - the player is glued to the standing pose
+    /// for the brief get-up-from-floor window. Called once per
+    /// frame from `update_gameplay`.
+    fn tick_ghost_rise(&mut self, dt: f32) {
+        use rift_engine::ecs::components::{Ghost, GhostRising};
+        let Some(player_id) = self.player_id() else { return };
+        let finished = if let Ok(mut rising) = self.world.get::<&mut GhostRising>(player_id) {
+            rising.remaining -= dt;
+            rising.remaining <= 0.0
+        } else {
+            return;
+        };
+        if finished {
+            let _ = self.world.remove_one::<GhostRising>(player_id);
+            let _ = self.world.insert_one(player_id, Ghost);
+            log::info!("Ghost rise animation complete - movement unlocked");
         }
     }
 

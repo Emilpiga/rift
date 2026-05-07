@@ -15,6 +15,7 @@ use super::enemy::{enemy_anim, ServerEnemy};
 use super::loot::ServerLoot;
 use super::player::ServerPlayer;
 use super::projectile::{ServerEnemyProjectile, ServerProjectile};
+use super::shrine::ServerReviveShrine;
 
 /// Sight range used to view-cull replicated entities (enemies +
 /// projectiles) per receiving client. Squared to skip the sqrt.
@@ -166,6 +167,28 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 },
             },
             position: loot_row.position.to_array(),
+            yaw: 0.0,
+            velocity: [0.0; 3],
+            health_pct: 1.0,
+            flags: 0,
+        });
+    }
+
+    // Revive shrines. No view-culling: shrines are floor-wide
+    // landmarks the HUD wants to render even from a distance
+    // (and there's at most one per floor anyway).
+    for (_e, shrine) in world.query::<&ServerReviveShrine>().iter() {
+        let progress_norm = (shrine.progress / rift_net::messages::SHRINE_CHANNEL_DURATION)
+            .clamp(0.0, 1.0);
+        let progress = (progress_norm * 255.0).round() as u8;
+        entities.push(EntitySnapshot {
+            net_id: shrine.net_id,
+            kind: EntityKind::ReviveShrine {
+                progress,
+                channelers: shrine.channelers,
+                required: shrine.required,
+            },
+            position: shrine.position.to_array(),
             yaw: 0.0,
             velocity: [0.0; 3],
             health_pct: 1.0,

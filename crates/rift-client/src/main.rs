@@ -154,6 +154,47 @@ impl RiftApp {
                 );
             }
         }
+
+        // Reconcile revive-shrine visuals against the snapshot.
+        // Server sends one row per active shrine with rolled
+        // progress + channel counts; we mirror the set so a
+        // fresh joiner sees an existing shrine and a completed
+        // shrine vanishes the tick its row drops out.
+        let shrine_rows: std::collections::HashMap<
+            rift_net::NetId,
+            (glam::Vec3, f32, u8, u8),
+        > = net
+            .remote
+            .values()
+            .filter_map(|re| match re.kind {
+                rift_net::messages::EntityKind::ReviveShrine {
+                    progress,
+                    channelers,
+                    required,
+                } => Some((
+                    re.net_id,
+                    (
+                        re.position,
+                        progress as f32 / 255.0,
+                        channelers,
+                        required,
+                    ),
+                )),
+                _ => None,
+            })
+            .collect();
+        rift_client::game::shrine_system::sync_visuals(
+            &mut state.shrines,
+            renderer,
+            &shrine_rows,
+        );
+        // Drop the local channel intent if the shrine we were
+        // channeling no longer exists (completion / floor change).
+        if let Some(target) = state.shrines.local_intent {
+            if !shrine_rows.contains_key(&target) {
+                state.shrines.local_intent = None;
+            }
+        }
     }
 
     /// Drain reliable world events from the server and dispatch
@@ -206,6 +247,9 @@ impl RiftApp {
             }
             WorldEvent::PlayerGhosted { entity, position } => {
                 self.handle_player_ghosted_event(entity, position, renderer);
+            }
+            WorldEvent::PlayersRevived { entities } => {
+                self.handle_players_revived_event(entities, renderer);
             }
         }
     }
@@ -293,6 +337,37 @@ impl RiftApp {
             rift_engine::renderer::vfx::presets::ghost_rise(),
             pos,
         );
+    }
+
+    /// Players have been revived by a completed shrine channel.
+    /// The server has already cleared their `is_ghost` flag so
+    /// the next snapshot will untint our local view; here we
+    /// just spawn a celebration VFX at each revived player's
+    /// last known position. The local-ghost teardown (engine
+    /// `Ghost` marker, animation reset) lives in the snapshot
+    /// path that already watches `local_ghost_cached`.
+    fn handle_players_revived_event(
+        &mut self,
+        entities: Vec<rift_net::NetId>,
+        renderer: &mut Renderer,
+    ) {
+        log::info!("net: PlayersRevived count={}", entities.len());
+        let Self { state: _, net } = self;
+        let Some(net) = net.as_mut() else { return };
+        for revived in entities {
+            // Try the avatar position (remote players) first,
+            // falling back to last_positions (works for the
+            // local player too).
+            let pos = net
+                .last_positions
+                .get(&revived)
+                .copied()
+                .unwrap_or(Vec3::ZERO);
+            renderer.vfx_system.spawn(
+                rift_engine::renderer::vfx::presets::ghost_rise(),
+                pos + Vec3::new(0.0, 1.0, 0.0),
+            );
+        }
     }
 
     /// Spawn the AoE-zone visual for a server-confirmed cast and
@@ -554,6 +629,15 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             net.request_exit_vote_cast(yes);
+        }
+
+        // Revive-shrine intent edge → server. Sent only when
+        // the gameplay tick has flagged a transition (start /
+        // stop / target swap). The server validates range +
+        // alive status; we already mirror the intent locally
+        // for the HUD prompt + beam VFX.
+        if let Some(intent) = state.net.pending_shrine_intent.take() {
+            net.request_set_shrine_channel(intent);
         }
 
         // Stash transfer requests (deposit / withdraw). Drained

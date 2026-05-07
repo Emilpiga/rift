@@ -203,6 +203,15 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::RiftExitVoteCast { yes });
     }
 
+    /// Push the local player's revive-shrine channel intent
+    /// up to the server. `Some(shrine)` while F is held in
+    /// range; `None` on release / out-of-range. The client
+    /// edge-triggers on transitions, so this stays cheap.
+    pub fn request_set_shrine_channel(&mut self, shrine: Option<rift_net::NetId>) {
+        log::info!("net: -> SetShrineChannel({shrine:?})");
+        self.send(Channel::Control, &ClientMsg::SetShrineChannel { shrine });
+    }
+
     /// Ask the server to fire an ability. Server is the authority on
     /// cooldown / range / damage; on success it spawns projectiles
     /// (replicated via snapshots) and emits `WorldEvent`s reliably.

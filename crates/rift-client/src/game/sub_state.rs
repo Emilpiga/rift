@@ -94,6 +94,13 @@ pub struct NetState {
     /// (`is_player_dead` discriminator, ghost-only HUD bits)
     /// can read it without a `NetClient` reference.
     pub local_ghost_cached: bool,
+    /// Edge-triggered revive-shrine channel intent the binary
+    /// must forward to the server. `Some(payload)` when the
+    /// gameplay tick has detected a transition; the binary
+    /// `take()`s it and ships `ClientMsg::SetShrineChannel`.
+    /// The inner `Option<NetId>` is the new intent (i.e.
+    /// `Some(shrine)` to start, `None` to stop).
+    pub pending_shrine_intent: Option<Option<rift_net::NetId>>,
 }
 
 /// Multiplayer-only: a request for the binary to forward to the server.
@@ -286,4 +293,28 @@ pub struct LootDropVisual {
     pub pillar_emitter: rift_engine::renderer::vfx::EffectId,
     /// VFX handle for the bright base pulse.
     pub base_emitter: rift_engine::renderer::vfx::EffectId,
+}
+
+/// Client-side mirror of every revive-shrine row currently
+/// replicated from the server. Visual emitters are owned here
+/// so floor changes / channel completions can despawn cleanly.
+#[derive(Default)]
+pub struct ShrineClientState {
+    pub visuals: Vec<super::shrine_system::ShrineVisual>,
+    /// `Some(shrine_id)` while the *local* player is intending
+    /// to channel that shrine. Mirror of the server's
+    /// `channeling_shrine` we toggle optimistically on F-press
+    /// so the HUD prompt swaps to "STOP CHANNELING" without a
+    /// snapshot roundtrip. Cleared automatically when the
+    /// shrine row drops out of the snapshot.
+    pub local_intent: Option<rift_net::NetId>,
+    /// Active beam emitter id while channeling. Spawned on the
+    /// edge `local_intent` flips from None -> Some, despawned
+    /// on the inverse edge or when the shrine despawns.
+    pub channel_beam: Option<rift_engine::renderer::vfx::EffectId>,
+    /// `prev_local_intent` snapshot from the previous frame.
+    /// Used to edge-detect channel start / stop in
+    /// `shrine_system::tick_channel_pose` so the SpellCast pose
+    /// + beam are toggled exactly once per transition.
+    pub prev_local_intent: Option<rift_net::NetId>,
 }

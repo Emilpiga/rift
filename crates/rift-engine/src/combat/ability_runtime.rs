@@ -30,8 +30,8 @@ pub fn effect_for_vfx(kind: VfxKind) -> Effect {
         VfxKind::CastSpark { rgb } => vfx_presets::cast_spark(rgb),
         VfxKind::FireballTrail => vfx_presets::fireball_trail(),
         VfxKind::FireballImpact => vfx_presets::fireball_explosion(),
-        VfxKind::CasterBoltTrail => vfx_presets::caster_bolt_trail(),
-        VfxKind::CasterBoltImpact => vfx_presets::caster_bolt_impact(),
+        VfxKind::ArcaneBoltTrail => vfx_presets::arcane_bolt_trail(),
+        VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact(),
         VfxKind::FrostRay => vfx_presets::frost_ray(),
         VfxKind::FireWave => vfx_presets::fire_wave(),
         // Empty effect — caller can guard `VfxKind::None` to skip
@@ -44,7 +44,7 @@ pub fn effect_for_vfx(kind: VfxKind) -> Effect {
 pub fn mesh_for_kind(kind: MeshKind) -> Mesh {
     match kind {
         MeshKind::Fireball => Mesh::fireball(),
-        MeshKind::CasterBolt => Mesh::caster_bolt(),
+        MeshKind::ArcaneBolt => Mesh::arcane_bolt(),
     }
 }
 

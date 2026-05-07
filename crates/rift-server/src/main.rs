@@ -363,6 +363,9 @@ impl Server {
             ClientMsg::RiftExitVoteCast { yes } => {
                 self.sim.cast_exit_vote(from, yes);
             }
+            ClientMsg::SetShrineChannel { shrine } => {
+                self.sim.set_shrine_channel(from, shrine);
+            }
         }
     }
 

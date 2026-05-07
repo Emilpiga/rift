@@ -398,7 +398,7 @@ pub fn tick_enemy(
 /// allocator so all replicated projectiles share one id space —
 /// clients don't care whether a `Projectile` row is ours or the
 /// caster's, only what its `ability_id` is.
-pub fn spawn_caster_bolt(
+pub fn spawn_arcane_bolt(
     world: &mut hecs::World,
     shot: &super::enemy::EnemyShot,
     next_projectile_net_id: &mut u32,
@@ -407,7 +407,7 @@ pub fn spawn_caster_bolt(
     *next_projectile_net_id = next_projectile_net_id.wrapping_add(1).max(0x4000_0000);
     world.spawn((ServerEnemyProjectile {
         net_id,
-        ability_id: rift_game::abilities::id::ENEMY_CASTER_BOLT,
+        ability_id: rift_game::abilities::id::ENEMY_ARCANE_BOLT,
         owner: shot.owner,
         position: shot.origin,
         velocity: shot.aim * super::enemy::caster::BOLT_SPEED,

@@ -29,6 +29,7 @@ pub mod floor;
 pub mod loot;
 pub mod player;
 pub mod projectile;
+pub mod shrine;
 pub mod snapshot;
 pub mod vote;
 
@@ -83,6 +84,13 @@ pub struct Sim {
     next_enemy_net_id: u32,
     next_loot_net_id: u32,
     next_projectile_net_id: u32,
+    /// NetId allocator for miscellaneous interactables (revive
+    /// shrines and any future floor objects). Lives in
+    /// `0x6000_0000..0x8000_0000` — disjoint from the
+    /// projectile range that ends at `0x6000_0000` in practice
+    /// (the projectile allocator wraps long before it ever
+    /// gets there) and from the player range (`0x8000_0000+`).
+    next_misc_net_id: u32,
 
     /// Most recent input from each client, coalesced. Drained by
     /// `player::apply_inputs` on every step.
@@ -241,6 +249,7 @@ impl Sim {
             next_enemy_net_id: 1,
             next_loot_net_id: 0x2000_0000,
             next_projectile_net_id: 0x4000_0000,
+            next_misc_net_id: 0x6000_0000,
             pending_inputs: HashMap::new(),
             sessions: HashMap::new(),
             aoe_zones: Vec::new(),
@@ -273,15 +282,24 @@ impl Sim {
         self.floor = floor::generate(self.floor_seed, new_index);
         let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
         player::snap_all_to(&mut self.world, spawn);
-        // Restore HP for everyone on the new floor. Floors only
-        // change after a successful boss kill, a manual return to
-        // hub, or a death-triggered respawn — in all three cases
-        // the player should arrive at full HP.
-        player::heal_all(&mut self.world);
+        // HP restore policy depends on destination:
+        //   - Hub (index 0): full heal + clear ghost state.
+        //     Triggered by manual exit-vote, party-wipe respawn,
+        //     login. Team is back in the safe zone, everyone
+        //     starts fresh.
+        //   - Deeper rift floor: heal LIVING players only;
+        //     ghosts follow along still in spectator mode
+        //     instead of being resurrected by the floor change.
+        if new_index == 0 {
+            player::heal_all(&mut self.world);
+        } else {
+            player::heal_living(&mut self.world);
+        }
         enemy::despawn_all(&mut self.world);
         projectile::despawn_all(&mut self.world);
         projectile::despawn_all_enemy(&mut self.world);
         loot::despawn_all(&mut self.world);
+        shrine::despawn_all(&mut self.world);
         self.aoe_zones.clear();
         channel::clear_all(&mut self.world);
         ability::clear_cooldowns(&mut self.cooldowns);
@@ -298,6 +316,15 @@ impl Sim {
             &self.floor,
             self.floor_index,
             &mut self.next_enemy_net_id,
+        );
+        // Roll a (rare) revive shrine on rift floors >= 2.
+        // `maybe_spawn` no-ops on hub / floor 1.
+        shrine::maybe_spawn(
+            &mut self.world,
+            &self.floor,
+            self.floor_seed,
+            self.floor_index,
+            &mut self.next_misc_net_id,
         );
         self.rift_progress = RiftProgress::for_floor(new_index);
         self.progress_dirty = true;
@@ -363,6 +390,36 @@ impl Sim {
             .get::<&ServerPlayer>(entity)
             .map(|p| p.is_ghost)
             .unwrap_or(false)
+    }
+
+    /// Set the player's revive-shrine channel intent. `Some`
+    /// requires alive + within [`SHRINE_INTERACT_RADIUS`] of
+    /// the named shrine. `None` always succeeds (release F,
+    /// walk out of range, etc.). Idempotent.
+    pub fn set_shrine_channel(&mut self, client_id: ClientId, shrine: Option<NetId>) {
+        use rift_net::messages::SHRINE_INTERACT_RADIUS;
+        let Some(&entity) = self.sessions.get(&client_id) else { return };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else { return };
+        match shrine {
+            None => {
+                p.channeling_shrine = None;
+            }
+            Some(id) => {
+                if p.is_dead_or_ghosting() {
+                    return;
+                }
+                drop(p);
+                let Some((_, shrine_pos)) = shrine::find(&self.world, id) else {
+                    return;
+                };
+                let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else { return };
+                let dist_sq = (p.k.position - shrine_pos).length_squared();
+                if dist_sq > SHRINE_INTERACT_RADIUS * SHRINE_INTERACT_RADIUS {
+                    return;
+                }
+                p.channeling_shrine = Some(id);
+            }
+        }
     }
 
     /// Stash an input from a client — coalesced against any earlier
@@ -1097,7 +1154,7 @@ impl Sim {
         let ai_outcome = enemy::tick_ai(&mut self.world, &player_targets, dt);
         let melee_damage = ai_outcome.melee_damage;
         for shot in &ai_outcome.shots {
-            projectile::spawn_caster_bolt(
+            projectile::spawn_arcane_bolt(
                 &mut self.world,
                 shot,
                 &mut self.next_projectile_net_id,
@@ -1180,6 +1237,12 @@ impl Sim {
             );
             self.check_party_wipe();
         }
+
+        // 6b. Tick revive shrines after the DeathCtx scope ends so
+        //     the borrow on `pending_events` is free. `shrine::tick`
+        //     pushes `WorldEvent::PlayersRevived` directly into the
+        //     event queue, so the broadcast picks it up this tick.
+        shrine::tick(&mut self.world, &mut self.pending_events, dt);
 
         // 7. Death-fade: tick the death timer on dying enemies and
         //    despawn rows whose timer hit zero. Kept separate from

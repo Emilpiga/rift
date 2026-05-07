@@ -670,6 +670,73 @@ pub fn render_hud_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
     });
 }
 
+/// Revive-shrine channel progress panel. Shown whenever a
+/// shrine on the floor has any active channelers (so even
+/// remote players see the progress when their teammate is
+/// alone on the shrine). Draws a slim horizontal bar with the
+/// "N / M CHANNELING" caption underneath the prompt.
+pub fn render_shrine_progress(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    progress: f32,
+    channelers: u8,
+    required: u8,
+) {
+    use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Vec2};
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+    let bar_w: f32 = 320.0;
+    let bar_h: f32 = 14.0;
+    let label = format!(
+        "REVIVE SHRINE  -  {} / {} CHANNELING",
+        channelers, required
+    );
+    let label_size = 11.0;
+    let text_w = ui.measure_text(&label, label_size);
+    let inner = Vec2::new(bar_w.max(text_w), bar_h + 4.0 + label_size);
+    let pad = Pad::symmetric(16.0, 8.0);
+    let outer_w = inner.x + pad.left + pad.right;
+    let outer_h = inner.y + pad.top + pad.bottom;
+    let rect = Rect::from_xywh(
+        (screen.x - outer_w) / 2.0,
+        screen.y * 0.55,
+        outer_w,
+        outer_h,
+    );
+    let frame = Frame::panel(&theme)
+        .with_fill(Color::rgba(0.05, 0.10, 0.18, 0.92))
+        .with_padding(pad);
+    frame.show(ui, rect, |ui, body| {
+        // Caption.
+        ui.draw_text(
+            Pos2::new(body.x() + (inner.x - text_w) * 0.5, body.y()),
+            &label,
+            label_size,
+            Color::rgba(0.65, 0.88, 1.05, 1.0),
+        );
+        // Bar background.
+        let bar_y = body.y() + label_size + 4.0;
+        let bar_x = body.x() + (inner.x - bar_w) * 0.5;
+        ui.draw_rect(
+            Rect::from_xywh(bar_x, bar_y, bar_w, bar_h),
+            Color::rgba(0.05, 0.08, 0.13, 1.0),
+        );
+        // Filled portion.
+        let p = progress.clamp(0.0, 1.0);
+        if p > 0.0 {
+            ui.draw_rect(
+                Rect::from_xywh(bar_x, bar_y, bar_w * p, bar_h),
+                Color::rgba(0.45, 0.85, 1.10, 1.0),
+            );
+        }
+        // Border.
+        ui.draw_outline(
+            Rect::from_xywh(bar_x, bar_y, bar_w, bar_h),
+            1.0,
+            Color::rgba(0.35, 0.55, 0.85, 1.0),
+        );
+    });
+}
+
 /// Rift exit-vote panel. Top-center HUD card showing the
 /// countdown, per-voter Yes/No/Pending status, and the local
 /// Y/N hint when our own choice is still Pending. While the vote
