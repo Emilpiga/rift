@@ -5,7 +5,7 @@
 //! - kinematic player movement integrator (`kinematic`)
 //! - ability definitions, runtime effects (data only), and rosters
 //!   (`abilities`)
-//! - class roster + base stats (`classes`)
+//! - hero base stats + avatar (`hero`)
 //! - talent trees (`talents`)
 //! - character profiles + gender (`character`)
 //! - monster role + wire byte mapping (`monsters`)
@@ -18,7 +18,8 @@
 pub mod abilities;
 pub mod attributes;
 pub mod character;
-pub mod classes;
+pub mod hero;
+pub mod loadout;
 pub mod components;
 pub mod debuffs;
 pub mod experience;

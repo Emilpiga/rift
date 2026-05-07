@@ -143,17 +143,6 @@ use crate::abilities as ab;
 pub const AFFIX_POOL: &[AffixDef] = &[
     // ════════ Common-tier: pure stats ═══════════════════════════════
     AffixDef {
-        id: "flat_power",
-        name_template: "{} Power",
-        effect: AffixEffect::Stat(Stat::Power),
-        roll: (3.0, 6.0),
-        ilvl_scale: 1.5,
-        tags: MELEE | CASTER,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 100,
-    },
-    AffixDef {
         id: "flat_health",
         name_template: "{} Health",
         effect: AffixEffect::Stat(Stat::Health),
@@ -344,9 +333,9 @@ pub const AFFIX_POOL: &[AffixDef] = &[
         weight: 15,
     },
     AffixDef {
-        id: "mod_steady_shot_extra_proj",
-        name_template: "Steady Shot fires {} extra arrows",
-        effect: AffixEffect::ExtraProjectiles(ab::STEADY_SHOT),
+        id: "mod_fire_ball_extra_proj",
+        name_template: "Fireball fires {} extra projectiles",
+        effect: AffixEffect::ExtraProjectiles(ab::FIRE_BALL),
         roll: (1.0, 1.0),
         ilvl_scale: 0.0,
         tags: SPEED,
@@ -430,10 +419,195 @@ pub const AFFIX_POOL: &[AffixDef] = &[
         rarity_min: Rarity::Legendary,
         weight: 8,
     },
+    // ════════ Slot-signature affixes ════════════════════════════════
+    //
+    // These are the deterministic lines injected by
+    // `Item::roll` based on `EquipSlot`. They're full members of
+    // the pool (so save/load + tooltip rendering work uniformly)
+    // but normally never roll as bonuses because every item slot
+    // already carries them. The bonus-roll path filters them
+    // out by `id` in `Item::roll`.
+    AffixDef {
+        id: "flat_vitality",
+        name_template: "{} Vitality",
+        effect: AffixEffect::Stat(Stat::Vitality),
+        roll: (8.0, 16.0),
+        ilvl_scale: 3.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_weapon_damage",
+        name_template: "{} Weapon Damage",
+        effect: AffixEffect::Stat(Stat::WeaponDamage),
+        roll: (0.05, 0.12),
+        ilvl_scale: 0.004,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_spell_damage",
+        name_template: "{} Spell Damage",
+        effect: AffixEffect::Stat(Stat::SpellDamage),
+        roll: (0.05, 0.12),
+        ilvl_scale: 0.004,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_physical_damage",
+        name_template: "{} Physical Damage",
+        effect: AffixEffect::Stat(Stat::PhysicalDamage),
+        roll: (0.06, 0.14),
+        ilvl_scale: 0.005,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_projectile_damage",
+        name_template: "{} Projectile Damage",
+        effect: AffixEffect::Stat(Stat::ProjectileDamage),
+        roll: (0.06, 0.14),
+        ilvl_scale: 0.005,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_beam_damage",
+        name_template: "{} Beam Damage",
+        effect: AffixEffect::Stat(Stat::BeamDamage),
+        roll: (0.06, 0.14),
+        ilvl_scale: 0.005,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_aoe_damage",
+        name_template: "{} AoE Damage",
+        effect: AffixEffect::Stat(Stat::AoeDamage),
+        roll: (0.06, 0.14),
+        ilvl_scale: 0.005,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
+    AffixDef {
+        id: "pct_melee_damage",
+        name_template: "{} Melee Damage",
+        effect: AffixEffect::Stat(Stat::MeleeDamage),
+        roll: (0.06, 0.14),
+        ilvl_scale: 0.005,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 0,
+    },
 ];
 
 /// Look up an affix by stable id. `O(n)` — used for save-game
 /// rehydration, not hot paths.
 pub fn lookup(id: &str) -> Option<&'static AffixDef> {
     AFFIX_POOL.iter().find(|a| a.id == id)
+}
+
+/// `true` if `effect` is a "legendary" effect — i.e. one of the
+/// gameplay-changing patterns (Transform, Trigger/Proc, extra
+/// projectiles). The roll pipeline reserves these for the
+/// dedicated legendary-effect slot on Legendary-rarity items.
+pub fn is_legendary_effect(effect: &AffixEffect) -> bool {
+    matches!(
+        effect,
+        AffixEffect::TransformAbility(_, _)
+            | AffixEffect::Proc(_, _)
+            | AffixEffect::ExtraProjectiles(_)
+    )
+}
+
+/// Number of leading affix entries on a fresh roll that come from
+/// the slot's signature ([`signature_for`]). The first N entries
+/// of [`super::Item::affixes`] are always signatures \u2014 reading
+/// this is how tooltip rendering tells "guaranteed lines" from
+/// "bonus rolls" without storing an extra flag per affix.
+pub fn signature_count(slot: super::items::EquipSlot) -> usize {
+    use super::items::EquipSlot::*;
+    match slot {
+        // Vitality + WeaponDamage + SpellDamage
+        Weapon => 3,
+        // Vitality + CritChance + CritDamage
+        Hands => 3,
+        // Vitality + slot-specific defensive / utility line
+        Helm | Chest | Legs | Boots => 2,
+        // Vitality + one random element / archetype line
+        Ring1 | Ring2 | Amulet => 2,
+    }
+}
+
+/// Deterministic per-slot affix ids that every item gets injected
+/// regardless of rarity. Returned as a small `Vec` because some
+/// slots (Ring/Amulet) randomise the *kind* of element / archetype
+/// while still always producing exactly one such line.
+///
+/// Vitality is always slot 0 — read top-down on every tooltip the
+/// player sees `+N Vitality` first, then the slot signature.
+pub fn signature_for(
+    slot: super::items::EquipSlot,
+    rng: &mut super::rng::LootRng,
+) -> Vec<&'static str> {
+    use super::items::EquipSlot::*;
+    let mut out: Vec<&'static str> = Vec::with_capacity(3);
+    out.push("flat_vitality");
+    match slot {
+        Weapon => {
+            out.push("pct_weapon_damage");
+            out.push("pct_spell_damage");
+        }
+        Helm => out.push("pct_cooldown"),
+        Chest => out.push("flat_health"),
+        Legs => out.push("flat_armor"),
+        Hands => {
+            out.push("pct_crit_chance");
+            out.push("pct_crit_damage");
+        }
+        Boots => out.push("pct_move_speed"),
+        Ring1 | Ring2 => {
+            // One random elemental damage line per ring. Each
+            // ring rolls independently, so a player can stack
+            // matching elements or hedge across two.
+            const ELEMENTS: [&str; 4] = [
+                "pct_fire_damage",
+                "pct_ice_damage",
+                "pct_lightning_damage",
+                "pct_physical_damage",
+            ];
+            let pick = rng.range(0, ELEMENTS.len() as u32) as usize;
+            out.push(ELEMENTS[pick]);
+        }
+        Amulet => {
+            // One random archetype damage line. Maps to which
+            // ability shape (projectile / beam / AoE / melee)
+            // benefits.
+            const ARCHETYPES: [&str; 4] = [
+                "pct_projectile_damage",
+                "pct_beam_damage",
+                "pct_aoe_damage",
+                "pct_melee_damage",
+            ];
+            let pick = rng.range(0, ARCHETYPES.len() as u32) as usize;
+            out.push(ARCHETYPES[pick]);
+        }
+    }
+    out
 }

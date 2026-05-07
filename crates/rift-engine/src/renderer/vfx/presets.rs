@@ -259,6 +259,147 @@ pub fn rain_of_fire() -> Effect {
     }
 }
 
+/// Fire Wave — a one-shot, fast-expanding ring of fire centred
+/// on the caster. Built to feel impactful: a flat ground
+/// shockwave ring, an outward-rushing wall of flame, hot
+/// embers thrown radially, and a brief column of smoke left
+/// behind. All four layers self-terminate by ~0.7 s so the
+/// preset can be used as a fire-and-forget client emitter.
+pub fn fire_wave() -> Effect {
+    Effect {
+        // Stops emitting almost immediately; particles age out
+        // through the rest of the visual.
+        duration: 0.05,
+        layers: vec![
+            // 1. Ground shockwave — single hollow ring sprite
+            //    that grows from a tight nucleus to the full
+            //    wave radius. The Ring sprite is hollow so it
+            //    reads as the leading edge of the wave rather
+            //    than a fill disc.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 1 },
+                speed: (0.0, 0.0),
+                lifetime: (0.55, 0.55),
+                forces: vec![],
+                size: Curve::from_stops([
+                    (0.00, 0.50),
+                    (0.30, 6.00),
+                    (1.00, 15.00),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [6.0, 3.2, 0.6, 1.0]),
+                    (0.40, [3.5, 1.2, 0.2, 0.85]),
+                    (1.00, [0.8, 0.10, 0.02, 0.0]),
+                ]),
+                sprite: SpriteShape::Ring,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 2. Flame wall — particles burst from a small ring
+            //    on the ground, flying outward + slightly up.
+            //    Reads as the body of the wave catching enemies
+            //    as it sweeps out. Spawning on a `Ring` rather
+            //    than a `Point` gives every particle a unique
+            //    radial direction without us having to stamp
+            //    one in code.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Ring {
+                    radius: 0.6,
+                    thickness: 0.4,
+                },
+                emission: EmissionMode::Burst { count: 80 },
+                speed: (8.0, 13.0),
+                lifetime: (0.35, 0.55),
+                forces: vec![
+                    ForceField::Drag { coefficient: 1.8 },
+                    // Subtle upward bias so the flame plumes
+                    // rise as they expand instead of skidding
+                    // flat on the floor.
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 3.5,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.45),
+                    (0.30, 0.85),
+                    (1.00, 0.30),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [5.5, 2.6, 0.6, 1.0]),
+                    (0.40, [3.0, 1.0, 0.2, 0.80]),
+                    (1.00, [0.4, 0.06, 0.02, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 3. Embers — bright sparks thrown out radially with
+            //    real gravity so they arc and land. Heavy
+            //    particle count for a satisfying crunch on the
+            //    impact frame.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Ring {
+                    radius: 0.4,
+                    thickness: 0.3,
+                },
+                emission: EmissionMode::Burst { count: 60 },
+                speed: (10.0, 16.0),
+                lifetime: (0.30, 0.55),
+                forces: vec![
+                    ForceField::Drag { coefficient: 0.8 },
+                    ForceField::Gravity {
+                        axis: -Vec3::Y,
+                        strength: 14.0,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.13),
+                    (1.00, 0.0),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [6.0, 4.0, 1.6, 1.0]),
+                    (0.50, [2.5, 1.0, 0.25, 0.9]),
+                    (1.00, [0.5, 0.10, 0.05, 0.0]),
+                ]),
+                sprite: SpriteShape::Spark,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 4. Smoke residue — slow alpha-blended puffs left
+            //    behind once the flame fades. Sells the "this
+            //    just happened" beat after the wave has passed.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 1.2 },
+                emission: EmissionMode::Burst { count: 18 },
+                speed: (0.6, 1.2),
+                lifetime: (0.7, 1.1),
+                forces: vec![
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 1.2,
+                    },
+                    ForceField::Drag { coefficient: 0.5 },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.45),
+                    (0.50, 0.85),
+                    (1.00, 1.20),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.18, 0.13, 0.10, 0.55]),
+                    (0.50, [0.12, 0.09, 0.07, 0.30]),
+                    (1.00, [0.05, 0.04, 0.04, 0.0]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}
+
 /// Fireball trail — persistent emitter that follows the
 /// projectile around. Two layers: an inner hot core of dense
 /// embers that drift slightly outward + a cooler smoke wake
@@ -815,4 +956,273 @@ pub fn portal_vortex() -> Effect {
             }),
         ],
     }
+}
+
+/// Big visceral blood burst on death.
+///
+/// Three layers, all alpha-blended (blood does **not** glow,
+/// so HDR is intentionally avoided here):
+///
+/// 1. **Spurt** — a single large, very dark crimson "splat" puff
+///    that flashes at the kill point and fades fast. Sells the
+///    moment of contact.
+/// 2. **Droplets** — a wide dome of small fast droplets fired
+///    upward + outward. Heavy gravity (~22 m/s²) and low drag,
+///    so they arc, peak, and fall in <0.6 s — reading as wet
+///    matter rather than fire embers.
+/// 3. **Mist** — a few soft puffs of dark red haze that linger
+///    for ~0.5 s and drift slightly upward. Smoky sprite ties
+///    the burst together visually.
+///
+/// `up` is the world-space direction the spew should aim
+/// (typically `Vec3::Y` — pass another vector for directional
+/// hits, e.g. opposite of the projectile velocity).
+pub fn blood_splatter(up: Vec3) -> Effect {
+    let axis = if up.length_squared() > 1e-4 {
+        up.normalize()
+    } else {
+        Vec3::Y
+    };
+    Effect {
+        duration: 0.05,
+        layers: vec![
+            // 1. Initial dark crimson spurt — a few large soft
+            //    puffs at the kill point.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 3 },
+                speed: (0.0, 0.6),
+                lifetime: (0.16, 0.22),
+                forces: vec![ForceField::Drag { coefficient: 6.0 }],
+                size: Curve::from_stops([
+                    (0.00, 0.55),
+                    (0.30, 0.85),
+                    (1.00, 0.50),
+                ]),
+                // Deep, slightly-dark red. Alpha drops gracefully
+                // without going additive — blood doesn't emit.
+                color: Gradient::from_stops([
+                    (0.00, [0.55, 0.04, 0.04, 0.95]),
+                    (0.50, [0.35, 0.02, 0.02, 0.70]),
+                    (1.00, [0.18, 0.01, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+            // 2. Droplets — wide upward+outward cone, fast, heavy
+            //    gravity. Low drag so they keep their momentum
+            //    until gravity pulls them back down.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Cone {
+                    axis,
+                    half_angle: 1.05, // ~60° spread
+                },
+                emission: EmissionMode::Burst { count: 36 },
+                speed: (4.0, 8.5),
+                lifetime: (0.45, 0.75),
+                forces: vec![
+                    ForceField::Drag { coefficient: 1.2 },
+                    ForceField::Gravity {
+                        axis: -Vec3::Y,
+                        strength: 22.0,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.07),
+                    (0.85, 0.07),
+                    (1.00, 0.0),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.62, 0.05, 0.05, 1.00]),
+                    (0.70, [0.40, 0.03, 0.03, 0.95]),
+                    (1.00, [0.20, 0.01, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+            // 3. Mist — a few slow, soft, dark-red smoky puffs
+            //    that drift up briefly and dissolve.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Burst { count: 6 },
+                speed: (0.4, 1.2),
+                lifetime: (0.45, 0.65),
+                forces: vec![
+                    ForceField::Drag { coefficient: 3.0 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 0.8,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.30),
+                    (1.00, 0.55),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.30, 0.02, 0.02, 0.55]),
+                    (1.00, [0.10, 0.01, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}
+
+/// Smaller blood spurt for non-fatal hits — fewer droplets, no
+/// mist, lower velocity than [`blood_splatter`]. Cheap enough
+/// to fire on every damage tick without overwhelming the screen.
+///
+/// `up` is the spew axis (typically `Vec3::Y`).
+pub fn blood_hit_spurt(up: Vec3) -> Effect {
+    let axis = if up.length_squared() > 1e-4 {
+        up.normalize()
+    } else {
+        Vec3::Y
+    };
+    Effect {
+        duration: 0.05,
+        layers: vec![Layer::Particles(ParticleSpec {
+            spawn: SpawnShape::Cone {
+                axis,
+                half_angle: 0.85,
+            },
+            emission: EmissionMode::Burst { count: 12 },
+            speed: (2.5, 5.5),
+            lifetime: (0.25, 0.45),
+            forces: vec![
+                ForceField::Drag { coefficient: 1.4 },
+                ForceField::Gravity {
+                    axis: -Vec3::Y,
+                    strength: 18.0,
+                },
+            ],
+            size: Curve::from_stops([
+                (0.00, 0.06),
+                (0.85, 0.06),
+                (1.00, 0.0),
+            ]),
+            color: Gradient::from_stops([
+                (0.00, [0.62, 0.05, 0.05, 1.00]),
+                (0.70, [0.40, 0.03, 0.03, 0.90]),
+                (1.00, [0.20, 0.01, 0.01, 0.00]),
+            ]),
+            sprite: SpriteShape::SoftGlow,
+            blend: BlendMode::Alpha,
+            opacity: 1.0,
+        })],
+    }
+}
+
+/// Wall-torch flame — a continuous, looping fire plume that sits
+/// on a wall sconce. Three stacked layers compose the look:
+///
+/// 1. **Core flame**: short-lived bright HDR additive particles
+///    rising fast. Keeps the flame's silhouette tight and drives
+///    the bloom highlight.
+/// 2. **Outer flame**: longer-lived softer particles that drift
+///    upward and outward, giving the flame visible volume.
+/// 3. **Smoke wisp**: dim translucent puff that lingers above
+///    the flame, fading to nothing.
+///
+/// The effect is `duration: 0.0` (infinite) — gameplay code
+/// despawns it when the floor changes. All forces are vertical
+/// so the flame stays anchored to its wall position; the
+/// `Wind` force adds a tiny upward bias so even slow particles
+/// rise reliably.
+pub fn wall_torch() -> Effect {
+    Effect {
+        duration: 0.0,
+        layers: vec![
+            // Core flame — small, very bright, short life.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.04 },
+                emission: EmissionMode::Continuous { rate: 55.0 },
+                speed: (1.6, 2.4),
+                lifetime: (0.18, 0.30),
+                forces: vec![
+                    // Upward acceleration so flames lick higher
+                    // as they age (negative gravity along Y).
+                    ForceField::Gravity { axis: Vec3::Y, strength: 4.5 },
+                    ForceField::Drag { coefficient: 1.5 },
+                    // Subtle curl gives the flame its dancing
+                    // silhouette without expensive simulation.
+                    ForceField::Curl { frequency: 4.0, strength: 1.6 },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.10),
+                    (0.30, 0.16),
+                    (1.00, 0.02),
+                ]),
+                // HDR amber → orange → dim red. Bright enough at
+                // birth (~3-4×) to drive bloom; tonemap brings
+                // the visible colour back to a clean orange.
+                color: Gradient::from_stops([
+                    (0.00, [4.5, 2.4, 0.6, 1.00]),
+                    (0.40, [3.0, 1.0, 0.2, 1.00]),
+                    (1.00, [0.6, 0.1, 0.0, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // Outer flame — wider, dimmer, longer-lived. Reads
+            // as the flame's volume / aura.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.09 },
+                emission: EmissionMode::Continuous { rate: 35.0 },
+                speed: (0.7, 1.2),
+                lifetime: (0.35, 0.55),
+                forces: vec![
+                    ForceField::Gravity { axis: Vec3::Y, strength: 2.8 },
+                    ForceField::Drag { coefficient: 1.2 },
+                    ForceField::Curl { frequency: 2.5, strength: 1.0 },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.16),
+                    (0.40, 0.22),
+                    (1.00, 0.04),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [2.5, 1.0, 0.20, 0.85]),
+                    (0.50, [1.4, 0.45, 0.10, 0.55]),
+                    (1.00, [0.30, 0.08, 0.02, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // Smoke wisp — slow rising dim grey puff. Alpha-
+            // blended so it can sit above the additive flame
+            // without blowing out.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.08 },
+                emission: EmissionMode::Continuous { rate: 6.0 },
+                speed: (0.25, 0.45),
+                lifetime: (1.2, 1.8),
+                forces: vec![
+                    ForceField::Gravity { axis: Vec3::Y, strength: 1.0 },
+                    ForceField::Drag { coefficient: 0.6 },
+                    ForceField::Curl { frequency: 1.2, strength: 0.6 },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.10),
+                    (0.50, 0.30),
+                    (1.00, 0.55),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.10, 0.09, 0.08, 0.40]),
+                    (0.40, [0.08, 0.07, 0.06, 0.20]),
+                    (1.00, [0.04, 0.04, 0.04, 0.00]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+
 }

@@ -6,6 +6,8 @@ pub mod depth;
 pub mod texture;
 pub mod material;
 pub mod shadow;
+pub mod sky;
+pub mod post;
 pub mod overlay;
 pub mod font;
 pub mod vfx;

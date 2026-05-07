@@ -19,26 +19,28 @@ use super::sub_state::{LootClientState, NetState};
 /// chest, not just passing nearby.
 pub const INTERACT_RADIUS: f32 = 1.8;
 
-/// Per-frame stash chest tick. Returns the new `stash_open`
-/// value; caller persists it back onto `GameState`.
+/// Per-frame stash chest tick. Reads / writes
+/// `loot.stash_session` (the server-mirrored flag), pushes
+/// open / close requests onto `net.stash_session_requests`,
+/// and forces `mp_inventory_ui.open` while a session is
+/// active.
 #[allow(clippy::too_many_arguments)]
 pub fn tick(
     world: &hecs::World,
     floor_mgr: &FloorManager,
     input: &Input,
-    stash_open: &mut bool,
     mp_inventory_ui: &mut MpInventoryUI,
     net: &mut NetState,
     loot: &mut LootClientState,
-    portal_prompt: &mut Option<&'static str>,
+    hud_prompt: &mut Option<&'static str>,
 ) {
     use winit::keyboard::KeyCode;
 
     let Some(chest_pos) = floor_mgr.stash_chest_pos else {
         // Not in the hub (or chest hasn't spawned yet). Force-
         // close any lingering session.
-        if *stash_open {
-            *stash_open = false;
+        if loot.stash_session {
+            loot.stash_session = false;
             mp_inventory_ui.open = false;
             net.stash_session_requests.push(false);
         }
@@ -55,16 +57,16 @@ pub fn tick(
     let in_range = player_pos.distance(chest_pos) <= INTERACT_RADIUS;
 
     if in_range {
-        *portal_prompt = Some(if *stash_open {
+        *hud_prompt = Some(if loot.stash_session {
             "PRESS [F] TO CLOSE STASH"
         } else {
             "PRESS [F] TO OPEN STASH"
         });
         if input.key_just_pressed(KeyCode::KeyF) {
-            *stash_open = !*stash_open;
-            mp_inventory_ui.open = *stash_open;
-            net.stash_session_requests.push(*stash_open);
-            if *stash_open {
+            loot.stash_session = !loot.stash_session;
+            mp_inventory_ui.open = loot.stash_session;
+            net.stash_session_requests.push(loot.stash_session);
+            if loot.stash_session {
                 log::info!("stash: opening");
             } else {
                 log::info!("stash: closing");
@@ -73,10 +75,10 @@ pub fn tick(
                 loot.stash_items.clear();
             }
         }
-    } else if *stash_open {
+    } else if loot.stash_session {
         // Walked away — auto close.
         log::info!("stash: out of range, auto-closing");
-        *stash_open = false;
+        loot.stash_session = false;
         mp_inventory_ui.open = false;
         loot.stash_items.clear();
         net.stash_session_requests.push(false);

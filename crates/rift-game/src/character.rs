@@ -1,9 +1,7 @@
 //! Character roster — in-memory list of created characters and their
-//! profile data (name, gender, class, level). Persistence is deferred
+//! profile data (name, gender, level). Persistence is deferred
 //! until multiplayer/DB work begins; for now everything lives in this
 //! struct for the lifetime of the process.
-
-use crate::classes::ClassId;
 
 /// Hard cap on simultaneous character slots in the roster.
 pub const MAX_CHARACTERS: usize = 5;
@@ -54,16 +52,14 @@ impl Gender {
 pub struct CharacterProfile {
     pub name: String,
     pub gender: Gender,
-    pub class: ClassId,
     pub level: u32,
 }
 
 impl CharacterProfile {
-    pub fn new(name: String, gender: Gender, class: ClassId) -> Self {
+    pub fn new(name: String, gender: Gender) -> Self {
         Self {
             name,
             gender,
-            class,
             level: 1,
         }
     }

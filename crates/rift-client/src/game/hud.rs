@@ -325,12 +325,46 @@ pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) 
     }
 }
 
-/// Top-right minimap. Shows walkable tiles, the player (white dot, with a
-/// short heading line), nearby enemies (red), the boss (orange), and the
+/// Soft-haloed minimap pip: draws a low-alpha halo rounded-rect
+/// then the opaque core rounded-rect on top. Free helper rather
+/// than a closure so the caller can keep mutably borrowing `ui`
+/// for other draws between pip calls.
+fn draw_pip(
+    ui: &mut Ui<'_>,
+    mx: f32,
+    my: f32,
+    core_size: f32,
+    core_col: Color,
+    halo_col: Color,
+) {
+    let halo = core_size * 2.4;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - halo * 0.5, my - halo * 0.5, halo, halo),
+        halo * 0.5,
+        halo_col,
+    );
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - core_size * 0.5, my - core_size * 0.5, core_size, core_size),
+        core_size * 0.5,
+        core_col,
+    );
+}
+
+/// Top-right minimap. Shows walkable tiles, the player (white pip with a
+/// short heading fan), nearby enemies (red), the boss (orange), and the
 /// active rift / hub portal (cyan).
 ///
+/// Visual breakdown (top to bottom inside the panel):
+///   ┌─────────────────────────────┐
+///   │  MAP                     N  │  ← header strip, themed
+///   ├─────────────────────────────┤
+///   │  ┌───────────────────────┐  │  ← inset navgrid frame
+///   │  │ walkable tiles + pips │  │
+///   │  └───────────────────────┘  │
+///   └─────────────────────────────┘
+///
 /// The map auto-scales: cell size is computed so the navgrid fits inside
-/// `MAP_PX × MAP_PX`.
+/// the inset content area.
 pub fn render_minimap(
     ui: &mut Ui<'_>,
     world: &hecs::World,
@@ -338,125 +372,273 @@ pub fn render_minimap(
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
 ) {
-    const MAP_PX: f32 = 320.0;
-    const PADDING: f32 = 14.0;
-    const MARGIN: f32 = 14.0;
+    use rift_engine::ui::im::{Frame, Pad};
 
+    // ---- Layout constants ----
+    const MAP_PX: f32 = 224.0;
+    const HEADER_H: f32 = 18.0;
+    const INSET: f32 = 6.0;
+    const MARGIN: f32 = 14.0;
+    const RADIUS: f32 = 6.0;
+
+    let theme = *ui.theme();
     let screen = ui.screen_size();
     let sw = screen.x;
 
-    let inner = MAP_PX - PADDING * 2.0;
-    let cell = (inner / nav.width.max(nav.depth) as f32).max(1.0);
-    let map_w = cell * nav.width as f32;
-    let map_h = cell * nav.depth as f32;
-
     let map_x = sw - MAP_PX - MARGIN;
     let map_y = MARGIN;
+    let panel_rect = Rect::from_xywh(map_x, map_y, MAP_PX, MAP_PX);
 
-    // Frame
-    ui.draw_rect(
-        Rect::from_xywh(map_x, map_y, MAP_PX, MAP_PX),
-        Color::rgba(0.04, 0.05, 0.07, 0.78),
+    // ---- Outer frame: themed panel chrome ----
+    // Subtle outer drop-shadow to lift the map off the world.
+    ui.draw_rounded_rect(
+        Rect::from_xywh(map_x + 2.0, map_y + 3.0, MAP_PX, MAP_PX),
+        RADIUS + 1.0,
+        Color::rgba(0.0, 0.0, 0.0, 0.32),
     );
-    // Border
-    let border = Color::rgba(0.18, 0.20, 0.26, 0.95);
-    ui.draw_rect(Rect::from_xywh(map_x, map_y, MAP_PX, 1.5), border);
-    ui.draw_rect(Rect::from_xywh(map_x, map_y + MAP_PX - 1.5, MAP_PX, 1.5), border);
-    ui.draw_rect(Rect::from_xywh(map_x, map_y, 1.5, MAP_PX), border);
-    ui.draw_rect(Rect::from_xywh(map_x + MAP_PX - 1.5, map_y, 1.5, MAP_PX), border);
+    let frame = Frame::panel(&theme)
+        .with_fill(Color::rgba(0.04, 0.05, 0.07, 0.94))
+        .with_radius(RADIUS)
+        .with_padding(Pad::all(0.0));
+    frame.show(ui, panel_rect, |ui, body| {
+        // ---- Header strip ----
+        let header = Rect::from_xywh(body.x(), body.y(), body.width(), HEADER_H);
+        ui.draw_rect(
+            Rect::from_xywh(header.x(), header.y(), header.width(), header.height()),
+            Color::rgba(0.07, 0.09, 0.12, 1.0),
+        );
+        // Header divider underline.
+        ui.draw_rect(
+            Rect::from_xywh(header.x(), header.max.y - 1.0, header.width(), 1.0),
+            Color::rgba(0.16, 0.18, 0.24, 1.0),
+        );
+        // Title.
+        ui.draw_text(
+            Pos2::new(header.x() + 8.0, header.y() + 4.0),
+            "MAP",
+            10.0,
+            theme.colors.text_dim,
+        );
+        // North indicator: "N" hugged to the right side of the
+        // header strip. The minimap maps world Z to screen Y, so
+        // up-on-map = -Z. The pip below the letter visually
+        // anchors it as a compass marker.
+        let n_w = ui.measure_text("N", 10.0);
+        let n_x = header.max.x - n_w - 12.0;
+        ui.draw_rect(
+            Rect::from_xywh(n_x - 5.0, header.y() + 6.0, 3.0, 6.0),
+            Color::rgba(0.55, 0.78, 1.0, 0.65),
+        );
+        ui.draw_text(
+            Pos2::new(n_x, header.y() + 4.0),
+            "N",
+            10.0,
+            Color::rgba(0.85, 0.92, 1.0, 0.95),
+        );
 
-    // Centre the navgrid inside the framed area.
-    let inner_x = map_x + (MAP_PX - map_w) * 0.5;
-    let inner_y = map_y + (MAP_PX - map_h) * 0.5;
+        // ---- Navgrid area ----
+        let inner_rect = Rect::from_xywh(
+            body.x() + INSET,
+            body.y() + HEADER_H + INSET,
+            body.width() - INSET * 2.0,
+            body.height() - HEADER_H - INSET * 2.0,
+        );
 
-    // Walkable tiles
-    let floor_col = Color::rgba(0.32, 0.30, 0.26, 0.92);
-    for z in 0..nav.depth {
-        for x in 0..nav.width {
-            if nav.is_walkable(x, z) {
-                ui.draw_rect(
-                    Rect::from_xywh(
-                        inner_x + x as f32 * cell,
-                        inner_y + z as f32 * cell,
-                        cell,
-                        cell,
-                    ),
-                    floor_col,
-                );
-            }
-        }
-    }
+        // Inset background (slightly darker than the panel so the
+        // walkable tiles read as "lit").
+        ui.draw_rounded_rect(
+            inner_rect,
+            RADIUS - 2.0,
+            Color::rgba(0.025, 0.028, 0.035, 1.0),
+        );
 
-    // World → minimap helper. Tile coords map 1:1 to world units.
-    let to_map = |p: Vec3| -> (f32, f32) {
-        let mx = inner_x + p.x * cell;
-        let my = inner_y + p.z * cell;
-        (mx, my)
-    };
-    // True iff (mx,my) lies inside the framed minimap window.
-    let in_frame = |mx: f32, my: f32| -> bool {
-        mx >= map_x && mx <= map_x + MAP_PX && my >= map_y && my <= map_y + MAP_PX
-    };
+        // Centre the navgrid inside the inset.
+        let cell = (inner_rect.width().min(inner_rect.height())
+            / nav.width.max(nav.depth) as f32)
+            .max(1.0);
+        let map_w = cell * nav.width as f32;
+        let map_h = cell * nav.depth as f32;
+        let inner_x = inner_rect.x() + (inner_rect.width() - map_w) * 0.5;
+        let inner_y = inner_rect.y() + (inner_rect.height() - map_h) * 0.5;
 
-    // Portal pip
-    if let Some(p) = portal_pos {
-        let (mx, my) = to_map(p);
-        if in_frame(mx, my) {
-            let s = (cell * 2.6).max(4.0);
-            ui.draw_rect(
-                Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s),
-                Color::rgba(0.30, 0.75, 1.0, 0.95),
-            );
-        }
-    }
-
-    // Enemy pips
-    for (_id, (t, _e, boss, _)) in world
-        .query::<(&Transform, &Enemy, Option<&Boss>, Option<&Health>)>()
-        .iter()
-    {
-        let (mx, my) = to_map(t.position);
-        if !in_frame(mx, my) { continue; }
-        let (s, col) = if boss.is_some() {
-            ((cell * 2.4).max(4.0), Color::rgba(1.00, 0.55, 0.10, 1.0))
-        } else {
-            ((cell * 1.6).max(2.5), Color::rgba(0.92, 0.25, 0.22, 1.0))
-        };
-        ui.draw_rect(Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s), col);
-    }
-
-    // Player pip + facing tick
-    if let Some((pp, _)) = world
-        .query::<(&Transform, &Player, &LocalPlayer)>()
-        .iter()
-        .map(|(_, (t, p, _))| (t.position, p.aim_dir))
-        .next()
-    {
-        let (mx, my) = to_map(pp);
-        if in_frame(mx, my) {
-            let s = (cell * 1.9).max(3.0);
-            ui.draw_rect(
-                Rect::from_xywh(mx - s * 0.5, my - s * 0.5, s, s),
-                Color::rgba(0.95, 0.95, 0.98, 1.0),
-            );
-            // Facing line: short heading marker.
-            let f = Vec3::new(player_facing.x, 0.0, player_facing.z);
-            if f.length_squared() > 1e-4 {
-                let f = f.normalize();
-                let len = (cell * 3.5).max(6.0);
-                let dx = f.x * len;
-                let dz = f.z * len;
-                let steps = 6;
-                for i in 1..=steps {
-                    let t = i as f32 / steps as f32;
+        // Walkable tiles. Two-tone fill driven by a cheap
+        // checker on (x ^ z) so the map doesn't read as a flat
+        // slab when cells are large enough to discern.
+        let floor_a = Color::rgba(0.42, 0.36, 0.30, 0.95);
+        let floor_b = Color::rgba(0.36, 0.30, 0.25, 0.95);
+        for z in 0..nav.depth {
+            for x in 0..nav.width {
+                if nav.is_walkable(x, z) {
+                    let col = if (x ^ z) & 1 == 0 { floor_a } else { floor_b };
                     ui.draw_rect(
-                        Rect::from_xywh(mx + dx * t - 1.0, my + dz * t - 1.0, 2.0, 2.0),
-                        Color::rgba(0.95, 0.95, 0.98, 0.85),
+                        Rect::from_xywh(
+                            inner_x + x as f32 * cell,
+                            inner_y + z as f32 * cell,
+                            cell,
+                            cell,
+                        ),
+                        col,
                     );
                 }
             }
         }
-    }
+
+        // Inner-edge vignette: four thin dark bands fading inward
+        // so the map doesn't visually bleed into the panel
+        // border. Cheap (4 rects) but goes a long way.
+        const VIG_STEPS: i32 = 3;
+        for i in 0..VIG_STEPS {
+            let f = 1.0 - (i as f32 / VIG_STEPS as f32);
+            let alpha = 0.28 * f;
+            let band = (4.0 - i as f32 * 1.2).max(1.0);
+            let col = Color::rgba(0.0, 0.0, 0.0, alpha);
+            // top
+            ui.draw_rect(
+                Rect::from_xywh(inner_rect.x(), inner_rect.y() + i as f32, inner_rect.width(), band),
+                col,
+            );
+            // bottom
+            ui.draw_rect(
+                Rect::from_xywh(
+                    inner_rect.x(),
+                    inner_rect.max.y - i as f32 - band,
+                    inner_rect.width(),
+                    band,
+                ),
+                col,
+            );
+            // left
+            ui.draw_rect(
+                Rect::from_xywh(inner_rect.x() + i as f32, inner_rect.y(), band, inner_rect.height()),
+                col,
+            );
+            // right
+            ui.draw_rect(
+                Rect::from_xywh(
+                    inner_rect.max.x - i as f32 - band,
+                    inner_rect.y(),
+                    band,
+                    inner_rect.height(),
+                ),
+                col,
+            );
+        }
+
+        // Inset outline.
+        ui.draw_rounded_outline(
+            inner_rect,
+            RADIUS - 2.0,
+            1.0,
+            Color::rgba(0.18, 0.20, 0.26, 1.0),
+        );
+
+        // World → minimap coords helper
+        let to_map = |p: Vec3| -> (f32, f32) {
+            (inner_x + p.x * cell, inner_y + p.z * cell)
+        };
+        let in_inner = |mx: f32, my: f32| -> bool {
+            mx >= inner_rect.x()
+                && mx <= inner_rect.max.x
+                && my >= inner_rect.y()
+                && my <= inner_rect.max.y
+        };
+
+        // Portal pip — cyan, drawn first so enemy / player pips
+        // overlap it cleanly when stacked.
+        if let Some(p) = portal_pos {
+            let (mx, my) = to_map(p);
+            if in_inner(mx, my) {
+                let s = (cell * 2.4).max(5.0);
+                draw_pip(
+                    ui,
+                    mx,
+                    my,
+                    s,
+                    Color::rgba(0.45, 0.85, 1.0, 1.0),
+                    Color::rgba(0.30, 0.75, 1.0, 0.35),
+                );
+            }
+        }
+
+        // Enemy pips
+        for (_id, (t, _e, boss, _)) in world
+            .query::<(&Transform, &Enemy, Option<&Boss>, Option<&Health>)>()
+            .iter()
+        {
+            let (mx, my) = to_map(t.position);
+            if !in_inner(mx, my) {
+                continue;
+            }
+            if boss.is_some() {
+                let s = (cell * 2.6).max(5.0);
+                draw_pip(
+                    ui,
+                    mx,
+                    my,
+                    s,
+                    Color::rgba(1.00, 0.60, 0.10, 1.0),
+                    Color::rgba(1.00, 0.55, 0.10, 0.40),
+                );
+            } else {
+                let s = (cell * 1.7).max(3.0);
+                draw_pip(
+                    ui,
+                    mx,
+                    my,
+                    s,
+                    Color::rgba(0.94, 0.30, 0.26, 1.0),
+                    Color::rgba(0.92, 0.20, 0.18, 0.30),
+                );
+            }
+        }
+
+        // Player pip + facing fan
+        if let Some((pp, _)) = world
+            .query::<(&Transform, &Player, &LocalPlayer)>()
+            .iter()
+            .map(|(_, (t, p, _))| (t.position, p.aim_dir))
+            .next()
+        {
+            let (mx, my) = to_map(pp);
+            if in_inner(mx, my) {
+                // Facing fan: tapered dots along `player_facing`,
+                // drawn before the player pip so the pip stays
+                // crisp on top of the trail.
+                let f = Vec3::new(player_facing.x, 0.0, player_facing.z);
+                if f.length_squared() > 1e-4 {
+                    let f = f.normalize();
+                    let len = (cell * 4.5).max(8.0);
+                    let dx = f.x * len;
+                    let dz = f.z * len;
+                    const STEPS: i32 = 5;
+                    for i in 1..=STEPS {
+                        let t = i as f32 / STEPS as f32;
+                        let size = (3.2 * (1.0 - t * 0.6)).max(1.4);
+                        let alpha = (1.0 - t) * 0.85 + 0.15;
+                        ui.draw_rounded_rect(
+                            Rect::from_xywh(
+                                mx + dx * t - size * 0.5,
+                                my + dz * t - size * 0.5,
+                                size,
+                                size,
+                            ),
+                            size * 0.5,
+                            Color::rgba(0.95, 0.97, 1.0, alpha),
+                        );
+                    }
+                }
+                let s = (cell * 2.0).max(4.5);
+                draw_pip(
+                    ui,
+                    mx,
+                    my,
+                    s,
+                    Color::rgba(0.98, 0.99, 1.0, 1.0),
+                    Color::rgba(0.55, 0.78, 1.0, 0.45),
+                );
+            }
+        }
+    });
 }
 
 /// Generic interaction prompt centred just below mid-screen, used by
@@ -464,7 +646,7 @@ pub fn render_minimap(
 /// "PRESS [F] TO ENTER THE RIFT"). Migrated onto the IM stack —
 /// uses `Frame` so the panel chrome (rounded corners, border)
 /// matches the rest of the UI without copy-pasting rect math.
-pub fn render_portal_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
+pub fn render_hud_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
     use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Vec2};
     let theme = *ui.theme();
     let screen = ui.screen_size();
@@ -488,7 +670,7 @@ pub fn render_portal_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
     });
 }
 
-/// Loot-pickup prompt — same chrome as [`render_portal_prompt`] but
+/// Loot-pickup prompt — same chrome as [`render_hud_prompt`] but
 /// the text colour follows the item's tier (rarity) so the player
 /// can read the rarity at a glance. Placed slightly above the
 /// portal prompt anchor so the two never overlap.
@@ -550,7 +732,19 @@ pub fn render_damage_flash(ui: &mut Ui<'_>, strength: f32) {
 }
 
 /// Render the ability bar (bottom-center) via the immediate-mode UI.
-pub fn render_ability_bar(ui: &mut Ui<'_>, abilities: &AbilitySlot) {
+///
+/// Returns `Some(slot_index)` if the player clicked one of the
+/// six bar slots this frame. Caller uses that to open the
+/// spellbook with the slot pre-targeted.
+///
+/// Locked slots (per `loadout::SLOT_UNLOCK_LEVELS` vs.
+/// `player_level`) render disabled and reject clicks. The slot
+/// shows a "Lv N" caption so the player knows when it unlocks.
+pub fn render_ability_bar(
+    ui: &mut Ui<'_>,
+    abilities: &AbilitySlot,
+    player_level: u32,
+) -> Option<usize> {
     const AB_SIZE: f32 = 64.0;
     const AB_GAP: f32 = 6.0;
     const AB_KEYS: [&str; 6] = ["LMB", "1", "2", "3", "4", "5"];
@@ -561,18 +755,32 @@ pub fn render_ability_bar(ui: &mut Ui<'_>, abilities: &AbilitySlot) {
     let ab_y = screen.y - AB_SIZE - 16.0;
 
     let mut hovered_idx: Option<usize> = None;
+    let mut clicked_idx: Option<usize> = None;
 
     for (i, slot) in abilities.slots.iter().enumerate() {
         let pos = Pos2::new(ab_x + i as f32 * (AB_SIZE + AB_GAP), ab_y);
         let id = Id::root("ability_bar").child(i);
+        let slot_unlocked =
+            rift_game::loadout::is_slot_unlocked(i, player_level);
 
         let mut s = ItemSlot::new(AB_SIZE).key_label(AB_KEYS[i]);
-        if let Some(state) = slot {
+        if !slot_unlocked {
+            // Locked bar slot — render as a disabled "padlock"
+            // tile with the unlock level glyph.
+            s = s
+                .enabled(false)
+                .fallback_glyph('\u{1F512}')
+                .fallback_color(Color::rgba(0.55, 0.25, 0.25, 0.9));
+        } else if let Some(state) = slot {
             // `cooldown_progress()` returns elapsed/total; the
             // overlay drains from full → empty as the cooldown
             // ticks, so pass `1 - progress` (remaining fraction).
             let remaining = 1.0 - state.cooldown_progress();
-            s = s.cooldown(remaining).enabled(state.ready());
+            // Always keep the slot click-enabled so the player
+            // can right-click-style swap via the spellbook
+            // even mid-cooldown. The `ready()` flag only
+            // affects whether the cast hotkey fires.
+            s = s.cooldown(remaining);
             if let Some(name) = state.ability.icon {
                 s = s.icon(name);
             } else {
@@ -582,13 +790,29 @@ pub fn render_ability_bar(ui: &mut Ui<'_>, abilities: &AbilitySlot) {
                         .fallback_color(Color::rgba(0.6, 0.85, 1.0, 0.95));
                 }
             }
-        } else {
-            s = s.enabled(false);
         }
+        // Empty unlocked slot: leave it click-enabled with no
+        // icon so the player can click to open the spellbook
+        // and pick something for it.
 
         let resp = s.show(ui, pos, id);
-        if resp.hovered && slot.is_some() {
+        if resp.hovered && slot.is_some() && slot_unlocked {
             hovered_idx = Some(i);
+        }
+        if resp.clicked && slot_unlocked {
+            clicked_idx = Some(i);
+        }
+
+        // Locked-slot caption.
+        if !slot_unlocked {
+            let lvl = rift_game::loadout::SLOT_UNLOCK_LEVELS[i];
+            let theme = *ui.theme();
+            ui.draw_text(
+                Pos2::new(pos.x, pos.y + AB_SIZE + 2.0),
+                format!("Lv {lvl}").as_str(),
+                theme.fonts.size_sm,
+                Color::rgba(0.65, 0.30, 0.30, 0.9),
+            );
         }
     }
 
@@ -626,6 +850,8 @@ pub fn render_ability_bar(ui: &mut Ui<'_>, abilities: &AbilitySlot) {
                 .show(ui, Pos2::new(tip_x, tip_y), &lines);
         }
     }
+
+    clicked_idx
 }
 
 /// Render thin health bars above enemies that have taken damage.
@@ -755,4 +981,57 @@ fn ability_abbrev(name: &str) -> String {
         let b = chars.next().unwrap_or(a).to_ascii_uppercase();
         format!("{a}{b}")
     }
+}
+
+/// Full-screen "Entering World" overlay: title, progress bar,
+/// and a tiny status label. Drawn on top of the live scene
+/// during the staged-init steps after a hub↔rift transition so
+/// the player sees something other than a frozen frame while
+/// monsters / icons stream in.
+pub fn draw_world_loading_overlay(renderer: &mut rift_engine::Renderer, progress: f32, label: &str) {
+    let (sw, sh) = renderer.screen_size();
+    let batch = &mut renderer.overlay_batch;
+
+    batch.rect_px(0.0, 0.0, sw, sh, [0.02, 0.02, 0.03, 0.92], sw, sh);
+
+    let title = "Entering World";
+    let title_size = 30.0;
+    let title_w = batch.measure_text(title, title_size);
+    batch.text(
+        title,
+        (sw - title_w) * 0.5,
+        sh * 0.40 - title_size,
+        title_size,
+        [0.85, 0.80, 0.65, 1.0],
+        sw,
+        sh,
+    );
+
+    let bar_w = (sw * 0.45).max(240.0);
+    let bar_h = 18.0;
+    let bar_x = (sw - bar_w) * 0.5;
+    let bar_y = sh * 0.50;
+    batch.rect_px(bar_x, bar_y, bar_w, bar_h, [0.10, 0.10, 0.14, 1.0], sw, sh);
+    let fill_w = bar_w * progress.clamp(0.0, 1.0);
+    if fill_w > 0.5 {
+        batch.rect_px(bar_x, bar_y, fill_w, bar_h, [0.55, 0.45, 0.20, 1.0], sw, sh);
+    }
+    let border = [0.30, 0.28, 0.22, 1.0];
+    let t = 1.5;
+    batch.rect_px(bar_x, bar_y, bar_w, t, border, sw, sh);
+    batch.rect_px(bar_x, bar_y + bar_h - t, bar_w, t, border, sw, sh);
+    batch.rect_px(bar_x, bar_y, t, bar_h, border, sw, sh);
+    batch.rect_px(bar_x + bar_w - t, bar_y, t, bar_h, border, sw, sh);
+
+    let label_size = 14.0;
+    let label_w = batch.measure_text(label, label_size);
+    batch.text(
+        label,
+        (sw - label_w) * 0.5,
+        bar_y + bar_h + 16.0,
+        label_size,
+        [0.65, 0.62, 0.55, 1.0],
+        sw,
+        sh,
+    );
 }

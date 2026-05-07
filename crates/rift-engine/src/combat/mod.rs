@@ -9,7 +9,7 @@ pub mod ability_runtime;
 pub mod projectile;
 
 pub use ability_runtime::{
-    effect_for_preset, execute_ability, execute_ability_instant, execute_ability_placed,
-    AbilityCtx,
+    effect_for_vfx, execute_ability, execute_ability_instant, execute_ability_placed,
+    mesh_for_kind, AbilityCtx,
 };
 pub use projectile::{Projectile, ProjectileKind};

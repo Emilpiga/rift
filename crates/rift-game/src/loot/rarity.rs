@@ -23,14 +23,18 @@ pub enum Rarity {
 }
 
 impl Rarity {
-    /// Inclusive `(min, max)` affix count for this rarity.
-    /// Implicits don't count.
+    /// Number of *bonus* affixes rolled at this rarity. Bonus
+    /// affixes come on top of the deterministic per-slot
+    /// signature (Vitality + slot-specific guaranteed lines)
+    /// that every item gets regardless of rarity. Legendary
+    /// additionally gets one effect affix from the legendary
+    /// pool — see `Item::roll`.
     pub fn affix_count_range(self) -> (u32, u32) {
         match self {
-            Rarity::Common => (1, 2),
-            Rarity::Magic => (2, 3),
-            Rarity::Rare => (3, 4),
-            Rarity::Legendary => (4, 5),
+            Rarity::Common => (0, 0),
+            Rarity::Magic => (1, 1),
+            Rarity::Rare => (2, 2),
+            Rarity::Legendary => (3, 3),
         }
     }
 

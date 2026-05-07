@@ -7,7 +7,7 @@ use rift_net::{ClientId, Gender};
 use rift_net::messages::RosterEntry;
 use rift_persistence::{CharacterRecord, Uuid};
 
-use super::gender_from_i16;
+use super::{gender_from_i16, loadout_to_u8};
 use crate::Server;
 
 impl Server {
@@ -78,6 +78,9 @@ impl Server {
             gender: gender_id,
             level: 1,
             xp: 0,
+            // Mirrors `Loadout::default_hero()` — only Steady
+            // Shot is unlocked at level 1.
+            loadout: [0, 255, 255, 255, 255, 255],
         }
     }
 
@@ -96,6 +99,7 @@ impl Server {
                     class_id: r.class_id,
                     gender: gender_from_i16(r.gender),
                     level: r.level.max(0) as u32,
+                    loadout: loadout_to_u8(r.loadout),
                 })
                 .collect(),
             Err(e) => {

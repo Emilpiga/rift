@@ -1,0 +1,76 @@
+<#
+.SYNOPSIS
+    Dev launcher for rift.
+
+.EXAMPLES
+    .\scripts\rift.ps1 server
+    .\scripts\rift.ps1 client
+    .\scripts\rift.ps1 client -- --connect 127.0.0.1:34000
+    .\scripts\rift.ps1 both
+    .\scripts\rift.ps1 build
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet("server", "client", "both", "build", "help")]
+    [string]$Command = "help",
+
+    [Parameter(Position = 1)]
+    [ValidateSet("start", "build", "run")]
+    [string]$Sub = "start",
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
+)
+
+$ErrorActionPreference = "Stop"
+Set-Location (Join-Path $PSScriptRoot "..")
+
+$ServerBind   = if ($env:RIFT_SERVER_BIND) { $env:RIFT_SERVER_BIND } else { "127.0.0.1:34000" }
+$ClientCnx    = if ($env:RIFT_CONNECT)     { $env:RIFT_CONNECT }     else { "127.0.0.1:34000" }
+$ServerLog    = if ($env:RIFT_SERVER_LOG)  { $env:RIFT_SERVER_LOG }  else { "info" }
+$ClientLog    = if ($env:RIFT_CLIENT_LOG)  { $env:RIFT_CLIENT_LOG }  else { "info" }
+
+function Build-Server { cargo build -p rift-server }
+function Build-Client { cargo build -p rift-client }
+function Run-Server   { $env:RUST_LOG = $ServerLog; & .\target\debug\rift-server.exe --bind $ServerBind @Rest }
+function Run-Client   { $env:RUST_LOG = $ClientLog; & .\target\debug\rift.exe --connect $ClientCnx @Rest }
+
+switch ($Command) {
+    "server" {
+        if ($Sub -eq "build") { Build-Server; return }
+        if ($Sub -eq "start") { Build-Server }
+        Run-Server
+        if ($Sub -eq "run") { Run-Server }
+    }
+    "client" {
+        if ($Sub -eq "build") { Build-Client; return }
+        if ($Sub -eq "start") { Build-Client }
+        Run-Client
+        if ($Sub -eq "run") { Run-Client }
+    }
+    "both" {
+        cargo build --workspace
+        $prevLog = $env:RUST_LOG
+        $env:RUST_LOG = $ServerLog
+        $srv = Start-Process -PassThru -NoNewWindow `
+            -FilePath ".\target\debug\rift-server.exe" `
+            -ArgumentList "--bind", $ServerBind
+        $env:RUST_LOG = $prevLog
+        Start-Sleep -Milliseconds 500
+        try { Run-Client } finally { if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force } }
+    }
+    "build" { cargo build --workspace }
+    default {
+        Write-Host @"
+rift dev launcher
+
+  .\scripts\rift.ps1 server [start|build|run]
+  .\scripts\rift.ps1 client [start|build|run]
+  .\scripts\rift.ps1 both
+  .\scripts\rift.ps1 build
+
+Env: RIFT_SERVER_BIND, RIFT_CONNECT, RIFT_SERVER_LOG, RIFT_CLIENT_LOG
+"@
+    }
+}

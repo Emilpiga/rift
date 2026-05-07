@@ -84,7 +84,7 @@ pub fn tick_hub(
     renderer: &mut Renderer,
     input: &Input,
     net: &mut NetState,
-    portal_prompt: &mut Option<&'static str>,
+    hud_prompt: &mut Option<&'static str>,
     dt: f32,
 ) {
     tick(
@@ -93,7 +93,7 @@ pub fn tick_hub(
         renderer,
         input,
         net,
-        portal_prompt,
+        hud_prompt,
         dt,
         "PRESS [F] TO ENTER THE RIFT",
         "hub portal",
@@ -112,7 +112,7 @@ pub fn tick_exit(
     renderer: &mut Renderer,
     input: &Input,
     net: &mut NetState,
-    portal_prompt: &mut Option<&'static str>,
+    hud_prompt: &mut Option<&'static str>,
     floor_complete: bool,
     in_hub: bool,
     boss_room_center: Vec3,
@@ -133,7 +133,7 @@ pub fn tick_exit(
         renderer,
         input,
         net,
-        portal_prompt,
+        hud_prompt,
         dt,
         "PRESS [F] TO DESCEND",
         "exit portal",
@@ -146,7 +146,7 @@ fn tick(
     renderer: &mut Renderer,
     input: &Input,
     net: &mut NetState,
-    portal_prompt: &mut Option<&'static str>,
+    hud_prompt: &mut Option<&'static str>,
     dt: f32,
     prompt_text: &'static str,
     log_label: &str,
@@ -170,7 +170,7 @@ fn tick(
         return;
     };
     if player_pos.distance(portal.position) <= INTERACT_RADIUS {
-        *portal_prompt = Some(prompt_text);
+        *hud_prompt = Some(prompt_text);
         if input.key_just_pressed(KeyCode::KeyF) && net.transition.is_none() {
             log::info!("{log_label}: requesting EnterRift");
             net.transition = Some(NetTransitionRequest::EnterRift);

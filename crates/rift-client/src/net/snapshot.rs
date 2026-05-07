@@ -121,8 +121,20 @@ impl NetClient {
         // the server respawns us via `LoadFloor` (handled there).
         if let Some(nid) = our_id {
             if let Some(e) = snap.entities.iter().find(|e| e.net_id == nid) {
-                self.local_dead =
+                let now_dead =
                     e.flags & rift_net::messages::entity_flags::DEAD != 0;
+                if now_dead && !self.local_dead {
+                    // First snapshot of death: drop any unacked
+                    // pre-death movement inputs so the reconcile
+                    // path below doesn't replay WASD on top of
+                    // the corpse position every snapshot, which
+                    // would oscillate `predicted` and visibly
+                    // shake the death-animation avatar around
+                    // (#jitter).
+                    self.input_history.clear();
+                    self.correction_error = Vec3::ZERO;
+                }
+                self.local_dead = now_dead;
             }
         }
 

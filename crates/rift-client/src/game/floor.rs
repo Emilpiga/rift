@@ -11,6 +11,7 @@ use rift_game::monsters::MonsterRole;
 use crate::game::PlayerState;
 use super::props::{self, Props};
 use super::rift_state::RiftState;
+use super::torches::TorchSystem;
 
 /// Manages floor generation: creating the dungeon, spawning entities.
 pub struct FloorManager {
@@ -19,6 +20,10 @@ pub struct FloorManager {
     pub monsters: MonsterCache,
     pub props: Props,
     pub env: EnvTextures,
+    /// Wall-mounted torch flames + warm point lights, regenerated
+    /// per floor. Despawned by [`Self::clear_torches`] on floor
+    /// regen.
+    pub torches: TorchSystem,
     /// World position of the hub stash chest, set at the end of
     /// [`Self::generate_hub`]. `None` when the active floor is a
     /// rift floor (the chest only exists in the hub). Read by
@@ -35,6 +40,7 @@ impl FloorManager {
             monsters: MonsterCache::default(),
             props: Props::new(),
             env: EnvTextures::default(),
+            torches: TorchSystem::new(),
             stash_chest_pos: None,
         }
     }
@@ -54,6 +60,11 @@ impl FloorManager {
         // Rift floors don't host the chest; clear any stale
         // hub-floor position so proximity tests can't false-fire.
         self.stash_chest_pos = None;
+        // Despawn the previous floor's torch VFX before we
+        // regenerate. Their `EffectId`s belong to the old
+        // particle system slots; leaving them around would
+        // leak emitter capacity.
+        self.torches.clear(renderer);
 
         let config = FloorConfig::for_floor(rift.floor);
         let seed = seed_override
@@ -64,24 +75,35 @@ impl FloorManager {
         self.boss_room_center = floor.boss_room_center;
         self.nav_grid = NavGrid::from_floor(&floor);
 
-        // Set floor theme clear color — moody Diablo-style ambience
+        // Set floor theme clear color — cave-dark Diablo ambience.
+        // Torches carry the warm punctuation, so the unlit base
+        // is intentionally near-black.
         renderer.clear_color = match rift.floor % 4 {
-            0 => [0.012, 0.008, 0.006, 1.0], // dark stone dungeon (warm shadow)
-            1 => [0.008, 0.014, 0.008, 1.0], // mossy crypts (cold dampness)
-            2 => [0.030, 0.008, 0.005, 1.0], // infernal red tint (hellish glow)
-            _ => [0.006, 0.010, 0.020, 1.0], // icy depths (deep cold blue)
+            0 => [0.006, 0.004, 0.003, 1.0], // dark stone dungeon
+            1 => [0.004, 0.007, 0.004, 1.0], // mossy crypts
+            2 => [0.014, 0.004, 0.003, 1.0], // infernal red tint
+            _ => [0.003, 0.005, 0.010, 1.0], // icy depths
         };
         // Fog color slightly warmer than clear (distant haze tint)
         renderer.fog_color = [
-            renderer.clear_color[0] * 1.4 + 0.004,
-            renderer.clear_color[1] * 1.2 + 0.002,
+            renderer.clear_color[0] * 1.4 + 0.002,
+            renderer.clear_color[1] * 1.2 + 0.001,
             renderer.clear_color[2] * 1.1 + 0.001,
         ];
-        // Moody-but-readable fog for the rift floors. Pushed out from
-        // the original 5..16 wall so the player can actually see the
-        // room they're in (without losing the dungeon-y atmosphere).
-        renderer.fog_start = 10.0;
-        renderer.fog_end = 32.0;
+        // Tighter fog for damp, claustrophobic rift floors. The
+        // player still has line-of-sight to the room they're in,
+        // but anything past the next doorway dissolves into the
+        // black, keeping torches dramatic.
+        renderer.fog_start = 6.0;
+        renderer.fog_end = 22.0;
+
+        // Indoor dungeon: leave the sky disabled — the fog wall
+        // already swallows everything past ~32 m, and a procedural
+        // sky sneaking through the ceilingless walls would break
+        // the dungeon-y feel.
+        renderer.sky = rift_engine::SkyConfig::default();
+        // Cave-dark key + low ambient so torches drive the look.
+        renderer.key_light = rift_engine::KeyLight::DUNGEON;
 
         // Floor mesh — only walkable tiles, batched into one draw
         let floor_positions = floor.floor_positions();
@@ -89,12 +111,13 @@ impl FloorManager {
         renderer.add_mesh(&floor_mesh, Mat4::IDENTITY)?;
         let floor_obj_idx = renderer.objects.len() - 1;
 
-        // Walls — batched into a single draw call, themed per floor (darker, more saturated)
+        // Walls — batched into a single draw call, themed per floor
+        // (dark + slightly desaturated; torches will warm them up).
         let wall_color = match rift.floor % 4 {
-            0 => Vec3::new(0.32, 0.28, 0.24), // dark weathered stone
-            1 => Vec3::new(0.22, 0.32, 0.18), // deep mossy green
-            2 => Vec3::new(0.42, 0.18, 0.14), // dried-blood crimson
-            _ => Vec3::new(0.20, 0.26, 0.36), // glacial blue-gray
+            0 => Vec3::new(0.18, 0.16, 0.14), // damp weathered stone
+            1 => Vec3::new(0.13, 0.18, 0.11), // deep mossy green
+            2 => Vec3::new(0.24, 0.10, 0.08), // dried-blood crimson
+            _ => Vec3::new(0.11, 0.15, 0.21), // glacial blue-gray
         };
         let wall_mesh = Mesh::wall_colored(wall_color);
         let wall_positions = floor.wall_positions();
@@ -125,6 +148,13 @@ impl FloorManager {
         // Decorate rooms with static fantasy props (barrels, benches, candles, …).
         // Done before enemies spawn so the same seed picks consistent positions.
         props::fantasy::decorate_dungeon(&mut self.props, world, renderer, &floor, seed);
+
+        // Wall torches: looping flame VFX (HDR additive → blooms)
+        // + a warm point light at each sconce. The renderer caps
+        // active lights at 8, but `TorchSystem::update_lights` is
+        // called every frame to keep the nearest 8 to the player
+        // active.
+        self.torches.place(&floor, renderer, seed);
 
         // Player — spawned via shared helper so the hub generator can
         // reuse the same skinned-character + animation-set bring-up.
@@ -165,14 +195,19 @@ impl FloorManager {
         // Bright sunny meadow ambience: pale-blue sky, soft warm haze.
         renderer.clear_color = [0.55, 0.78, 0.95, 1.0];
         renderer.fog_color = [0.78, 0.88, 0.96];
-        // Tight circular fog horizon: the playable hub is roughly
-        // 30 m across, so we let the player see ~12 m before
-        // everything dissolves into pale-blue haze. Combined with
-        // the oversized grass disc below, this produces the
-        // "mysterious circular platform" effect — the floor never
-        // visibly ends, it just fades into mist.
-        renderer.fog_start = 7.0;
-        renderer.fog_end = 14.0;
+        // Pushed-out fog so the procedural sky is actually
+        // visible — keeping the old 7..14 wall meant the dome
+        // got tinted out before it could read. The grass apron
+        // disc is 80 m wide so 14..60 still hides the rim.
+        renderer.fog_start = 14.0;
+        renderer.fog_end = 60.0;
+
+        // Sunny outdoor sky for the hub.
+        renderer.sky = rift_engine::SkyConfig::meadow();
+        // Bright warm key + lifted ambient — the hub is meant
+        // to feel safe and readable, not cave-dark like the
+        // rift floors.
+        renderer.key_light = rift_engine::KeyLight::SUNLIT;
 
         // Hub floor: use the oversized grass-apron disc only.
         // The dungeon-floor batch tints itself with a per-floor

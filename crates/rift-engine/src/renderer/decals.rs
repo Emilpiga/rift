@@ -218,47 +218,61 @@ impl DecalSystem {
         }
     }
 
-    /// Generate a procedural blood splatter mesh. We aim for a "wet,
-    /// recently-spilled" look: a darker, slightly desaturated core; an
-    /// irregular jagged outline; many small satellite droplets; a few
-    /// long thin streaks; and a faint diffuse halo around the main pool
-    /// to fake the wicking/diffusion of fresh blood into porous floor.
+    /// Generate a procedural blood splatter mesh.
+    ///
+    /// We aim for a "wet, recently-spilled" look layered out of
+    /// three concentric rings plus radial extras:
+    ///
+    /// 1. **Wet sheen** — a small inner disc using a slightly
+    ///    super-bright red so the HDR bloom pass picks it up as
+    ///    a faint glint. Sells the "still wet, light catches it"
+    ///    micro-highlight.
+    /// 2. **Viscous mid** — the main pool body in a saturated
+    ///    fresh-blood red.
+    /// 3. **Dry rim** — a darker, slightly desaturated outer
+    ///    ring with a jagged irregular outline.
+    ///
+    /// Around the pool we add elongated streaks (longer + thinner
+    /// than before) and a denser scatter of micro-droplets with
+    /// wider size jitter.
     fn gen_splatter_mesh(&mut self, size: f32, _is_wall: bool) -> Mesh {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        // Color palette tuned for "fresh blood on stone".  We use a
-        // single bright wet-red across the whole splat with only a
-        // mild darker variant for the optional outer halo.  Keeping
-        // every visible vertex near the same hue avoids the
-        // "two-tone painted" look the dark rim was producing.
-        let core_color   = Vec3::new(0.36, 0.025, 0.015);
-        let rim_color    = Vec3::new(0.30, 0.020, 0.012);
-        let droplet_dark = Vec3::new(0.30, 0.020, 0.012);
-        let droplet_lit  = Vec3::new(0.36, 0.025, 0.015);
+        // Multi-tone palette for "fresh blood on stone".
+        // `sheen` is intentionally pushed slightly above the
+        // standard sRGB range on R so the new HDR/bloom pipeline
+        // catches it as a wet-light highlight without making the
+        // splat itself look pink.
+        let sheen      = Vec3::new(0.55, 0.040, 0.025);
+        let core_wet   = Vec3::new(0.40, 0.028, 0.016);
+        let mid_visc   = Vec3::new(0.30, 0.020, 0.012);
+        let rim_dry    = Vec3::new(0.18, 0.012, 0.008);
 
-        // (No diffuse "halo" ring — its dark tone read as a black
-        // smudge under the splat at most lighting angles.  The wet
-        // pool itself is enough to sell the splatter.)
-
-        // ---- Main splatter pool: irregular jagged disk ----
-        let segments = 14 + (self.rand() * 6.0) as usize;
+        // ---- Outer pool: irregular jagged disk (rim_dry edge) ----
+        let segments = 18 + (self.rand() * 8.0) as usize;
         let center_idx = vertices.len() as u32;
         vertices.push(Vertex {
-            position: Vec3::new(0.0, 0.001, 0.0), // tiny y-bias above halo
+            position: Vec3::new(0.0, 0.001, 0.0),
             normal: Vec3::Y,
-            color: core_color,
+            color: mid_visc,
             uv: Vec2::new(0.5, 0.5),
         });
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            // Jagged outline: occasional spikes for an organic edge.
-            let spike = if self.rand() < 0.18 { self.rand_range(1.05, 1.45) } else { 1.0 };
+            // Jagged outline — taller spikes, occasional pinches.
+            let spike = if self.rand() < 0.22 {
+                self.rand_range(1.10, 1.55)
+            } else if self.rand() < 0.10 {
+                self.rand_range(0.70, 0.90)
+            } else {
+                1.0
+            };
             let r = size * self.rand_range(0.55, 0.95) * spike;
             let x = angle.cos() * r;
             let z = angle.sin() * r;
-            // Rim is slightly redder than the core for a wet sheen.
-            let c = rim_color * self.rand_range(0.85, 1.05);
+            // Per-vertex jitter on the dry rim to break uniformity.
+            let c = rim_dry * self.rand_range(0.80, 1.10);
             vertices.push(Vertex {
                 position: Vec3::new(x, 0.001, z),
                 normal: Vec3::Y,
@@ -273,22 +287,86 @@ impl DecalSystem {
             indices.push(center_idx + 1 + i as u32);
         }
 
-        // ---- Satellite droplets: more numerous and smaller ----
-        let droplet_count = 5 + (self.rand() * 6.0) as usize;
+        // ---- Mid ring: viscous body (core_wet inner, mid_visc outer) ----
+        // A second, smaller disk sits on top of the rim disk to
+        // give the pool a darker outer / brighter inner gradient
+        // without needing an extra texture.
+        let mid_segs = 14;
+        let mid_center = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, 0.0015, 0.0),
+            normal: Vec3::Y,
+            color: core_wet,
+            uv: Vec2::new(0.5, 0.5),
+        });
+        for i in 0..mid_segs {
+            let angle = (i as f32 / mid_segs as f32) * std::f32::consts::TAU;
+            let r = size * self.rand_range(0.40, 0.62);
+            vertices.push(Vertex {
+                position: Vec3::new(angle.cos() * r, 0.0015, angle.sin() * r),
+                normal: Vec3::Y,
+                color: mid_visc,
+                uv: Vec2::new(0.5, 0.5),
+            });
+        }
+        for i in 0..mid_segs {
+            let next = ((i + 1) % mid_segs) as u32;
+            indices.push(mid_center);
+            indices.push(mid_center + 1 + next);
+            indices.push(mid_center + 1 + i as u32);
+        }
+
+        // ---- Wet sheen: tiny bright inner disc for HDR glint ----
+        let sheen_segs = 10;
+        let sheen_center = vertices.len() as u32;
+        // Slight off-centre offset — the highlight rarely sits
+        // exactly on the geometric centre of a real splat.
+        let sheen_off = Vec3::new(
+            self.rand_range(-0.08, 0.08) * size,
+            0.0020,
+            self.rand_range(-0.08, 0.08) * size,
+        );
+        vertices.push(Vertex {
+            position: sheen_off,
+            normal: Vec3::Y,
+            color: sheen,
+            uv: Vec2::new(0.5, 0.5),
+        });
+        for i in 0..sheen_segs {
+            let angle = (i as f32 / sheen_segs as f32) * std::f32::consts::TAU;
+            let r = size * self.rand_range(0.12, 0.22);
+            vertices.push(Vertex {
+                position: sheen_off + Vec3::new(angle.cos() * r, 0.0, angle.sin() * r),
+                normal: Vec3::Y,
+                // Fade to core_wet at the highlight edge so it
+                // blends rather than abrupt-cuts.
+                color: core_wet,
+                uv: Vec2::new(0.5, 0.5),
+            });
+        }
+        for i in 0..sheen_segs {
+            let next = ((i + 1) % sheen_segs) as u32;
+            indices.push(sheen_center);
+            indices.push(sheen_center + 1 + next);
+            indices.push(sheen_center + 1 + i as u32);
+        }
+
+        // ---- Satellite droplets: denser + wider size jitter ----
+        let droplet_count = 8 + (self.rand() * 8.0) as usize;
         for _ in 0..droplet_count {
             let angle = self.rand_range(0.0, std::f32::consts::TAU);
-            let dist = size * self.rand_range(0.85, 1.9);
+            let dist = size * self.rand_range(0.85, 2.1);
             let drop_center = Vec3::new(angle.cos() * dist, 0.002, angle.sin() * dist);
-            let drop_r = size * self.rand_range(0.05, 0.18);
+            // Wider jitter — some are hair-thin, some are pea-sized.
+            let drop_r = size * self.rand_range(0.04, 0.22);
             let drop_segs = 6;
             let base_idx = vertices.len() as u32;
-
-            // Bright wet centre fading to a darker rim — matches the
-            // main pool's read.
+            // Smaller, more distant droplets dry faster (rim_dry).
+            let outer_color = if drop_r < size * 0.10 { rim_dry } else { mid_visc };
             vertices.push(Vertex {
                 position: drop_center,
                 normal: Vec3::Y,
-                color: droplet_lit,
+                color: core_wet,
                 uv: Vec2::new(0.5, 0.5),
             });
             for j in 0..drop_segs {
@@ -298,7 +376,7 @@ impl DecalSystem {
                     position: drop_center
                         + Vec3::new(a.cos() * dr, 0.0, a.sin() * dr),
                     normal: Vec3::Y,
-                    color: droplet_dark,
+                    color: outer_color,
                     uv: Vec2::new(0.5, 0.5),
                 });
             }
@@ -310,12 +388,12 @@ impl DecalSystem {
             }
         }
 
-        // ---- Long thin radiating streaks ----
-        let streak_count = 3 + (self.rand() * 4.0) as usize;
+        // ---- Long thin radiating streaks (longer + tapered) ----
+        let streak_count = 4 + (self.rand() * 5.0) as usize;
         for _ in 0..streak_count {
             let angle = self.rand_range(0.0, std::f32::consts::TAU);
-            let length = size * self.rand_range(1.4, 2.6);
-            let width  = size * self.rand_range(0.025, 0.07);
+            let length = size * self.rand_range(1.6, 3.2);
+            let width  = size * self.rand_range(0.020, 0.060);
             let base_idx = vertices.len() as u32;
 
             let dir  = Vec3::new(angle.cos(), 0.0, angle.sin());
@@ -326,19 +404,19 @@ impl DecalSystem {
             vertices.push(Vertex {
                 position: start + perp * width + Vec3::new(0.0, 0.001, 0.0),
                 normal: Vec3::Y,
-                color: core_color * 0.95,
+                color: core_wet,
                 uv: Vec2::new(0.5, 0.5),
             });
             vertices.push(Vertex {
                 position: start - perp * width + Vec3::new(0.0, 0.001, 0.0),
                 normal: Vec3::Y,
-                color: core_color * 0.95,
+                color: core_wet,
                 uv: Vec2::new(0.5, 0.5),
             });
             // Mid: midway tone, slightly thinner.
             let mid = dir * length * 0.55;
             let mid_w = width * 0.7;
-            let mid_color = core_color.lerp(rim_color, 0.55);
+            let mid_color = mid_visc;
             vertices.push(Vertex {
                 position: mid + perp * mid_w + Vec3::new(0.0, 0.001, 0.0),
                 normal: Vec3::Y,
@@ -351,11 +429,11 @@ impl DecalSystem {
                 color: mid_color,
                 uv: Vec2::new(0.5, 0.5),
             });
-            // Tip: tapered point, same wet tone for a uniform read.
+            // Tip: tapered point, dry-rim tone.
             vertices.push(Vertex {
                 position: dir * length + Vec3::new(0.0, 0.001, 0.0),
                 normal: Vec3::Y,
-                color: rim_color,
+                color: rim_dry,
                 uv: Vec2::new(0.5, 0.5),
             });
 

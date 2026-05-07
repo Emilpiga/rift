@@ -8,10 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::hot_reload::{self, HotReloader};
 use crate::renderer::camera::Camera;
-use crate::renderer::depth::{DepthBuffer, DEPTH_FORMAT};
+use crate::renderer::depth::DepthBuffer;
 use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex};
 use crate::renderer::shadow::{self, ShadowMap};
+use crate::renderer::sky::{SkyConfig, SkyRenderer};
+use crate::renderer::post::{BloomConfig, PostProcessing};
 use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
 use crate::renderer::vfx::{ParticleVfxRenderer, RibbonRenderer, VfxSystem};
 use crate::renderer::texture::Texture;
@@ -53,10 +55,15 @@ pub struct Renderer {
     frame_sync: FrameSync,
     command_buffers: Vec<vk::CommandBuffer>,
     command_pool: vk::CommandPool,
-    framebuffers: Vec<vk::Framebuffer>,
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
-    render_pass: vk::RenderPass,
+    /// HDR offscreen + bloom + composite. Owns three render
+    /// passes (scene/bloom/composite), the HDR & bloom images,
+    /// all per-image framebuffers and the post-process
+    /// pipelines. The forward scene pipeline is built against
+    /// `post.scene_pass`; overlay is built against
+    /// `post.composite_pass`.
+    post: PostProcessing,
     depth_buffer: DepthBuffer,
     default_texture: Texture,
     material_pool: MaterialPool,
@@ -105,6 +112,61 @@ pub struct Renderer {
     pub fog_origin: Vec3,
     // Dynamic point lights (populated each frame by game code)
     pub point_lights: Vec<PointLight>,
+    /// Procedural sky-dome configuration. Drawn before the
+    /// scene each frame when `sky.enabled` is true (typically
+    /// only outdoors). Game code mutates this field per biome.
+    pub sky: SkyConfig,
+    /// Pipeline + shaders for the procedural sky dome.
+    sky_renderer: SkyRenderer,
+    /// Bloom / tonemap parameters, mutable from game code.
+    pub bloom: BloomConfig,
+    /// Directional key light + ambient floor for the scene.
+    /// Defaults to the dim cave-moonlight tuning used by the
+    /// rift dungeons; game code overrides this per scene
+    /// (sunlit hub, etc.) before each frame's render.
+    pub key_light: KeyLight,
+}
+
+/// Directional key light + ambient floor. The forward shader
+/// reads `direction` as the light vector, `color` as its tint
+/// (multiplied into diffuse + specular + rim), and `ambient`
+/// as the unconditional floor added to every fragment.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyLight {
+    /// World-space direction *toward* the light (will be
+    /// normalised before upload).
+    pub direction: Vec3,
+    /// RGB tint of the directional contribution. Treat as
+    /// linear, pre-tonemap. ~0.2 reads as moonlight, ~1.0 as
+    /// midday sun.
+    pub color: Vec3,
+    /// Unconditional ambient floor. ~0.05 = cave-dark, ~0.30 =
+    /// outdoor overcast.
+    pub ambient: f32,
+}
+
+impl KeyLight {
+    /// Default rift / dungeon mood: very dim cool moonlight
+    /// with low ambient so torches carry the warmth.
+    pub const DUNGEON: Self = Self {
+        direction: Vec3::new(0.4, 0.8, 0.3),
+        color: Vec3::new(0.18, 0.20, 0.28),
+        ambient: 0.05,
+    };
+
+    /// Sunny outdoor hub: warm bright key + lifted ambient so
+    /// the open meadow reads as midday rather than dusk.
+    pub const SUNLIT: Self = Self {
+        direction: Vec3::new(0.4, 0.8, 0.3),
+        color: Vec3::new(1.10, 1.00, 0.85),
+        ambient: 0.35,
+    };
+}
+
+impl Default for KeyLight {
+    fn default() -> Self {
+        Self::DUNGEON
+    }
 }
 
 /// A dynamic point light source.
@@ -155,8 +217,18 @@ impl Renderer {
             [size.width, size.height],
         )?;
 
-        let render_pass =
-            pipeline::create_render_pass(&device.device, swapchain.format.format, DEPTH_FORMAT)?;
+        // Determine shader directory (relative to executable or workspace)
+        let shader_dir = find_shader_dir();
+
+        let depth_buffer = DepthBuffer::new(&device.device, &allocator, swapchain.extent)?;
+
+        // HDR offscreen + bloom + composite. Owns the three
+        // render passes the rest of the renderer targets.
+        let post = PostProcessing::new(
+            &device.device, &allocator, &swapchain, depth_buffer.view, &shader_dir,
+        )?;
+        let render_pass = post.scene_pass;
+        let composite_pass = post.composite_pass;
 
         let uniforms = UniformBuffers::new(&device.device, &allocator)?;
 
@@ -181,9 +253,6 @@ impl Renderer {
             command_pool_init,
         )?;
         unsafe { device.device.destroy_command_pool(command_pool_init, None); }
-
-        // Determine shader directory (relative to executable or workspace)
-        let shader_dir = find_shader_dir();
 
         let (pipeline_handle, pipeline_layout) = Self::compile_pipeline_from_disk(
             &device.device,
@@ -211,11 +280,6 @@ impl Renderer {
             }
         };
 
-        let depth_buffer = DepthBuffer::new(&device.device, &allocator, swapchain.extent)?;
-
-        let framebuffers =
-            create_framebuffers(&device.device, &swapchain, &depth_buffer, render_pass)?;
-
         let command_pool =
             commands::create_command_pool(&device.device, device.graphics_queue_family)?;
         let command_buffers = commands::allocate_command_buffers(
@@ -231,7 +295,7 @@ impl Renderer {
 
         let overlay = OverlayRenderer::new(
             &device.device, &allocator, device.graphics_queue, command_pool,
-            render_pass, swapchain.extent, &shader_dir,
+            composite_pass, swapchain.extent, &shader_dir,
         )?;
         let mut overlay_batch = OverlayBatch::new();
         // Bind the batch to the renderer's shared icon UV
@@ -251,6 +315,7 @@ impl Renderer {
             render_pass, swapchain.extent, uniforms.descriptor_set_layout, &shader_dir,
         )?;
         let vfx_system = VfxSystem::new(8192);
+        let sky_renderer = SkyRenderer::new(&device.device, render_pass, &shader_dir)?;
 
         log::info!("Renderer initialized successfully");
 
@@ -261,10 +326,9 @@ impl Renderer {
             device,
             allocator,
             swapchain,
-            render_pass,
+            post,
             pipeline: pipeline_handle,
             pipeline_layout,
-            framebuffers,
             command_pool,
             command_buffers,
             frame_sync,
@@ -294,6 +358,10 @@ impl Renderer {
             fog_end: 16.0,
             fog_origin: Vec3::ZERO,
             point_lights: Vec::new(),
+            sky: SkyConfig::default(),
+            sky_renderer,
+            bloom: BloomConfig::default(),
+            key_light: KeyLight::default(),
         })
     }
 
@@ -305,11 +373,10 @@ impl Renderer {
 
         unsafe { self.device.device.device_wait_idle()?; }
 
-        // Destroy old framebuffers
-        for &fb in &self.framebuffers {
-            unsafe { self.device.device.destroy_framebuffer(fb, None); }
-        }
-        self.framebuffers.clear();
+        // Tear down post-process swapchain-dependent resources
+        // (offscreen images, framebuffers, descriptor sets)
+        // before the depth buffer that some of them reference.
+        self.post.cleanup_swapchain_dependent(&self.device.device, &self.allocator);
 
         // Destroy old depth buffer
         self.depth_buffer.cleanup(&self.device.device, &self.allocator);
@@ -338,18 +405,18 @@ impl Renderer {
         // Recreate depth buffer at new size
         self.depth_buffer = DepthBuffer::new(&self.device.device, &self.allocator, self.swapchain.extent)?;
 
-        // Recreate framebuffers
-        self.framebuffers = create_framebuffers(
-            &self.device.device,
-            &self.swapchain,
-            &self.depth_buffer,
-            self.render_pass,
+        // Recreate post-process resources (offscreen images,
+        // framebuffers, descriptor sets). Render passes &
+        // pipelines stay alive across resize because every post
+        // pipeline uses dynamic viewport+scissor.
+        self.post.recreate(
+            &self.device.device, &self.allocator, &self.swapchain, self.depth_buffer.view,
         )?;
 
         // Recreate pipeline with new extent
         let (new_pipeline, new_layout) = Self::compile_pipeline_from_disk(
             &self.device.device,
-            self.render_pass,
+            self.post.scene_pass,
             self.swapchain.extent,
             &[self.uniforms.descriptor_set_layout, self.material_pool.layout],
             &self.shader_dir,
@@ -358,15 +425,15 @@ impl Renderer {
         self.pipeline_layout = new_layout;
 
         // Recreate overlay pipeline
-        self.overlay.recreate_pipeline(&self.device.device, self.render_pass, self.swapchain.extent, &self.shader_dir)?;
+        self.overlay.recreate_pipeline(&self.device.device, self.post.composite_pass, self.swapchain.extent, &self.shader_dir)?;
 
         // Recreate VFX ribbon pipeline alongside.
         self.vfx_ribbon_renderer.recreate_pipeline(
-            &self.device.device, self.render_pass, self.swapchain.extent,
+            &self.device.device, self.post.scene_pass, self.swapchain.extent,
             self.uniforms.descriptor_set_layout, &self.shader_dir,
         )?;
         self.vfx_particle_renderer.recreate_pipeline(
-            &self.device.device, self.render_pass, self.swapchain.extent,
+            &self.device.device, self.post.scene_pass, self.swapchain.extent,
             self.uniforms.descriptor_set_layout, &self.shader_dir,
         )?;
 
@@ -875,7 +942,12 @@ impl Renderer {
             point_light_color[i] = Vec4::new(pl.color.x, pl.color.y, pl.color.z, pl.intensity);
         }
 
-        let light_dir_world = Vec4::new(0.4, 0.8, 0.3, 0.0);
+        let light_dir_world = Vec4::new(
+            self.key_light.direction.x,
+            self.key_light.direction.y,
+            self.key_light.direction.z,
+            0.0,
+        );
         let light_dir_normalized = light_dir_world.normalize();
         // Snap shadow focus to camera position projected to ground (y=0). The
         // shadow module further snaps to texel size.
@@ -895,10 +967,14 @@ impl Renderer {
                 0.0,
             ),
             light_dir: light_dir_normalized,
-            // Cool, dim moonlight-toned key light. Lower ambient pushes
-            // unlit surfaces into shadow so the dungeon feels enclosed
-            // and torch point lights carry the warm color punctuation.
-            light_color: Vec4::new(0.62, 0.66, 0.78, 0.13),
+            // Per-scene directional key + ambient. See
+            // `KeyLight::DUNGEON` / `KeyLight::SUNLIT`.
+            light_color: Vec4::new(
+                self.key_light.color.x,
+                self.key_light.color.y,
+                self.key_light.color.z,
+                self.key_light.ambient,
+            ),
             fog_color: Vec4::new(self.fog_color[0], self.fog_color[1], self.fog_color[2], 0.0),
             fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 0.0),
             fog_origin: Vec4::new(self.fog_origin.x, self.fog_origin.y, self.fog_origin.z, 0.0),
@@ -1017,7 +1093,11 @@ impl Renderer {
             }
             device.cmd_end_render_pass(cmd);
 
-            // ---- Main pass ----
+            // ---- Main pass (HDR scene) ----
+            // Renders into the post-process HDR colour target,
+            // not the swapchain. Sky, world meshes, ribbons and
+            // particles all draw here. Overlay/UI moves to the
+            // composite pass below.
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
@@ -1033,8 +1113,8 @@ impl Renderer {
             ];
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(self.render_pass)
-                .framebuffer(self.framebuffers[image_index as usize])
+                .render_pass(self.post.scene_pass)
+                .framebuffer(self.post.scene_framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.swapchain.extent,
@@ -1042,6 +1122,19 @@ impl Renderer {
                 .clear_values(&clear_values);
 
             device.cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
+
+            // Sky dome — drawn first inside the main pass with
+            // depth test/write disabled so subsequent scene
+            // geometry occludes it naturally. No-op when
+            // `sky.enabled` is false (indoor dungeons).
+            self.sky_renderer.record(
+                device,
+                cmd,
+                self.swapchain.extent,
+                self.camera.view_matrix(),
+                self.camera.projection_matrix(),
+                &self.sky,
+            );
 
             // 3D scene
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -1073,6 +1166,25 @@ impl Renderer {
             self.vfx_ribbon_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
             // VFX particles (world-space, two pipelines).
             self.vfx_particle_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
+
+            device.cmd_end_render_pass(cmd);
+
+            // ---- Bloom (bright extract → blur H → blur V) ----
+            self.post.record_bloom(device, cmd, image_index, &self.bloom);
+
+            // ---- Composite + overlay ----
+            // Tonemap HDR + bloom into the swapchain, then draw
+            // the UI overlay on top so it stays at native sRGB
+            // crispness (no second tonemap pass).
+            let composite_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(self.post.composite_pass)
+                .framebuffer(self.post.composite_framebuffers[image_index as usize])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.swapchain.extent,
+                });
+            device.cmd_begin_render_pass(cmd, &composite_begin, vk::SubpassContents::INLINE);
+            self.post.record_composite(device, cmd, image_index, &self.bloom);
 
             // Overlay (HUD)
             self.overlay.record(frame, device, cmd);
@@ -1154,7 +1266,7 @@ impl Renderer {
 
             match Self::compile_pipeline_from_disk(
                 &self.device.device,
-                self.render_pass,
+                self.post.scene_pass,
                 self.swapchain.extent,
                 &[self.uniforms.descriptor_set_layout, self.material_pool.layout],
                 &self.shader_dir,
@@ -1265,17 +1377,17 @@ impl Drop for Renderer {
         self.overlay.cleanup(&self.device.device, &self.allocator);
         self.vfx_ribbon_renderer.cleanup(&self.device.device, &self.allocator);
         self.vfx_particle_renderer.cleanup(&self.device.device, &self.allocator);
+        self.sky_renderer.cleanup(&self.device.device);
+        // Tear down all post-process resources (offscreen
+        // images, framebuffers, pipelines, render passes,
+        // descriptor pool, sampler).
+        self.post.cleanup(&self.device.device, &self.allocator);
 
         unsafe {
-            for &fb in &self.framebuffers {
-                self.device.device.destroy_framebuffer(fb, None);
-            }
-
             self.device.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.device.destroy_render_pass(self.render_pass, None);
 
             self.swapchain.cleanup(&self.device.device);
             self.surface_fn.destroy_surface(self.surface, None);
@@ -1284,28 +1396,6 @@ impl Drop for Renderer {
         // Drop allocator before device & instance (auto-drop handles the rest)
         drop(self.allocator.lock());
     }
-}
-
-fn create_framebuffers(
-    device: &ash::Device,
-    swapchain: &Swapchain,
-    depth: &DepthBuffer,
-    render_pass: vk::RenderPass,
-) -> Result<Vec<vk::Framebuffer>> {
-    swapchain
-        .image_views
-        .iter()
-        .map(|&view| {
-            let attachments = [view, depth.view];
-            let fb_info = vk::FramebufferCreateInfo::default()
-                .render_pass(render_pass)
-                .attachments(&attachments)
-                .width(swapchain.extent.width)
-                .height(swapchain.extent.height)
-                .layers(1);
-            unsafe { device.create_framebuffer(&fb_info, None).map_err(Into::into) }
-        })
-        .collect()
 }
 
 /// Find the shader directory by checking common locations.

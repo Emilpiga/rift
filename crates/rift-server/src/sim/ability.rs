@@ -68,6 +68,22 @@ pub fn cast(
     let Some(ability) = lookup(ability_id) else {
         return;
     };
+    let Some(&entity) = sessions.get(&client_id) else {
+        return;
+    };
+    // Reject casts that don't match the player's persisted
+    // loadout. A misbehaving client that asks to fire an
+    // ability they haven't slotted gets silently dropped here
+    // rather than burning the cooldown — checked before we
+    // touch the cooldown table so a rejected cast leaves no
+    // residue.
+    let in_loadout = world
+        .get::<&ServerPlayer>(entity)
+        .map(|p| p.loadout.contains(ability_id))
+        .unwrap_or(false);
+    if !in_loadout {
+        return;
+    }
     let cds = cooldowns.entry(client_id).or_insert([0.0; COOLDOWN_SLOTS]);
     let slot = (ability_id as usize).min(COOLDOWN_SLOTS - 1);
     if cds[slot] > 0.0 {
@@ -75,9 +91,6 @@ pub fn cast(
     }
     cds[slot] = ability.cooldown;
 
-    let Some(&entity) = sessions.get(&client_id) else {
-        return;
-    };
     let (origin, caster_net_id, dmg_scalar, crit_chance, crit_damage) =
         match world.get::<&ServerPlayer>(entity) {
             Ok(p) => (
@@ -92,7 +105,16 @@ pub fn cast(
     // Pre-scale the ability's authored base damage by the caster's
     // gear / attribute multiplier. Crit gets rolled per-hit on the
     // damage-application path using the values stamped below.
-    let scaled_damage = ability.base_damage * dmg_scalar;
+    //
+    // Pipeline: base * (Power/attr scalar) * (scaling × element ×
+    // archetype gear bonuses). The second factor is what makes
+    // gear feel build-aware — a fire ability ignores +Ice gear
+    // and so on. See [`CharacterStats::ability_damage_mult`].
+    let ability_mult = world
+        .get::<&ServerPlayer>(entity)
+        .map(|p| p.stats.ability_damage_mult(&ability))
+        .unwrap_or(1.0);
+    let scaled_damage = ability.base_damage * dmg_scalar * ability_mult;
     let aim = {
         let v = glam::Vec2::from(aim_dir).normalize_or_zero();
         Vec3::new(v.x, 0.0, v.y)

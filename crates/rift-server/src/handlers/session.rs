@@ -77,9 +77,8 @@ impl Server {
     /// Spawn the player into the simulation and stash the net id
     /// on their session. The net id is what the client uses to
     /// recognize itself in subsequent snapshots.
-    fn spawn_player_session(&mut self, from: ClientId, class_id: &str) -> NetId {
-        let class = rift_game::classes::class_from_str(class_id);
-        let net_id = self.sim.spawn_player(from, class);
+    fn spawn_player_session(&mut self, from: ClientId, _class_id: &str) -> NetId {
+        let net_id = self.sim.spawn_player(from);
         if let Some(s) = self.sessions.get_mut(from) {
             s.net_id = Some(net_id);
         }
@@ -98,6 +97,8 @@ impl Server {
             let level = rec.level.max(1) as u32;
             let xp = rec.xp.max(0) as u64;
             self.sim.set_player_experience(from, level, xp);
+            let loadout = super::loadout_to_u8(rec.loadout);
+            self.sim.set_player_loadout(from, loadout);
         }
 
         // Inventory: skipped when persistence is disabled (dev
@@ -244,6 +245,16 @@ impl Server {
                 &ServerMsg::CharacterStats { level, xp, xp_to_next },
             );
         }
+        // Initial ability-loadout snapshot so the client's HUD
+        // bar shows whatever was persisted (or the default for
+        // a brand-new character).
+        if let Some(slots) = self.sim.player_loadout_snapshot(from) {
+            self.send_to(
+                from,
+                Channel::Control,
+                &ServerMsg::Loadout { slots },
+            );
+        }
         // Initial rift-progress snapshot (current floor's bar
         // state, including any kills already racked up by
         // already-connected players).
@@ -296,5 +307,50 @@ impl Server {
             gender,
         };
         self.broadcast(Channel::Control, &joined);
+    }
+
+    /// Apply a `ClientMsg::SetLoadoutSlot`. Validates against the
+    /// authoritative `ServerPlayer.loadout`, mirrors the change
+    /// into the persisted `CharacterRecord`, and pushes a fresh
+    /// `ServerMsg::Loadout` snapshot back to the client. Silent
+    /// no-op on a rejected slot/ability — the client's HUD will
+    /// stay on the last accepted snapshot.
+    pub(crate) fn handle_set_loadout_slot(
+        &mut self,
+        from: ClientId,
+        slot_index: u8,
+        ability_id: u8,
+    ) {
+        let Some(slots) = self
+            .sim
+            .set_player_loadout_slot(from, slot_index, ability_id)
+        else {
+            return;
+        };
+        // Mirror into the cached `CharacterRecord` so the next
+        // periodic `save` tick writes the new loadout. Persistence
+        // is fire-and-forget; the client doesn't wait on it.
+        let saved_record = if let Some(s) = self.sessions.get_mut(from) {
+            if let Some(rec) = s.record.as_mut() {
+                let mut as_i16 = [0i16; 6];
+                for (i, &slot) in slots.iter().enumerate() {
+                    as_i16[i] = slot as i16;
+                }
+                rec.loadout = as_i16;
+                Some(rec.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Some(handle), Some(rec)) = (&self.persistence, saved_record) {
+            let _ = handle.save(rec);
+        }
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::Loadout { slots },
+        );
     }
 }

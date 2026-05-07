@@ -82,7 +82,7 @@ pub fn spawn_character_entity(
     cache: &mut AnimLibraryCache,
     cfg: CharacterSpawn,
 ) -> anyhow::Result<hecs::Entity> {
-    let (mesh_path, tex_path) = rift_game::classes::base_model_paths(cfg.gender);
+    let (mesh_path, tex_path) = rift_game::hero::base_model_paths(cfg.gender);
 
     let (object_index, skinned_component) = match SkinnedMesh::from_gltf(mesh_path) {
         Ok(skinned) => {

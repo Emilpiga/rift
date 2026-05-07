@@ -48,11 +48,13 @@ pub struct ProjectileRender {
     pub anchor_pos: Vec3,
     pub anchor_vel: Vec3,
     pub yaw: f32,
-    /// Wire ability id, retained so the detonation VFX can
-    /// match the bolt's color scheme (warm fireball burst for
-    /// player abilities, violet arcane burst for enemy caster
-    /// bolts).
-    pub ability: u16,
+    /// Resolved detonation VFX, stored at spawn so the despawn
+    /// path doesn't need to re-look-up the ability. Distinct
+    /// per ability — fireball ⇒ orange burst, caster bolt ⇒
+    /// violet burst.
+    pub impact: rift_game::abilities::VfxKind,
+    /// Uniform render scale (from `ShapeVisuals::Projectile.scale`).
+    pub scale: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +174,11 @@ pub struct NetClient {
     /// character, drained by the binary once per frame and
     /// pushed into `PlayerState::experience`.
     pending_character_stats: Option<(u32, u64, u64)>,
+    /// Latest authoritative ability-loadout snapshot (six wire
+    /// ids). Drained once per frame and pushed into
+    /// `PlayerState::loadout`, which re-materializes the runtime
+    /// `AbilitySlot`.
+    pending_loadout: Option<[u8; 6]>,
     /// Latest authoritative rift-progress snapshot. Same
     /// shape as `ServerMsg::RiftProgress` (progress, required,
     /// boss_spawned, boss_killed, floor_complete). Drained by
@@ -277,6 +284,7 @@ impl NetClient {
             pending_equipment_sync: None,
             pending_stash_sync: None,
             pending_character_stats: None,
+            pending_loadout: None,
             pending_rift_progress: None,
             our_client_id: None,
             predicted: Kinematic::default(),
@@ -547,8 +555,9 @@ impl NetClient {
                 // handler and is read by `sync_local_player` next
                 // frame — clobbering the freshly-spawned local
                 // entity's full HP back to 0 and re-triggering the
-                // death FSM, which strands `player_dying = true`
-                // permanently. Clearing here means `sync_local_player`
+                // death FSM, which would re-trigger the death
+                // animation and strand input gated permanently.
+                // Clearing here means `sync_local_player`
                 // is a no-op until the first post-respawn snapshot
                 // populates `self.remote` with valid data.
                 self.remote.clear();
@@ -606,6 +615,10 @@ impl NetClient {
                     "net: CharacterStats level={level} xp={xp}/{xp_to_next}"
                 );
                 self.pending_character_stats = Some((level, xp, xp_to_next));
+            }
+            ServerMsg::Loadout { slots } => {
+                log::debug!("net: Loadout {slots:?}");
+                self.pending_loadout = Some(slots);
             }
             ServerMsg::RiftProgress {
                 progress,
@@ -738,6 +751,15 @@ impl NetClient {
     /// the new level.
     pub fn drain_character_stats(&mut self) -> Option<(u32, u64, u64)> {
         self.pending_character_stats.take()
+    }
+
+    /// Take the most recent `Loadout` reply if one has arrived
+    /// since the last call. The binary writes the six wire ids
+    /// into `PlayerState::loadout` and re-materializes the
+    /// runtime `AbilitySlot` so the HUD bar reflects the
+    /// authoritative bar.
+    pub fn drain_loadout(&mut self) -> Option<[u8; 6]> {
+        self.pending_loadout.take()
     }
 
     /// Take the most recent `RiftProgress` reply if one has

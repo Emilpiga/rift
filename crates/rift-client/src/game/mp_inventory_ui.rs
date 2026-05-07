@@ -338,6 +338,7 @@ impl MpInventoryUI {
                 item,
                 "Hovered",
                 Pos2::new(mp.x + 18.0, mp.y),
+                Some(&player_state.loadout),
             );
             // Compare side-by-side. Always show the equipped
             // counterpart when one exists; SHIFT additionally
@@ -349,6 +350,7 @@ impl MpInventoryUI {
                     equipped,
                     "Equipped",
                     Pos2::new(primary.max.x + 8.0, primary.y()),
+                    Some(&player_state.loadout),
                 );
                 if ui.shift_held() {
                     render_compare_delta(
@@ -537,10 +539,19 @@ fn compare_target<'a>(equipment: &'a Equipment, hovered: &Item) -> Option<&'a It
 /// Render a single item tooltip with the upgraded sizing —
 /// header in `size_md`, body lines in `size_md`. Returns the
 /// drawn rect (after screen clamping) so callers can stack
-/// adjacent tooltips horizontally.
-fn render_item_tooltip(ui: &mut Ui<'_>, item: &Item, header: &str, anchor: Pos2) -> Rect {
+/// adjacent tooltips horizontally. `loadout` enables the
+/// synergy footer ("→ Boosts <ability>") — pass `None` from
+/// previews / character-select where the player has no slotted
+/// abilities yet.
+fn render_item_tooltip(
+    ui: &mut Ui<'_>,
+    item: &Item,
+    header: &str,
+    anchor: Pos2,
+    loadout: Option<&rift_game::loadout::Loadout>,
+) -> Rect {
     let theme = *ui.theme();
-    let raw: Vec<String> = item.tooltip();
+    let raw: Vec<String> = item.tooltip(loadout);
     let rarity = item.rarity.color();
     let rarity_col = Color::rgba(rarity[0], rarity[1], rarity[2], 1.0);
     let lines: Vec<TooltipLine<'_>> = raw
@@ -559,6 +570,15 @@ fn render_item_tooltip(ui: &mut Ui<'_>, item: &Item, header: &str, anchor: Pos2)
                 theme.colors.text
             } else if s.starts_with("Item Level") {
                 theme.colors.text_dim
+            } else if s.starts_with('\u{2500}') {
+                // Divider between signature and bonus blocks.
+                theme.colors.text_dim
+            } else if s.starts_with('★') {
+                // Legendary effect — gold tint.
+                Color::rgba(1.00, 0.70, 0.20, 1.0)
+            } else if s.starts_with('→') {
+                // Synergy footer — accent.
+                theme.colors.accent
             } else {
                 theme.colors.text
             },
@@ -583,19 +603,26 @@ fn render_compare_delta(ui: &mut Ui<'_>, hovered: &Item, equipped: &Item, anchor
     // declaration order (kept stable so the column doesn't
     // dance frame to frame as a hovered item changes).
     const ORDER: &[Stat] = &[
-        Stat::Power,
         Stat::CritChance,
         Stat::CritDamage,
         Stat::AttackSpeed,
         Stat::Health,
+        Stat::Vitality,
         Stat::Armor,
         Stat::Evasion,
         Stat::CooldownReduction,
         Stat::ResourceRegen,
         Stat::MoveSpeed,
+        Stat::WeaponDamage,
+        Stat::SpellDamage,
+        Stat::PhysicalDamage,
         Stat::FireDamage,
         Stat::IceDamage,
         Stat::LightningDamage,
+        Stat::ProjectileDamage,
+        Stat::BeamDamage,
+        Stat::AoeDamage,
+        Stat::MeleeDamage,
     ];
 
     // Build the delta lines as owned strings; `TooltipLine`
@@ -807,7 +834,7 @@ fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, ps: &PlayerState) {
             let txt = theme.colors.text;
 
             header(ui, &mut y, "OFFENSE");
-            row(ui, &mut y, "Power", int(s.damage), txt);
+            row(ui, &mut y, "Damage", int(s.damage), txt);
             row(ui, &mut y, "Crit Chance", pct(s.crit_chance), txt);
             row(ui, &mut y, "Crit Damage", pct(s.crit_damage), txt);
             row(ui, &mut y, "Attack Speed", format!("{:.2}", s.attack_speed), txt);

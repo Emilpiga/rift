@@ -14,9 +14,10 @@ use rift_net::{
     ClientId, NetId,
 };
 use rift_game::attributes::Attributes;
-use rift_game::classes::{self, ClassId};
 use rift_game::experience::{Experience, LevelUpReward};
+use rift_game::hero::HERO;
 use rift_game::kinematic::{self, loco, Kinematic};
+use rift_game::loadout::Loadout;
 use rift_game::stats::CharacterStats;
 
 /// Default per-player level until the persisted level field is
@@ -62,9 +63,6 @@ pub struct ServerPlayer {
     /// `DepositToStash` / `WithdrawFromStash` so out-of-band
     /// transfer requests are dropped server-side.
     pub stash_open: bool,
-    /// Class identity. Drives the [`ClassConfig`] used to compute
-    /// [`Self::stats`].
-    pub class: ClassId,
     /// Character level. Used by [`CharacterStats::compute`] for
     /// HP-per-level scaling.
     pub level: u32,
@@ -74,7 +72,6 @@ pub struct ServerPlayer {
     /// field above so `CharacterStats::compute` can stay
     /// pure-arg.
     pub experience: Experience,
-    /// Per-attribute point allocation. Defaults to the class's
     /// `Attributes::for_class` allocation until per-character
     /// attribute points are persisted.
     pub attrs: Attributes,
@@ -83,19 +80,21 @@ pub struct ServerPlayer {
     /// by the cast / projectile / channel pipelines so client
     /// and server agree on the formulas.
     pub stats: CharacterStats,
+    /// Authoritative ability bar. Casts are gated against this so
+    /// a client can't fire an ability they haven't slotted.
+    /// Persisted via the `characters.loadout` column; mutated
+    /// through `ClientMsg::SetLoadoutSlot`.
+    pub loadout: Loadout,
 }
 
 impl ServerPlayer {
-    /// Build a fresh player record for `class`. Stats are computed
-    /// from the class config + default attributes + empty
-    /// equipment, so a freshly-spawned character matches
-    /// `CharacterStats::baseline`.
-    pub fn fresh(client_id: ClientId, net_id: NetId, spawn: glam::Vec3, class: ClassId) -> Self {
-        let class_config = classes::config_for(class);
-        let attrs = Attributes::for_class(class_config.primary_attribute);
+    /// Build a fresh player record. Stats are computed from the
+    /// hero config + default attributes + empty equipment, so a
+    /// freshly-spawned character matches `CharacterStats::baseline`.
+    pub fn fresh(client_id: ClientId, net_id: NetId, spawn: glam::Vec3) -> Self {
+        let attrs = Attributes::for_class(HERO.primary_attribute);
         let equipment = rift_game::loot::Equipment::new();
         let stats = CharacterStats::compute(
-            &class_config,
             &attrs,
             DEFAULT_LEVEL,
             &equipment.active_affix_sum(),
@@ -122,11 +121,11 @@ impl ServerPlayer {
             equipment,
             stash: Vec::new(),
             stash_open: false,
-            class,
             level: DEFAULT_LEVEL,
             attrs,
             stats,
             experience: Experience::new(),
+            loadout: Loadout::default_hero(),
         }
     }
 
@@ -139,9 +138,7 @@ impl ServerPlayer {
     /// Call after any mutation that changes a `compute` input:
     /// equip / unequip, attribute respec (TBD), level up (TBD).
     pub fn recompute_stats(&mut self) {
-        let class_config = classes::config_for(self.class);
         let new_stats = CharacterStats::compute(
-            &class_config,
             &self.attrs,
             self.level,
             &self.equipment.active_affix_sum(),
@@ -163,11 +160,10 @@ impl ServerPlayer {
     /// the authored numbers, and gear / attributes scale every
     /// ability uniformly.
     pub fn damage_scalar(&self) -> f32 {
-        let class_config = classes::config_for(self.class);
-        if class_config.base_damage <= 0.0 {
+        if HERO.base_damage <= 0.0 {
             1.0
         } else {
-            self.stats.damage / class_config.base_damage
+            self.stats.damage / HERO.base_damage
         }
     }
 

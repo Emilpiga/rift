@@ -18,7 +18,10 @@
 //! Stats fall into four semantic groups (informational only — the
 //! enum stays flat to keep matching cheap):
 //!
-//! - **Offensive** — `Power`, `CritChance`, `CritDamage`, `AttackSpeed`.
+//! - **Offensive** — `CritChance`, `CritDamage`, `AttackSpeed`, plus the
+//!   typed damage buckets (`WeaponDamage`, `SpellDamage`,
+//!   `PhysicalDamage`, `FireDamage`, `IceDamage`, `LightningDamage`,
+//!   `ProjectileDamage`, `BeamDamage`, `AoeDamage`, `MeleeDamage`).
 //! - **Defensive** — `Health`, `Armor`, `Evasion`.
 //! - **Utility** — `CooldownReduction`, `ResourceRegen`, `MoveSpeed`.
 //! - **Elemental** — `FireDamage`, `IceDamage`, `LightningDamage`.
@@ -28,7 +31,7 @@
 //! how to display / multiply downstream.
 
 use crate::attributes::Attributes;
-use crate::classes::ClassConfig;
+use crate::hero::HERO;
 
 // ---------------------------------------------------------------------------
 // Stat enum
@@ -38,41 +41,63 @@ use crate::classes::ClassConfig;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stat {
     // Offensive
-    Power,
     CritChance,
     CritDamage,
     AttackSpeed,
     // Defensive
     Health,
+    /// Flat life pool bonus. Distinct from Health so guaranteed
+    /// "+N Vitality" item lines stack with rare "+N Health"
+    /// rolls instead of overwriting each other in tooltips.
+    Vitality,
     Armor,
     Evasion,
     // Utility
     CooldownReduction,
     ResourceRegen,
     MoveSpeed,
-    // Elemental scaling
+    // Damage-bucket scaling — multiplies abilities whose
+    // `Scaling` matches.
+    WeaponDamage,
+    SpellDamage,
+    // Elemental scaling — multiplies abilities whose
+    // `Element` matches.
+    PhysicalDamage,
     FireDamage,
     IceDamage,
     LightningDamage,
+    // Archetype scaling — multiplies abilities whose
+    // `Archetype` matches.
+    ProjectileDamage,
+    BeamDamage,
+    AoeDamage,
+    MeleeDamage,
 }
 
 impl Stat {
     /// Display name (singular, capitalised).
     pub fn name(self) -> &'static str {
         match self {
-            Stat::Power => "Power",
             Stat::CritChance => "Crit Chance",
             Stat::CritDamage => "Crit Damage",
             Stat::AttackSpeed => "Attack Speed",
             Stat::Health => "Health",
+            Stat::Vitality => "Vitality",
             Stat::Armor => "Armor",
             Stat::Evasion => "Evasion",
             Stat::CooldownReduction => "Cooldown Reduction",
             Stat::ResourceRegen => "Resource Regen",
             Stat::MoveSpeed => "Move Speed",
+            Stat::WeaponDamage => "Weapon Damage",
+            Stat::SpellDamage => "Spell Damage",
+            Stat::PhysicalDamage => "Physical Damage",
             Stat::FireDamage => "Fire Damage",
             Stat::IceDamage => "Ice Damage",
             Stat::LightningDamage => "Lightning Damage",
+            Stat::ProjectileDamage => "Projectile Damage",
+            Stat::BeamDamage => "Beam Damage",
+            Stat::AoeDamage => "AoE Damage",
+            Stat::MeleeDamage => "Melee Damage",
         }
     }
 
@@ -88,9 +113,17 @@ impl Stat {
                 | Stat::CooldownReduction
                 | Stat::ResourceRegen
                 | Stat::MoveSpeed
+                | Stat::Evasion
+                | Stat::WeaponDamage
+                | Stat::SpellDamage
+                | Stat::PhysicalDamage
                 | Stat::FireDamage
                 | Stat::IceDamage
                 | Stat::LightningDamage
+                | Stat::ProjectileDamage
+                | Stat::BeamDamage
+                | Stat::AoeDamage
+                | Stat::MeleeDamage
         )
     }
 
@@ -229,9 +262,10 @@ pub struct CharacterStats {
     pub defense: f32,
 
     // --- Offensive --------------------------------------------------
-    /// Base outgoing damage (class base + flat `Stat::Power`)
-    /// scaled by primary attribute. Ability `damage_mult`
-    /// multiplies on top at the cast site.
+    /// Base outgoing damage — class base scaled by primary
+    /// attribute. Typed-damage gear (`WeaponDamage`, `SpellDamage`,
+    /// element / archetype) multiplies on top at the cast site
+    /// via [`CharacterStats::ability_damage_mult`].
     pub damage: f32,
     /// Crit roll, 0..1 — class base + agility + `Stat::CritChance`.
     pub crit_chance: f32,
@@ -260,6 +294,19 @@ pub struct CharacterStats {
     pub fire_damage: f32,
     pub ice_damage: f32,
     pub lightning_damage: f32,
+    pub physical_damage: f32,
+
+    // --- Damage buckets --------------------------------------------
+    /// Multiplies abilities whose `Scaling` is `Weapon`. 0..1.
+    pub weapon_damage: f32,
+    /// Multiplies abilities whose `Scaling` is `Spell`. 0..1.
+    pub spell_damage: f32,
+
+    // --- Archetype scaling -----------------------------------------
+    pub projectile_damage: f32,
+    pub beam_damage: f32,
+    pub aoe_damage: f32,
+    pub melee_damage: f32,
 }
 
 impl CharacterStats {
@@ -273,12 +320,12 @@ impl CharacterStats {
     /// testable and safe to call from either the client (HUD) or
     /// the server (authoritative combat).
     pub fn compute(
-        class: &ClassConfig,
         attrs: &Attributes,
         level: u32,
         equipment: &StatBlock,
         modifiers: &StatModifiers,
     ) -> Self {
+        let class = &HERO;
         let primary = class.primary_attribute;
         let primary_value = attrs.get(primary) as f32;
 
@@ -303,15 +350,16 @@ impl CharacterStats {
         let pct = |s: Stat| 1.0 + modifiers.percent.get(s);
 
         Self {
-            max_hp: (class_hp + attr_hp_bonus + flat(Stat::Health))
+            max_hp: (class_hp
+                + attr_hp_bonus
+                + flat(Stat::Health)
+                + flat(Stat::Vitality))
                 * pct(Stat::Health),
             armor: flat(Stat::Armor) * pct(Stat::Armor),
             evasion: flat(Stat::Evasion),
             defense: class.base_defense * attr_defense_mult,
 
-            damage: (class.base_damage + flat(Stat::Power))
-                * primary_dmg_mult
-                * pct(Stat::Power),
+            damage: class.base_damage * primary_dmg_mult,
             crit_chance: class.base_crit_chance
                 + attr_crit_bonus
                 + flat(Stat::CritChance),
@@ -327,15 +375,59 @@ impl CharacterStats {
             fire_damage: flat(Stat::FireDamage),
             ice_damage: flat(Stat::IceDamage),
             lightning_damage: flat(Stat::LightningDamage),
+            physical_damage: flat(Stat::PhysicalDamage),
+
+            weapon_damage: flat(Stat::WeaponDamage),
+            spell_damage: flat(Stat::SpellDamage),
+
+            projectile_damage: flat(Stat::ProjectileDamage),
+            beam_damage: flat(Stat::BeamDamage),
+            aoe_damage: flat(Stat::AoeDamage),
+            melee_damage: flat(Stat::MeleeDamage),
         }
     }
 
     /// Quick-path snapshot for a freshly-created character with no
     /// gear. Used by the character-select preview and any test
-    /// fixture that just wants "what does this class look like at
+    /// fixture that just wants "what does the hero look like at
     /// level 1?".
-    pub fn baseline(class: &ClassConfig) -> Self {
-        let attrs = Attributes::for_class(class.primary_attribute);
-        Self::compute(class, &attrs, 1, &StatBlock::new(), &StatModifiers::new())
+    pub fn baseline() -> Self {
+        let attrs = Attributes::for_class(HERO.primary_attribute);
+        Self::compute(&attrs, 1, &StatBlock::new(), &StatModifiers::new())
+    }
+
+    /// Compose the full ability-aware damage multiplier for one
+    /// cast. Reads the ability's scaling-bucket / element /
+    /// archetype tags and stacks the matching gear bonuses
+    /// multiplicatively. Pure read-only — call site multiplies
+    /// the result onto base damage in the server cast pipe.
+    ///
+    /// Order matches the design doc:
+    /// `(1 + scaling_bucket) × (1 + element) × (1 + archetype)`.
+    /// Each unmatched tag (`Scaling::None`, `Element::None`,
+    /// `Archetype::Movement`/`Utility`) contributes `× 1`, so
+    /// utility abilities pass through untouched.
+    pub fn ability_damage_mult(&self, ability: &crate::abilities::Ability) -> f32 {
+        use crate::abilities::{Archetype, Element, Scaling};
+        let scaling = match ability.scaling {
+            Scaling::Weapon => 1.0 + self.weapon_damage,
+            Scaling::Spell => 1.0 + self.spell_damage,
+            Scaling::None => 1.0,
+        };
+        let element = match ability.element {
+            Element::Physical => 1.0 + self.physical_damage,
+            Element::Fire => 1.0 + self.fire_damage,
+            Element::Ice => 1.0 + self.ice_damage,
+            Element::Lightning => 1.0 + self.lightning_damage,
+            Element::None => 1.0,
+        };
+        let archetype = match ability.archetype {
+            Archetype::Projectile => 1.0 + self.projectile_damage,
+            Archetype::Beam => 1.0 + self.beam_damage,
+            Archetype::Aoe => 1.0 + self.aoe_damage,
+            Archetype::Melee => 1.0 + self.melee_damage,
+            Archetype::Movement | Archetype::Utility => 1.0,
+        };
+        scaling * element * archetype
     }
 }

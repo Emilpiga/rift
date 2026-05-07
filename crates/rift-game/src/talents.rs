@@ -218,11 +218,15 @@ impl TalentTree {
             // the percent channel; chance/multiplier stats go on
             // flat (additive in their native unit).
             match (tstat, &node.effect) {
-                (TalentStat::Damage, TalentEffect::PercentBonus { .. }) => {
-                    m.percent.add(Stat::Power, v);
-                }
-                (TalentStat::Damage, TalentEffect::FlatBonus { .. }) => {
-                    m.flat.add(Stat::Power, v);
+                // `Damage` is now an aggregate — with `Stat::Power`
+                // gone, route it to both `WeaponDamage` and
+                // `SpellDamage` so a generic +damage talent buffs
+                // every build path. Flat damage talents fold into
+                // the same percent channel; we don't author flat
+                // damage talents anyway.
+                (TalentStat::Damage, _) => {
+                    m.percent.add(Stat::WeaponDamage, v);
+                    m.percent.add(Stat::SpellDamage, v);
                 }
                 (TalentStat::MaxHp, TalentEffect::PercentBonus { .. }) => {
                     m.percent.add(Stat::Health, v);
@@ -348,14 +352,14 @@ pub fn hunter_tree() -> TalentTree {
         },
         TalentNode {
             id: TalentId(7),
-            name: "Piercing Arrows",
-            description: "Arrows pierce through 1 additional target per rank.",
+            name: "Piercing Fire",
+            description: "Fireball pierces through 1 additional target per rank.",
             max_rank: 2,
             current_rank: 0,
             tier: 2,
             prerequisites: vec![TalentId(3)],
             effect: TalentEffect::AbilityMod {
-                ability: abilities::STEADY_SHOT,
+                ability: abilities::FIRE_BALL,
                 modifier: AbilityModifier::Pierce(1),
             },
         },

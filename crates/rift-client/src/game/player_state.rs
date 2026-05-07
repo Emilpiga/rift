@@ -8,21 +8,26 @@
 //! sub-systems (`loot_system`, `portal_system`, `stash_system`)
 //! can borrow it without pulling in the full `GameState` header.
 
-use rift_game::abilities::{self, Ability, AbilitySlot};
+use rift_game::abilities::AbilitySlot;
 use rift_game::attributes::Attributes;
 use rift_game::character::Gender;
-use rift_game::classes::{self, ClassConfig, ClassId};
 use rift_game::experience::Experience;
+use rift_game::hero::{HeroConfig, HERO};
+use rift_game::loadout::Loadout;
 use rift_game::stats::CharacterStats;
 use rift_game::talents::{self, TalentTree};
 
 pub struct PlayerState {
-    pub class: ClassId,
     pub gender: Gender,
     pub name: String,
-    pub config: ClassConfig,
+    pub config: HeroConfig,
     pub attributes: Attributes,
     pub experience: Experience,
+    /// The player's chosen six-ability action bar. Source of
+    /// truth for [`Self::abilities`]; mutate via
+    /// [`Self::set_loadout_slot`] which keeps the runtime
+    /// `AbilitySlot` in sync.
+    pub loadout: Loadout,
     pub abilities: AbilitySlot,
     pub talents: TalentTree,
     /// Cached resolved character sheet. Recomputed only when the
@@ -33,31 +38,19 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    pub fn new(class: ClassId) -> Self {
-        Self::with_profile(class, Gender::Female, String::new())
+    pub fn new() -> Self {
+        Self::with_profile(Gender::Female, String::new(), Loadout::default_hero())
     }
 
-    pub fn with_profile(class: ClassId, gender: Gender, name: String) -> Self {
-        let config = classes::config_for(class);
+    pub fn with_profile(gender: Gender, name: String, loadout: Loadout) -> Self {
+        let config = HERO.clone();
         let attributes = Attributes::for_class(config.primary_attribute);
 
-        let mut ability_slots = AbilitySlot::new();
-        let roster: [Ability; 6] = match class {
-            classes::HUNTER => abilities::hunter_roster(),
-            _ => abilities::hunter_roster(),
-        };
-        for (i, ab) in roster.into_iter().enumerate() {
-            ability_slots.set(i, ab);
-        }
-
-        let talents = match class {
-            classes::HUNTER => talents::hunter_tree(),
-            _ => talents::hunter_tree(),
-        };
+        let abilities = loadout.materialize();
+        let talents = talents::hunter_tree();
 
         let experience = Experience::new();
         let cached_stats = CharacterStats::compute(
-            &config,
             &attributes,
             experience.level,
             &rift_game::loot::Equipment::default().active_affix_sum(),
@@ -65,16 +58,25 @@ impl PlayerState {
         );
 
         Self {
-            class,
             gender,
             name,
             config,
             attributes,
             experience,
-            abilities: ability_slots,
+            loadout,
+            abilities,
             talents,
             cached_stats,
         }
+    }
+
+    /// Swap the ability in `slot_index` for the one with `wire_id`.
+    /// Re-materializes the runtime `AbilitySlot` so cooldowns
+    /// reset for the swapped slot. No-op when `slot_index` is
+    /// out of range.
+    pub fn set_loadout_slot(&mut self, slot_index: usize, wire_id: u8) {
+        self.loadout.set_slot(slot_index, wire_id);
+        self.abilities = self.loadout.materialize();
     }
 
     /// Recompute the cached character sheet from the supplied
@@ -82,7 +84,6 @@ impl PlayerState {
     /// `EquipmentSync`, attribute change, or level up.
     pub fn recompute_stats(&mut self, equipment: &rift_game::loot::Equipment) {
         self.cached_stats = CharacterStats::compute(
-            &self.config,
             &self.attributes,
             self.experience.level,
             &equipment.active_affix_sum(),

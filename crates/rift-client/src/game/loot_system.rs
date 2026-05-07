@@ -149,3 +149,60 @@ pub fn resolve_claim(
         );
     }
 }
+
+/// Handle a `WorldEvent::LootDropped` event (or the equivalent
+/// snapshot-reconciliation row for a client that just joined).
+///
+/// Spawns the pillar + base loot beam VFX at `position` and
+/// records a [`LootDropVisual`] entry. Idempotent on `loot_id`
+/// so receiving both the reliable event and the next snapshot's
+/// `EntityKind::Loot` row doesn't double-spawn the emitter.
+pub fn on_loot_dropped(
+    loot: &mut LootClientState,
+    renderer: &mut Renderer,
+    loot_id: rift_net::NetId,
+    position: glam::Vec3,
+    blob: rift_net::messages::ItemBlob,
+) {
+    use super::sub_state::LootDropVisual;
+
+    if loot.drops.iter().any(|d| d.net_id == loot_id) {
+        return;
+    }
+    // Rehydrate the wire blob into a full Item. Mismatched indices
+    // (e.g. server running a newer build) → drop the visual.
+    let Some(item) = rift_game::loot::Item::from_wire(
+        blob.base_id,
+        blob.rarity,
+        blob.ilvl,
+        &blob.affixes,
+    ) else {
+        log::warn!(
+            "loot drop {loot_id:?} has unknown indices base={} affixes={:?}; skipping visual",
+            blob.base_id,
+            blob.affixes
+        );
+        return;
+    };
+
+    let color = item.rarity.color();
+    let pillar = renderer
+        .vfx_system
+        .spawn(rift_engine::renderer::vfx::presets::loot_beam(color), position);
+    let base = renderer
+        .vfx_system
+        .spawn(rift_engine::renderer::vfx::presets::loot_beam_base(color), position);
+    log::info!(
+        "loot dropped: {} (item-level {}) at {:?}",
+        item.display_name(),
+        item.ilvl,
+        position
+    );
+    loot.drops.push(LootDropVisual {
+        net_id: loot_id,
+        position,
+        item,
+        pillar_emitter: pillar,
+        base_emitter: base,
+    });
+}

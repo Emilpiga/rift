@@ -296,6 +296,9 @@ impl Server {
             ClientMsg::UnequipToBagSlot { slot, inventory_index } => {
                 self.handle_unequip_to_bag_slot(from, slot, inventory_index as usize);
             }
+            ClientMsg::SetLoadoutSlot { slot_index, ability_id } => {
+                self.handle_set_loadout_slot(from, slot_index, ability_id);
+            }
             ClientMsg::Ack { .. } => { /* phase 4 */ }
             ClientMsg::Goodbye => {
                 log::info!("Goodbye from {from:?}");

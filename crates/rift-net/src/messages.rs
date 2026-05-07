@@ -234,6 +234,19 @@ pub enum ClientMsg {
         slot: u8,
         inventory_index: u32,
     },
+
+    /// Mutate one slot of the player's persisted ability loadout.
+    /// `slot_index` is the action-bar slot (0..6); `ability_id`
+    /// is the wire id of the ability to put there. Server
+    /// validates the ability is player-castable, updates its
+    /// authoritative `ServerPlayer.loadout`, persists, and
+    /// replies with [`ServerMsg::Loadout`] so every client
+    /// stays in sync with what the server thinks is equipped.
+    /// Reliable on `Channel::Control`.
+    SetLoadoutSlot {
+        slot_index: u8,
+        ability_id: u8,
+    },
 }
 
 /// Cosmetic body type. Mirrors `rift_game::character::Gender`. Kept
@@ -254,6 +267,11 @@ pub struct RosterEntry {
     pub class_id: String,
     pub gender: Gender,
     pub level: u32,
+    /// Six ability wire ids the player has slotted on the action
+    /// bar. See `rift_game::loadout::Loadout`. Sent so the
+    /// character-select / future "preview" UI can render the
+    /// per-character ability bar before the player has logged in.
+    pub loadout: [u8; 6],
 }
 
 /// One frame of player input. Compact by design — we'll send these
@@ -446,6 +464,14 @@ pub enum ServerMsg {
     /// avatar entity + renderer slot. Snapshots after this point will
     /// no longer carry the player's `net_id`.
     PlayerLeft { net_id: NetId },
+
+    /// Authoritative ability-loadout snapshot for the local
+    /// character. Sent once right after [`ServerMsg::Welcome`]
+    /// and again after every [`ClientMsg::SetLoadoutSlot`] the
+    /// server accepts. Carries the full six-slot vector so the
+    /// client can resync after a partial-message drop.
+    /// Reliable on `Channel::Control`.
+    Loadout { slots: [u8; 6] },
 
     /// Authoritative XP / level snapshot for the local character.
     /// Sent once at Welcome and again whenever the server's

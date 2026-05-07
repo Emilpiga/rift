@@ -91,8 +91,12 @@ impl NetClient {
         };
 
         // Predict locally so the local avatar moves immediately,
-        // and stash for replay-on-reconcile.
-        if self.predicted_ready {
+        // and stash for replay-on-reconcile. Skipped while dead:
+        // the server has frozen our corpse, and any local
+        // integration would just be undone (and re-replayed) on
+        // the next snapshot, jittering the death-animation
+        // avatar in place.
+        if !dead && self.predicted_ready {
             if let Some(floor) = self.predict_floor.as_ref() {
                 rift_game::kinematic::apply_input(
                     &mut self.predicted,
@@ -105,10 +109,15 @@ impl NetClient {
         }
         // Bound history at 2 seconds of input so it can't grow
         // unbounded if the server stops acking for any reason.
-        if self.input_history.len() >= 128 {
-            self.input_history.pop_front();
+        // While dead, skip pushing entirely — the snapshot path
+        // cleared `input_history` on death and there's nothing
+        // for the server to act on anyway.
+        if !dead {
+            if self.input_history.len() >= 128 {
+                self.input_history.pop_front();
+            }
+            self.input_history.push_back((self.input_seq, dt, cmd));
         }
-        self.input_history.push_back((self.input_seq, dt, cmd));
 
         self.send(Channel::Snapshot, &ClientMsg::Input(cmd));
     }
@@ -204,6 +213,19 @@ impl NetClient {
     pub fn request_end_channel(&mut self, ability_id: u8) {
         let msg = ClientMsg::EndChannel { ability_id };
         self.send(Channel::Event, &msg);
+    }
+
+    /// Ask the server to swap the ability in `slot_index` for the
+    /// one with `ability_id`. Server validates the ability is
+    /// player-castable; on accept it mirrors the change to the
+    /// persisted record and replies with a fresh
+    /// [`ServerMsg::Loadout`].
+    pub fn request_set_loadout_slot(&mut self, slot_index: u8, ability_id: u8) {
+        log::debug!("net: -> SetLoadoutSlot slot={slot_index} ability={ability_id}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::SetLoadoutSlot { slot_index, ability_id },
+        );
     }
 
     /// Ask the server to claim a ground-loot drop on our behalf.

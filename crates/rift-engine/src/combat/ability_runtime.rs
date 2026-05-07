@@ -1,14 +1,14 @@
 //! Data-driven ability runtime — client-side cast-anim FSM.
 //!
-//! Declarative ability data (`Ability`, `AbilityEffect`, `ParticlePreset`,
-//! ...) lives in `rift_game::abilities`. This file only contains the
-//! ECS-touching execution helpers that interpret those types against
-//! the engine's renderer + world.
+//! Declarative ability data (`Ability`, `AbilityEffect`, `VfxKind`,
+//! `MeshKind`, ...) lives in `rift_game::abilities`. This file only
+//! contains the ECS-touching execution helpers that interpret those
+//! types against the engine's renderer + world.
 
 use glam::Vec3;
 use hecs::World;
 
-use rift_game::abilities::{Ability, AbilityEffect, ActionMovement, ParticlePreset};
+use rift_game::abilities::{Ability, AbilityEffect, ActionMovement, MeshKind, VfxKind};
 use rift_game::components::PlayerAction;
 use rift_game::talents::TalentTree;
 
@@ -16,18 +16,35 @@ use crate::animation::Animator;
 use crate::ecs::components::{
     AnimationSet, LocalPlayer, Player, SpellCast, SpellPhase, Transform, Velocity,
 };
+use crate::renderer::mesh::Mesh;
 use crate::renderer::vfx::{presets as vfx_presets, spec::Effect};
 use crate::renderer::Renderer;
 
-/// Map a declarative `ParticlePreset` to a concrete VFX [`Effect`].
-/// Routed through the declarative `vfx::presets` module rather
-/// than the legacy `EmitterConfig` builders so all ability
-/// visuals share one rendering path.
-pub fn effect_for_preset(preset: ParticlePreset) -> Effect {
-    match preset {
-        ParticlePreset::DodgePuff => vfx_presets::dodge_puff(),
-        ParticlePreset::RainOfFire => vfx_presets::rain_of_fire(),
-        ParticlePreset::Cast(rgb) => vfx_presets::cast_spark(rgb),
+/// Map a declarative [`VfxKind`] to a concrete VFX [`Effect`].
+/// Single source of truth — every ability visual the renderer
+/// spawns goes through this function.
+pub fn effect_for_vfx(kind: VfxKind) -> Effect {
+    match kind {
+        VfxKind::DodgePuff => vfx_presets::dodge_puff(),
+        VfxKind::RainOfFire => vfx_presets::rain_of_fire(),
+        VfxKind::CastSpark { rgb } => vfx_presets::cast_spark(rgb),
+        VfxKind::FireballTrail => vfx_presets::fireball_trail(),
+        VfxKind::FireballImpact => vfx_presets::fireball_explosion(),
+        VfxKind::CasterBoltTrail => vfx_presets::caster_bolt_trail(),
+        VfxKind::CasterBoltImpact => vfx_presets::caster_bolt_impact(),
+        VfxKind::FrostRay => vfx_presets::frost_ray(),
+        VfxKind::FireWave => vfx_presets::fire_wave(),
+        // Empty effect — caller can guard `VfxKind::None` to skip
+        // the spawn call entirely.
+        VfxKind::None => Effect { duration: 0.0, layers: Vec::new() },
+    }
+}
+
+/// Map a declarative [`MeshKind`] to a concrete projectile mesh.
+pub fn mesh_for_kind(kind: MeshKind) -> Mesh {
+    match kind {
+        MeshKind::Fireball => Mesh::fireball(),
+        MeshKind::CasterBolt => Mesh::caster_bolt(),
     }
 }
 
@@ -61,7 +78,7 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
                     let pos = ctx.placed_position();
                     ctx.renderer
                         .vfx_system
-                        .spawn(effect_for_preset(*p), pos + Vec3::new(0.0, *visual_y, 0.0));
+                        .spawn(effect_for_vfx(*p), pos + Vec3::new(0.0, *visual_y, 0.0));
                 }
             }
             AbilityEffect::SetPlayerAction {
@@ -74,6 +91,12 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
             } => {
                 set_player_action(*action, *duration, clip, *movement, *cancel_cast, *emitter, ctx);
             }
+            AbilityEffect::SpawnEmitterAtCaster { visual, height } => {
+                ctx.renderer.vfx_system.spawn(
+                    effect_for_vfx(*visual),
+                    ctx.origin + Vec3::new(0.0, *height, 0.0),
+                );
+            }
         }
     }
 }
@@ -84,7 +107,7 @@ fn set_player_action(
     clip_names: &[&str],
     movement: ActionMovement,
     cancel_cast: bool,
-    emitter: Option<ParticlePreset>,
+    emitter: Option<VfxKind>,
     ctx: &mut AbilityCtx<'_>,
 ) {
     let player_id = ctx
@@ -101,7 +124,7 @@ fn set_player_action(
     if let Some(p) = emitter {
         ctx.renderer
             .vfx_system
-            .spawn(effect_for_preset(p), position + Vec3::new(0.0, 0.5, 0.0));
+            .spawn(effect_for_vfx(p), position + Vec3::new(0.0, 0.5, 0.0));
     }
 
     let body_dir = {

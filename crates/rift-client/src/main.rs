@@ -145,8 +145,8 @@ impl RiftApp {
                 if state.loot.claimed_ids.contains(&re.net_id) {
                     continue;
                 }
-                rift_client::game::state::spawn_loot_drop_visual(
-                    state,
+                rift_client::game::state::on_loot_dropped(
+                    &mut state.loot,
                     renderer,
                     re.net_id,
                     re.position,
@@ -184,7 +184,7 @@ impl RiftApp {
         use rift_net::messages::WorldEvent;
         match ev {
             WorldEvent::Damage { target, amount, crit, position } => {
-                self.handle_damage_event(target, amount, crit, position);
+                self.handle_damage_event(target, amount, crit, position, renderer);
             }
             WorldEvent::Death { entity, .. } => {
                 self.handle_death_event(entity, renderer);
@@ -210,7 +210,7 @@ impl RiftApp {
     /// Spawn floating combat text for damage we just took or
     /// dealt. Direct hits go through `spawn_player_damage` so
     /// they're styled distinctly from damage we dealt out.
-    fn handle_damage_event(&mut self, target: rift_net::NetId, amount: f32, crit: bool, position: [f32; 3]) {
+    fn handle_damage_event(&mut self, target: rift_net::NetId, amount: f32, crit: bool, position: [f32; 3], renderer: &mut Renderer) {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
         let world_pos = Vec3::from_array(position);
@@ -218,6 +218,15 @@ impl RiftApp {
             state.combat_text.spawn_player_damage(world_pos, amount);
         } else {
             state.combat_text.spawn_damage(world_pos, amount, crit);
+            // Visceral blood spurt on enemy hits. Anchored a
+            // little above the snapshot position so droplets fly
+            // from chest height rather than the feet. Skipped
+            // for self-hits — the local player already has the
+            // red vignette to communicate "you got hit".
+            renderer.vfx_system.spawn(
+                rift_engine::renderer::vfx::presets::blood_hit_spurt(Vec3::Y),
+                world_pos + Vec3::new(0.0, 1.0, 0.0),
+            );
         }
     }
 
@@ -231,7 +240,15 @@ impl RiftApp {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
         if let Some(&pos) = net.last_positions.get(&entity) {
+            // Persistent floor stain.
             state.decals.spawn_blood(pos, &state.wall_aabbs, renderer);
+            // Big visceral burst on top of it. Anchored at
+            // chest height so the upward cone reads as the kill
+            // shot rather than ground splatter.
+            renderer.vfx_system.spawn(
+                rift_engine::renderer::vfx::presets::blood_splatter(Vec3::Y),
+                pos + Vec3::new(0.0, 1.0, 0.0),
+            );
         }
         // Remote player death: play the death clip on their
         // avatar so observers see them topple instead of just
@@ -241,7 +258,7 @@ impl RiftApp {
         // before the reliable Death event.
         if Some(entity) != net.our_net_id() {
             if let Some(&avatar) = net.avatar_entities.get(&entity) {
-                rift_client::game::state::trigger_remote_death(&mut state.world, avatar);
+                rift_client::game::state::on_remote_death(&mut state.world, avatar);
             }
         }
     }
@@ -249,7 +266,8 @@ impl RiftApp {
     /// Spawn the AoE-zone visual for a server-confirmed cast and
     /// trigger the upper-body cast pose on remote casters. The
     /// local caster's pose is already running from `tick_combat`
-    /// the moment the input fired, so we skip ourselves.
+    /// the moment the input fired, so we pass `caster_avatar =
+    /// None` for our own casts to skip the pose hop.
     fn handle_ability_cast_event(
         &mut self,
         caster: rift_net::NetId,
@@ -263,39 +281,26 @@ impl RiftApp {
         let aim = Vec3::new(dir[0], 0.0, dir[1]);
         let cast_origin = Vec3::from_array(origin);
         let target_pos = target.map(Vec3::from_array);
-        let def = rift_game::abilities::from_wire_id(ability as u8);
-
-        // AoE-zone visuals (e.g. Rain of Fire) need to play on
-        // *every* connected client — including the caster, who
-        // currently returns out of `tick_combat` after sending
-        // the placement and never spawns the local emitter.
-        // Driving the visual off the server's `AbilityCast`
-        // event guarantees every observer sees the same effect
-        // at the same authoritative position.
-        if let Some(def) = &def {
-            rift_client::game::state::spawn_ability_aoe_visual(
-                renderer,
-                def,
-                cast_origin,
-                aim,
-                target_pos,
-            );
-        }
+        let Some(def) = rift_game::abilities::from_wire_id(ability as u8) else {
+            return;
+        };
 
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
-        if Some(caster) != net.our_net_id() {
-            if let Some(&entity) = net.avatar_entities.get(&caster) {
-                if let Some(def) = def {
-                    rift_client::game::state::trigger_remote_cast(
-                        &mut state.world,
-                        entity,
-                        &def,
-                        aim,
-                    );
-                }
-            }
-        }
+        let caster_avatar = if Some(caster) == net.our_net_id() {
+            None
+        } else {
+            net.avatar_entities.get(&caster).copied()
+        };
+        rift_client::game::state::on_remote_ability_cast(
+            state,
+            renderer,
+            &def,
+            aim,
+            cast_origin,
+            target_pos,
+            caster_avatar,
+        );
     }
 
     fn handle_loot_dropped_event(
@@ -312,8 +317,8 @@ impl RiftApp {
             position
         );
         let pos = Vec3::from_array(position);
-        rift_client::game::state::spawn_loot_drop_visual(
-            &mut self.state,
+        rift_client::game::state::on_loot_dropped(
+            &mut self.state.loot,
             renderer,
             loot,
             pos,
@@ -335,7 +340,7 @@ impl RiftApp {
         log::trace!("net: ChannelTick caster={caster:?} ability={ability}");
         let pos = Vec3::from_array(position);
         let aim = Vec3::new(dir[0], 0.0, dir[1]);
-        rift_client::game::state::push_channel_visual(
+        rift_client::game::state::on_channel_tick(
             &mut self.state,
             caster,
             ability as u8,
@@ -351,10 +356,8 @@ impl RiftApp {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
 
-        if Some(caster) == net.our_net_id() {
-            state.channel.active = None;
-        }
-        let entity = if Some(caster) == net.our_net_id() {
+        let is_local = Some(caster) == net.our_net_id();
+        let entity = if is_local {
             state
                 .world
                 .query::<(
@@ -367,15 +370,7 @@ impl RiftApp {
         } else {
             net.avatar_entities.get(&caster).copied()
         };
-        if let Some(entity) = entity {
-            if let Ok(mut cast) = state
-                .world
-                .get::<&mut rift_engine::ecs::components::SpellCast>(entity)
-            {
-                cast.cancel();
-            }
-        }
-        rift_client::game::state::clear_channel_visual(state, caster, ability as u8);
+        rift_client::game::state::on_channel_end(state, caster, ability as u8, entity, is_local);
     }
 
     /// Forward this frame's local intentions to the server:
@@ -405,7 +400,7 @@ impl RiftApp {
             net.set_profile(ClientProfile {
                 account_name,
                 character_name: profile.name,
-                class_id: profile.class.0.to_string(),
+                class_id: "hero".to_string(),
                 gender,
             });
         }
@@ -495,6 +490,18 @@ impl RiftApp {
             } else {
                 net.request_close_stash();
             }
+        }
+
+        // Loadout-slot changes. Pushed by the spellbook UI; the
+        // server is authoritative and replies with a fresh
+        // `ServerMsg::Loadout`.
+        for (slot_index, ability_id) in state
+            .net
+            .pending_loadout_changes
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            net.request_set_loadout_slot(slot_index, ability_id);
         }
 
         // Stash transfer requests (deposit / withdraw). Drained
@@ -634,6 +641,14 @@ impl RiftApp {
                 state.level_up_flash = 1.0;
                 log::info!("client: leveled up to {level}");
             }
+        }
+
+        // Authoritative ability-loadout snapshots. Server is the
+        // source of truth; mutate `PlayerState::loadout` and
+        // re-materialize the runtime `AbilitySlot`.
+        if let Some(slots) = net.drain_loadout() {
+            state.player_state.loadout = rift_game::loadout::Loadout::from_slots(slots);
+            state.player_state.abilities = state.player_state.loadout.materialize();
         }
 
         // Authoritative rift-progress snapshots.

@@ -39,12 +39,19 @@ pub mod enemy_anim {
 /// the server doesn't yank the row out from under the animation.
 pub const DEATH_FADE_DUR: f32 = 1.6;
 
-/// Aggro pickup range — within this distance the closest player is
-/// chosen as the target. Outside this, the enemy idles in place.
-/// Sized to comfortably exceed the typical viewport so enemies
-/// you can see are already reacting to you, instead of standing
-/// like statues until you're nearly on top of them.
-pub const AGGRO_RANGE: f32 = 22.0;
+/// Aggro pickup range — within this distance an *unengaged*
+/// enemy will lock onto the closest player. Tuned roughly to one
+/// room-and-a-bit so a player walking down a corridor doesn't
+/// instantly aggro every monster in the next two rooms the
+/// moment a rift floor finishes loading.
+pub const AGGRO_RANGE: f32 = 9.0;
+/// Leash drop range — once an enemy is engaged with a target it
+/// will keep chasing until the target is at least this far away,
+/// at which point the enemy resets to idle (and may re-pick a
+/// different nearby player). Larger than [`AGGRO_RANGE`] so a
+/// brief duck behind a wall doesn't make the pack forget you,
+/// but small enough that fleeing across the dungeon does.
+pub const LEASH_RANGE: f32 = 28.0;
 /// How close the enemy must be before it stops moving and swings.
 pub const ATTACK_RANGE: f32 = 1.6;
 /// Damage dealt per successful melee hit.
@@ -181,6 +188,12 @@ pub struct ServerEnemy {
     /// Per-role behaviour state. Idle for brutes/elites; drives
     /// the stalker dash cycle and caster wind-up timers.
     pub ai_phase: AiPhase,
+    /// Currently-engaged target, set when the enemy first picks
+    /// up aggro and held until the target leaves
+    /// [`LEASH_RANGE`] (or dies / despawns). Lets us run a tight
+    /// [`AGGRO_RANGE`] for fresh pickups without having packs
+    /// drop chase the moment the player ducks past the limit.
+    pub target_lock: Option<Entity>,
 }
 
 impl ServerEnemy {
@@ -267,8 +280,14 @@ pub fn tick_ai(
         if en.attack_anim_remaining > 0.0 {
             en.attack_anim_remaining = (en.attack_anim_remaining - dt).max(0.0);
         }
-        // Find nearest player within aggro range.
-        let target = nearest_player(en.k.position, player_positions);
+        // Find or refresh the engaged target.
+        //
+        // Two-phase logic: if we already have a `target_lock`
+        // and the player still exists within `LEASH_RANGE`,
+        // keep chasing them. Otherwise drop the lock and try
+        // to pick up a fresh nearest within the (smaller)
+        // `AGGRO_RANGE`.
+        let target = resolve_target(en, player_positions);
 
         // Per-role steering + attack.
         match en.role {
@@ -293,6 +312,40 @@ pub fn tick_ai(
         }
     }
     outcome
+}
+
+/// Resolve the active target for `en`, honouring the leash:
+/// keep `target_lock` while it's within [`LEASH_RANGE`], else
+/// pick a fresh nearest within [`AGGRO_RANGE`] (and update the
+/// lock). Returns `None` and clears the lock when no eligible
+/// target exists.
+fn resolve_target(
+    en: &mut ServerEnemy,
+    players: &[(Entity, Vec3)],
+) -> Option<(Entity, Vec3, f32)> {
+    // 1. Honour an existing lock as long as that player is
+    //    still around and within leash distance.
+    if let Some(locked) = en.target_lock {
+        if let Some(&(pe, pp)) = players.iter().find(|(e, _)| *e == locked) {
+            let dx = pp.x - en.k.position.x;
+            let dz = pp.z - en.k.position.z;
+            let d2 = dx * dx + dz * dz;
+            if d2 <= LEASH_RANGE * LEASH_RANGE {
+                return Some((pe, pp, d2));
+            }
+        }
+        // Player gone or out of leash — drop the lock and
+        // fall through to the fresh-pickup path.
+        en.target_lock = None;
+    }
+
+    // 2. Fresh aggro: nearest player within the (small)
+    //    `AGGRO_RANGE`.
+    let picked = nearest_player(en.k.position, players);
+    if let Some((pe, _, _)) = picked {
+        en.target_lock = Some(pe);
+    }
+    picked
 }
 
 /// Find the nearest entry in `players` within [`AGGRO_RANGE`] of
@@ -724,6 +777,7 @@ pub fn spawn_for_floor(
                     attack_anim_remaining: 0.0,
                     dying_remaining: 0.0,
                     ai_phase: AiPhase::default(),
+                    target_lock: None,
                 };
                 world.spawn((enemy, super::debuff::DebuffStack::default()));
                 spawned += 1;

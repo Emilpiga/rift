@@ -31,6 +31,18 @@ pub(crate) fn gender_from_i16(g: i16) -> Gender {
     }
 }
 
+/// Coerce a persisted `[i16; 6]` ability loadout to the `u8` wire
+/// shape. Out-of-range entries fall back to the empty-slot
+/// sentinel (`u8::MAX`) so a malformed row leaves the slot
+/// blank instead of accidentally re-binding Steady Shot.
+pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
+    let mut out = [rift_game::loadout::EMPTY_SLOT; 6];
+    for (i, &slot) in loadout.iter().enumerate() {
+        out[i] = u8::try_from(slot).unwrap_or(rift_game::loadout::EMPTY_SLOT);
+    }
+    out
+}
+
 /// Convert an authoritative `rift_game::loot::Item` into the
 /// `ItemBlob` shape that ships over the wire. Centralised so all
 /// the `InventorySync` / `EquipmentSync` builders agree on the

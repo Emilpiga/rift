@@ -261,13 +261,12 @@ impl Sim {
     }
 
     /// Spawn (or look up the existing) player entity for a freshly-
-    /// Helloed client. Returns the allocated `NetId`. `class_id`
-    /// drives the initial [`CharacterStats`] snapshot baked into
-    /// [`ServerPlayer::fresh`].
+    /// Helloed client. Returns the allocated `NetId`. Initial
+    /// [`CharacterStats`] are baked into [`ServerPlayer::fresh`]
+    /// from the hero config.
     pub fn spawn_player(
         &mut self,
         client_id: ClientId,
-        class: rift_game::classes::ClassId,
     ) -> NetId {
         if let Some(&existing) = self.sessions.get(&client_id) {
             if let Ok(p) = self.world.get::<&ServerPlayer>(existing) {
@@ -279,7 +278,7 @@ impl Sim {
         let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
         let entity = self
             .world
-            .spawn((ServerPlayer::fresh(client_id, net_id, spawn, class),));
+            .spawn((ServerPlayer::fresh(client_id, net_id, spawn),));
         self.sessions.insert(client_id, entity);
         log::info!("sim: spawned player {client_id:?} as {net_id:?} at {spawn:?}");
         net_id
@@ -481,6 +480,70 @@ impl Sim {
             p.experience.current_xp,
             p.experience.xp_to_next_level(),
         ))
+    }
+
+    /// Replace the entire ability loadout for `client_id`. Used
+    /// at hydrate time to restore the persisted bar after a
+    /// fresh `Hello`. No-op when the client isn't connected.
+    pub fn set_player_loadout(
+        &mut self,
+        client_id: ClientId,
+        slots: [u8; 6],
+    ) {
+        let Some(&entity) = self.sessions.get(&client_id) else { return };
+        if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) {
+            p.loadout = rift_game::loadout::Loadout::from_slots(slots);
+        }
+    }
+
+    /// Snapshot of the authoritative ability loadout. Used by
+    /// the session handler to push `ServerMsg::Loadout` to the
+    /// owning client at Welcome time and after every accepted
+    /// `SetLoadoutSlot`.
+    pub fn player_loadout_snapshot(
+        &self,
+        client_id: ClientId,
+    ) -> Option<[u8; 6]> {
+        let &entity = self.sessions.get(&client_id)?;
+        let p = self.world.get::<&ServerPlayer>(entity).ok()?;
+        Some(p.loadout.slots)
+    }
+
+    /// Mutate one slot of the player's ability bar. Validates:
+    /// - `slot_index` is in range *and* unlocked at the player's
+    ///   current level (per `loadout::SLOT_UNLOCK_LEVELS`)
+    /// - `ability_id` is either the empty-slot sentinel or a
+    ///   player-castable ability whose own `unlock_level` the
+    ///   player has reached.
+    /// Returns the freshly-updated full loadout (so the caller
+    /// can persist + reply in one go) or `None` if the request
+    /// was rejected.
+    pub fn set_player_loadout_slot(
+        &mut self,
+        client_id: ClientId,
+        slot_index: u8,
+        ability_id: u8,
+    ) -> Option<[u8; 6]> {
+        let slot_idx = slot_index as usize;
+        if slot_idx >= rift_game::loadout::SLOT_COUNT {
+            return None;
+        }
+        let &entity = self.sessions.get(&client_id)?;
+        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let player_level = p.experience.level;
+        if !rift_game::loadout::is_slot_unlocked(slot_idx, player_level) {
+            return None;
+        }
+        // Allow either the empty sentinel (clearing the slot) or
+        // an unlocked player-castable ability.
+        let allow_empty = ability_id == rift_game::loadout::EMPTY_SLOT;
+        let allow_ability = rift_game::loadout::is_player_ability(ability_id)
+            && rift_game::loadout::is_ability_unlocked(ability_id, player_level);
+        if !allow_empty && !allow_ability {
+            return None;
+        }
+        p.loadout.set_slot(slot_idx, ability_id);
+        Some(p.loadout.slots)
     }
 
     /// Move the bag item at `inventory_index` into its canonical
@@ -1190,6 +1253,7 @@ impl Sim {
                 airborne: false,
                 ..Default::default()
             },
+            target_lock: None,
             speed,
             hp_max: hp,
             hp,

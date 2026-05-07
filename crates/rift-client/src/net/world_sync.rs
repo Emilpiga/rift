@@ -474,23 +474,19 @@ impl NetClient {
                 renderer.vfx_system.despawn(trail_id);
             }
             if let Some(visual) = self.projectile_render.remove(&net_id) {
-                let burst = if visual.ability
-                    == rift_game::abilities::id::ENEMY_CASTER_BOLT as u16
-                {
-                    rift_engine::renderer::vfx::presets::caster_bolt_impact()
-                } else {
-                    rift_engine::renderer::vfx::presets::fireball_explosion()
-                };
+                // Stored at spawn, so no per-ability branch here.
+                let burst = rift_engine::combat::effect_for_vfx(visual.impact);
                 renderer.vfx_system.spawn(burst, visual.render_pos);
             }
         }
 
         // Spawn newcomers. Allocate the mesh slot first, then
         // attach a trail emitter at the spawn position so the
-        // first frame already has visible embers. Player
-        // projectiles use the warm fireball mesh + trail; enemy
-        // caster bolts use a smaller violet mesh + arcane trail
-        // so they're instantly distinguishable in combat.
+        // first frame already has visible embers. Mesh / trail /
+        // impact are pulled directly from the ability's
+        // `ShapeVisuals::Projectile` recipe — no per-ability
+        // branches in this file.
+        use rift_game::abilities::ShapeVisuals;
         let to_spawn: Vec<(NetId, Vec3, Vec3, f32, u16)> = self
             .remote
             .iter()
@@ -503,22 +499,24 @@ impl NetClient {
             })
             .collect();
         for (net_id, pos, vel, yaw, ability) in to_spawn {
-            let is_enemy_bolt =
-                ability == rift_game::abilities::id::ENEMY_CASTER_BOLT as u16;
-            let mesh = if is_enemy_bolt {
-                rift_engine::renderer::mesh::Mesh::caster_bolt()
-            } else {
-                rift_engine::renderer::mesh::Mesh::fireball()
+            // Look up the projectile's visual recipe. Skip the
+            // spawn if either the ability is unknown or it
+            // declares a non-projectile shape — defensive
+            // guards, both should always succeed for a
+            // snapshot-borne `EntityKind::Projectile`.
+            let Some(ab) = rift_game::abilities::lookup(ability as u8) else {
+                continue;
             };
-            if renderer.add_mesh(&mesh, Mat4::ZERO).is_ok() {
+            let ShapeVisuals::Projectile { mesh, trail, impact, scale } = ab.visuals.shape else {
+                continue;
+            };
+            let mesh_obj = rift_engine::combat::mesh_for_kind(mesh);
+            if renderer.add_mesh(&mesh_obj, Mat4::ZERO).is_ok() {
                 let idx = renderer.objects.len() - 1;
                 self.projectile_objects.insert(net_id, idx);
-                let trail_effect = if is_enemy_bolt {
-                    rift_engine::renderer::vfx::presets::caster_bolt_trail()
-                } else {
-                    rift_engine::renderer::vfx::presets::fireball_trail()
-                };
-                let trail_id = renderer.vfx_system.spawn(trail_effect, pos);
+                let trail_id = renderer
+                    .vfx_system
+                    .spawn(rift_engine::combat::effect_for_vfx(trail), pos);
                 self.projectile_trails.insert(net_id, trail_id);
                 self.projectile_render.insert(
                     net_id,
@@ -527,7 +525,8 @@ impl NetClient {
                         anchor_pos: pos,
                         anchor_vel: vel,
                         yaw,
-                        ability,
+                        impact,
+                        scale,
                     },
                 );
             }
@@ -563,7 +562,7 @@ impl NetClient {
             visual.render_pos += visual.anchor_vel * dt;
 
             if idx < renderer.objects.len() {
-                let scale = Vec3::splat(0.6);
+                let scale = Vec3::splat(visual.scale);
                 renderer.objects[idx].model_matrix = Mat4::from_translation(visual.render_pos)
                     * Mat4::from_rotation_y(visual.yaw)
                     * Mat4::from_scale(scale);

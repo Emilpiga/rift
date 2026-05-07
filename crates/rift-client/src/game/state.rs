@@ -1,6 +1,5 @@
 use glam::Vec3;
 use rift_game::abilities::{Ability, TargetingMode};
-use rift_game::talents::TalentTree;
 use rift_engine::ecs::components::{Health, LocalPlayer, Player, Transform};
 use rift_engine::ui::CombatTextSystem;
 use rift_engine::renderer::decals::DecalSystem;
@@ -13,7 +12,6 @@ use rift_engine::ecs::systems::{
 use rift_engine::{Input, LoadStatus, Renderer};
 
 use rift_game::character;
-use rift_game::classes;
 use rift_game::monsters;
 use super::character_select;
 use super::character_spawn;
@@ -26,6 +24,7 @@ use super::player_state::PlayerState;
 use super::portal_system::{self, HubPortal};
 use super::rift_state::RiftState;
 use super::stash_system;
+use super::spellbook;
 pub use super::sub_state::*;
 
 /// Top-level game state — the single struct that orchestrates all
@@ -74,25 +73,16 @@ pub struct GameState {
     /// kicks in) and decayed back to 0 over ~0.6 s each frame so
     /// the world fades in cleanly after the regeneration stall.
     transition_fade: f32,
-    /// `true` once we've triggered the player's death animation.
-    player_dying: bool,
     /// Local player's HP last frame, used to detect damage events
-    /// and trigger the hit-react animation. `None` until the first
+    /// (for the hit-react one-shot) and the alive→dead edge that
+    /// triggers the death animation. `None` until the first
     /// frame the local player exists in the world.
     prev_player_hp: Option<f32>,
     /// `Some(text)` if the local player is standing in an
     /// interaction range this frame and the HUD should show a
-    /// press-F prompt. Set during `tick_*_portal`, consumed and
-    /// cleared during the HUD pass.
-    portal_prompt: Option<&'static str>,
-    /// Whether a stash session is currently open client-side.
-    /// Set when the player F-interacts with the chest in the
-    /// hub (which also fires `ClientMsg::OpenStash`); cleared
-    /// when they walk away or press F again. While open, the
-    /// inventory panel forces itself open and bag clicks
-    /// deposit instead of equipping. Mirrors the server's
-    /// per-player `stash_open` flag.
-    pub stash_open: bool,
+    /// press-F prompt. Set during `tick_*_portal` and the stash
+    /// chest tick, consumed and cleared during the HUD pass.
+    hud_prompt: Option<&'static str>,
     /// True while the player is in the safe hub zone.
     in_hub: bool,
     /// Glowing entry portal placed in the hub.
@@ -118,6 +108,11 @@ pub struct GameState {
     app_state: AppState,
     /// Owns the character-select screen UI + preview avatar.
     character_select: character_select::CharacterSelect,
+    /// Spellbook overlay state (open/closed + selected ability).
+    /// Toggled with `B`; mutates the loadout via
+    /// `request_set_loadout_slot` and waits for the server to
+    /// echo the new bar back through `ServerMsg::Loadout`.
+    pub spellbook: spellbook::SpellbookUi,
     /// Shared cache of bound player-skeleton animation sets, keyed by
     /// gender. Populated lazily on first spawn (local or remote).
     pub anim_cache: character_spawn::AnimLibraryCache,
@@ -169,7 +164,7 @@ impl GameState {
         Self {
             world: hecs::World::new(),
             rift: RiftState::new(1),
-            player_state: PlayerState::new(classes::HUNTER),
+            player_state: PlayerState::new(),
             floor_mgr: FloorManager::new(),
             mp_inventory_ui: mp_inventory_ui::MpInventoryUI::new(),
             combat_text: CombatTextSystem::new(),
@@ -182,10 +177,8 @@ impl GameState {
             damage_flash: 0.0,
             level_up_flash: 0.0,
             transition_fade: 0.0,
-            player_dying: false,
             prev_player_hp: None,
-            portal_prompt: None,
-            stash_open: false,
+            hud_prompt: None,
             in_hub: true,
             hub_portal: None,
             exit_portal: None,
@@ -196,6 +189,7 @@ impl GameState {
             app_state: AppState::CharacterSelect,
             character_select: character_select::CharacterSelect::new(),
             anim_cache: character_spawn::AnimLibraryCache::new(),
+            spellbook: spellbook::SpellbookUi::new(),
         }
     }
 
@@ -268,9 +262,8 @@ impl GameState {
     }
 
     fn reset_for_regeneration(&mut self, renderer: &mut Renderer) {
-        self.player_dying = false;
         self.prev_player_hp = None;
-        self.portal_prompt = None;
+        self.hud_prompt = None;
         self.damage_flash = 0.0;
         self.level_up_flash = 0.0;
         self.targeting = None;
@@ -292,69 +285,9 @@ impl GameState {
         // Stash UI must close on transition: the chest only
         // exists in the hub, and a stale "stash open" flag
         // would cause bag clicks to deposit into nothing.
-        self.stash_open = false;
+        self.loot.stash_session = false;
         self.mp_inventory_ui.open = false;
         self.loot.stash_items.clear();
-    }
-
-    /// Spawn the hub entry portal at `pos`. Thin wrapper around
-    /// [`portal_system::spawn_hub`] kept on `GameState` so the
-    /// existing transition paths read fluently.
-    fn spawn_hub_portal(&mut self, renderer: &mut Renderer, pos: Vec3) {
-        portal_system::spawn_hub(&mut self.hub_portal, renderer, pos);
-    }
-
-    /// Per-frame hub-portal tick. Shim for [`portal_system::tick_hub`].
-    fn tick_hub_portal(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
-        portal_system::tick_hub(
-            &mut self.hub_portal,
-            &self.world,
-            renderer,
-            input,
-            &mut self.net,
-            &mut self.portal_prompt,
-            dt,
-        );
-    }
-
-    /// Per-frame exit-portal tick. Shim for [`portal_system::tick_exit`].
-    fn tick_exit_portal(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
-        portal_system::tick_exit(
-            &mut self.exit_portal,
-            &self.world,
-            renderer,
-            input,
-            &mut self.net,
-            &mut self.portal_prompt,
-            self.rift.floor_complete,
-            self.in_hub,
-            self.floor_mgr.boss_room_center,
-            dt,
-        );
-    }
-
-    /// Per-frame stash-chest tick. Shim for [`stash_system::tick`].
-    fn tick_stash_chest(&mut self, input: &Input) {
-        stash_system::tick(
-            &self.world,
-            &self.floor_mgr,
-            input,
-            &mut self.stash_open,
-            &mut self.mp_inventory_ui,
-            &mut self.net,
-            &mut self.loot,
-            &mut self.portal_prompt,
-        );
-    }
-
-    /// Per-frame ground-loot interaction. Shim for [`loot_system::tick`].
-    fn tick_loot_pickup(&mut self, input: &Input) {
-        loot_system::tick(
-            &self.world,
-            &mut self.loot,
-            &mut self.combat_text,
-            input,
-        );
     }
 
     /// Number of occupied bag slots in our local inventory mirror.
@@ -412,7 +345,7 @@ impl GameState {
                 &self.player_state,
                 &mut self.anim_cache,
             ) {
-                Ok(portal_pos) => self.spawn_hub_portal(renderer, portal_pos),
+                Ok(portal_pos) => portal_system::spawn_hub(&mut self.hub_portal, renderer, portal_pos),
                 Err(e) => log::error!("Hub regeneration failed: {}", e),
             }
         } else {
@@ -471,24 +404,56 @@ impl GameState {
 
         // Hub portal: spin the mesh and watch for the local player
         // walking up + pressing F to start a rift run.
-        self.tick_hub_portal(renderer, input, dt);
+        portal_system::tick_hub(
+            &mut self.hub_portal,
+            &self.world,
+            renderer,
+            input,
+            &mut self.net,
+            &mut self.hud_prompt,
+            dt,
+        );
 
         // Exit portal: appears in the boss room after the boss
         // dies; F-press advances to the next rift floor.
-        self.tick_exit_portal(renderer, input, dt);
+        portal_system::tick_exit(
+            &mut self.exit_portal,
+            &self.world,
+            renderer,
+            input,
+            &mut self.net,
+            &mut self.hud_prompt,
+            self.rift.floor_complete,
+            self.in_hub,
+            self.floor_mgr.boss_room_center,
+            dt,
+        );
 
         // Hub stash chest: F-press toggles the stash panel
         // (queues `OpenStash` / `CloseStash` for the server,
         // forces the inventory UI open, and swaps bag-click
         // semantics from equip to deposit).
-        self.tick_stash_chest(input);
+        stash_system::tick(
+            &self.world,
+            &self.floor_mgr,
+            input,
+            &mut self.mp_inventory_ui,
+            &mut self.net,
+            &mut self.loot,
+            &mut self.hud_prompt,
+        );
 
         // Ground loot: hover prompt + F-to-pick.
-        self.tick_loot_pickup(input);
+        loot_system::tick(
+            &self.world,
+            &mut self.loot,
+            &mut self.combat_text,
+            input,
+        );
 
         // ECS systems
         let action_cfg = PlayerActionConfig::default();
-        let accept_input = !self.player_dying;
+        let accept_input = !self.is_player_dead();
         player_action_pre_system(&mut self.world, input, dt, &action_cfg, accept_input);
         player_input_system(&mut self.world, input, dt);
         movement_system(&mut self.world, dt);
@@ -512,18 +477,19 @@ impl GameState {
         let pointer_in_inventory = self.mp_inventory_ui.consumes_mouse(mp.0, mp.1, sw, sh);
 
         // Ability-based combat (sends cast requests to the server).
-        if !self.player_dying && !self.in_hub && !pointer_in_inventory {
+        if !self.is_player_dead() && !self.in_hub && !pointer_in_inventory {
             self.tick_combat(input, renderer, dt);
         }
 
-        // Catch-all death detection. HP is driven by snapshot deltas
-        // applied to the local Health component by the net layer.
-        if !self.player_dying {
-            let dead = self.world.query::<(&Health, &Player, &LocalPlayer)>().iter()
-                .any(|(_, (h, _, _))| h.is_dead());
-            if dead {
-                self.trigger_player_death();
-            }
+        // Catch-all death detection: alive last frame, dead this
+        // frame. HP is driven by snapshot deltas applied to the
+        // local `Health` component by the net layer; the
+        // `prev_player_hp` edge gives us a one-shot trigger that
+        // doesn't need a parallel `dying` flag.
+        let was_alive = self.prev_player_hp.map_or(false, |p| p > 0.001);
+        let is_dead = self.is_player_dead();
+        if was_alive && is_dead {
+            self.trigger_player_death();
         }
 
         // Hit-react: detect a damage event on the local player and
@@ -532,10 +498,12 @@ impl GameState {
         // the client because the local player isn't run through
         // that system. The SpellCast layer's built-in
         // `hit_cooldown` gates retriggering.
-        if !self.player_dying {
+        if !is_dead {
             self.tick_player_hit_react();
         } else {
-            self.prev_player_hp = None;
+            // Keep `prev_player_hp` pinned to the dying value so
+            // the alive→dead edge above stays one-shot.
+            self.prev_player_hp = Some(0.0);
         }
     }
 
@@ -574,7 +542,7 @@ impl GameState {
         // Channel beam visuals (Frost Ray etc.) — driven by reliable
         // `WorldEvent::ChannelTick` events buffered into
         // `self.channel.visuals` by the binary's event loop.
-        self.tick_channel_visuals(renderer, dt);
+        super::ability::tick_channel_visuals(self, renderer, dt);
 
         // Equipment visual sync (other gameplay state, like the held
         // weapon's world position) still happens after skinning.
@@ -587,8 +555,8 @@ impl GameState {
 
         // Skip aim updates while the player is dead — otherwise the
         // death pose's spine twist would keep tracking the cursor.
-        if !self.player_dying {
-            let arm_aim = Self::cursor_aim_dir(input, renderer, player_pos);
+        if !self.is_player_dead() {
+            let arm_aim = super::cursor::aim_dir(input, renderer, player_pos);
             if let Some(player_id) = self.player_id() {
                 if let Ok(mut p) = self.world.get::<&mut rift_engine::ecs::components::Player>(player_id) {
                     p.aim_dir = arm_aim;
@@ -601,6 +569,8 @@ impl GameState {
         // camera out doesn't pull the fog wall in over the
         // character.
         renderer.fog_origin = player_pos;
+        // Push the 8 nearest wall-torch lights for this frame.
+        self.floor_mgr.torches.update_lights(renderer, player_pos);
         renderer.vfx_system.tick(dt);
         self.player_state.abilities.tick_all(dt);
 
@@ -657,7 +627,16 @@ impl GameState {
             self.level_up_flash,
             self.in_hub,
         );
-        hud::render_ability_bar(&mut ui, &self.player_state.abilities);
+        if let Some(slot_idx) = hud::render_ability_bar(
+            &mut ui,
+            &self.player_state.abilities,
+            self.player_state.experience.level,
+        ) {
+            // Click on a HUD bar slot opens the spellbook with
+            // that slot pre-targeted; the next pool click
+            // assigns directly without the two-step picker.
+            self.spellbook.open_for_slot(slot_idx as u8);
+        }
         hud::render_enemy_health_bars(&mut ui, &self.world, view_proj);
         if !self.in_hub {
             hud::render_boss_arrow(&mut ui, &self.world, view_proj);
@@ -676,17 +655,37 @@ impl GameState {
             &self.loot.items,
             &self.loot.equipment,
             &mut self.loot.pending_equip_requests,
-            self.stash_open,
+            self.loot.stash_session,
             &self.loot.stash_items,
             &mut self.loot.pending_stash_requests,
             &self.player_state,
         );
 
+        // Spellbook toggle (B) — open / close the loadout editor.
+        // Suppressed while a stash session is active so B doesn't
+        // double-bind alongside the inventory drag context.
+        if !self.loot.stash_session
+            && ui.input().key_just_pressed(winit::keyboard::KeyCode::KeyB)
+        {
+            self.spellbook.toggle();
+        }
+        if let Some(action) = self.spellbook.frame(
+            &mut ui,
+            &self.player_state.loadout,
+            self.player_state.experience.level,
+        ) {
+            match action {
+                spellbook::SpellbookAction::AssignSlot { slot_index, ability_id } => {
+                    self.net.pending_loadout_changes.push((slot_index, ability_id));
+                }
+            }
+        }
+
         // Portal prompt: rendered above the loot prompt so a player
         // standing inside both prompt radii (which shouldn't happen
         // in practice — portals don't drop loot) sees both lines.
-        if let Some(text) = self.portal_prompt.take() {
-            hud::render_portal_prompt(&mut ui, text);
+        if let Some(text) = self.hud_prompt.take() {
+            hud::render_hud_prompt(&mut ui, text);
         }
         if let Some((net_id, _)) = nearest_loot {
             if let Some(drop) = self.loot.drops.iter().find(|d| d.net_id == net_id) {
@@ -766,13 +765,13 @@ impl GameState {
         profile: character::CharacterProfile,
     ) {
         log::info!(
-            "Entering world as '{}' on account '{}' ({:?} {:?})",
-            profile.name, account_name, profile.gender, profile.class,
+            "Entering world as '{}' on account '{}' ({:?})",
+            profile.name, account_name, profile.gender,
         );
         self.player_state = PlayerState::with_profile(
-            profile.class,
             profile.gender,
             profile.name.clone(),
+            rift_game::loadout::Loadout::default_hero(),
         );
         // Hand the profile + account to the binary so it can
         // advertise them on the wire. In SP this is just dropped.
@@ -812,7 +811,7 @@ impl GameState {
                     &self.player_state,
                     &mut self.anim_cache,
                 ) {
-                    Ok(portal_pos) => self.spawn_hub_portal(renderer, portal_pos),
+                    Ok(portal_pos) => portal_system::spawn_hub(&mut self.hub_portal, renderer, portal_pos),
                     Err(e) => log::error!("Hub generation failed: {}", e),
                 }
                 ("Generating hub…", Some(EnterPhase::AttachOutfits))
@@ -829,250 +828,11 @@ impl GameState {
             }
         };
 
-        draw_world_loading_overlay(renderer, 0.0, label);
+        hud::draw_world_loading_overlay(renderer, 0.0, label);
 
         match next {
             Some(p) => self.app_state = AppState::EnteringWorld(p),
             None => self.app_state = AppState::Playing,
-        }
-    }
-
-    /// Per-frame update for active channel beam visuals.
-    ///
-    /// For each entry in `self.channel.visuals` we lazily allocate a
-    /// stretched beam mesh on the renderer the first time we see it,
-    /// then on subsequent frames we update its model matrix so the
-    /// beam tracks the caster's hand and aim direction. Walls clip
-    /// the beam length via a raycast against `self.wall_aabbs`.
-    /// Idle entries (no tick for ~0.4 s) and entries flagged
-    /// `ending` get their model matrix zeroed and are dropped.
-    fn tick_channel_visuals(&mut self, renderer: &mut Renderer, dt: f32) {
-        use rift_engine::physics::{self, Ray};
-
-        // Visuals (frost-ray colour). Other channel kinds can branch
-        // here later; for now Whirlwind doesn't need a beam.
-        const FROST_RAY_WIRE_ID: u8 = 6;
-        const BEAM_HAND_OFFSET: f32 = 1.25; // chest fallback when no hand joint
-        const IDLE_TIMEOUT: f32 = 0.4;
-        const IMPACT_INTERVAL: f32 = 0.10; // 10 Hz cold-burst cadence
-
-        // Pull the local player's live transform + aim, and the
-        // *world-space* position of its right-hand joint if the
-        // skinning pass has produced one this frame. Beam visuals
-        // for our own channel anchor at the hand for accuracy
-        // (server tick rate of ~5 Hz would otherwise look choppy
-        // *and* off-anatomy).
-        use rift_engine::ecs::components::Skinned;
-        let local_live: Option<(Vec3, Vec3, Option<Vec3>)> = self
-            .world
-            .query::<(&Transform, &Player, &LocalPlayer, Option<&Skinned>)>()
-            .iter()
-            .map(|(_, (t, p, _, s))| {
-                let hand = s.and_then(|s| {
-                    if p.hand_joint == u32::MAX { return None; }
-                    let idx = p.hand_joint as usize;
-                    s.joint_worlds.get(idx).map(|m| {
-                        let local = m.col(3).truncate();
-                        // joint_worlds are mesh-local; lift into
-                        // world via the entity transform.
-                        t.matrix().transform_point3(local)
-                    })
-                });
-                (t.position, p.aim_dir, hand)
-            })
-            .next();
-        let local_active_ability = self.channel.active.map(|c| c.ability_id);
-
-        // Snapshot enemy positions for client-side beam-corridor
-        // hit detection (so we can spawn impact particles on every
-        // pierced target). Mirrors the server-side logic in
-        // `sim::channel::collect_hits` for `ChannelEffect::Beam`.
-        use rift_engine::ecs::components::Enemy;
-        let enemy_positions: Vec<Vec3> = self
-            .world
-            .query::<(&Transform, &Enemy)>()
-            .iter()
-            .map(|(_, (t, _))| t.position)
-            .collect();
-
-        // Drain a temporary list of indices to drop after the loop so
-        // we can mutate `channel_visuals` while still holding `&mut
-        // renderer`.
-        let mut drop_indices: Vec<usize> = Vec::new();
-
-        for (i, vis) in self.channel.visuals.iter_mut().enumerate() {
-            let (beam_range, beam_corridor_width, pierce_targets) =
-                match rift_game::abilities::lookup(vis.ability_id).map(|d| d.kind) {
-                    Some(rift_game::abilities::AbilityKind::Channel {
-                        effect: rift_game::abilities::ChannelEffect::Beam {
-                            range, width, pierce_targets, ..
-                        },
-                        ..
-                    }) => (range, width, pierce_targets),
-                    _ => (0.0, 0.0, 0),
-                };
-
-            // Hide-and-drop path: ending flag set by `clear_channel_visual`
-            // or idle timeout exceeded.
-            vis.idle += dt;
-            let expired = vis.ending || vis.idle > IDLE_TIMEOUT;
-
-            // Resolve the caster: prefer matching to a known
-            // remote-player avatar by net id; if no remote matches
-            // (and we're channeling locally) treat the visual as
-            // belonging to us. This keeps remote and local beams
-            // visually consistent even if both happen at once.
-            use rift_engine::ecs::components::{RemotePlayer, Skinned};
-            let remote_data = self
-                .world
-                .query::<(&Transform, &Player, &RemotePlayer, Option<&Skinned>)>()
-                .iter()
-                .find(|(_, (_, _, rp, _))| rp.net_id == vis.caster.0)
-                .map(|(_, (t, p, _, s))| {
-                    let hand = s.and_then(|s| {
-                        if p.hand_joint == u32::MAX { return None; }
-                        let idx = p.hand_joint as usize;
-                        s.joint_worlds.get(idx).map(|m| {
-                            let local = m.col(3).truncate();
-                            t.matrix().transform_point3(local)
-                        })
-                    });
-                    (t.position, p.aim_dir, hand)
-                });
-            let is_local = remote_data.is_none()
-                && local_active_ability == Some(vis.ability_id);
-            let mut hand_override: Option<Vec3> = None;
-            if let Some((pos, aim, hand)) = remote_data {
-                // Remote caster: anchor the beam to their hand
-                // joint and pull pos/aim from the live (interpolated)
-                // transform instead of the stale `ChannelTick`
-                // payload, so the beam doesn't visibly trail the
-                // body while they move.
-                vis.position = pos;
-                if aim.length_squared() > 1e-6 {
-                    vis.aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or_zero();
-                }
-                hand_override = hand;
-            } else if is_local {
-                if let Some((pos, aim, hand)) = local_live {
-                    vis.position = pos;
-                    if aim.length_squared() > 1e-6 {
-                        vis.aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or_zero();
-                    }
-                    hand_override = hand;
-                    // Heartbeat the idle timer so we don't fade out
-                    // between server ticks.
-                    vis.idle = 0.0;
-                }
-            }
-            let _ = is_local;
-
-            // Skip non-beam channels (Whirlwind etc.); just let them
-            // age out without spawning a mesh.
-            if beam_range <= 0.0 || vis.ability_id != FROST_RAY_WIRE_ID {
-                if expired {
-                    drop_indices.push(i);
-                }
-                continue;
-            }
-
-            // Compute beam endpoints first — we need them whether
-            // we're spawning a fresh effect, updating an existing
-            // one, or zeroing one out for despawn.
-            let origin = hand_override
-                .unwrap_or_else(|| vis.position + Vec3::Y * BEAM_HAND_OFFSET);
-            let dir = if vis.aim.length_squared() > 1e-6 {
-                vis.aim.normalize()
-            } else {
-                Vec3::Z
-            };
-            let ray = Ray { origin, direction: dir };
-            let length = match physics::raycast(&ray, beam_range, &self.wall_aabbs) {
-                Some(hit) => hit.distance.max(0.05),
-                None => beam_range,
-            };
-            let tip = origin + dir * length;
-
-            if expired {
-                if let Some(id) = vis.vfx_id.take() {
-                    renderer.vfx_system.despawn(id);
-                }
-                drop_indices.push(i);
-                continue;
-            }
-
-            // Lazy spawn the declarative VFX effect on first
-            // frame; subsequent frames just push fresh endpoints.
-            // The ribbon spec encodes everything that used to be
-            // a hand-rolled cylinder mesh + per-frame spark
-            // emitter in the legacy path.
-            if vis.vfx_id.is_none() {
-                let id = renderer
-                    .vfx_system
-                    .spawn(rift_engine::renderer::vfx::presets::frost_ray(), origin);
-                vis.vfx_id = Some(id);
-            }
-            if let Some(id) = vis.vfx_id {
-                renderer.vfx_system.set_endpoints(id, origin, tip);
-                // Anchor drives the per-frame spawn position of the
-                // hand-base swirl layer; gameplay owns the hand
-                // joint, so we push it every frame.
-                renderer.vfx_system.set_anchor(id, origin);
-            }
-
-            // ---- Impact bursts at every pierced enemy + the
-            // terminal point. Cadence-gated so we don't spew
-            // hundreds of particles per second.
-            vis.impact_acc += dt;
-            if vis.impact_acc >= IMPACT_INTERVAL {
-                vis.impact_acc = 0.0;
-
-                // Replicate the server's beam-corridor hit math so
-                // visuals match what's actually being damaged.
-                // Right vector in XZ plane (rotate aim 90°).
-                let right = Vec3::new(dir.z, 0.0, -dir.x);
-                let mut hits: Vec<(f32, Vec3)> = Vec::new();
-                for ep in &enemy_positions {
-                    let to = Vec3::new(ep.x - origin.x, 0.0, ep.z - origin.z);
-                    let along = to.dot(dir);
-                    if along < 0.0 || along > length {
-                        continue;
-                    }
-                    if to.dot(right).abs() > beam_corridor_width {
-                        continue;
-                    }
-                    hits.push((along, *ep));
-                }
-                hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                let cap = (pierce_targets as usize).saturating_add(1);
-                hits.truncate(cap);
-
-                for (_along, pos) in &hits {
-                    // Centre on the enemy's torso, not their feet.
-                    let burst_pos = *pos + Vec3::Y * 0.9;
-                    renderer.vfx_system.spawn(
-                        rift_engine::renderer::vfx::presets::frost_impact(),
-                        burst_pos,
-                    );
-                }
-
-                // Terminal-point burst: when the beam clipped a wall
-                // (length < beam_range) or pierced through everything
-                // and reached max range, sparkle at the tip.
-                let clipped = length + 0.01 < beam_range;
-                if clipped || hits.len() < cap {
-                    renderer.vfx_system.spawn(
-                        rift_engine::renderer::vfx::presets::frost_impact(),
-                        tip,
-                    );
-                }
-            }
-        }
-
-        // Remove expired entries (back-to-front so earlier indices
-        // stay valid).
-        for &i in drop_indices.iter().rev() {
-            self.channel.visuals.swap_remove(i);
         }
     }
 
@@ -1091,11 +851,11 @@ impl GameState {
             return;
         };
 
-        let aim_dir = Self::cursor_aim_dir(input, renderer, player_pos);
+        let aim_dir = super::cursor::aim_dir(input, renderer, player_pos);
 
         // ─── Placed ability targeting mode ─────────────────────────────────
         if self.targeting.is_some() {
-            if let Some(cursor_pos) = Self::cursor_world_pos(input, renderer, 0.0) {
+            if let Some(cursor_pos) = super::cursor::world_pos(input, renderer, 0.0) {
                 let targeting = self.targeting.as_ref().unwrap();
                 let radius = targeting.radius;
                 if let Some(obj_idx) = targeting.indicator_obj {
@@ -1109,7 +869,7 @@ impl GameState {
 
             // Left-click: confirm placement → forward to server.
             if input.left_clicked() {
-                if let Some(cursor_pos) = Self::cursor_world_pos(input, renderer, 0.0) {
+                if let Some(cursor_pos) = super::cursor::world_pos(input, renderer, 0.0) {
                     let targeting = self.targeting.take().unwrap();
                     if let Some(obj_idx) = targeting.indicator_obj {
                         if obj_idx < renderer.objects.len() {
@@ -1213,7 +973,7 @@ impl GameState {
                 // Placed ability → enter targeting mode locally.
                 if let TargetingMode::Placed { radius } = ability_clone.targeting {
                     let indicator_mesh = rift_engine::Mesh::targeting_circle([0.2, 0.5, 1.0]);
-                    let initial_pos = Self::cursor_world_pos(input, renderer, 0.0)
+                    let initial_pos = super::cursor::world_pos(input, renderer, 0.0)
                         .unwrap_or(player_pos);
                     let initial_mat = Mat4::from_translation(initial_pos)
                         * Mat4::from_scale(Vec3::splat(radius));
@@ -1254,7 +1014,7 @@ impl GameState {
                     Some(rift_game::abilities::AbilityKind::Channel { .. })
                 );
                 let placed_target = if let TargetingMode::Placed { .. } = ability_clone.targeting {
-                    Self::cursor_world_pos(input, renderer, 0.0)
+                    super::cursor::world_pos(input, renderer, 0.0)
                 } else {
                     None
                 };
@@ -1299,20 +1059,29 @@ impl GameState {
                 });
                 let _ = is_channel;
 
-                // If this is a channel ability, latch the local
-                // active-channel state so subsequent frames can
-                // detect button release and movement.
+                // Hold-to-channel latch. Only infinite-duration
+                // channels (Frost Ray) need client-side hold/
+                // release tracking — finite-duration channels
+                // (Fire Wave, Whirlwind) run on the server's own
+                // clock and would otherwise be cancelled by the
+                // very next frame's "key not held" check, which
+                // strips the ServerChannel before its first tick
+                // interval has elapsed and no enemies are ever
+                // hit.
                 if let Some(def) = rift_game::abilities::lookup(ability_clone.wire_id) {
                     if let rift_game::abilities::AbilityKind::Channel { duration, cancel_on_move, .. } = def.kind {
-                        self.channel.active = Some(ActiveChannel {
-                            ability_id: ability_clone.wire_id,
-                            slot_index: i,
-                            cancel_on_move,
-                            // Add a small grace period so a release
-                            // event slightly after the server's
-                            // expiry doesn't fire a stale EndChannel.
-                            remaining: duration + 0.25,
-                        });
+                        if duration.is_infinite() {
+                            self.channel.active = Some(ActiveChannel {
+                                ability_id: ability_clone.wire_id,
+                                slot_index: i,
+                                cancel_on_move,
+                                // Grace period: server's
+                                // ChannelEnd may arrive a frame
+                                // late; this prevents a stale
+                                // release from firing.
+                                remaining: duration + 0.25,
+                            });
+                        }
                     }
                 }
 
@@ -1320,7 +1089,7 @@ impl GameState {
                 // damage / projectile spawn — we just play the cast
                 // animation + any client-side particles immediately
                 // so the input feels responsive.
-                trigger_local_cast(&ability_clone, aim_dir, player_pos, &mut self.world, renderer, &self.player_state.talents);
+                super::ability::trigger_local_cast(&ability_clone, aim_dir, player_pos, &mut self.world, renderer, &self.player_state.talents);
             }
         }
     }
@@ -1331,6 +1100,14 @@ impl GameState {
             .iter()
             .map(|(e, _)| e)
             .next()
+    }
+
+    /// `true` while the local player's `Health` is at zero.
+    /// Derived state — replaces a former `player_dying` field
+    /// that was a parallel mirror of the same condition.
+    fn is_player_dead(&self) -> bool {
+        let Some(pid) = self.player_id() else { return false };
+        self.world.get::<&Health>(pid).map(|h| h.is_dead()).unwrap_or(false)
     }
 
     /// Detect HP drops on the local player since last frame and play
@@ -1386,7 +1163,6 @@ impl GameState {
             AnimationSet, Player, PlayerAction, SpellCast, Velocity,
         };
 
-        self.player_dying = true;
         self.damage_flash = (self.damage_flash + 0.45).min(0.85);
         log::info!("Player death triggered (rift floor {}).", self.rift.floor);
 
@@ -1424,381 +1200,17 @@ impl GameState {
             p.airborne = false;
         }
     }
-
-    /// Compute the world position where the cursor ray hits a ground plane at the given Y.
-    fn cursor_world_pos(input: &Input, renderer: &Renderer, ground_y: f32) -> Option<Vec3> {
-        let (mx, my) = input.mouse_pos();
-        let [w, h] = renderer.window_extent();
-        if w == 0 || h == 0 {
-            return None;
-        }
-
-        let ndc_x = (mx / w as f32) * 2.0 - 1.0;
-        let ndc_y = (my / h as f32) * 2.0 - 1.0;
-
-        let inv_vp = (renderer.camera.projection_matrix() * renderer.camera.view_matrix()).inverse();
-        let near_point = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, 0.0));
-        let far_point = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, 1.0));
-        let ray_dir = (far_point - near_point).normalize();
-
-        if ray_dir.y.abs() < 1e-6 {
-            return None;
-        }
-        let t = (ground_y - near_point.y) / ray_dir.y;
-        Some(near_point + ray_dir * t)
-    }
-
-    /// Compute a horizontal aim direction from the cursor position to the ground plane.
-    fn cursor_aim_dir(input: &Input, renderer: &Renderer, player_pos: Vec3) -> Vec3 {
-        if let Some(hit) = Self::cursor_world_pos(input, renderer, player_pos.y) {
-            let delta = hit - player_pos;
-            let flat = Vec3::new(delta.x, 0.0, delta.z);
-            if flat.length_squared() > 0.01 {
-                return flat.normalize();
-            }
-        }
-        Vec3::NEG_Z
-    }
 }
 
-/// Local cast feedback. The server still owns damage / projectile
-/// spawn — this just plays the cast animation + any client-side
-/// particles immediately so the input feels responsive.
-///
-/// Strategy:
-/// - Projectile abilities (`SpawnProjectiles`) trigger the upper-body
-///   `SpellCast` FSM on the player's skeleton via `cast.begin`.
-///   Handled by `cast_advance_system`.
-/// - AoE / movement abilities (`SpawnAoeZone`, `SetPlayerAction`)
-///   route through `execute_ability_instant`, which spawns the
-///   client-side particles and (for movement abilities) sets
-///   `Player.action` + cross-fades the matching one-shot clip.
-fn trigger_local_cast(
-    ability: &Ability,
-    aim_dir: Vec3,
-    origin: Vec3,
-    world: &mut hecs::World,
-    renderer: &mut Renderer,
-    talents: &TalentTree,
-) {
-    use rift_engine::ecs::components::{LocalPlayer, SpellCast};
+// Ability / channel / remote-death event handlers live in
+// [`super::ability`]. They are re-exported below for callers that
+// historically reached them through `game::state::*`.
+pub use super::ability::{
+    on_channel_end, on_channel_tick, on_remote_ability_cast, on_remote_death,
+};
 
-    let has_projectile = ability
-        .effects
-        .iter()
-        .any(|e| matches!(e, rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }));
-    // Channeled abilities have empty `effects` (the server drives
-    // the actual ticks) but still want the cast pose. Detect by
-    // looking at the wire-side `AbilityKind`.
-    let is_channeled = matches!(
-        rift_game::abilities::lookup(ability.wire_id).map(|d| d.kind),
-        Some(rift_game::abilities::AbilityKind::Channel { .. })
-    );
-
-    if has_projectile || is_channeled {
-        let pid = world
-            .query::<(&Player, &LocalPlayer)>()
-            .iter()
-            .map(|(e, _)| e)
-            .next();
-        if let Some(pid) = pid {
-            if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
-                if is_channeled {
-                    cast.begin_channel(ability.clone(), aim_dir);
-                } else {
-                    cast.begin(ability.clone(), aim_dir, 0.0);
-                }
-            }
-        }
-    } else {
-        rift_engine::combat::execute_ability_instant(
-            ability,
-            origin,
-            aim_dir,
-            0.0,
-            Some(talents),
-            world,
-            renderer,
-        );
-    }
-}
-
-/// Spawn the AoE-zone particle visual for an ability on the local
-/// renderer. Driven from the server's `WorldEvent::AbilityCast` so
-/// every observer (including the caster) sees the same effect at
-/// the same authoritative position; the local placement path
-/// otherwise returns out of `tick_combat` without spawning a
-/// particle emitter, leaving the caster with no visual feedback.
-///
-/// No-op for abilities without a `SpawnAoeZone` effect, or when the
-/// effect's `visual` is `None`.
-pub fn spawn_ability_aoe_visual(
-    renderer: &mut Renderer,
-    ability: &Ability,
-    origin: Vec3,
-    aim_dir: Vec3,
-    target: Option<Vec3>,
-) {
-    use rift_engine::combat::effect_for_preset;
-    for effect in ability.effects {
-        if let rift_game::abilities::AbilityEffect::SpawnAoeZone {
-            visual,
-            visual_y,
-            ..
-        } = effect
-        {
-            let Some(preset) = visual else { continue };
-            // Match `AbilityCtx::placed_position`: use `target` if
-            // the cast was placed (e.g. Rain of Fire), otherwise
-            // fall back to a forward offset along aim from the
-            // caster origin.
-            let pos = target.unwrap_or(origin + aim_dir * 5.0)
-                + Vec3::new(0.0, *visual_y, 0.0);
-            renderer
-                .vfx_system
-                .spawn(effect_for_preset(*preset), pos);
-        }
-    }
-}
-
-/// Trigger the upper-body spell-cast layer on a *remote* avatar.
-/// Used by the binary when a `WorldEvent::AbilityCast` arrives for a
-/// caster that isn't us. Only projectile abilities are visualised
-/// here today — server already drives the rest through snapshots.
-pub fn trigger_remote_cast(
-    world: &mut hecs::World,
-    entity: hecs::Entity,
-    ability: &Ability,
-    aim_dir: Vec3,
-) {
-    use rift_engine::ecs::components::SpellCast;
-
-    let has_projectile = ability
-        .effects
-        .iter()
-        .any(|e| matches!(e, rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }));
-    let is_channeled = matches!(
-        rift_game::abilities::lookup(ability.wire_id).map(|d| d.kind),
-        Some(rift_game::abilities::AbilityKind::Channel { .. })
-    );
-    if !has_projectile && !is_channeled {
-        return;
-    }
-    if let Ok(mut cast) = world.get::<&mut SpellCast>(entity) {
-        if is_channeled {
-            cast.begin_channel(ability.clone(), aim_dir);
-        } else {
-            cast.begin(ability.clone(), aim_dir, 0.0);
-        }
-    }
-}
-
-/// Update or create a per-channel visual entry from a server
-/// `ChannelTick`. Called by the binary when reliable events arrive.
-/// The actual mesh is allocated lazily inside `GameState::update`,
-/// where we have access to the renderer.
-pub fn push_channel_visual(
-    state: &mut GameState,
-    caster: rift_net::NetId,
-    ability_id: u8,
-    position: Vec3,
-    aim: Vec3,
-) {
-    if let Some(entry) = state
-        .channel.visuals
-        .iter_mut()
-        .find(|v| v.caster == caster && v.ability_id == ability_id)
-    {
-        entry.position = position;
-        entry.aim = aim;
-        entry.idle = 0.0;
-        return;
-    }
-    state.channel.visuals.push(ChannelVisual {
-        caster,
-        ability_id,
-        position,
-        aim,
-        idle: 0.0,
-        obj_idx: None,
-        vfx_id: None,
-        ending: false,
-        impact_acc: 0.0,
-    });
-}
-
-/// Hide and forget the visual for a channel that just ended.
-/// Zeroing the model matrix removes it from the scene; the renderer
-/// slot is recycled implicitly the next time we add a beam.
-pub fn clear_channel_visual(
-    state: &mut GameState,
-    caster: rift_net::NetId,
-    ability_id: u8,
-) {
-    if let Some(entry) = state
-        .channel.visuals
-        .iter_mut()
-        .find(|v| v.caster == caster && v.ability_id == ability_id)
-    {
-        // Defer the actual hide-and-drop to `update`, which has
-        // access to the renderer to zero the mesh's model matrix.
-        entry.ending = true;
-    }
-}
-
-/// Play the death animation on a remote avatar. Mirrors the
-/// local `trigger_player_death` path: cancel any in-flight
-/// upper-body cast, zero velocity, clear `Player.action`, and
-/// cross-fade the body animator to the first matching death
-/// clip on the rig. Idempotent — calling it again on an avatar
-/// that's already in its death pose is a no-op cross-fade.
-pub fn trigger_remote_death(world: &mut hecs::World, entity: hecs::Entity) {
-    use rift_engine::animation::Animator;
-    use rift_engine::ecs::components::{
-        AnimationSet, Health, Player, PlayerAction, SpellCast, Velocity,
-    };
-
-    let candidates: &[&str] = &["Death01", "Death_01", "Death", "Death02", "Death_02"];
-    let clip = match world.get::<&AnimationSet>(entity) {
-        Ok(set) => set.find_any(candidates),
-        Err(_) => None,
-    };
-    let Some(clip) = clip else {
-        log::warn!("Death animation not found in remote player's clip set");
-        return;
-    };
-
-    // Match `trigger_player_death`'s SpellCast reset: not just
-    // `cancel()` (which moves to Exiting and lets the layer fade
-    // out over time), but a hard zero so the upper-body cast pose
-    // can't bleed into the death cross-fade.
-    if let Ok(mut cast) = world.get::<&mut SpellCast>(entity) {
-        cast.phase = rift_engine::ecs::components::SpellPhase::Idle;
-        cast.layer_animator = None;
-        cast.weight = 0.0;
-        cast.pending_oneshot = None;
-        cast.oneshot_is_hit = false;
-    }
-    if let Ok(mut anim) = world.get::<&mut Animator>(entity) {
-        anim.cross_fade(clip, false, 0.18);
-        anim.speed = 1.0;
-    }
-    if let Ok(mut vel) = world.get::<&mut Velocity>(entity) {
-        vel.linear = Vec3::ZERO;
-    }
-    if let Ok(mut p) = world.get::<&mut Player>(entity) {
-        p.action = PlayerAction::None;
-        p.action_timer = 0.0;
-        p.vy = 0.0;
-        p.airborne = false;
-    }
-    // Belt-and-braces: stamp Health to zero so `locomotion_anim_system`'s
-    // `is_dead()` gate is true on the very next frame, even if the
-    // snapshot mirror in `sync_avatars` lags by a tick. Otherwise
-    // locomotion can briefly cross-fade Idle/Walk over the death
-    // pose before the next snapshot arrives.
-    if let Ok(mut h) = world.get::<&mut Health>(entity) {
-        h.current = 0.0;
-    }
-    log::info!("Remote player death animation triggered.");
-}
-
-/// Spawn the loot-pillar visual at `position` for a freshly-dropped
-/// item. Idempotent on `loot_id` so receiving both the
-/// `WorldEvent::LootDropped` and the next snapshot's
-/// `EntityKind::Loot` row doesn't double-spawn the emitter.
-pub fn spawn_loot_drop_visual(
-    state: &mut GameState,
-    renderer: &mut rift_engine::renderer::Renderer,
-    loot_id: rift_net::NetId,
-    position: Vec3,
-    blob: rift_net::messages::ItemBlob,
-) {
-    if state.loot.drops.iter().any(|d| d.net_id == loot_id) {
-        return;
-    }
-    // Rehydrate the wire blob into a full Item. Mismatched indices
-    // (e.g. server running a newer build) → drop the visual.
-    let Some(item) = rift_game::loot::Item::from_wire(
-        blob.base_id,
-        blob.rarity,
-        blob.ilvl,
-        &blob.affixes,
-    ) else {
-        log::warn!(
-            "loot drop {loot_id:?} has unknown indices base={} affixes={:?}; skipping visual",
-            blob.base_id,
-            blob.affixes
-        );
-        return;
-    };
-
-    let color = item.rarity.color();
-    let pillar = renderer
-        .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::loot_beam(color), position);
-    let base = renderer
-        .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::loot_beam_base(color), position);
-    log::info!(
-        "loot dropped: {} (item-level {}) at {:?}",
-        item.display_name(),
-        item.ilvl,
-        position
-    );
-    state.loot.drops.push(LootDropVisual {
-        net_id: loot_id,
-        position,
-        item,
-        pillar_emitter: pillar,
-        base_emitter: base,
-    });
-}
-
-fn draw_world_loading_overlay(renderer: &mut Renderer, progress: f32, label: &str) {
-    let (sw, sh) = renderer.screen_size();
-    let batch = &mut renderer.overlay_batch;
-
-    batch.rect_px(0.0, 0.0, sw, sh, [0.02, 0.02, 0.03, 0.92], sw, sh);
-
-    let title = "Entering World";
-    let title_size = 30.0;
-    let title_w = batch.measure_text(title, title_size);
-    batch.text(
-        title,
-        (sw - title_w) * 0.5,
-        sh * 0.40 - title_size,
-        title_size,
-        [0.85, 0.80, 0.65, 1.0],
-        sw,
-        sh,
-    );
-
-    let bar_w = (sw * 0.45).max(240.0);
-    let bar_h = 18.0;
-    let bar_x = (sw - bar_w) * 0.5;
-    let bar_y = sh * 0.50;
-    batch.rect_px(bar_x, bar_y, bar_w, bar_h, [0.10, 0.10, 0.14, 1.0], sw, sh);
-    let fill_w = bar_w * progress.clamp(0.0, 1.0);
-    if fill_w > 0.5 {
-        batch.rect_px(bar_x, bar_y, fill_w, bar_h, [0.55, 0.45, 0.20, 1.0], sw, sh);
-    }
-    let border = [0.30, 0.28, 0.22, 1.0];
-    let t = 1.5;
-    batch.rect_px(bar_x, bar_y, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y + bar_h - t, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y, t, bar_h, border, sw, sh);
-    batch.rect_px(bar_x + bar_w - t, bar_y, t, bar_h, border, sw, sh);
-
-    let label_size = 14.0;
-    let label_w = batch.measure_text(label, label_size);
-    batch.text(
-        label,
-        (sw - label_w) * 0.5,
-        bar_y + bar_h + 16.0,
-        label_size,
-        [0.65, 0.62, 0.55, 1.0],
-        sw,
-        sh,
-    );
-}
+// `WorldEvent::LootDropped` handler lives in [`super::loot_system`]
+// next to the rest of the loot pickup / inventory plumbing. Callers
+// thread `state.loot` explicitly rather than reaching back through
+// `GameState`.
+pub use super::loot_system::on_loot_dropped;

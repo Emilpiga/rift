@@ -36,6 +36,10 @@ pub struct CharacterRecord {
     pub gender: i16,
     pub level: i32,
     pub xp: i32,
+    /// Six ability wire ids (see `rift_game::abilities::id`). Stored
+    /// as `SMALLINT[]` so the column shape is independent of the
+    /// (currently 6) bar slot count.
+    pub loadout: [i16; 6],
 }
 
 /// One persisted inventory row. Keys items by *stable* string ids
@@ -487,16 +491,21 @@ async fn load_or_create(
     }
 
     let character_id = Uuid::new_v4();
+    // Empty bar except for Steady Shot in slot 0. Mirrors
+    // `rift_game::loadout::Loadout::default_hero()`. The 255
+    // entries are the EMPTY_SLOT sentinel.
+    let default_loadout: [i16; 6] = [0, 255, 255, 255, 255, 255];
     sqlx::query(
         "INSERT INTO characters \
-         (id, account_id, name, class_id, gender, level, xp) \
-         VALUES ($1, $2, $3, $4, $5, 1, 0)",
+         (id, account_id, name, class_id, gender, level, xp, loadout) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0, $6)",
     )
     .bind(character_id)
     .bind(account_id)
     .bind(character_name)
     .bind(class_id)
     .bind(gender)
+    .bind(&default_loadout[..])
     .execute(&mut *tx)
     .await?;
 
@@ -510,6 +519,7 @@ async fn load_or_create(
         gender,
         level: 1,
         xp: 0,
+        loadout: default_loadout,
     })
 }
 
@@ -538,8 +548,8 @@ async fn list_account_characters(
             id
         }
     };
-    let rows: Vec<(Uuid, String, String, i16, i32, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp \
+    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout \
          FROM characters WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(account_id)
@@ -548,7 +558,7 @@ async fn list_account_characters(
     tx.commit().await?;
     let characters = rows
         .into_iter()
-        .map(|(id, name, class_id, gender, level, xp)| CharacterRecord {
+        .map(|(id, name, class_id, gender, level, xp, loadout)| CharacterRecord {
             id,
             account_id,
             name,
@@ -556,6 +566,7 @@ async fn list_account_characters(
             gender,
             level,
             xp,
+            loadout: loadout_from_vec(loadout),
         })
         .collect();
     Ok((account_id, characters))
@@ -566,15 +577,15 @@ async fn fetch_by_account_and_name(
     account_id: Uuid,
     name: &str,
 ) -> Result<Option<CharacterRecord>, PersistenceError> {
-    let row: Option<(Uuid, String, String, i16, i32, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp \
+    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout \
          FROM characters WHERE account_id = $1 AND name = $2",
     )
     .bind(account_id)
     .bind(name)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(row.map(|(id, name, class_id, gender, level, xp)| CharacterRecord {
+    Ok(row.map(|(id, name, class_id, gender, level, xp, loadout)| CharacterRecord {
         id,
         account_id,
         name,
@@ -582,13 +593,15 @@ async fn fetch_by_account_and_name(
         gender,
         level,
         xp,
+        loadout: loadout_from_vec(loadout),
     }))
 }
 
 async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE characters SET \
-            class_id = $2, gender = $3, level = $4, xp = $5, updated_at = now() \
+            class_id = $2, gender = $3, level = $4, xp = $5, \
+            loadout = $6, updated_at = now() \
          WHERE id = $1",
     )
     .bind(rec.id)
@@ -596,9 +609,26 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     .bind(rec.gender)
     .bind(rec.level)
     .bind(rec.xp)
+    .bind(&rec.loadout[..])
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Convert a postgres `SMALLINT[]` row read into a fixed-size
+/// `[i16; 6]`. Pads with the default loadout if the column came
+/// back short or oversized so a manually-edited DB row can't
+/// crash the worker.
+fn loadout_from_vec(v: Vec<i16>) -> [i16; 6] {
+    // Mirrors `Loadout::default_hero()` — Steady Shot in slot 0,
+    // every other slot empty. Used as a fallback so a
+    // manually-edited DB row can't crash the worker.
+    let default: [i16; 6] = [0, 255, 255, 255, 255, 255];
+    let mut out = default;
+    for (i, slot) in v.into_iter().take(6).enumerate() {
+        out[i] = slot;
+    }
+    out
 }
 
 /// Read every `inventory_items` row belonging to `character_id`,

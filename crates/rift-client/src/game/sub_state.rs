@@ -64,6 +64,12 @@ pub struct NetState {
     /// queued events are forwarded in order so a quick
     /// open-then-close double-tap survives.
     pub stash_session_requests: Vec<bool>,
+    /// Loadout-slot mutations the binary forwards to the server
+    /// as `ClientMsg::SetLoadoutSlot`. Each tuple is
+    /// `(slot_index, ability_id)`. The server replies with
+    /// `ServerMsg::Loadout`, so we never mutate the local
+    /// loadout optimistically.
+    pub pending_loadout_changes: Vec<(u8, u8)>,
 }
 
 /// Multiplayer-only: a request for the binary to forward to the server.
@@ -184,6 +190,14 @@ pub struct LootClientState {
     /// Stash transfer requests (deposit / withdraw) the binary
     /// forwards to the server. Drained per frame.
     pub pending_stash_requests: Vec<StashRequest>,
+    /// Local mirror of the server-side per-player `stash_open`
+    /// flag. Toggled by [`super::stash_system::tick`] when the
+    /// player presses F near the hub chest, mirrored to the
+    /// server via `NetState::stash_session_requests`. Gates
+    /// stash bag-click semantics (deposit vs equip) and forces
+    /// the inventory panel open in the UI layer; panel
+    /// visibility itself stays in [`super::mp_inventory_ui`].
+    pub stash_session: bool,
 }
 
 /// Outgoing stash transfer request shape, queued by the

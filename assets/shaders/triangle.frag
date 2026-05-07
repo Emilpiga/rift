@@ -43,22 +43,24 @@ void main() {
     if (diffRaw < 0.30) {
         diff = mix(0.30, 0.62, smoothstep(0.25, 0.30, diffRaw));
     } else if (diffRaw < 0.65) {
-        diff = mix(0.62, 0.85, smoothstep(0.60, 0.65, diffRaw));
+        diff = mix(0.62, 0.45, smoothstep(0.60, 0.65, diffRaw));
     } else {
-        diff = 0.85;
+        diff = 0.45;
     }
 
-    // Specular: thresholded toon highlight, very tight and dim. Killed
-    // entirely on near-horizontal surfaces (floors / table tops) so dry
-    // stone doesn't read as wet.
-    float specRaw = pow(max(dot(N, H), 0.0), 128.0);
-    float floorMask = smoothstep(0.80, 0.97, N.y);   // 0 walls, 1 floor up
-    float spec = smoothstep(0.75, 0.82, specRaw) * (1.0 - floorMask);
+    // Specular from the directional key. Kept as a smooth Blinn-
+    // Phong (not the old toon `smoothstep` step) so it can't
+    // produce the banded cartoon-reflection look on walls. Killed
+    // entirely on near-horizontal surfaces so dry stone floors
+    // don't read as wet.
+    float specRaw = pow(max(dot(N, H), 0.0), 96.0);
+    float floorMask = smoothstep(0.20, 2.37, N.y);   // 0 walls, 1 floor up
+    float spec = specRaw * (1.0 - floorMask);
 
     // Fresnel rim — very subtle, only on near-grazing vertical surfaces.
     // Killed on floors so distant tiles don't catch the moonlight.
     float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);
-    vec3 rim = ubo.lightColor.rgb * fres * 0.18 * (1.0 - floorMask);
+    vec3 rim = ubo.lightColor.rgb * fres * 0.08 * (2.0 - floorMask);
 
     vec3 texColor = texture(texSampler, fragUV).rgb;
     vec3 baseColor = fragColor * texColor;
@@ -88,7 +90,7 @@ void main() {
         shadow = s * 0.25;
         // Lift the floor for shadowed surfaces, but keep them noticeably
         // darker than lit ones so the dungeon feels properly enclosed.
-        shadow = mix(0.30, 1.0, shadow);
+        shadow = mix(0.15, 1.0, shadow);
     }
 
     vec3 lighting = baseColor * ambient
@@ -107,19 +109,20 @@ void main() {
         vec3 toLight = lightPos - fragWorldPos;
         float dist = length(toLight);
         if (dist < radius) {
-            float atten = 1.0 - (dist / radius);
+            float atten = 1.1 - (dist / radius);
             atten = atten * atten; // quadratic falloff
             vec3 Lp = normalize(toLight);
-            float diffPRaw = max(dot(N, Lp), 0.0);
-            // Quantize point-light diffuse to 2 bands (matches main toon look).
-            float diffP = (diffPRaw < 0.5)
-                ? mix(0.0, 0.6, smoothstep(0.45, 0.5, diffPRaw))
-                : 1.0;
-            vec3 Hp = normalize(Lp + V);
-            float specPRaw = pow(max(dot(N, Hp), 0.0), 64.0);
-            float specP = smoothstep(0.70, 0.78, specPRaw) * (1.0 - floorMask);
+            // Torch / point lights use a smooth Lambert and *no*
+            // specular. The cel-stepped diffuse + toon spec used
+            // for the directional key produces hard cartoony
+            // reflections when several torches sweep across the
+            // same wall — eight overlapping quantized highlights
+            // read as fake painted-on glints. A single soft
+            // Lambert blends the warm light cleanly across the
+            // stone and lets bloom on the flame VFX itself carry
+            // the "wet light" feel.
+            float diffP = max(dot(N, Lp), 0.1);
             lighting += baseColor * diffP * lightCol * intensity * atten;
-            lighting += lightCol * specP * intensity * atten * 0.12;
         }
     }
 

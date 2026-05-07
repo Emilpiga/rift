@@ -27,7 +27,7 @@ use rift_engine::{
 use std::sync::Arc;
 
 use rift_game::character::{CharacterProfile, CharacterRoster, Gender, MAX_CHARACTERS};
-use rift_game::classes;
+use rift_game::hero;
 
 /// What the screen wants the surrounding game to do this frame.
 #[derive(Clone, Debug)]
@@ -68,7 +68,6 @@ enum ViewKind {
 struct CreateForm {
     name: String,
     gender: Gender,
-    class_idx: usize,
 }
 
 impl CreateForm {
@@ -76,23 +75,7 @@ impl CreateForm {
         Self {
             name: String::new(),
             gender: Gender::Female,
-            class_idx: 0,
         }
-    }
-}
-
-/// All available classes, in display order.
-fn class_options() -> [(rift_game::classes::ClassId, &'static str); 1] {
-    [(classes::HUNTER, "Hunter")]
-}
-
-/// Resolve a wire `class_id` string back into the local `ClassId`
-/// content table. Falls back to Hunter for unknown codes so a
-/// future server with extra classes still renders something.
-fn roster_class_from_id(id: &str) -> rift_game::classes::ClassId {
-    match id {
-        "hunter" => classes::HUNTER,
-        _ => classes::HUNTER,
     }
 }
 
@@ -154,12 +137,11 @@ impl CharacterSelect {
     ) {
         self.roster = CharacterRoster::new();
         for e in entries {
-            let class = roster_class_from_id(&e.class_id);
             let gender = match e.gender {
                 rift_net::messages::Gender::Male => Gender::Male,
                 rift_net::messages::Gender::Female => Gender::Female,
             };
-            let mut profile = CharacterProfile::new(e.character_name, gender, class);
+            let mut profile = CharacterProfile::new(e.character_name, gender);
             profile.level = e.level;
             self.roster.add(profile);
         }
@@ -246,7 +228,7 @@ impl CharacterSelect {
         renderer: &mut Renderer,
         gender: Gender,
     ) -> Option<hecs::Entity> {
-        let (model_path, tex_path) = classes::base_model_paths(gender);
+        let (model_path, tex_path) = hero::base_model_paths(gender);
         let skinned = match SkinnedMesh::from_gltf(model_path) {
             Ok(s) => s,
             Err(e) => {
@@ -520,10 +502,9 @@ impl CharacterSelect {
                             theme.colors.text,
                         );
                         let sub = format!(
-                            "Lv {}  -  {}  -  {}",
+                            "Lv {}  -  {}",
                             profile.level,
                             profile.gender.label(),
-                            classes::config_for(profile.class).name,
                         );
                         ui.draw_text(
                             inner.min + Vec2::new(8.0, 36.0),
@@ -638,42 +619,6 @@ impl CharacterSelect {
                 self.create_form.gender = Gender::Female;
             }
 
-            // Class cycler.
-            label(ui, body.min + Vec2::new(0.0, 250.0), "Class");
-            let class_count = class_options().len();
-            let (_, class_name) = class_options()[self.create_form.class_idx];
-            let arrow_y = body.y() + 272.0;
-            let left = Button::new("<").show_with_id(
-                ui,
-                Id::root("char_select").child("class_left"),
-                Rect::from_xywh(body.x(), arrow_y, 40.0, 40.0),
-            );
-            // Centre name display.
-            let name_box = Rect::from_xywh(body.x() + 50.0, arrow_y, 190.0, 40.0);
-            Frame::inset(&theme).show_only(ui, name_box);
-            let tw = ui.measure_text(class_name, theme.fonts.size_lg);
-            ui.draw_text(
-                Pos2::new(
-                    name_box.x() + (name_box.width() - tw) * 0.5,
-                    name_box.y() + (name_box.height() - theme.fonts.size_lg) * 0.5,
-                ),
-                class_name,
-                theme.fonts.size_lg,
-                theme.colors.text,
-            );
-            let right = Button::new(">").show_with_id(
-                ui,
-                Id::root("char_select").child("class_right"),
-                Rect::from_xywh(body.x() + 250.0, arrow_y, 40.0, 40.0),
-            );
-            if left.clicked {
-                self.create_form.class_idx =
-                    (self.create_form.class_idx + class_count - 1) % class_count;
-            }
-            if right.clicked {
-                self.create_form.class_idx = (self.create_form.class_idx + 1) % class_count;
-            }
-
             // Confirm + Cancel.
             let can_confirm = !self.create_form.name.trim().is_empty();
             let btn_y = body.max.y - 50.0;
@@ -691,11 +636,9 @@ impl CharacterSelect {
             );
             let enter = ui.input().enter_just_pressed() && name_resp.focused && can_confirm;
             if (confirm.clicked || enter) && can_confirm {
-                let (class_id, _) = class_options()[self.create_form.class_idx];
                 let profile = CharacterProfile::new(
                     self.create_form.name.trim().to_string(),
                     self.create_form.gender,
-                    class_id,
                 );
                 self.roster.add(profile);
                 self.view = ViewKind::Roster;
