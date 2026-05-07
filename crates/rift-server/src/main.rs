@@ -319,15 +319,29 @@ impl Server {
                 log::info!("Goodbye from {from:?}");
             }
             ClientMsg::RequestEnterRift => {
-                // Accept iff currently in the hub. Once a session
-                // is in a rift this same message bumps to the next
-                // floor (boss-kill auto-advance lives in Phase 7).
-                let new_index = if self.sim.floor_index == 0 {
-                    1
-                } else {
-                    self.sim.floor_index + 1
-                };
-                self.transition_floor(new_index);
+                use crate::sim::ExitVoteRequest;
+                // Hub → first floor: always instant. (Solo or
+                // party, the hub has no "unprepared" state.)
+                if self.sim.floor_index == 0 {
+                    self.transition_floor(1);
+                    return;
+                }
+                // In-rift → next floor: open a descend ready
+                // check unless the party is solo. Solo players
+                // bypass the vote and transition immediately.
+                match self.sim.request_descend_vote(from) {
+                    ExitVoteRequest::Pass => {
+                        log::info!("vote: solo {from:?} descending");
+                        self.transition_floor(self.sim.floor_index + 1);
+                    }
+                    ExitVoteRequest::Opened => { /* broadcast via take_exit_vote_update */ }
+                    ExitVoteRequest::Refused => {
+                        // Already an active vote / on cooldown /
+                        // dead. Silently no-op so a misclick on F
+                        // doesn't burn the cooldown again.
+                        log::debug!("vote: refused descend from {from:?}");
+                    }
+                }
             }
             ClientMsg::RequestReturnToHub => {
                 if self.sim.floor_index != 0 {
@@ -500,14 +514,25 @@ impl Server {
         // an integer-second boundary, vote resolved, cooldown
         // expired).
         let outcome = self.sim.tick_exit_vote(dt);
-        if matches!(outcome, crate::sim::vote::TickOutcome::Passed) {
-            log::info!("vote: party voted to leave rift");
-            let wiped = self.sim.wipe_dead_loot();
-            self.transition_floor(0);
-            for cid in wiped {
-                self.broadcast_inventory_state(cid);
-                self.persist_inventory_state(cid);
+        match outcome {
+            crate::sim::vote::TickOutcome::Passed(
+                rift_net::messages::VoteKind::Exit,
+            ) => {
+                log::info!("vote: party voted to leave rift");
+                let wiped = self.sim.wipe_dead_loot();
+                self.transition_floor(0);
+                for cid in wiped {
+                    self.broadcast_inventory_state(cid);
+                    self.persist_inventory_state(cid);
+                }
             }
+            crate::sim::vote::TickOutcome::Passed(
+                rift_net::messages::VoteKind::Descend,
+            ) => {
+                log::info!("vote: party voted to descend");
+                self.transition_floor(self.sim.floor_index + 1);
+            }
+            _ => {}
         }
         if let Some(state) = self.sim.take_exit_vote_update() {
             self.broadcast(Channel::Control, &ServerMsg::RiftExitVote(state));

@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use rift_net::{
-    messages::{VoteChoice, VoteState},
+    messages::{VoteChoice, VoteKind, VoteState},
     NetId,
 };
 
@@ -39,6 +39,12 @@ pub const VOTE_COOLDOWN: f32 = 60.0;
 /// open.
 #[derive(Clone, Debug)]
 pub struct ExitVote {
+    /// What this vote is asking the party to decide. Carried
+    /// through to the wire `VoteState` so the HUD title is
+    /// correct and to [`TickOutcome::Passed`] so the main loop
+    /// knows whether to descend or return to the hub on a Yes
+    /// resolution.
+    pub kind: VoteKind,
     /// Seconds remaining on the active window. Counts down to
     /// zero in [`Sim::tick_exit_vote`]; resolution happens at
     /// or below zero.
@@ -58,9 +64,11 @@ pub enum TickOutcome {
     /// Either no vote is open, or the open vote has not yet
     /// resolved this tick.
     Idle,
-    /// Vote resolved with unanimous Yes — caller should wipe
-    /// ghost loot and transition the party to the hub.
-    Passed,
+    /// Vote resolved with unanimous Yes. The kind selects the
+    /// caller's response: `Exit` wipes ghost loot and
+    /// transitions to the hub; `Descend` advances to the next
+    /// rift floor.
+    Passed(VoteKind),
     /// Vote resolved with a No or expired with pending votes.
     /// Caller arms the cooldown.
     Fizzled,
@@ -81,6 +89,7 @@ pub fn build_state(
             .collect();
         voters.sort_by_key(|(nid, _)| nid.0);
         VoteState {
+            kind: v.kind,
             active: true,
             time_remaining: v.time_remaining.max(0.0),
             cooldown_remaining: cooldown_remaining.max(0.0),
@@ -88,6 +97,10 @@ pub fn build_state(
         }
     } else {
         VoteState {
+            // Idle state has no "current" kind; the HUD ignores
+            // it whenever `active` is false. Default to Exit
+            // for backwards-compatible cooldown-banner display.
+            kind: VoteKind::Exit,
             active: false,
             time_remaining: 0.0,
             cooldown_remaining: cooldown_remaining.max(0.0),
@@ -121,6 +134,6 @@ pub fn resolve(vote: &ExitVote) -> TickOutcome {
         }
     } else {
         // No `No`s, no `Pending`s — everyone said Yes.
-        TickOutcome::Passed
+        TickOutcome::Passed(vote.kind)
     }
 }

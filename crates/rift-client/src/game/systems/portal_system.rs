@@ -14,7 +14,7 @@ use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::{Input, Renderer};
 
-use super::sub_state::{NetState, NetTransitionRequest};
+use crate::game::sub_state::{NetState, NetTransitionRequest};
 
 /// Walk-to-interact range. Within this distance the player gets
 /// a press-F prompt and the F key triggers an `EnterRift`
@@ -113,9 +113,12 @@ pub fn tick_exit(
     input: &Input,
     net: &mut NetState,
     hud_prompt: &mut Option<&'static str>,
+    descend_prompt: &mut bool,
     floor_complete: bool,
     in_hub: bool,
     boss_room_center: Vec3,
+    vote_active: bool,
+    vote_cooldown: f32,
     dt: f32,
 ) {
     // Spawn lazily on first qualifying frame.
@@ -126,6 +129,56 @@ pub fn tick_exit(
         let pos = boss_room_center + Vec3::new(0.0, 0.5, 0.0);
         log::info!("exit portal: spawning at {:?}", pos);
         spawn_exit(exit_portal, renderer, pos);
+    }
+    // Track in-range for the difficulty tooltip even when the
+    // F-press / cooldown banner paths short-circuit below.
+    if let Some(portal) = exit_portal.as_ref() {
+        let in_range = world
+            .query::<(&Transform, &Player, &LocalPlayer)>()
+            .iter()
+            .map(|(_, (t, _, _))| t.position)
+            .next()
+            .map(|p| p.distance(portal.position) <= INTERACT_RADIUS)
+            .unwrap_or(false);
+        if in_range {
+            *descend_prompt = true;
+        }
+    }
+    // While a descend / exit vote is open the HUD vote panel
+    // owns the prompt slot and the F-press is reserved for
+    // Y/N — so suppress both here. Likewise during cooldown,
+    // surface the cooldown banner instead of the F-press
+    // prompt so the player understands why F doesn't work.
+    if vote_active {
+        // Still spin the mesh below.
+        if let Some(portal) = exit_portal.as_mut() {
+            portal.age += dt;
+            if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
+                obj.model_matrix = Mat4::from_translation(portal.position)
+                    * Mat4::from_rotation_y(portal.age * 0.6);
+            }
+        }
+        return;
+    }
+    if vote_cooldown > 0.0 {
+        if let Some(portal) = exit_portal.as_mut() {
+            portal.age += dt;
+            if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
+                obj.model_matrix = Mat4::from_translation(portal.position)
+                    * Mat4::from_rotation_y(portal.age * 0.6);
+            }
+            let player_in_range = world
+                .query::<(&Transform, &Player, &LocalPlayer)>()
+                .iter()
+                .map(|(_, (t, _, _))| t.position)
+                .next()
+                .map(|p| p.distance(portal.position) <= INTERACT_RADIUS)
+                .unwrap_or(false);
+            if player_in_range {
+                *hud_prompt = Some("VOTE COOLDOWN ACTIVE");
+            }
+        }
+        return;
     }
     tick(
         exit_portal,

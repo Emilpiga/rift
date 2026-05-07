@@ -33,15 +33,17 @@ impl MonsterRole {
     }
 
     /// Visual scale multiplier. The monster pack is authored at roughly
-    /// 1m height; the player is ~1.8m, so we keep regular enemies a bit
-    /// shorter than the player while elites/bosses tower over them.
+    /// 1m height; the player is ~1.8m. Regulars are deliberately small
+    /// (~half player height) so dense packs still read as a swarm
+    /// rather than a wall of bodies. Elite + boss are the only sizes
+    /// that visually outclass the player.
     pub fn scale(self) -> f32 {
         match self {
-            MonsterRole::Brute   => 0.85,
-            MonsterRole::Stalker => 0.70,
-            MonsterRole::Caster  => 0.78,
-            MonsterRole::Elite   => 1.10,
-            MonsterRole::Boss    => 1.80,
+            MonsterRole::Brute   => 0.60,
+            MonsterRole::Stalker => 0.55,
+            MonsterRole::Caster  => 0.60,
+            MonsterRole::Elite   => 0.85,
+            MonsterRole::Boss    => 1.60,
         }
     }
 

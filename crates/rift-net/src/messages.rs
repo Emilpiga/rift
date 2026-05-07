@@ -307,6 +307,20 @@ pub enum VoteChoice {
     No,
 }
 
+/// What an active [`VoteState`] is asking the party to decide.
+/// Drives the HUD title + the resolution path on the server
+/// (Exit → transition to hub; Descend → transition to the next
+/// rift floor). Wire stable: don't reorder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoteKind {
+    /// Leave the rift and return to the hub. Initiated by F at
+    /// the rift-spawn portal.
+    Exit,
+    /// Descend to the next rift floor. Initiated by F at the
+    /// boss-room exit portal once the floor is complete.
+    Descend,
+}
+
 /// Snapshot of the rift exit vote, broadcast on
 /// [`ServerMsg::RiftExitVote`] whenever the underlying state
 /// changes (vote opened, vote cast, vote resolved). Sent to every
@@ -314,6 +328,9 @@ pub enum VoteChoice {
 /// HUD comes up cleanly even for players who join mid-vote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteState {
+    /// What this vote is asking the party to decide. Drives
+    /// the HUD panel title and the server resolution path.
+    pub kind: VoteKind,
     /// `true` while the 15s window is open. `false` when the
     /// vote is idle (cooldown ticking down, or no recent
     /// attempt at all).

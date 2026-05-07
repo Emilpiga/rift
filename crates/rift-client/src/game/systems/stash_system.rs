@@ -9,9 +9,9 @@
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::Input;
 
-use super::floor::FloorManager;
-use super::mp_inventory_ui::MpInventoryUI;
-use super::sub_state::{LootClientState, NetState};
+use crate::game::floor::FloorManager;
+use crate::game::mp_inventory_ui::MpInventoryUI;
+use crate::game::sub_state::{LootClientState, NetState};
 
 /// Walk-to-interact range for the hub stash chest. Slightly
 /// tighter than the portal radius so the prompt only fires

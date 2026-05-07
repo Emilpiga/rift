@@ -122,9 +122,8 @@ fn vnoise(u: f32, v: f32, cells: u32, seed: u32) -> f32 {
     let y0 = sv.floor() as i32;
     let fx = su - x0 as f32;
     let fy = sv - y0 as f32;
-    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
-    let sx = smooth(fx);
-    let sy = smooth(fy);
+    let sx = rift_math::smoothstep(fx);
+    let sy = rift_math::smoothstep(fy);
     let h = |ix: i32, iy: i32| -> f32 {
         let wx = ix.rem_euclid(cells as i32);
         let wy = iy.rem_euclid(cells as i32);

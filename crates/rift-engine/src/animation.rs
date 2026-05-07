@@ -296,9 +296,7 @@ impl Animator {
                 1.0 - (self.blend_time_remaining / self.blend_total)
             } else { 1.0 };
             // Smoothstep for nicer feel.
-            self.blend = self.blend.clamp(0.0, 1.0);
-            let b = self.blend;
-            self.blend = b * b * (3.0 - 2.0 * b);
+            self.blend = rift_math::smoothstep(self.blend.clamp(0.0, 1.0));
             if self.blend_time_remaining <= 0.0 {
                 self.prev = None;
                 self.blend = 1.0;

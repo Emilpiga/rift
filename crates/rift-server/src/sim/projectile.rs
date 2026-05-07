@@ -12,25 +12,44 @@ use rift_net::{messages::WorldEvent, NetId};
 
 use super::enemy::ServerEnemy;
 
+/// Which side a projectile belongs to. Drives target-list
+/// filtering in [`tick`]: `Player`-team bolts collide with
+/// enemies, `Enemy`-team bolts collide with players. Both
+/// share the same `ServerProjectile` component, snapshot
+/// shape, and net-id allocator — the client doesn't need to
+/// know which team a bolt is on because the visual is keyed
+/// off `ability_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Team {
+    Player,
+    Enemy,
+}
+
 /// One in-flight server-side projectile.
 #[derive(Clone, Debug)]
 pub struct ServerProjectile {
     pub net_id: NetId,
     pub ability_id: u8,
     pub owner: NetId,
+    pub team: Team,
     pub position: Vec3,
     pub velocity: Vec3,
     pub ttl: f32,
     pub damage: f32,
     /// Caster's crit chance at the time of cast (0..1).
+    /// `Team::Enemy` projectiles leave this at `0.0` since
+    /// enemies don't crit today.
     pub crit_chance: f32,
     /// Caster's crit damage multiplier at the time of cast
-    /// (e.g. `0.5` = +50 %).
+    /// (e.g. `0.5` = +50 %). Ignored when `crit_chance == 0.0`.
     pub crit_damage: f32,
+    /// Remaining pierce count. `Team::Enemy` projectiles use
+    /// `0` (first-hit-wins).
     pub pierce_remaining: u32,
     pub size: f32,
     /// Debuff to apply on hit (if any). Wire id from
-    /// `rift_game::debuffs::id::*`.
+    /// `rift_game::debuffs::id::*`. `None` for `Team::Enemy`
+    /// bolts today.
     pub apply_debuff: Option<u8>,
 }
 
@@ -118,18 +137,27 @@ fn hits_wall(floor: &Floor, p: Vec3) -> bool {
     floor.get(gx as usize, gz as usize) == Tile::Wall
 }
 
-/// Integrate every projectile, run XZ collision against the enemy
-/// snapshot, and apply damage. Pushes a `WorldEvent::Damage` per hit
-/// and a `WorldEvent::Death` per kill into `events`. Despawns dead
+/// Integrate every projectile, run XZ collision against the
+/// appropriate target list per team, and apply damage. Pushes
+/// a `WorldEvent::Damage` per `Player`-team hit and a
+/// `WorldEvent::Death` per kill into `events`. Despawns dead
 /// projectiles and dead enemies.
+///
+/// Returns the queued `(player_entity, damage)` rows produced
+/// by `Enemy`-team projectile hits — the caller (`Sim::step`)
+/// applies them through `apply_player_damage` so the player-
+/// damage event ordering stays consistent with the rest of the
+/// tick.
 pub fn tick(
     world: &mut hecs::World,
     floor: &Floor,
     enemies: &[(Entity, Vec3, NetId, f32)],
+    players: &[(Entity, Vec3)],
     ctx: &mut super::loot::DeathCtx<'_>,
     dt: f32,
-) {
+) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
+    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
     for (pe, proj) in world.query_mut::<&mut ServerProjectile>() {
         proj.position += proj.velocity * dt;
@@ -148,26 +176,53 @@ pub fn tick(
             continue;
         }
         let mut consumed = false;
-        for (en_entity, en_pos, en_net_id, en_radius) in enemies {
-            let dx = proj.position.x - en_pos.x;
-            let dz = proj.position.z - en_pos.z;
-            let dist_xz = (dx * dx + dz * dz).sqrt();
-            if dist_xz < *en_radius + proj.size * 0.5 {
-                hits.push(Hit {
-                    enemy: *en_entity,
-                    enemy_net_id: *en_net_id,
-                    enemy_pos: *en_pos,
-                    damage: proj.damage,
-                    crit_chance: proj.crit_chance,
-                    crit_damage: proj.crit_damage,
-                    crit_seed: hit_seed(ctx.tick, *en_net_id, proj.owner, proj.net_id.0 as u64),
-                    apply_debuff: proj.apply_debuff,
-                });
-                if proj.pierce_remaining > 0 {
-                    proj.pierce_remaining -= 1;
-                } else {
-                    consumed = true;
-                    break;
+        match proj.team {
+            Team::Player => {
+                // Player bolts hit enemies. Pierce drains per
+                // hit; first frame past zero stops the bolt.
+                for (en_entity, en_pos, en_net_id, en_radius) in enemies {
+                    let dx = proj.position.x - en_pos.x;
+                    let dz = proj.position.z - en_pos.z;
+                    let dist_xz = (dx * dx + dz * dz).sqrt();
+                    if dist_xz < *en_radius + proj.size * 0.5 {
+                        hits.push(Hit {
+                            enemy: *en_entity,
+                            enemy_net_id: *en_net_id,
+                            enemy_pos: *en_pos,
+                            damage: proj.damage,
+                            crit_chance: proj.crit_chance,
+                            crit_damage: proj.crit_damage,
+                            crit_seed: hit_seed(
+                                ctx.tick,
+                                *en_net_id,
+                                proj.owner,
+                                proj.net_id.0 as u64,
+                            ),
+                            apply_debuff: proj.apply_debuff,
+                        });
+                        if proj.pierce_remaining > 0 {
+                            proj.pierce_remaining -= 1;
+                        } else {
+                            consumed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Team::Enemy => {
+                // Enemy bolts hit players. First-hit-wins:
+                // pierce / crit / debuffs are not currently
+                // wired for enemy projectiles, so the bolt
+                // detonates on the first overlap.
+                for (player_entity, ppos) in players {
+                    let dx = proj.position.x - ppos.x;
+                    let dz = proj.position.z - ppos.z;
+                    let dist_xz = (dx * dx + dz * dz).sqrt();
+                    if dist_xz < PLAYER_HIT_RADIUS + proj.size * 0.5 {
+                        player_damage.push((*player_entity, proj.damage));
+                        consumed = true;
+                        break;
+                    }
                 }
             }
         }
@@ -179,6 +234,7 @@ pub fn tick(
         let _ = world.despawn(e);
     }
     apply_hits_to_enemies(world, hits, ctx);
+    player_damage
 }
 
 /// Tick every AoE zone: advance its clock, apply damage on each
@@ -299,29 +355,11 @@ pub(super) fn apply_hits_to_enemies(
 
 // ── Enemy → player projectiles ────────────────────────────────
 //
-// Mirrors `ServerProjectile` but targets players instead of
-// enemies. Kept as a separate type so player projectiles don't
-// have to carry a `team` flag everywhere — and so the client's
-// existing `EntityKind::Projectile` rendering still works
-// unmodified, distinguishing the two purely off `ability_id`.
-
-/// One in-flight enemy-cast projectile (e.g. caster bolt).
-#[derive(Clone, Debug)]
-pub struct ServerEnemyProjectile {
-    pub net_id: NetId,
-    /// Wire ability id — clients dispatch mesh / VFX off this.
-    /// Currently always [`rift_game::abilities::id::ENEMY_CASTER_BOLT`].
-    pub ability_id: u8,
-    /// Net id of the caster. Kept for future telemetry / kill
-    /// attribution; not currently read by the damage path.
-    #[allow(dead_code)]
-    pub owner: NetId,
-    pub position: Vec3,
-    pub velocity: Vec3,
-    pub ttl: f32,
-    pub damage: f32,
-    pub size: f32,
-}
+// Enemy projectiles share the [`ServerProjectile`] component
+// with player projectiles, distinguished by `team: Team::Enemy`.
+// The unified [`tick`] above handles both — this section only
+// keeps the player-side hit radius as a public constant so AoE
+// / channel code can reuse the player-target overlap rule.
 
 /// Sphere radius used for enemy-projectile↔player XZ collision.
 /// Slightly bigger than the enemy hit radius — players are
@@ -329,90 +367,3 @@ pub struct ServerEnemyProjectile {
 /// telegraph reads as a real threat instead of a free dodge.
 pub const PLAYER_HIT_RADIUS: f32 = 0.5;
 
-/// Despawn every `ServerEnemyProjectile` in the world. Called on
-/// floor change.
-pub fn despawn_all_enemy(world: &mut hecs::World) {
-    let stale: Vec<Entity> = world
-        .query::<&ServerEnemyProjectile>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
-    for e in stale {
-        let _ = world.despawn(e);
-    }
-}
-
-/// Integrate every enemy projectile, run XZ collision against
-/// players, and queue damage rows for `apply_player_damage` to
-/// consume. Returns `(player_entity, damage)` pairs the caller
-/// applies once the world borrow ends.
-///
-/// Despawns dead projectiles (TTL expired, hit a wall, or
-/// landed a hit). Enemy bolts don't pierce.
-pub fn tick_enemy(
-    world: &mut hecs::World,
-    floor: &Floor,
-    players: &[(Entity, Vec3)],
-    dt: f32,
-) -> Vec<(Entity, f32)> {
-    let mut damage: Vec<(Entity, f32)> = Vec::new();
-    let mut to_despawn: Vec<Entity> = Vec::new();
-    for (pe, proj) in world.query_mut::<&mut ServerEnemyProjectile>() {
-        proj.position += proj.velocity * dt;
-        proj.ttl -= dt;
-        if proj.ttl <= 0.0 {
-            to_despawn.push(pe);
-            continue;
-        }
-        if hits_wall(floor, proj.position) {
-            to_despawn.push(pe);
-            continue;
-        }
-        // First-hit-wins: the bolt detonates on the first player
-        // it overlaps. No pierce, no friendly fire (we never
-        // collision-check enemies here so caster bolts can't
-        // damage other casters).
-        let mut consumed = false;
-        for (player_entity, ppos) in players {
-            let dx = proj.position.x - ppos.x;
-            let dz = proj.position.z - ppos.z;
-            let dist_xz = (dx * dx + dz * dz).sqrt();
-            if dist_xz < PLAYER_HIT_RADIUS + proj.size * 0.5 {
-                damage.push((*player_entity, proj.damage));
-                consumed = true;
-                break;
-            }
-        }
-        if consumed {
-            to_despawn.push(pe);
-        }
-    }
-    for e in to_despawn {
-        let _ = world.despawn(e);
-    }
-    damage
-}
-
-/// Spawn one enemy bolt entity from a [`super::enemy::EnemyShot`]
-/// emitted by the AI tick. Reuses the player-projectile net-id
-/// allocator so all replicated projectiles share one id space —
-/// clients don't care whether a `Projectile` row is ours or the
-/// caster's, only what its `ability_id` is.
-pub fn spawn_arcane_bolt(
-    world: &mut hecs::World,
-    shot: &super::enemy::EnemyShot,
-    next_projectile_net_id: &mut u32,
-) {
-    let net_id = NetId(*next_projectile_net_id);
-    *next_projectile_net_id = next_projectile_net_id.wrapping_add(1).max(0x4000_0000);
-    world.spawn((ServerEnemyProjectile {
-        net_id,
-        ability_id: rift_game::abilities::id::ENEMY_ARCANE_BOLT,
-        owner: shot.owner,
-        position: shot.origin,
-        velocity: shot.aim * super::enemy::caster::BOLT_SPEED,
-        ttl: super::enemy::caster::BOLT_TTL,
-        damage: super::enemy::caster::BOLT_DAMAGE,
-        size: 0.45,
-    },));
-}

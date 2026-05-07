@@ -231,6 +231,26 @@ pub struct LootClientState {
     pub stash_session: bool,
 }
 
+impl LootClientState {
+    /// Wipe per-floor loot state on a regen. The actual
+    /// `items` / `equipment` mirrors and the outbound request
+    /// queues are cross-floor and stay untouched; only floor-
+    /// scoped visuals + the stash session flag are cleared.
+    /// VFX emitters owned by `drops` are invalidated by
+    /// `renderer.vfx_system.clear_all()` upstream, so this just
+    /// drops bookkeeping.
+    pub fn reset_for_floor(&mut self) {
+        self.drops.clear();
+        self.pending_pickups.clear();
+        self.claimed_ids.clear();
+        // Stash UI must close on transition: the chest only
+        // exists in the hub, and a stale "stash open" flag
+        // would cause bag clicks to deposit into nothing.
+        self.stash_session = false;
+        self.stash_items.clear();
+    }
+}
+
 /// Outgoing stash transfer request shape, queued by the
 /// inventory UI and drained by the binary into
 /// `NetClient::request_deposit_to_stash` /
@@ -300,7 +320,7 @@ pub struct LootDropVisual {
 /// so floor changes / channel completions can despawn cleanly.
 #[derive(Default)]
 pub struct ShrineClientState {
-    pub visuals: Vec<super::shrine_system::ShrineVisual>,
+    pub visuals: Vec<crate::game::shrine_system::ShrineVisual>,
     /// `Some(shrine_id)` while the *local* player is intending
     /// to channel that shrine. Mirror of the server's
     /// `channeling_shrine` we toggle optimistically on F-press
@@ -317,4 +337,16 @@ pub struct ShrineClientState {
     /// `shrine_system::tick_channel_pose` so the SpellCast pose
     /// + beam are toggled exactly once per transition.
     pub prev_local_intent: Option<rift_net::NetId>,
+}
+
+impl ShrineClientState {
+    /// Wipe per-floor shrine state on a regen. VFX emitters
+    /// owned by `visuals` + `channel_beam` are invalidated by
+    /// `renderer.vfx_system.clear_all()` upstream.
+    pub fn reset_for_floor(&mut self) {
+        self.visuals.clear();
+        self.local_intent = None;
+        self.prev_local_intent = None;
+        self.channel_beam = None;
+    }
 }

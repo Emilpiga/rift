@@ -14,7 +14,7 @@ use rift_net::{
 use super::enemy::{enemy_anim, ServerEnemy};
 use super::loot::ServerLoot;
 use super::player::ServerPlayer;
-use super::projectile::{ServerEnemyProjectile, ServerProjectile};
+use super::projectile::ServerProjectile;
 use super::shrine::ServerReviveShrine;
 
 /// Sight range used to view-cull replicated entities (enemies +
@@ -108,29 +108,6 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     // View-culled projectiles. Yaw is derived from velocity so
     // client meshes orient correctly.
     for (_e, proj) in world.query::<&ServerProjectile>().iter() {
-        if !in_view(viewer_pos, proj.position) {
-            continue;
-        }
-        let yaw = (-proj.velocity.x).atan2(-proj.velocity.z);
-        entities.push(EntitySnapshot {
-            net_id: proj.net_id,
-            kind: EntityKind::Projectile {
-                ability: proj.ability_id as u16,
-            },
-            position: proj.position.to_array(),
-            yaw,
-            velocity: proj.velocity.to_array(),
-            health_pct: 1.0,
-            flags: 0,
-        });
-    }
-
-    // View-culled enemy-cast projectiles (caster bolts). Use the
-    // same `EntityKind::Projectile` wire shape — the client
-    // dispatches mesh / VFX off `ability` so a bolt's distinct
-    // ability id (`ENEMY_CASTER_BOLT`) is enough to give it a
-    // separate visual from player projectiles.
-    for (_e, proj) in world.query::<&ServerEnemyProjectile>().iter() {
         if !in_view(viewer_pos, proj.position) {
             continue;
         }

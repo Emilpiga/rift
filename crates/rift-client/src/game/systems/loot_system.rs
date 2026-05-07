@@ -13,7 +13,7 @@ use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::ui::CombatTextSystem;
 use rift_engine::{Input, Renderer};
 
-use super::sub_state::LootClientState;
+use crate::game::sub_state::LootClientState;
 
 /// Walk-to-pickup range for ground loot drops. Mirrored on the
 /// server as `rift_server::sim::PICKUP_RANGE`; we keep them
@@ -164,7 +164,7 @@ pub fn on_loot_dropped(
     position: glam::Vec3,
     blob: rift_net::messages::ItemBlob,
 ) {
-    use super::sub_state::LootDropVisual;
+    use crate::game::sub_state::LootDropVisual;
 
     if loot.drops.iter().any(|d| d.net_id == loot_id) {
         return;

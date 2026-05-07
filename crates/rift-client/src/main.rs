@@ -288,7 +288,7 @@ impl RiftApp {
         let Some(net) = net.as_mut() else { return };
         if let Some(&pos) = net.last_positions.get(&entity) {
             // Persistent floor stain.
-            state.decals.spawn_blood(pos, &state.wall_aabbs, renderer);
+            state.decals.spawn_blood(pos, &state.floor.wall_aabbs, renderer);
             // Big visceral burst on top of it. Anchored at
             // chest height so the upward cone reads as the kill
             // shot rather than ground splatter.
@@ -388,6 +388,36 @@ impl RiftApp {
         let aim = Vec3::new(dir[0], 0.0, dir[1]);
         let cast_origin = Vec3::from_array(origin);
         let target_pos = target.map(Vec3::from_array);
+        // Ground-slam telegraph / impact: visual-only ability
+        // casts where `dir[0]` carries the slam radius and
+        // `dir[1]` carries the wind-up duration (wind-up only).
+        // Centred on `target` (= caster position at cast). No
+        // pose / cast-spark — these are emitted from enemy AI,
+        // not the player cast pipeline.
+        match ability as u8 {
+            rift_game::abilities::id::GROUND_SLAM_WINDUP => {
+                let centre = target_pos.unwrap_or(cast_origin);
+                let radius = dir[0].max(0.5);
+                let duration = dir[1].max(0.05);
+                renderer.vfx_system.spawn(
+                    rift_engine::renderer::vfx::presets::ground_slam_telegraph(
+                        radius, duration,
+                    ),
+                    centre + Vec3::new(0.0, 0.05, 0.0),
+                );
+                return;
+            }
+            rift_game::abilities::id::GROUND_SLAM_IMPACT => {
+                let centre = target_pos.unwrap_or(cast_origin);
+                let radius = dir[0].max(0.5);
+                renderer.vfx_system.spawn(
+                    rift_engine::renderer::vfx::presets::ground_slam_impact(radius),
+                    centre + Vec3::new(0.0, 0.05, 0.0),
+                );
+                return;
+            }
+            _ => {}
+        }
         let Some(def) = rift_game::abilities::from_wire_id(ability as u8) else {
             return;
         };
@@ -774,7 +804,7 @@ impl RiftApp {
             state.player_state.experience.set_xp_to_next(xp_to_next);
             if prev_level != level {
                 state.player_state.recompute_stats(&state.loot.equipment);
-                state.level_up_flash = 1.0;
+                state.frame.level_up_flash = 1.0;
                 log::info!("client: leveled up to {level}");
             }
         }

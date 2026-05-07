@@ -2817,6 +2817,7 @@ dependencies = [
  "rift-dungeon",
  "rift-engine",
  "rift-game",
+ "rift-math",
  "rift-net",
  "winit",
 ]
@@ -2848,6 +2849,7 @@ dependencies = [
  "rayon",
  "rift-dungeon",
  "rift-game",
+ "rift-math",
  "shaderc",
  "winit",
 ]

@@ -170,7 +170,7 @@ impl TorchSystem {
             let d = d2.sqrt();
             let fade_start = MAX_DIST - FADE_BAND;
             let dt = ((MAX_DIST - d) / FADE_BAND).clamp(0.0, 1.0);
-            let dist_s = if d <= fade_start { 1.0 } else { dt * dt * (3.0 - 2.0 * dt) };
+            let dist_s = if d <= fade_start { 1.0 } else { rift_math::smoothstep(dt) };
 
             // Rank fade — full intensity for the closest
             // RANK_FULL lights, smoothly fading the remaining
@@ -183,7 +183,7 @@ impl TorchSystem {
                 let span = (RANK_CAP - RANK_FULL) as f32;
                 let r = (rank - RANK_FULL) as f32 + 1.0;
                 let t = (1.0 - (r / span)).clamp(0.0, 1.0);
-                t * t * (3.0 - 2.0 * t)
+                rift_math::smoothstep(t)
             };
 
             light.intensity *= dist_s * rank_s;

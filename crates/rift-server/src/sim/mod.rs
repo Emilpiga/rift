@@ -297,7 +297,6 @@ impl Sim {
         }
         enemy::despawn_all(&mut self.world);
         projectile::despawn_all(&mut self.world);
-        projectile::despawn_all_enemy(&mut self.world);
         loot::despawn_all(&mut self.world);
         shrine::despawn_all(&mut self.world);
         self.aoe_zones.clear();
@@ -1151,15 +1150,85 @@ impl Sim {
         //    shot requests), then integrate motion and spawn
         //    any caster bolts the AI asked for.
         let player_targets = player::target_positions(&self.world);
-        let ai_outcome = enemy::tick_ai(&mut self.world, &player_targets, dt);
+        let damage_mult = FloorConfig::for_floor(self.floor_index).enemy_damage_mult;
+        let ai_outcome = enemy::tick_ai(&mut self.world, &player_targets, damage_mult, dt);
         let melee_damage = ai_outcome.melee_damage;
-        for shot in &ai_outcome.shots {
-            projectile::spawn_arcane_bolt(
+        // Unified enemy ability cast pipeline. Every enemy
+        // attack flows through this single stream:
+        //   * `Start` events translate into `AbilityCast` wire
+        //     events so clients can play the telegraph.
+        //   * `Resolve` events run authoritative effects via
+        //     [`ability::resolve_enemy_cast`] which reads the
+        //     ability's registry entry and produces projectiles
+        //     / damage / summons. Summons go through a local
+        //     queue so net-id allocation stays owned by Sim.
+        let mut summon_queue: Vec<(glam::Vec3, u8, f32)> = Vec::new();
+        let mut melee_from_resolves: Vec<(hecs::Entity, f32)> = Vec::new();
+        for cast in ai_outcome.casts {
+            match cast {
+                enemy::EnemyCast::Start {
+                    owner,
+                    ability_id,
+                    origin,
+                    target,
+                    dir_x,
+                    dir_y,
+                } => {
+                    self.pending_events.push(rift_net::messages::WorldEvent::AbilityCast {
+                        caster: owner,
+                        ability: ability_id as u16,
+                        origin: origin.to_array(),
+                        dir: [dir_x, dir_y],
+                        target: Some(target.to_array()),
+                        start_tick: tick,
+                    });
+                }
+                enemy::EnemyCast::Resolve {
+                    owner,
+                    ability_id,
+                    origin,
+                    aim,
+                    damage_mult,
+                    param_a,
+                } => {
+                    ability::resolve_enemy_cast(
+                        ability::EnemyCastResolve {
+                            caster: owner,
+                            origin,
+                            aim,
+                            ability_id,
+                            damage_mult,
+                            param_a,
+                        },
+                        &player_targets,
+                        &mut self.world,
+                        &mut self.next_projectile_net_id,
+                        &mut melee_from_resolves,
+                        &mut summon_queue,
+                        &mut self.pending_events,
+                        tick,
+                    );
+                }
+            }
+        }
+        // Drain any summons queued during cast resolves into
+        // real enemy entities. Net-ids come from the same
+        // allocator the floor packs use so clients see them as
+        // ordinary enemies.
+        for (pos, role_byte, hp_mult) in &summon_queue {
+            enemy::spawn_summon(
                 &mut self.world,
-                shot,
-                &mut self.next_projectile_net_id,
+                *pos,
+                *role_byte,
+                *hp_mult,
+                self.floor_index,
+                &mut self.next_enemy_net_id,
             );
         }
+        // Merge the two damage queues (AI melee + cast
+        // resolves) into one for the player-damage pass.
+        let mut melee_damage = melee_damage;
+        melee_damage.extend(melee_from_resolves);
         enemy::integrate_motion(&mut self.world, &self.floor, dt);
 
         // 3. Apply queued enemy → player melee damage. Players
@@ -1184,16 +1253,6 @@ impl Sim {
         //    direct kills both run through `loot::finalise_kills`
         //    (which emits `Death`, rolls drops, and despawns).
         let enemies = enemy::snapshot_for_collision(&self.world);
-        // Enemy → player projectiles. Tick'd outside the
-        // `DeathCtx` scope below since enemy bolts only damage
-        // players, never enemies, and the player damage path
-        // needs its own borrow of `pending_events` /
-        // `pending_player_deaths`. Collected here, applied after
-        // the player-projectile / AoE / channel ticks so the
-        // event ordering stays consistent (bolt damage always
-        // lands after any same-tick player hits).
-        let enemy_proj_damage =
-            projectile::tick_enemy(&mut self.world, &self.floor, &player_targets, dt);
 
         let mut kills: Vec<loot::KillInfo> = Vec::new();
         let mut ctx = loot::DeathCtx {
@@ -1203,7 +1262,20 @@ impl Sim {
             floor_index: self.floor_index,
             kills: &mut kills,
         };
-        projectile::tick(&mut self.world, &self.floor, &enemies, &mut ctx, dt);
+        // Unified projectile tick — handles both player→enemy
+        // and enemy→player bolts (distinguished by `Team`).
+        // Enemy-team hits are returned as `(player, damage)`
+        // rows for the player-damage path below; the player-
+        // team path runs through `DeathCtx` like before, so
+        // event ordering stays consistent.
+        let enemy_proj_damage = projectile::tick(
+            &mut self.world,
+            &self.floor,
+            &enemies,
+            &player_targets,
+            &mut ctx,
+            dt,
+        );
         projectile::tick_aoe(
             &mut self.world,
             &mut self.aoe_zones,
@@ -1423,7 +1495,7 @@ impl Sim {
             ai_phase: enemy::AiPhase::default(),
         };
         self.world
-            .spawn((enemy, debuff::DebuffStack::default()));
+            .spawn((enemy, debuff::DebuffStack::default(), enemy::BossState::new(self.floor_index)));
         self.rift_progress.boss_spawned = true;
         self.progress_dirty = true;
         log::info!(
@@ -1596,6 +1668,70 @@ impl Sim {
             roll.len()
         );
         self.exit_vote = Some(vote::ExitVote {
+            kind: rift_net::messages::VoteKind::Exit,
+            time_remaining: vote::VOTE_DURATION,
+            votes: roll,
+        });
+        self.exit_vote_dirty = true;
+        ExitVoteRequest::Opened
+    }
+
+    /// Handle a [`rift_net::ClientMsg::RequestEnterRift`] received
+    /// while currently on a rift floor. Solo parties bypass this
+    /// path and fall through to instant transition. Multiplayer
+    /// parties open a 15s ready-check vote so one player pressing
+    /// F at the exit portal doesn't yank everyone else into the
+    /// next floor unprepared. Same shape + lifetime as
+    /// [`Self::request_exit_vote`]; only `kind` and the
+    /// resolution path differ (see [`Self::tick_exit_vote`]).
+    pub fn request_descend_vote(
+        &mut self,
+        client_id: ClientId,
+    ) -> ExitVoteRequest {
+        if self.floor_index == 0 {
+            // Hub \u2192 first floor is always instant. Caller falls
+            // through to the transition path.
+            return ExitVoteRequest::Refused;
+        }
+        if self.exit_vote.is_some() || self.exit_vote_cooldown > 0.0 {
+            return ExitVoteRequest::Refused;
+        }
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return ExitVoteRequest::Refused;
+        };
+        let initiator_alive = self
+            .world
+            .get::<&ServerPlayer>(entity)
+            .map(|p| p.hp > 0.0 && !p.is_ghost)
+            .unwrap_or(false);
+        if !initiator_alive {
+            return ExitVoteRequest::Refused;
+        }
+        let mut roll: HashMap<NetId, VoteChoice> = HashMap::new();
+        let mut initiator_net_id: Option<NetId> = None;
+        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
+            if p.hp <= 0.0 {
+                continue;
+            }
+            roll.insert(p.net_id, VoteChoice::Pending);
+            if p.client_id == client_id {
+                initiator_net_id = Some(p.net_id);
+            }
+        }
+        if roll.len() <= 1 {
+            log::info!("vote: solo descend by {:?} instant pass", client_id);
+            return ExitVoteRequest::Pass;
+        }
+        if let Some(nid) = initiator_net_id {
+            roll.insert(nid, VoteChoice::Yes);
+        }
+        log::info!(
+            "vote: descend opened by {:?} ({} living voters)",
+            client_id,
+            roll.len()
+        );
+        self.exit_vote = Some(vote::ExitVote {
+            kind: rift_net::messages::VoteKind::Descend,
             time_remaining: vote::VOTE_DURATION,
             votes: roll,
         });
@@ -1660,12 +1796,12 @@ impl Sim {
         }
         match vote::resolve(vote) {
             vote::TickOutcome::Idle => vote::TickOutcome::Idle,
-            vote::TickOutcome::Passed => {
-                log::info!("vote: passed unanimously — exiting rift");
+            vote::TickOutcome::Passed(kind) => {
+                log::info!("vote: passed unanimously ({:?})", kind);
                 self.exit_vote = None;
                 self.exit_vote_cooldown = 0.0;
                 self.exit_vote_dirty = true;
-                vote::TickOutcome::Passed
+                vote::TickOutcome::Passed(kind)
             }
             vote::TickOutcome::Fizzled => {
                 log::info!(

@@ -58,7 +58,7 @@ impl DecalSystem {
     pub fn spawn_blood(
         &mut self,
         position: Vec3,
-        wall_aabbs: &[crate::physics::Aabb],
+        wall_aabbs: &[rift_math::physics::Aabb],
         renderer: &mut Renderer,
     ) {
         // Recycle the oldest decal if we're at the cap.
@@ -116,8 +116,8 @@ impl DecalSystem {
         let check_dirs = [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z];
         for dir in &check_dirs {
             let ray_origin = position + Vec3::new(0.0, 0.5, 0.0);
-            let ray = crate::physics::Ray::new(ray_origin, *dir);
-            if let Some(hit) = crate::physics::raycast(&ray, 2.0, wall_aabbs) {
+            let ray = rift_math::physics::Ray::new(ray_origin, *dir);
+            if let Some(hit) = rift_math::physics::raycast(&ray, 2.0, wall_aabbs) {
                 // Skip if ray started inside the wall (t~0)
                 if hit.distance < 0.05 {
                     continue;

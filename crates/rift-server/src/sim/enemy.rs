@@ -63,19 +63,28 @@ pub const ATTACK_COOLDOWN: f32 = 1.4;
 pub const ATTACK_ANIM_DUR: f32 = 0.45;
 
 /// Sphere radius used for projectile↔enemy XZ collision.
-pub const ENEMY_HIT_RADIUS: f32 = 0.6;
+/// Tuned to roughly match the shrunken visual scales in
+/// [`rift_game::monsters::MonsterRole::scale`] so projectiles
+/// don't whiff visibly past small models.
+pub const ENEMY_HIT_RADIUS: f32 = 0.45;
 
 /// Personal-space radius used for separation steering between
 /// enemies in the same pack. Below this distance an enemy steers
 /// away from its neighbour so packs don't melt into a single dot
-/// when they all converge on the player.
-pub const SEPARATION_RADIUS: f32 = 1.3;
+/// when they all converge on the player. Tightened along with
+/// the visual shrink so dense packs still have enough room to
+/// breathe but read as a swarm, not a parade.
+pub const SEPARATION_RADIUS: f32 = 0.9;
 /// Strength of the separation push relative to walking speed.
 /// Tuned so two enemies brushing shoulders just barely shove each
 /// other apart without breaking forward locomotion.
 pub const SEPARATION_STRENGTH: f32 = 1.1;
 
-/// Caster ranged-attack tuning.
+/// Caster ranged-attack movement tuning. Combat tuning (cooldown,
+/// wind-up, damage, projectile speed/ttl) lives in the shared
+/// [`rift_game::abilities::REGISTRY`] entry for `ARCANE_BOLT`;
+/// the AI looks it up at cast time. Only positioning constants
+/// stay here because they're AI-side, not ability-side.
 pub mod caster {
     /// Preferred kite distance — caster tries to stay near this
     /// from its target, backing off if the player closes inside
@@ -86,19 +95,6 @@ pub mod caster {
     /// Above this distance the caster moves toward the player to
     /// stay in firing range.
     pub const MAX_RANGE: f32 = 14.0;
-    /// Cooldown between consecutive bolt shots, in seconds.
-    pub const SHOT_COOLDOWN: f32 = 2.4;
-    /// How long the wind-up freeze lasts before the bolt actually
-    /// fires. Doubles as the wire `ATTACK` anim window so clients
-    /// see a telegraphed cast.
-    pub const WINDUP_DUR: f32 = 0.55;
-    /// Bolt projectile speed (units / s).
-    pub const BOLT_SPEED: f32 = 14.0;
-    /// Bolt projectile lifetime — auto-expires after this many
-    /// seconds even with no impact.
-    pub const BOLT_TTL: f32 = 1.5;
-    /// Damage dealt to the player on direct hit.
-    pub const BOLT_DAMAGE: f32 = 9.0;
 }
 
 /// Stalker dash-attack tuning.
@@ -131,6 +127,115 @@ pub mod stalker {
     /// Multiplier on `enemy.speed` during recovery (negative-ish:
     /// applied to the *away-from-target* direction).
     pub const RECOVER_SPEED_MULT: f32 = 0.8;
+}
+
+/// Boss phase / enrage tuning. Per-attack tuning (radius,
+/// damage, count, wind-up) lives in the shared
+/// [`rift_game::abilities::REGISTRY`] entries for
+/// `GROUND_SLAM`, `ARCANE_FAN`, and `SUMMON_BRUTES`; the AI
+/// reads them by `wire_id` at cast-decision time so a designer
+/// can rebalance the fight by editing the registry.
+///
+/// The boss runs a 3-phase fight gated on HP fraction:
+///
+/// * **Phase 1** (HP > 66 %): chase + melee + Slam.
+/// * **Phase 2** (HP 33-66 %): adds Fan (5-bolt arc).
+/// * **Phase 3** / enrage (HP < 33 %): adds Summons; all
+///   cooldowns multiplied by [`boss::ENRAGE_CD_MULT`] and speed
+///   by [`boss::ENRAGE_SPEED_MULT`].
+pub mod boss {
+    /// HP fraction at which phase 2 unlocks.
+    pub const PHASE_2_HP: f32 = 0.66;
+    /// HP fraction at which phase 3 (enrage) unlocks.
+    pub const PHASE_3_HP: f32 = 0.33;
+
+    /// Cooldown multiplier applied to every boss attack while
+    /// enraged. Smaller = more frequent.
+    pub const ENRAGE_CD_MULT: f32 = 0.7;
+    /// Speed multiplier applied while enraged.
+    pub const ENRAGE_SPEED_MULT: f32 = 1.3;
+    /// Phase-3 slam radius is bumped by this multiplier so the
+    /// player can't just stand at the slam edge once enrage
+    /// hits. Applied on top of the slam ability's authored
+    /// `radius` from the registry.
+    pub const SLAM_RADIUS_ENRAGE_MULT: f32 = 1.5;
+
+    /// Wind-up scale as a function of rift floor. Floor 1 leaves
+    /// wind-ups at 1.0×; deep floors compress them so the player
+    /// has less time to react. Bottoms out at 0.55×.
+    pub fn windup_scale(floor: u32) -> f32 {
+        (1.0 / (1.0 + floor as f32 * 0.04)).max(0.55)
+    }
+}
+
+/// Per-boss state. Lives as a sibling component on the boss
+/// entity so regular enemies don't pay for boss bookkeeping.
+///
+/// Cooldowns are keyed by ability `wire_id` so adding a new
+/// boss attack is a single registry-entry append + one entry
+/// in the per-phase ability list inside [`tick_boss`]. The
+/// active wind-up tracks the resolving ability the same way
+/// — when it expires we look up `ability_id` in the registry
+/// and dispatch through [`super::ability::resolve_enemy_cast`].
+#[derive(Clone, Debug)]
+pub struct BossState {
+    /// Floor index captured at spawn — used for wind-up scaling
+    /// and for sizing the brute summons (so summons keep up with
+    /// the floor's HP curve).
+    pub floor: u32,
+    /// Per-ability cooldowns. `cooldowns[ability_id as usize]`
+    /// is the seconds remaining before the boss may cast that
+    /// ability again. Sized to cover the full enemy-id range
+    /// (64..=255 — see `rift_game::abilities::id`); the lower
+    /// half is unused.
+    pub cooldowns: [f32; ABILITY_COOLDOWN_SLOTS],
+    pub attack: BossAttack,
+}
+
+/// Number of cooldown slots per boss. One per possible
+/// ability wire id. Wire ids are u8 so 256 is the upper bound;
+/// at this size the array fits in 1 KiB and lookups are O(1).
+pub const ABILITY_COOLDOWN_SLOTS: usize = 256;
+
+impl BossState {
+    pub fn new(floor: u32) -> Self {
+        let mut cooldowns = [0.0_f32; ABILITY_COOLDOWN_SLOTS];
+        // Stagger the opening so the boss doesn't dump every
+        // attack on the first frame the player walks in.
+        cooldowns[rift_game::abilities::id::GROUND_SLAM as usize] = 1.5;
+        cooldowns[rift_game::abilities::id::ARCANE_FAN as usize] = 3.0;
+        cooldowns[rift_game::abilities::id::SUMMON_BRUTES as usize] = 6.0;
+        Self {
+            floor,
+            cooldowns,
+            attack: BossAttack::Idle,
+        }
+    }
+}
+
+/// In-flight boss attack. The `Windup` variant carries the
+/// resolving ability's wire id + remaining timer + (for
+/// projectiles) the locked aim direction. On expiry the
+/// caller looks the ability up in
+/// [`rift_game::abilities::REGISTRY`] and dispatches through
+/// [`super::ability::resolve_enemy_cast`].
+#[derive(Clone, Copy, Debug)]
+pub enum BossAttack {
+    Idle,
+    Windup {
+        ability_id: u8,
+        remaining: f32,
+        /// Aim direction snapshotted at wind-up start (so the
+        /// player can side-step a fan after the telegraph).
+        /// `Vec3::ZERO` for self-centred attacks (slam, summon).
+        aim: Vec3,
+        /// Ability-specific scalar baked at wind-up start —
+        /// passed straight through to
+        /// `EnemyCast::Resolve.param_a`. Used by the slam to
+        /// preserve the enrage-scaled radius across the
+        /// wind-up regardless of any phase change mid-cast.
+        param_a: f32,
+    },
 }
 
 /// Per-enemy AI phase. Most roles only ever live in
@@ -205,28 +310,60 @@ impl ServerEnemy {
     }
 }
 
-/// One in-flight ranged-attack request emitted by the AI tick.
-/// The caller (`Sim::step`) consumes these to spawn enemy
-/// projectile entities once the AI's mutable borrow ends.
-#[derive(Clone, Debug)]
-pub struct EnemyShot {
-    /// Net id of the casting enemy (so the spawned projectile
-    /// can record its owner for replication).
-    pub owner: NetId,
-    /// Bolt origin (caster body + slight forward offset).
-    pub origin: Vec3,
-    /// Unit aim direction in XZ.
-    pub aim: Vec3,
+/// One enemy ability cast emitted by an AI tick. The AI either
+/// emits a `Start` (wind-up beginning, drives the client
+/// telegraph visual) or a `Resolve` (wind-up expired, runs
+/// authoritative effects). The caller (`Sim::step`) translates
+/// these into `WorldEvent::AbilityCast` events + dispatches
+/// resolves through [`super::ability::resolve_enemy_cast`].
+///
+/// Unifying every enemy attack onto this single channel means
+/// adding a new attack is a registry-entry append + one
+/// selection arm in `tick_boss` — no new bespoke `EnemyShot` /
+/// `summons` plumbing.
+#[derive(Clone, Copy, Debug)]
+pub enum EnemyCast {
+    /// Wind-up just started. `dir_x` / `dir_y` pack ability-
+    /// specific scalars onto the wire `AbilityCast.dir` field
+    /// (e.g. slam radius + wind-up duration).
+    Start {
+        owner: NetId,
+        ability_id: u8,
+        origin: Vec3,
+        target: Vec3,
+        dir_x: f32,
+        dir_y: f32,
+    },
+    /// Wind-up expired. Server runs the ability's effect (spawn
+    /// projectiles / damage / summon).
+    Resolve {
+        owner: NetId,
+        ability_id: u8,
+        origin: Vec3,
+        aim: Vec3,
+        damage_mult: f32,
+        /// Optional ability-specific scalar override applied at
+        /// resolve. For [`AbilityKind::DelayedAoe`] this is the
+        /// effective radius (m), letting the AI bake in
+        /// per-cast scaling (e.g. boss slam enrage multiplier)
+        /// without having to author multiple registry entries.
+        /// `0.0` falls back to the registry's authored value.
+        param_a: f32,
+    },
 }
 
 /// Output bundle from one AI tick. The dispatcher walks every
 /// enemy, applies role-specific steering / attack logic, and
-/// returns the queued damage + ranged-shot rows for the caller
+/// returns the queued damage + ability-cast rows for the caller
 /// to apply once the world borrow ends.
 #[derive(Default)]
 pub struct AiOutcome {
     pub melee_damage: Vec<(Entity, f32)>,
-    pub shots: Vec<EnemyShot>,
+    /// Ability cast events (start-of-windup + resolve). Lifted
+    /// into `WorldEvent::AbilityCast` and / or dispatched
+    /// through [`super::ability::resolve_enemy_cast`] by
+    /// `Sim::step`.
+    pub casts: Vec<EnemyCast>,
 }
 
 /// One AI tick for every enemy in the world.
@@ -246,6 +383,7 @@ pub struct AiOutcome {
 pub fn tick_ai(
     world: &mut hecs::World,
     player_positions: &[(Entity, Vec3)],
+    damage_mult: f32,
     dt: f32,
 ) -> AiOutcome {
     // Snapshot every live enemy's (net_id, position) so the
@@ -262,8 +400,8 @@ pub fn tick_ai(
         .collect();
 
     let mut outcome = AiOutcome::default();
-    for (_e, (en, stack)) in world
-        .query_mut::<(&mut ServerEnemy, Option<&super::debuff::DebuffStack>)>()
+    for (_e, (en, stack, boss)) in world
+        .query_mut::<(&mut ServerEnemy, Option<&super::debuff::DebuffStack>, Option<&mut BossState>)>()
     {
         // Skip dying enemies — their AI is frozen until the
         // death-fade timer expires and they're despawned.
@@ -291,24 +429,42 @@ pub fn tick_ai(
 
         // Per-role steering + attack.
         match en.role {
-            role::STALKER => tick_stalker(en, target, speed_mult, dt, &mut outcome),
-            role::CASTER => tick_caster(en, target, speed_mult, dt, &mut outcome),
-            // Brute, Elite, Boss, and any unknown role: classic
-            // chase-and-melee behaviour.
-            _ => tick_brute(en, target, speed_mult, dt, &mut outcome),
+            role::STALKER => tick_stalker(en, target, speed_mult, damage_mult, dt, &mut outcome),
+            role::CASTER => tick_caster(en, target, speed_mult, damage_mult, dt, &mut outcome),
+            role::BOSS if boss.is_some() => {
+                tick_boss(
+                    en,
+                    boss.unwrap(),
+                    target,
+                    player_positions,
+                    speed_mult,
+                    damage_mult,
+                    dt,
+                    &mut outcome,
+                );
+            }
+            // Brute, Elite, and any unknown role: classic
+            // chase-and-melee behaviour. (Boss without a
+            // BossState component falls through here too — keeps
+            // the fight functional even if the component slot
+            // ever fails to attach.)
+            _ => tick_brute(en, target, speed_mult, damage_mult, dt, &mut outcome),
         }
 
         // Separation: shove away from any neighbour inside
         // SEPARATION_RADIUS so packs spread out instead of
-        // stacking. Skips dying enemies (filtered above) and
-        // self (matched by net_id).
-        let push = separation_steering(en.net_id, en.k.position, &neighbours);
-        if push.length_squared() > 1.0e-6 {
-            // Scale by base speed so the shove feels uniform
-            // across slow / fast roles. Applied additively so
-            // forward locomotion still wins when it's set; in
-            // pure-Idle states the push is what unjams the clump.
-            en.k.velocity += push * en.speed * SEPARATION_STRENGTH * speed_mult;
+        // stacking. Skipped for the boss — there's only ever
+        // one of him and the body is huge, so neighbour pushes
+        // would just jitter him off his attack mark.
+        if en.role != role::BOSS {
+            let push = separation_steering(en.net_id, en.k.position, &neighbours);
+            if push.length_squared() > 1.0e-6 {
+                // Scale by base speed so the shove feels uniform
+                // across slow / fast roles. Applied additively so
+                // forward locomotion still wins when it's set; in
+                // pure-Idle states the push is what unjams the clump.
+                en.k.velocity += push * en.speed * SEPARATION_STRENGTH * speed_mult;
+            }
         }
     }
     outcome
@@ -400,6 +556,7 @@ fn tick_brute(
     en: &mut ServerEnemy,
     target: Option<(Entity, Vec3, f32)>,
     speed_mult: f32,
+    damage_mult: f32,
     _dt: f32,
     outcome: &mut AiOutcome,
 ) {
@@ -430,7 +587,7 @@ fn tick_brute(
             en.attack_anim_remaining = ATTACK_ANIM_DUR;
             outcome
                 .melee_damage
-                .push((target_entity, ATTACK_DAMAGE));
+                .push((target_entity, ATTACK_DAMAGE * damage_mult));
         }
     }
 }
@@ -443,6 +600,7 @@ fn tick_stalker(
     en: &mut ServerEnemy,
     target: Option<(Entity, Vec3, f32)>,
     speed_mult: f32,
+    damage_mult: f32,
     dt: f32,
     outcome: &mut AiOutcome,
 ) {
@@ -519,7 +677,7 @@ fn tick_stalker(
             if !landed && dist <= ATTACK_RANGE {
                 outcome
                     .melee_damage
-                    .push((target_entity, stalker::DASH_DAMAGE));
+                    .push((target_entity, stalker::DASH_DAMAGE * damage_mult));
                 landed = true;
             }
             if next <= 0.0 {
@@ -557,13 +715,34 @@ fn tick_stalker(
 /// target while firing bolts on cooldown. Approach if too far,
 /// retreat if too close. Wind-up freeze before each bolt
 /// telegraphs the attack so players can break line of sight.
+///
+/// All combat tuning (bolt damage / speed / TTL / cooldown /
+/// wind-up) is read from the shared
+/// [`rift_game::abilities::REGISTRY`] entry for `ARCANE_BOLT`.
 fn tick_caster(
     en: &mut ServerEnemy,
     target: Option<(Entity, Vec3, f32)>,
     speed_mult: f32,
+    damage_mult: f32,
     dt: f32,
     outcome: &mut AiOutcome,
 ) {
+    use rift_game::abilities::{id as ability_id, lookup, AbilityKind};
+    let bolt = lookup(ability_id::ARCANE_BOLT)
+        .expect("REGISTRY missing ARCANE_BOLT");
+    let bolt_windup = match bolt.kind {
+        AbilityKind::EnemyProjectiles { windup, .. } => windup,
+        // Registry mis-authoring: keep the AI alive with a sane
+        // default so a bad edit doesn't soft-lock the boss
+        // fight. Asserts in debug builds so it's caught before
+        // shipping.
+        _ => {
+            debug_assert!(false, "ARCANE_BOLT must be EnemyProjectiles");
+            0.55
+        }
+    };
+    let bolt_cooldown = bolt.cooldown;
+
     let Some((_target_entity, target_pos, d2)) = target else {
         en.k.velocity = Vec3::ZERO;
         en.k.locomotion = loco::IDLE;
@@ -588,17 +767,17 @@ fn tick_caster(
         en.k.velocity = Vec3::ZERO;
         en.k.locomotion = loco::IDLE;
         if next <= 0.0 {
-            // Fire bolt from a slightly elevated body offset so
-            // the visual emerges from the caster's chest, not
-            // its feet. Direction is freshly recomputed at fire
-            // time so very-late side-steps still get tracked.
-            let origin = en.k.position + Vec3::Y * 1.1 + dir_to * 0.4;
-            outcome.shots.push(EnemyShot {
+            // Direction is freshly recomputed at fire time so
+            // very-late side-steps still get tracked.
+            outcome.casts.push(EnemyCast::Resolve {
                 owner: en.net_id,
-                origin,
+                ability_id: ability_id::ARCANE_BOLT,
+                origin: en.k.position,
                 aim: dir_to,
+                damage_mult,
+                param_a: 0.0,
             });
-            en.attack_cooldown = caster::SHOT_COOLDOWN;
+            en.attack_cooldown = bolt_cooldown;
             en.ai_phase = AiPhase::Idle;
         } else {
             en.ai_phase = AiPhase::CasterWindup(next);
@@ -628,9 +807,260 @@ fn tick_caster(
     // wall-collision step — telegraphing now even through walls
     // would reveal positions, which is fine for a PvE game.
     if en.attack_cooldown <= 0.0 && dist <= caster::MAX_RANGE {
-        en.ai_phase = AiPhase::CasterWindup(caster::WINDUP_DUR);
-        en.attack_anim_remaining = caster::WINDUP_DUR;
+        en.ai_phase = AiPhase::CasterWindup(bolt_windup);
+        en.attack_anim_remaining = bolt_windup;
     }
+}
+
+/// Boss behaviour. The boss runs a 3-phase fight gated on HP
+/// fraction (see [`boss`] module). Between attacks the boss
+/// chases its target and swings in melee like a brute. Active
+/// attacks (Slam / Fan / Summons) take precedence over chase
+/// movement and freeze the boss for the duration of the
+/// wind-up; that freeze + the attack-anim flag is the visual
+/// telegraph the player reads.
+///
+/// `players` carries every player position so the slam pulse
+/// can hit the whole arena radius, not just the locked target.
+fn tick_boss(
+    en: &mut ServerEnemy,
+    boss: &mut BossState,
+    target: Option<(Entity, Vec3, f32)>,
+    _players: &[(Entity, Vec3)],
+    speed_mult: f32,
+    damage_mult: f32,
+    dt: f32,
+    outcome: &mut AiOutcome,
+) {
+    use rift_game::abilities::{id as ab_id, lookup, AbilityKind};
+
+    // Phase + per-phase modifiers.
+    let hp_frac = if en.hp_max > 0.0 { en.hp / en.hp_max } else { 0.0 };
+    let phase: u8 = if hp_frac > boss::PHASE_2_HP {
+        1
+    } else if hp_frac > boss::PHASE_3_HP {
+        2
+    } else {
+        3
+    };
+    let enraged = phase == 3;
+    let cd_mult = if enraged { boss::ENRAGE_CD_MULT } else { 1.0 };
+    let move_mult = if enraged { boss::ENRAGE_SPEED_MULT } else { 1.0 };
+    let windup_scale = boss::windup_scale(boss.floor);
+
+    // Tick every per-ability cooldown. Independent of the
+    // shared `attack_cooldown` clock so basic-melee swings
+    // stay on their own rhythm during chase.
+    for cd in boss.cooldowns.iter_mut() {
+        if *cd > 0.0 {
+            *cd = (*cd - dt).max(0.0);
+        }
+    }
+
+    // 1. Resolve any in-flight wind-up before deciding what to
+    //    do this tick. Wind-ups freeze movement; on expiry we
+    //    emit an `EnemyCast::Resolve` and let the central
+    //    dispatcher in `super::ability::resolve_enemy_cast`
+    //    actually apply the effect (spawn projectiles / damage
+    //    / queue summons).
+    if let BossAttack::Windup { ability_id, remaining, aim, param_a } = boss.attack {
+        en.k.velocity = Vec3::ZERO;
+        en.k.locomotion = loco::IDLE;
+        // For projectile fans, lock the boss's facing to the
+        // captured aim so the cone reads correctly through the
+        // wind-up.
+        if aim.length_squared() > 1.0e-4 {
+            en.k.yaw = aim.x.atan2(aim.z);
+            en.k.aim_yaw = en.k.yaw;
+        }
+        let next = remaining - dt;
+        if next <= 0.0 {
+            outcome.casts.push(EnemyCast::Resolve {
+                owner: en.net_id,
+                ability_id,
+                origin: en.k.position,
+                aim,
+                damage_mult,
+                param_a,
+            });
+            // Re-arm the per-ability cooldown from the
+            // registry, scaled by phase modifier.
+            let base_cd = lookup(ability_id).map(|a| a.cooldown).unwrap_or(0.0);
+            boss.cooldowns[ability_id as usize] = base_cd * cd_mult;
+            boss.attack = BossAttack::Idle;
+        } else {
+            boss.attack = BossAttack::Windup {
+                ability_id,
+                remaining: next,
+                aim,
+                param_a,
+            };
+        }
+        return;
+    }
+
+    // 2. No active wind-up — chase the target and decide
+    //    whether to commit to a new attack this tick.
+    let Some((target_entity, target_pos, d2)) = target else {
+        en.k.velocity = Vec3::ZERO;
+        en.k.locomotion = loco::IDLE;
+        return;
+    };
+    let dist = d2.sqrt();
+    let to_target = Vec3::new(
+        target_pos.x - en.k.position.x,
+        0.0,
+        target_pos.z - en.k.position.z,
+    );
+    if to_target.length_squared() > 1.0e-4 {
+        en.k.yaw = to_target.x.atan2(to_target.z);
+        en.k.aim_yaw = en.k.yaw;
+    }
+
+    // Attack selection priority: summons (only enrage) > slam >
+    // fan (phase 2+) > melee. Tuning (cooldown, wind-up,
+    // radius, projectile count) all comes from the shared
+    // [`rift_game::abilities::REGISTRY`]; this body only owns
+    // the *selection* logic.
+    if enraged && boss.cooldowns[ab_id::SUMMON_BRUTES as usize] <= 0.0 {
+        let summon = lookup(ab_id::SUMMON_BRUTES)
+            .expect("REGISTRY missing SUMMON_BRUTES");
+        let windup = match summon.kind {
+            AbilityKind::Summon { windup, .. } => windup,
+            _ => 1.2,
+        } * windup_scale;
+        boss.attack = BossAttack::Windup {
+            ability_id: ab_id::SUMMON_BRUTES,
+            remaining: windup,
+            aim: Vec3::ZERO,
+            param_a: 0.0,
+        };
+        en.attack_anim_remaining = windup;
+        return;
+    }
+    if boss.cooldowns[ab_id::GROUND_SLAM as usize] <= 0.0 {
+        let slam = lookup(ab_id::GROUND_SLAM).expect("REGISTRY missing GROUND_SLAM");
+        let (slam_radius, slam_windup_base) = match slam.kind {
+            AbilityKind::DelayedAoe { radius, windup } => (radius, windup),
+            _ => (4.0, 1.0),
+        };
+        // Only commit to slam if the player is within
+        // `radius * 1.4` — leaves headroom for the player to
+        // dance around the edge of the danger zone.
+        if dist <= slam_radius * 1.4 {
+            let windup = slam_windup_base * windup_scale;
+            // Phase-3 slam radius is bumped so the player can't
+            // outrange it by 0.5 m. Visual telegraph carries
+            // the same scaled radius so the ring the player
+            // sees is the danger circle. The same scaled
+            // radius rides through the wind-up via `param_a`
+            // so resolve damage uses it too.
+            let radius = slam_radius
+                * if enraged { boss::SLAM_RADIUS_ENRAGE_MULT } else { 1.0 };
+            boss.attack = BossAttack::Windup {
+                ability_id: ab_id::GROUND_SLAM,
+                remaining: windup,
+                aim: Vec3::ZERO,
+                param_a: radius,
+            };
+            en.attack_anim_remaining = windup;
+            // Sustained ground-ring telegraph for the wind-up
+            // duration. Side-channels through the visual-only
+            // GROUND_SLAM_WINDUP wire id; the impact event is
+            // emitted by `resolve_enemy_cast` on resolve.
+            outcome.casts.push(EnemyCast::Start {
+                owner: en.net_id,
+                ability_id: ab_id::GROUND_SLAM_WINDUP,
+                origin: en.k.position,
+                target: en.k.position,
+                dir_x: radius,
+                dir_y: windup,
+            });
+            return;
+        }
+    }
+    if phase >= 2 && boss.cooldowns[ab_id::ARCANE_FAN as usize] <= 0.0 {
+        let fan = lookup(ab_id::ARCANE_FAN).expect("REGISTRY missing ARCANE_FAN");
+        let fan_windup = match fan.kind {
+            AbilityKind::EnemyProjectiles { windup, .. } => windup,
+            _ => 0.8,
+        } * windup_scale;
+        let aim = to_target.normalize_or_zero();
+        boss.attack = BossAttack::Windup {
+            ability_id: ab_id::ARCANE_FAN,
+            remaining: fan_windup,
+            aim,
+            param_a: 0.0,
+        };
+        en.attack_anim_remaining = fan_windup;
+        return;
+    }
+
+    // No special attack ready — chase + melee like a brute.
+    if dist > ATTACK_RANGE {
+        let dir = to_target.normalize_or_zero();
+        en.k.velocity = dir * en.speed * speed_mult * move_mult;
+        en.k.locomotion = loco::RUN;
+    } else {
+        en.k.velocity = Vec3::ZERO;
+        en.k.locomotion = loco::IDLE;
+        if en.attack_cooldown <= 0.0 {
+            en.attack_cooldown = ATTACK_COOLDOWN;
+            en.attack_anim_remaining = ATTACK_ANIM_DUR;
+            // Boss melee is heavier than a brute swing.
+            outcome
+                .melee_damage
+                .push((target_entity, ATTACK_DAMAGE * 1.6 * damage_mult));
+        }
+    }
+}
+
+/// Spawn one ad-hoc enemy at `pos` with the given role byte and
+/// HP multiplier (relative to floor base HP). Used by the boss
+/// summon path; mirrors the construction in [`spawn_for_floor`]
+/// without going through pack placement.
+pub fn spawn_summon(
+    world: &mut hecs::World,
+    pos: Vec3,
+    role_byte: u8,
+    hp_mult: f32,
+    floor_index: u32,
+    next_enemy_net_id: &mut u32,
+) {
+    let cfg = FloorConfig::for_floor(floor_index);
+    let hp = cfg.enemy_health * hp_mult;
+    let speed = cfg.enemy_speed
+        * match role_byte {
+            role::BRUTE => 0.85,
+            role::STALKER => 1.35,
+            role::CASTER => 0.95,
+            _ => 1.0,
+        };
+    let net_id = NetId(*next_enemy_net_id);
+    *next_enemy_net_id = next_enemy_net_id.wrapping_add(1).max(1);
+    let enemy = ServerEnemy {
+        net_id,
+        role: role_byte,
+        k: Kinematic {
+            position: Vec3::new(pos.x, 0.0, pos.z),
+            velocity: Vec3::ZERO,
+            yaw: 0.0,
+            aim_yaw: 0.0,
+            locomotion: loco::IDLE,
+            vy: 0.0,
+            airborne: false,
+            ..Default::default()
+        },
+        speed,
+        hp_max: hp,
+        hp,
+        attack_cooldown: 0.0,
+        attack_anim_remaining: 0.0,
+        dying_remaining: 0.0,
+        ai_phase: AiPhase::default(),
+        target_lock: None,
+    };
+    world.spawn((enemy, super::debuff::DebuffStack::default()));
 }
 
 /// Integrate every enemy's velocity against the floor's wall grid.

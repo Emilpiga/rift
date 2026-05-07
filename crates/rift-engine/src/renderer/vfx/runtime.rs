@@ -699,9 +699,7 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
 
 // ─── Math helpers ─────────────────────────────────────────────────────────
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
+use rift_math::lerp;
 
 fn bake_gradient_8(g: &super::spec::Gradient) -> [[f32; 4]; 8] {
     let mut out = [[0.0; 4]; 8];

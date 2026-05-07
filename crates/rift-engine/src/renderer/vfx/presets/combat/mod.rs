@@ -7,9 +7,11 @@ pub mod cast;
 pub mod fire;
 pub mod frost;
 pub mod impact;
+pub mod slam;
 
 pub use arcane::*;
 pub use cast::*;
 pub use fire::*;
 pub use frost::*;
 pub use impact::*;
+pub use slam::*;

@@ -432,7 +432,30 @@ pub mod id {
     // upper half is plenty. Clients dispatch projectile mesh /
     // VFX off these ids in `world_sync` — never reorder, only
     // append.
-    pub const ENEMY_ARCANE_BOLT: u8 = 64;
+    pub const ARCANE_BOLT: u8 = 64;
+    /// Ground-slam wind-up: a one-shot `WorldEvent::AbilityCast`
+    /// emitted when a slam-style attack enters its telegraph
+    /// phase. The cast event's `target` carries the slam centre
+    /// and the `dir.x` field carries the radius (m); clients
+    /// drive a sustained ground-ring telegraph off it. Player-
+    /// castable in principle — today only the boss uses it.
+    pub const GROUND_SLAM_WINDUP: u8 = 65;
+    /// Ground-slam impact: paired with `GROUND_SLAM_WINDUP`,
+    /// emitted when the wind-up resolves. Same target/radius
+    /// payload convention as the wind-up event.
+    pub const GROUND_SLAM_IMPACT: u8 = 66;
+    /// Multi-bolt cone fan. Authored as a single
+    /// [`AbilityKind::EnemyProjectiles`] entry with `count > 1`
+    /// and a non-zero spread; the boss uses it in phase 2+.
+    pub const ARCANE_FAN: u8 = 67;
+    /// Boss ground slam (the gameplay ability — distinct from
+    /// the visual-only WINDUP/IMPACT events). Kind is
+    /// [`AbilityKind::DelayedAoe`].
+    pub const GROUND_SLAM: u8 = 68;
+    /// Boss summons: spawn brute reinforcements in a ring
+    /// around the caster after a wind-up. Kind is
+    /// [`AbilityKind::Summon`].
+    pub const SUMMON_BRUTES: u8 = 69;
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -475,6 +498,52 @@ pub enum AbilityKind {
     },
     /// Pure visual / movement on the client side, no server-side damage.
     ClientOnly,
+    /// Enemy-cast projectiles that damage *players* (mirror of
+    /// [`AbilityKind::Projectiles`] with the target side flipped).
+    /// `windup` is the telegraph freeze the casting AI plays
+    /// before the bolts spawn — the AI ticks it down and only
+    /// calls `cast_for_enemy` once it expires, so this field is
+    /// authoritative tuning, not runtime state.
+    ///
+    /// In principle a player could ever take an "enemy-style"
+    /// telegraphed ranged attack; the variant is named for who
+    /// gets hurt, not who casts. Spawned projectiles share the
+    /// `ServerProjectile` component with player bolts but carry
+    /// `Team::Enemy`, which routes them to the player target
+    /// list in the unified projectile tick.
+    EnemyProjectiles {
+        count: u32,
+        spread: f32,
+        speed: f32,
+        ttl: f32,
+        windup: f32,
+        size: f32,
+    },
+    /// Single-resolve self-centred AoE at the caster's body
+    /// position. Damage = `Ability.base_damage`. After the AI's
+    /// wind-up resolves, every player inside `radius` takes the
+    /// damage exactly once. Used by boss Slam.
+    ///
+    /// Telegraph visuals are driven separately: the caster emits
+    /// a `WorldEvent::AbilityCast` carrying `radius` + `windup`
+    /// when the wind-up starts (see `id::GROUND_SLAM_WINDUP`),
+    /// and a paired impact event on resolve.
+    DelayedAoe {
+        radius: f32,
+        windup: f32,
+    },
+    /// Spawn `count` enemies in a ring around the caster after
+    /// `windup` seconds. Used by boss summons. `role` is one of
+    /// `rift_server::sim::enemy::role::*` (a wire-stable byte).
+    /// `hp_mult` scales the floor's base enemy HP — summons want
+    /// to be a real threat through the enrage phase.
+    Summon {
+        count: u32,
+        role: u8,
+        hp_mult: f32,
+        ring_radius: f32,
+        windup: f32,
+    },
 }
 
 /// Per-tick effect of a [`AbilityKind::Channel`]. Designed to grow
@@ -889,14 +958,175 @@ pub static REGISTRY: &[Ability] = &[
     // ── Enemy abilities (wire ids 64..) ───────────────────────────────
     //
     // Enemy abilities aren't routed through the player cast
-    // dispatcher — enemy AI in `rift-server` spawns their effects
-    // directly. They live in `REGISTRY` so the *visual* lookup
-    // (`ability.visuals.shape`) works uniformly for player and
-    // enemy projectiles on the client.
+    // dispatcher — enemy AI in `rift-server` ticks its own
+    // wind-ups and calls `ability::cast_for_enemy` at resolve.
+    // The data lives here so all tuning (damage / speed / radius
+    // / wind-up) is in a single table both the AI and the client
+    // visual-lookup pipeline read from.
     Ability {
-        id: AbilityId("enemy_arcane_bolt"),
-        wire_id: id::ENEMY_ARCANE_BOLT,
+        id: AbilityId("arcane_bolt"),
+        wire_id: id::ARCANE_BOLT,
         name: "Arcane Bolt",
+        description: "",
+        icon: None,
+        // Cooldown is enforced by the casting AI's per-attack
+        // timer, not by the player cooldown table — but the
+        // value lives here so the AI can read it.
+        cooldown: 2.4,
+        resource_cost: 0.0,
+        base_damage: 9.0,
+        damage_mult: 1.0,
+        projectile_count: 1,
+        spread_angle: 0.0,
+        range: 14.0 * 1.5,
+        unlock_level: 0,
+        element: Element::None,
+        archetype: Archetype::Projectile,
+        scaling: Scaling::None,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::EnemyProjectiles {
+            count: 1,
+            spread: 0.0,
+            speed: 14.0,
+            ttl: 1.5,
+            windup: 0.55,
+            size: 0.45,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::Projectile {
+                mesh: MeshKind::ArcaneBolt,
+                trail: VfxKind::ArcaneBoltTrail,
+                impact: VfxKind::ArcaneBoltImpact,
+                scale: 0.6,
+            },
+        },
+        effects: &[],
+    },
+    // Boss multi-bolt fan — same projectile path as the
+    // single-bolt caster attack but with `count > 1` and a
+    // wider spread.
+    Ability {
+        id: AbilityId("arcane_fan"),
+        wire_id: id::ARCANE_FAN,
+        name: "Arcane Fan",
+        description: "",
+        icon: None,
+        cooldown: 5.0,
+        resource_cost: 0.0,
+        base_damage: 9.0,
+        damage_mult: 1.0,
+        projectile_count: 5,
+        spread_angle: 0.7,
+        range: 14.0 * 1.5,
+        unlock_level: 0,
+        element: Element::None,
+        archetype: Archetype::Projectile,
+        scaling: Scaling::None,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::EnemyProjectiles {
+            count: 5,
+            spread: 0.7,
+            speed: 14.0,
+            ttl: 1.5,
+            windup: 0.8,
+            size: 0.45,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::Projectile {
+                mesh: MeshKind::ArcaneBolt,
+                trail: VfxKind::ArcaneBoltTrail,
+                impact: VfxKind::ArcaneBoltImpact,
+                scale: 0.6,
+            },
+        },
+        effects: &[],
+    },
+    // Boss ground slam — single-resolve self-centred AoE.
+    // The wire id 68 is the gameplay ability; the per-cast
+    // visual telegraph + impact use the existing
+    // GROUND_SLAM_WINDUP / GROUND_SLAM_IMPACT visual ids
+    // emitted as side-channel `AbilityCast` events.
+    Ability {
+        id: AbilityId("ground_slam"),
+        wire_id: id::GROUND_SLAM,
+        name: "Ground Slam",
+        description: "",
+        icon: None,
+        cooldown: 4.0,
+        resource_cost: 0.0,
+        base_damage: 28.0,
+        damage_mult: 1.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 4.0,
+        unlock_level: 0,
+        element: Element::Physical,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::None,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::DelayedAoe {
+            radius: 4.0,
+            windup: 1.0,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::None,
+        },
+        effects: &[],
+    },
+    // Boss summons — ring of brutes around the caster after
+    // a wind-up.
+    Ability {
+        id: AbilityId("summon_brutes"),
+        wire_id: id::SUMMON_BRUTES,
+        name: "Summon Brutes",
+        description: "",
+        icon: None,
+        cooldown: 12.0,
+        resource_cost: 0.0,
+        base_damage: 0.0,
+        damage_mult: 0.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 3.0,
+        unlock_level: 0,
+        element: Element::None,
+        archetype: Archetype::Utility,
+        scaling: Scaling::None,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::Summon {
+            count: 3,
+            // role byte: 0 = BRUTE, mirrors
+            // `rift_server::sim::enemy::role::BRUTE`.
+            role: 0,
+            hp_mult: 1.5,
+            ring_radius: 3.0,
+            windup: 1.2,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::None,
+        },
+        effects: &[],
+    },
+    // Visual-only ability events — no kind/data, just the wire
+    // id so the client renderer can dispatch off it.
+    // Ground-slam wind-up + impact pair. Both are
+    // visual-only ability events (no projectile / AoE-zone
+    // entity) — the actual damage is applied by the caster's
+    // own logic when the wind-up resolves. The client reads
+    // `target` for the slam centre and `dir.x` for the radius
+    // (m), packed into the AbilityCast event by the server.
+    Ability {
+        id: AbilityId("ground_slam_windup"),
+        wire_id: id::GROUND_SLAM_WINDUP,
+        name: "Slam (wind-up)",
         description: "",
         icon: None,
         cooldown: 0.0,
@@ -907,22 +1137,41 @@ pub static REGISTRY: &[Ability] = &[
         spread_angle: 0.0,
         range: 0.0,
         unlock_level: 0,
-        element: Element::None,
-        archetype: Archetype::Projectile,
+        element: Element::Physical,
+        archetype: Archetype::Aoe,
         scaling: Scaling::None,
         duration: 0.0,
         targeting: TargetingMode::Instant,
-        // ClientOnly so the player cast pipeline never picks this
-        // up; enemy AI bypasses `cast()` entirely.
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals {
             cast_spark: None,
-            shape: ShapeVisuals::Projectile {
-                mesh: MeshKind::ArcaneBolt,
-                trail: VfxKind::ArcaneBoltTrail,
-                impact: VfxKind::ArcaneBoltImpact,
-                scale: 0.6,
-            },
+            shape: ShapeVisuals::None,
+        },
+        effects: &[],
+    },
+    Ability {
+        id: AbilityId("ground_slam_impact"),
+        wire_id: id::GROUND_SLAM_IMPACT,
+        name: "Slam (impact)",
+        description: "",
+        icon: None,
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        base_damage: 0.0,
+        damage_mult: 0.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 0.0,
+        unlock_level: 0,
+        element: Element::Physical,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::None,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::ClientOnly,
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::None,
         },
         effects: &[],
     },

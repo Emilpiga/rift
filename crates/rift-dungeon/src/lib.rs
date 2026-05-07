@@ -1,8 +1,10 @@
 pub mod bsp;
 pub mod config;
+pub mod nav;
 pub mod rooms;
 
 pub use config::FloorConfig;
+pub use nav::NavGrid;
 pub use rooms::{Room, RoomType};
 
 use glam::Vec3;

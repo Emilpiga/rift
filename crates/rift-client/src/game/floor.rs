@@ -1,5 +1,5 @@
 use glam::{Mat4, Vec3};
-use rift_engine::ai::NavGrid;
+use rift_dungeon::NavGrid;
 use rift_engine::ecs::components::{
     Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, Renderable, Skinned, Static, Transform, Velocity,
 };

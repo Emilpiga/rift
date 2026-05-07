@@ -21,7 +21,7 @@ use rift_net::messages::SHRINE_INTERACT_RADIUS;
 use rift_net::NetId;
 use std::collections::HashMap;
 
-use super::sub_state::ShrineClientState;
+use crate::game::sub_state::ShrineClientState;
 use crate::game::sub_state::NetState;
 
 

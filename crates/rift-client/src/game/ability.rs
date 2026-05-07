@@ -294,7 +294,7 @@ pub fn on_channel_end(
 /// renderer the first time we see it, then on subsequent frames
 /// update its endpoints so the beam tracks the caster's hand and
 /// aim direction. Walls clip the beam length via a raycast
-/// against `state.wall_aabbs`. Idle entries (no tick for ~0.4 s)
+/// against `state.floor.wall_aabbs`. Idle entries (no tick for ~0.4 s)
 /// and entries flagged `ending` get their VFX despawned and are
 /// dropped from the visuals list.
 pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: f32) {
@@ -468,7 +468,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             origin,
             direction: dir,
         };
-        let length = match physics::raycast(&ray, beam_range, &state.wall_aabbs) {
+        let length = match physics::raycast(&ray, beam_range, &state.floor.wall_aabbs) {
             Some(hit) => hit.distance.max(0.05),
             None => beam_range,
         };

@@ -4,7 +4,7 @@ use hecs::World;
 use super::components::{AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, Health, LocalPlayer, Player, Renderable, Skinned, Transform, Velocity};
 use crate::animation::{self, Animator};
 use crate::input::Input;
-use crate::physics::{self, Aabb, Ray};
+use rift_math::physics::{self, Aabb, Ray};
 use crate::renderer::Renderer;
 
 /// Process player input and set velocity based on WASD keys.
