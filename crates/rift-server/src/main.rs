@@ -249,13 +249,25 @@ impl Server {
                 aim_dir,
                 placed_target,
             } => {
+                // Ghosts (risen-but-dead spectators) can't cast.
+                // Silently drop — the client UI gates this too,
+                // but desync from a stale snapshot would let a
+                // ghost's cast affect live enemies.
+                if self.sim.is_ghost(from) {
+                    return;
+                }
                 self.sim
                     .cast_ability(from, ability_id, origin, aim_dir, placed_target, self.tick);
             }
             ClientMsg::EndChannel { ability_id } => {
                 self.sim.end_channel(from, ability_id);
             }
-            ClientMsg::PickUpLoot { net_id } => self.handle_pick_up_loot(from, net_id),
+            ClientMsg::PickUpLoot { net_id } => {
+                if self.sim.is_ghost(from) {
+                    return;
+                }
+                self.handle_pick_up_loot(from, net_id)
+            }
             ClientMsg::EquipItem { inventory_index } => {
                 self.handle_equip_item(from, inventory_index as usize);
             }
@@ -291,6 +303,9 @@ impl Server {
                 self.handle_swap_stash_slots(from, a as usize, b as usize);
             }
             ClientMsg::DropInventoryItem { inventory_index } => {
+                if self.sim.is_ghost(from) {
+                    return;
+                }
                 self.handle_drop_inventory_item(from, inventory_index as usize);
             }
             ClientMsg::UnequipToBagSlot { slot, inventory_index } => {
@@ -323,6 +338,30 @@ impl Server {
                 log::info!("RequestRoster from {from:?}: account={account_name:?}");
                 let entries = self.lookup_roster(&account_name);
                 self.send_to(from, Channel::Control, &ServerMsg::Roster { entries });
+            }
+            ClientMsg::RiftExitVoteStart => {
+                use crate::sim::ExitVoteRequest;
+                match self.sim.request_exit_vote(from) {
+                    ExitVoteRequest::Pass => {
+                        // Solo path: same wipe-and-transition
+                        // sequence as the wipe-respawn flow,
+                        // minus the timer.
+                        log::info!("vote: solo {from:?} exiting rift");
+                        let wiped = self.sim.wipe_dead_loot();
+                        self.transition_floor(0);
+                        for cid in wiped {
+                            self.broadcast_inventory_state(cid);
+                            self.persist_inventory_state(cid);
+                        }
+                    }
+                    ExitVoteRequest::Opened => { /* broadcast happens via take_exit_vote_update */ }
+                    ExitVoteRequest::Refused => {
+                        log::debug!("vote: refused start from {from:?}");
+                    }
+                }
+            }
+            ClientMsg::RiftExitVoteCast { yes } => {
+                self.sim.cast_exit_vote(from, yes);
             }
         }
     }
@@ -434,10 +473,41 @@ impl Server {
         // Auto-respawn: when the post-death countdown elapses the
         // sim asks us to load the hub. We force it regardless of
         // current floor so a death always pulls the party back to
-        // safety.
+        // safety. Wipe-only path: the timer arms only when every
+        // player on the rift floor is dead, so any player whose
+        // hp is zero at this point loses their bag + equipped
+        // gear (stash safe). Living players — none, by
+        // construction here — keep everything.
         if self.sim.take_hub_respawn_request() {
-            log::info!("respawning party to hub after death");
+            log::info!("respawning party to hub after wipe");
+            let wiped = self.sim.wipe_dead_loot();
             self.transition_floor(0);
+            for cid in wiped {
+                self.broadcast_inventory_state(cid);
+                self.persist_inventory_state(cid);
+            }
+        }
+
+        // Rift exit vote: tick the deadline / cooldown, resolve
+        // a Pass into the same wipe-and-transition path as the
+        // wipe-respawn flow above (ghosts lose their loot;
+        // living voters keep theirs), and broadcast a fresh
+        // `RiftExitVote` whenever the underlying state changed
+        // this tick (vote opened, vote cast, deadline crossed
+        // an integer-second boundary, vote resolved, cooldown
+        // expired).
+        let outcome = self.sim.tick_exit_vote(dt);
+        if matches!(outcome, crate::sim::vote::TickOutcome::Passed) {
+            log::info!("vote: party voted to leave rift");
+            let wiped = self.sim.wipe_dead_loot();
+            self.transition_floor(0);
+            for cid in wiped {
+                self.broadcast_inventory_state(cid);
+                self.persist_inventory_state(cid);
+            }
+        }
+        if let Some(state) = self.sim.take_exit_vote_update() {
+            self.broadcast(Channel::Control, &ServerMsg::RiftExitVote(state));
         }
     }
 

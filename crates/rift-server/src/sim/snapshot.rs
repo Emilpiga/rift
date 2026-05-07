@@ -26,14 +26,25 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     let mut ack_seq = 0;
     let mut viewer_pos: Option<Vec3> = None;
 
-    // Players first — every connected player ships every snapshot.
+    // Players first — every connected player ships every snapshot,
+    // EXCEPT ghosts (risen-but-dead): a ghost is owner-only, so
+    // their row is dropped from any snapshot whose `ack_for`
+    // isn't them. Living teammates therefore see no avatar /
+    // nameplate / health bar for the ghost, which is what we
+    // want for distraction-free spectating.
     for (_e, p) in world.query::<&ServerPlayer>().iter() {
+        if p.is_ghost && p.client_id != ack_for {
+            continue;
+        }
         let mut flags: u8 = 0;
         if p.k.airborne {
             flags |= entity_flags::AIRBORNE;
         }
         if p.hp <= 0.0 {
             flags |= entity_flags::DEAD;
+        }
+        if p.is_ghost {
+            flags |= entity_flags::GHOST;
         }
         entities.push(EntitySnapshot {
             net_id: p.net_id,

@@ -24,19 +24,27 @@ impl NetClient {
     pub(super) fn send_input(&mut self, input: &Input, dt: f32) {
         self.input_seq = self.input_seq.wrapping_add(1);
 
-        // Dead players don't send input. We still bump `input_seq`
-        // so `ack_seq` keeps advancing once snapshots resume,
-        // freeze the predicted kinematic, and ship a zero-input
-        // command so the server's coalescer notices the seq bump
-        // and the client's reconcile path doesn't replay any
-        // pre-death movement against the new state. Buttons /
-        // movement are all zero so nothing actually happens
-        // server-side either way.
-        let dead = self.local_dead;
+        // Dead-and-not-yet-risen players don't send input. We
+        // still bump `input_seq` so `ack_seq` keeps advancing
+        // once snapshots resume, freeze the predicted kinematic,
+        // and ship a zero-input command so the server's
+        // coalescer notices the seq bump and the client's
+        // reconcile path doesn't replay any pre-death movement
+        // against the new state. Buttons / movement are all
+        // zero so nothing actually happens server-side either
+        // way.
+        //
+        // Ghosts (`local_ghost`) are a special case: they're
+        // still flagged DEAD from the HP point of view but the
+        // server accepts WASD input from them so they can scout
+        // ahead. We still gate ability/attack buttons (server
+        // rejects them anyway) so the spectate camera doesn't
+        // light up FX trying to predict casts.
+        let pinned = self.local_dead && !self.local_ghost;
         let mut buttons: u16 = 0;
         let mut dx = 0.0f32;
         let mut dz = 0.0f32;
-        if !dead {
+        if !pinned {
             // WASD → camera-relative move axis, matching the SP
             // `player_input_system`. We rotate the raw axis by the
             // active camera yaw before sending so the wire payload is
@@ -96,7 +104,7 @@ impl NetClient {
         // integration would just be undone (and re-replayed) on
         // the next snapshot, jittering the death-animation
         // avatar in place.
-        if !dead && self.predicted_ready {
+        if !pinned && self.predicted_ready {
             if let Some(floor) = self.predict_floor.as_ref() {
                 rift_game::kinematic::apply_input(
                     &mut self.predicted,
@@ -112,7 +120,7 @@ impl NetClient {
         // While dead, skip pushing entirely — the snapshot path
         // cleared `input_history` on death and there's nothing
         // for the server to act on anyway.
-        if !dead {
+        if !pinned {
             if self.input_history.len() >= 128 {
                 self.input_history.pop_front();
             }
@@ -173,6 +181,26 @@ impl NetClient {
     pub fn request_return_to_hub(&mut self) {
         log::info!("net: -> RequestReturnToHub");
         self.send(Channel::Control, &ClientMsg::RequestReturnToHub);
+    }
+
+    /// Open the rift exit vote. Sent when the local player
+    /// presses F at the rift-spawn portal. Server validates the
+    /// caster is alive and on a non-hub floor; on success it
+    /// either instantly transitions a solo player to the hub or
+    /// broadcasts a fresh `RiftExitVote` so every party member's
+    /// HUD lights up.
+    pub fn request_exit_vote_start(&mut self) {
+        log::info!("net: -> RiftExitVoteStart");
+        self.send(Channel::Control, &ClientMsg::RiftExitVoteStart);
+    }
+
+    /// Cast the local player's vote on the active rift exit
+    /// vote. `yes = true` for [F]/[Y], `false` for [N]. Silently
+    /// ignored server-side if no vote is active or the caster
+    /// has already voted.
+    pub fn request_exit_vote_cast(&mut self, yes: bool) {
+        log::info!("net: -> RiftExitVoteCast({yes})");
+        self.send(Channel::Control, &ClientMsg::RiftExitVoteCast { yes });
     }
 
     /// Ask the server to fire an ability. Server is the authority on

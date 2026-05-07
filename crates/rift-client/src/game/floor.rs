@@ -29,6 +29,11 @@ pub struct FloorManager {
     /// rift floor (the chest only exists in the hub). Read by
     /// `GameState::tick_stash_chest` for the proximity prompt.
     pub stash_chest_pos: Option<Vec3>,
+    /// World position of the active floor's spawn point. Updated
+    /// by both [`Self::generate`] and [`Self::generate_hub`] so
+    /// the rift-spawn portal can sit on top of it. Mirrors
+    /// `rift_dungeon::Floor::spawn_pos` for the latest floor.
+    pub spawn_pos: Vec3,
 }
 
 impl FloorManager {
@@ -42,6 +47,7 @@ impl FloorManager {
             env: EnvTextures::default(),
             torches: TorchSystem::new(),
             stash_chest_pos: None,
+            spawn_pos: Vec3::ZERO,
         }
     }
 
@@ -159,6 +165,7 @@ impl FloorManager {
         // Player — spawned via shared helper so the hub generator can
         // reuse the same skinned-character + animation-set bring-up.
         let spawn = floor.spawn_pos;
+        self.spawn_pos = spawn;
         self.spawn_player(world, renderer, spawn, player_state, anim_cache)?;
 
         // Enemies — server-authoritative. The floor visuals (walls,
@@ -266,6 +273,7 @@ impl FloorManager {
         self.stash_chest_pos = Some(stash_pos);
 
         let spawn = floor.spawn_pos;
+        self.spawn_pos = spawn;
         self.spawn_player(world, renderer, spawn, player_state, anim_cache)?;
 
         let portal_pos = floor.first_room_center() + Vec3::new(0.0, 0.5, 0.0);

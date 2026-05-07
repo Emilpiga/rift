@@ -140,6 +140,93 @@ pub fn tick_exit(
     );
 }
 
+/// Per-frame rift-spawn-portal tick. Lazily spawns the portal
+/// the first frame we're on a rift floor (i.e. `!in_hub`),
+/// spins the mesh thereafter, and converts an F-press inside
+/// the interact radius into a `pending_exit_vote_start` flag
+/// that the binary forwards as `ClientMsg::RiftExitVoteStart`.
+/// While a vote is already active the prompt is suppressed and
+/// the F-press is ignored — the player should be using Y/N.
+/// Ghosts (risen-but-dead spectators) get no prompt and the F
+/// press is ignored: gatekeeping the living team out of an
+/// exit by spamming votes would be too easy otherwise.
+pub fn tick_rift_spawn(
+    portal_slot: &mut Option<HubPortal>,
+    world: &hecs::World,
+    renderer: &mut Renderer,
+    input: &Input,
+    net: &mut NetState,
+    hud_prompt: &mut Option<&'static str>,
+    in_hub: bool,
+    spawn_pos: Vec3,
+    vote_active: bool,
+    cooldown_remaining: f32,
+    is_ghost: bool,
+    dt: f32,
+) {
+    use winit::keyboard::KeyCode;
+
+    if in_hub {
+        // Despawn isn't worth the cleanup churn — we just stop
+        // ticking. The renderer slot will be cleared when the
+        // next floor regen wipes objects wholesale.
+        return;
+    }
+    if portal_slot.is_none() {
+        // Sit slightly above ground so the ring isn't z-fought
+        // by the floor decal.
+        let pos = spawn_pos + Vec3::new(0.0, 0.5, 0.0);
+        log::info!("rift spawn portal: spawning at {:?}", pos);
+        spawn(portal_slot, renderer, pos, "rift spawn portal");
+    }
+
+    let Some(portal) = portal_slot.as_mut() else { return };
+    portal.age += dt;
+    if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
+        obj.model_matrix = Mat4::from_translation(portal.position)
+            * Mat4::from_rotation_y(portal.age * 0.6);
+    }
+
+    let Some(player_pos) = world
+        .query::<(&Transform, &Player, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (t, _, _))| t.position)
+        .next()
+    else {
+        return;
+    };
+    if player_pos.distance(portal.position) > INTERACT_RADIUS {
+        return;
+    }
+    if is_ghost {
+        // Ghosts don't get a prompt and can't open a vote. We
+        // still tick the spin animation above so the portal
+        // visual stays alive in their spectator view.
+        return;
+    }
+    if vote_active {
+        // HUD vote panel owns the prompt while a vote is in
+        // flight — keep this slot quiet so the two prompts
+        // don't fight for the same on-screen line.
+        return;
+    }
+    if cooldown_remaining > 0.0 {
+        // Surface a temporary "wait N s" prompt instead of the
+        // F-press one so the player understands why F doesn't
+        // work. The HUD prompt is `&'static str` today; we
+        // round + use a small set of pre-baked literals to
+        // avoid plumbing dynamic strings through the prompt
+        // system just for this.
+        *hud_prompt = Some("VOTE COOLDOWN ACTIVE");
+        return;
+    }
+    *hud_prompt = Some("PRESS [F] TO LEAVE THE RIFT");
+    if input.key_just_pressed(KeyCode::KeyF) && !net.pending_exit_vote_start {
+        log::info!("rift spawn portal: requesting RiftExitVoteStart");
+        net.pending_exit_vote_start = true;
+    }
+}
+
 fn tick(
     portal_slot: &mut Option<HubPortal>,
     world: &hecs::World,

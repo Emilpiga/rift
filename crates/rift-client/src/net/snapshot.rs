@@ -135,6 +135,8 @@ impl NetClient {
                     self.correction_error = Vec3::ZERO;
                 }
                 self.local_dead = now_dead;
+                self.local_ghost =
+                    e.flags & rift_net::messages::entity_flags::GHOST != 0;
             }
         }
 

@@ -247,6 +247,63 @@ pub enum ClientMsg {
         slot_index: u8,
         ability_id: u8,
     },
+
+    /// Open the rift exit vote. Sent when a living player
+    /// presses F at the rift-spawn portal. Server validates the
+    /// caster is alive and on a non-hub floor, with no vote
+    /// already active and no cooldown remaining; on success it
+    /// either:
+    /// - **Solo:** instantly transitions the party to the hub
+    ///   (with loot wipe for any ghosts).
+    /// - **Multiplayer:** opens a 15s vote window, auto-records
+    ///   the initiator as `Yes`, and broadcasts
+    ///   [`ServerMsg::RiftExitVote`] to every player on the
+    ///   floor so HUD panels light up. Ghosts (dead players)
+    ///   don't vote — the threshold is unanimous YES from
+    ///   *living* players.
+    /// Reliable on `Channel::Control`.
+    RiftExitVoteStart,
+
+    /// Cast a vote on the currently-active rift exit vote. Sent
+    /// when a living player presses Y or N. Silently dropped if
+    /// no vote is active, the caster is dead, or the caster has
+    /// already voted (no changing your mind). Reliable on
+    /// `Channel::Control`.
+    RiftExitVoteCast { yes: bool },
+}
+
+/// One voter's choice in an active [`VoteState`]. `Pending` means
+/// the player has been included in the vote roll but hasn't cast
+/// yes or no yet. Wire stable: don't reorder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoteChoice {
+    Pending,
+    Yes,
+    No,
+}
+
+/// Snapshot of the rift exit vote, broadcast on
+/// [`ServerMsg::RiftExitVote`] whenever the underlying state
+/// changes (vote opened, vote cast, vote resolved). Sent to every
+/// connected client (not just players on the rift floor) so the
+/// HUD comes up cleanly even for players who join mid-vote.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoteState {
+    /// `true` while the 15s window is open. `false` when the
+    /// vote is idle (cooldown ticking down, or no recent
+    /// attempt at all).
+    pub active: bool,
+    /// Seconds remaining on the active vote window. Drives the
+    /// HUD countdown ring. `0.0` when `active` is false.
+    pub time_remaining: f32,
+    /// Seconds remaining before another vote may be opened.
+    /// `0.0` once cooldown has expired.
+    pub cooldown_remaining: f32,
+    /// One row per *living* player on the rift floor at the
+    /// moment the vote opened. Includes the initiator
+    /// (auto-`Yes`). Ordered by client_id ascending so the HUD
+    /// layout is stable across the vote's lifetime.
+    pub voters: Vec<(NetId, VoteChoice)>,
 }
 
 /// Cosmetic body type. Mirrors `rift_game::character::Gender`. Kept
@@ -323,6 +380,10 @@ pub mod entity_flags {
     pub const AIRBORNE: u8 = 1 << 0;
     /// Player is dead. Reserved for the death pose / respawn flow.
     pub const DEAD: u8 = 1 << 1;
+    /// Player has risen as a ghost: still `hp == 0`, but moves
+    /// freely and is invisible to LIVING teammates (server
+    /// filters them out of remote snapshots, owner-only).
+    pub const GHOST: u8 = 1 << 2;
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -506,6 +567,13 @@ pub enum ServerMsg {
         /// can advance via the portal.
         floor_complete: bool,
     },
+
+    /// Snapshot of the rift exit vote. Broadcast on every state
+    /// change (vote opened, a player cast their vote, vote
+    /// resolved, cooldown ticked across a 1s boundary). Clients
+    /// drive their HUD vote panel directly off this. Reliable on
+    /// `Channel::Control`. See [`VoteState`].
+    RiftExitVote(VoteState),
 }
 
 /// Per-tick snapshot. Phase 1 ships the *full* state every tick — we
@@ -664,5 +732,17 @@ pub enum WorldEvent {
     ChannelEnd {
         caster: NetId,
         ability: u16,
+    },
+
+    /// A dead player has finished their down-pose timer and risen
+    /// as a ghost. Server stops including their row in remote
+    /// snapshots after this fires, so the client uses the event
+    /// as a cue to play a "poof" VFX at their last position
+    /// (otherwise the avatar just pops out of existence). The
+    /// owning client suppresses the VFX for themselves so their
+    /// own rise doesn't slap them in the face.
+    PlayerGhosted {
+        entity: NetId,
+        position: [f32; 3],
     },
 }

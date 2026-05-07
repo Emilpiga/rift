@@ -70,6 +70,30 @@ pub struct NetState {
     /// `ServerMsg::Loadout`, so we never mutate the local
     /// loadout optimistically.
     pub pending_loadout_changes: Vec<(u8, u8)>,
+    /// `true` for one frame when the local player F-presses the
+    /// rift-spawn portal, asking the binary to fire
+    /// `ClientMsg::RiftExitVoteStart`. Server validates +
+    /// either short-circuits to a solo exit or broadcasts the
+    /// fresh `RiftExitVote` snapshot.
+    pub pending_exit_vote_start: bool,
+    /// Per-frame queue of exit-vote casts. Each entry is
+    /// `true` for Yes / `false` for No. Drained by the binary
+    /// into `ClientMsg::RiftExitVoteCast`. A `Vec` rather than
+    /// a single `Option` so a fast Y→N double-tap (which we
+    /// won't accept anyway, but shouldn't deadlock the queue)
+    /// can flush both to the server.
+    pub pending_exit_vote_casts: Vec<bool>,
+    /// Cache of our authoritative `NetId`, mirrored each frame
+    /// from `NetClient::our_net_id()` so gameplay-thread code
+    /// (`update_gameplay`, HUD) can identify the local player
+    /// without holding a reference to `NetClient`. `None`
+    /// before `Welcome` arrives.
+    pub our_net_id_cached: Option<rift_net::NetId>,
+    /// Mirror of `NetClient::is_local_ghost()`, refreshed each
+    /// frame from the binary so gameplay-thread gating
+    /// (`is_player_dead` discriminator, ghost-only HUD bits)
+    /// can read it without a `NetClient` reference.
+    pub local_ghost_cached: bool,
 }
 
 /// Multiplayer-only: a request for the binary to forward to the server.

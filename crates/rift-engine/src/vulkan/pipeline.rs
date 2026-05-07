@@ -135,18 +135,39 @@ pub fn create_graphics_pipeline(
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
 
+    // Standard alpha blending. Required for the per-object
+    // `tint.a` fragment-out: any object with `tint.a < 1.0`
+    // (currently only the local player's avatar in ghost mode)
+    // blends against the framebuffer. With `tint.a == 1.0` (the
+    // default for every other object) `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`
+    // degenerates to `1.0 / 0.0`, i.e. identical to opaque —
+    // no visual change for normal content. Depth write stays
+    // enabled so translucent objects still occlude themselves
+    // and other geometry; that's an intentional trade-off (the
+    // ghost avatar is mostly seen straight-on by its owner).
     let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)
-        .blend_enable(false);
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .alpha_blend_op(vk::BlendOp::ADD);
 
     let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(std::slice::from_ref(&color_blend_attachment));
 
     let set_layouts = descriptor_set_layouts;
+    // Push constant range: `mat4 model` (64 bytes) followed by
+    // `vec4 tint` (16 bytes). The vert reads `model`; the frag
+    // reads `tint`, so we mark the whole range visible to both
+    // stages. Vulkan requires the union of stages here even
+    // though each stage only touches its own subrange.
     let push_constant_range = vk::PushConstantRange {
-        stage_flags: vk::ShaderStageFlags::VERTEX,
+        stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
         offset: 0,
-        size: 64, // Mat4 = 16 floats * 4 bytes
+        size: 80, // Mat4 (64) + vec4 tint (16)
     };
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(set_layouts)

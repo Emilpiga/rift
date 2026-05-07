@@ -204,6 +204,9 @@ impl RiftApp {
             WorldEvent::ChannelEnd { caster, ability } => {
                 self.handle_channel_end_event(caster, ability);
             }
+            WorldEvent::PlayerGhosted { entity, position } => {
+                self.handle_player_ghosted_event(entity, position, renderer);
+            }
         }
     }
 
@@ -261,6 +264,35 @@ impl RiftApp {
                 rift_client::game::state::on_remote_death(&mut state.world, avatar);
             }
         }
+    }
+
+    /// A teammate has finished their death animation and risen
+    /// into ghost mode. The server has stopped including their
+    /// row in our snapshot, so `world_sync` is about to despawn
+    /// their avatar — without a visual cue they'd just pop out
+    /// of existence. We spawn a soft cyan-white wisp burst at
+    /// their last server position so the disappearance reads as
+    /// "their soul left the body" rather than a glitch. The
+    /// owning client suppresses this for themselves so a player
+    /// rising into spectator mode isn't slapped with a VFX in
+    /// front of their own camera.
+    fn handle_player_ghosted_event(
+        &mut self,
+        entity: rift_net::NetId,
+        position: [f32; 3],
+        renderer: &mut Renderer,
+    ) {
+        log::info!("net: PlayerGhosted entity={entity:?}");
+        let Self { state: _, net } = self;
+        let Some(net) = net.as_mut() else { return };
+        if Some(entity) == net.our_net_id() {
+            return;
+        }
+        let pos = Vec3::from_array(position) + Vec3::new(0.0, 1.0, 0.0);
+        renderer.vfx_system.spawn(
+            rift_engine::renderer::vfx::presets::ghost_rise(),
+            pos,
+        );
     }
 
     /// Spawn the AoE-zone visual for a server-confirmed cast and
@@ -504,6 +536,26 @@ impl RiftApp {
             net.request_set_loadout_slot(slot_index, ability_id);
         }
 
+        // Rift exit-vote requests: F-press on the rift-spawn
+        // portal flips this flag for one frame. The server
+        // either short-circuits (solo → instant transition) or
+        // broadcasts a fresh `RiftExitVote` snapshot which the
+        // HUD vote panel then renders.
+        if std::mem::take(&mut state.net.pending_exit_vote_start) {
+            net.request_exit_vote_start();
+        }
+        // Y/N casts during an active vote. The server filters
+        // out duplicates / non-Pending voters, so it's safe to
+        // forward whatever the input layer queued.
+        for yes in state
+            .net
+            .pending_exit_vote_casts
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            net.request_exit_vote_cast(yes);
+        }
+
         // Stash transfer requests (deposit / withdraw). Drained
         // alongside equip requests; the server replies with
         // fresh InventorySync + StashSync.
@@ -661,6 +713,19 @@ impl RiftApp {
             state.rift.boss_killed = boss_killed;
             state.rift.floor_complete = complete;
         }
+
+        // Authoritative rift exit-vote snapshot. Mirrored onto
+        // `GameState::exit_vote` for the HUD vote panel and the
+        // gameplay-thread Y/N input gate.
+        if let Some(vote) = net.drain_exit_vote() {
+            state.exit_vote = Some(vote);
+        }
+
+        // Mirror our authoritative `NetId` so gameplay-thread
+        // code can identify the local voter without holding a
+        // reference to `NetClient`.
+        state.net.our_net_id_cached = net.our_net_id();
+        state.net.local_ghost_cached = net.is_local_ghost();
     }
 }
 

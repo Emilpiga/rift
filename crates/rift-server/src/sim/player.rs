@@ -85,6 +85,17 @@ pub struct ServerPlayer {
     /// Persisted via the `characters.loadout` column; mutated
     /// through `ClientMsg::SetLoadoutSlot`.
     pub loadout: Loadout,
+    /// `true` once a dead player has finished their down-pose
+    /// timer and entered ghost mode — they can move freely,
+    /// trigger the rift exit-vote portal, but can't cast,
+    /// loot, or be targeted by AI. Cleared on heal_all().
+    pub is_ghost: bool,
+    /// Countdown (seconds) from death until ghost rise. `None`
+    /// while alive or already a ghost. Set to
+    /// `GHOST_RISE_DELAY` the tick HP first crosses 0; ticked
+    /// down in `Sim::step`. When it reaches 0 we flip
+    /// `is_ghost = true` and clear the timer.
+    pub ghost_rise_timer: Option<f32>,
 }
 
 impl ServerPlayer {
@@ -126,6 +137,8 @@ impl ServerPlayer {
             stats,
             experience: Experience::new(),
             loadout: Loadout::default_hero(),
+            is_ghost: false,
+            ghost_rise_timer: None,
         }
     }
 
@@ -172,7 +185,20 @@ impl ServerPlayer {
     /// the HP pool reflects the new tier, and the (possibly
     /// empty) reward list is returned for the caller to act on
     /// (granting attribute / talent points lives a layer up).
+    ///
+    /// Dead-or-ghosting players are short-circuited entirely:
+    /// the heal-to-full on level-up would otherwise resurrect a
+    /// player who took a killing blow and earned XP in the same
+    /// tick (e.g. their ability finished a kill the same frame
+    /// it killed them) — server flips `hp = 0` and arms
+    /// `ghost_rise_timer`, but `is_ghost` doesn't latch until
+    /// the rise delay elapses, so we can't gate purely on that
+    /// flag. Treating any of {hp<=0, is_ghost, ghost timer
+    /// armed} as "not earning XP this tick" closes the window.
     pub fn grant_xp(&mut self, amount: u64) -> Vec<LevelUpReward> {
+        if self.is_dead_or_ghosting() {
+            return Vec::new();
+        }
         let rewards = self.experience.grant_xp(amount);
         if !rewards.is_empty() {
             self.level = self.experience.level;
@@ -184,6 +210,15 @@ impl ServerPlayer {
             self.hp = self.hp_max;
         }
         rewards
+    }
+
+    /// `true` if this player is in any "not actively playing"
+    /// state — dead (hp≤0), risen ghost, or in the down-pose
+    /// waiting to rise. Used to gate XP / heal / vote-init paths
+    /// that would otherwise have inconsistent behaviour during
+    /// the death→ghost transition window.
+    pub fn is_dead_or_ghosting(&self) -> bool {
+        self.hp <= 0.0 || self.is_ghost || self.ghost_rise_timer.is_some()
     }
 }
 
@@ -229,11 +264,12 @@ pub fn apply_inputs(
         if let Some(&entity) = sessions.get(&client_id) {
             if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
                 p.last_input_seq = cmd.seq;
-                // Dead players don't move. Still record `seq` so
-                // ack_seq stays current and the client's
-                // prediction buffer prunes correctly even after
-                // we stop applying input.
-                if p.hp <= 0.0 {
+                // Dead-but-not-yet-risen players are pinned in
+                // the down pose: zero velocity, drop input. Once
+                // they've risen as a ghost they regain movement
+                // (but `cast_ability` still rejects them, so the
+                // attack/ability button bits below are harmless).
+                if p.hp <= 0.0 && !p.is_ghost {
                     p.k.velocity = glam::Vec3::ZERO;
                     continue;
                 }
@@ -250,12 +286,15 @@ pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
     }
 }
 
-/// Snapshot every player's `(entity, position)` into a Vec, suitable
-/// for use as the AI target list during the enemy tick.
+/// Snapshot every *living* player's `(entity, position)` into a
+/// Vec, suitable for use as the AI target list during the enemy
+/// tick. Ghosts (`hp <= 0.0` while in a rift floor) are filtered
+/// out so AI / enemy projectiles don't aim at corpses.
 pub fn target_positions(world: &hecs::World) -> Vec<(Entity, glam::Vec3)> {
     world
         .query::<&ServerPlayer>()
         .iter()
+        .filter(|(_, p)| p.hp > 0.0)
         .map(|(e, p)| (e, p.k.position))
         .collect()
 }
@@ -279,5 +318,7 @@ pub fn snap_all_to(world: &mut hecs::World, spawn: glam::Vec3) {
 pub fn heal_all(world: &mut hecs::World) {
     for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
         p.hp = p.hp_max;
+        p.is_ghost = false;
+        p.ghost_rise_timer = None;
     }
 }

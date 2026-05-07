@@ -17,6 +17,7 @@ layout(binding = 0) uniform UniformData {
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
+    vec4 tint; // rgb multiplies frag colour, a is output alpha (frag-only field; vert ignores)
 } push;
 
 layout(location = 0) in vec3 inPosition;

@@ -116,7 +116,10 @@ unsafe impl bytemuck::Zeroable for BlurPush {}
 struct CompositePush {
     bloom_intensity: f32,
     exposure: f32,
-    _pad0: f32,
+    /// 0.0 = normal scene, 1.0 = full ghost view (desaturate to
+    /// luma + cool cyan tint + radial vignette). Driven by the
+    /// client when the local player is in ghost mode.
+    ghost_mix: f32,
     _pad1: f32,
 }
 unsafe impl bytemuck::Pod for CompositePush {}
@@ -622,12 +625,17 @@ impl PostProcessing {
     /// that overlay drawing can happen in the same pass after
     /// us). Just records the fullscreen draw with proper
     /// pipeline / descriptors.
+    ///
+    /// `ghost_mix` in `[0.0, 1.0]` blends in the ghost-view
+    /// post effect (desaturate-to-luma + cool tint + radial
+    /// vignette). `0.0` is the default no-op.
     pub fn record_composite(
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         image_index: u32,
         config: &BloomConfig,
+        ghost_mix: f32,
     ) {
         let i = image_index as usize;
         let viewport = vk::Viewport {
@@ -648,7 +656,8 @@ impl PostProcessing {
             let push = CompositePush {
                 bloom_intensity: config.intensity,
                 exposure: config.exposure,
-                _pad0: 0.0, _pad1: 0.0,
+                ghost_mix: ghost_mix.clamp(0.0, 1.0),
+                _pad1: 0.0,
             };
             device.cmd_push_constants(cmd, self.composite_layout,
                 vk::ShaderStageFlags::FRAGMENT, 0, bytemuck::bytes_of(&push));

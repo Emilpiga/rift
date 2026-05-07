@@ -9,19 +9,21 @@ use crate::renderer::Renderer;
 
 /// Process player input and set velocity based on WASD keys.
 pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
-    for (_id, (transform, velocity, player, health, _local)) in
+    for (_id, (transform, velocity, player, health, ghost, _local)) in
         world.query_mut::<(
             &Transform,
             &mut Velocity,
             &Player,
             Option<&super::components::Health>,
+            Option<&super::components::Ghost>,
             &LocalPlayer,
         )>()
     {
         // Dead players don't move — freeze velocity so the death
-        // animation plays at their final position.
+        // animation plays at their final position. Ghosts (HP still
+        // 0 but server-permitted to move) bypass this gate.
         if let Some(h) = health {
-            if h.is_dead() {
+            if h.is_dead() && ghost.is_none() {
                 velocity.linear = Vec3::ZERO;
                 continue;
             }
@@ -186,8 +188,8 @@ pub fn locomotion_anim_system(world: &mut World) {
     ];
     const IDLE_NAMES: &[&str] = &["Idle_Loop", "Idle"];
 
-    for (_id, (vel, set, animator, enemy_anim, health, player)) in
-        world.query_mut::<(&Velocity, &AnimationSet, &mut Animator, Option<&EnemyAnim>, Option<&super::components::Health>, Option<&Player>)>()
+    for (_id, (vel, set, animator, enemy_anim, health, player, ghost)) in
+        world.query_mut::<(&Velocity, &AnimationSet, &mut Animator, Option<&EnemyAnim>, Option<&super::components::Health>, Option<&Player>, Option<&super::components::Ghost>)>()
     {
         // Skip locomotion overrides while a one-shot reaction (Death,
         // HitRecieve, Bite_Front) is locked.
@@ -195,9 +197,10 @@ pub fn locomotion_anim_system(world: &mut World) {
             if ea.lock_remaining > 0.0 { continue; }
         }
         // Dead players: leave the death clip running, don't snap back to
-        // Idle/Walk.
+        // Idle/Walk. Ghosts (risen-but-dead spectators) bypass this:
+        // their HP is still 0 but they're animated like a live player.
         if let Some(h) = health {
-            if h.is_dead() { continue; }
+            if h.is_dead() && ghost.is_none() { continue; }
         }
         // Skip while the player is mid-jump or mid-roll — those clips
         // are driven by game-side code.
@@ -989,13 +992,14 @@ pub fn player_action_pre_system(
         .get::<&Health>(player_id)
         .map(|h| h.is_dead())
         .unwrap_or(false);
+    let is_ghost = world.get::<&super::components::Ghost>(player_id).is_ok();
 
     let (action, action_timer, airborne, aim_dir) = match world.get::<&Player>(player_id) {
         Ok(p) => (p.action, p.action_timer, p.airborne, p.aim_dir),
         Err(_) => return,
     };
 
-    if dead || !accept_input {
+    if (dead && !is_ghost) || !accept_input {
         return;
     }
 
@@ -1113,11 +1117,14 @@ pub fn player_action_post_system(world: &mut World, cfg: &PlayerActionConfig) {
 
     // Dead players keep whatever full-body animation `trigger_player_death`
     // set up — never overwrite it with a JumpLand clip on touchdown.
+    // Ghosts (HP still 0 but spectator-mobile) bypass this gate so
+    // their landing pose is animated like a live player.
     let dead = world
         .get::<&Health>(player_id)
         .map(|h| h.is_dead())
         .unwrap_or(false);
-    if dead {
+    let is_ghost = world.get::<&super::components::Ghost>(player_id).is_ok();
+    if dead && !is_ghost {
         return;
     }
 

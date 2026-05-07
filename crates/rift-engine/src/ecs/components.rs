@@ -329,6 +329,15 @@ pub struct RemotePlayer {
     pub net_id: u32,
 }
 
+/// Marker tag set on a player entity that's currently in
+/// risen-but-dead "ghost" spectator mode (HP still 0, but the
+/// server permits movement and the avatar is renderered with
+/// the translucent ghost tint). Engine systems that gate on
+/// `Health::is_dead()` (locomotion, etc.) treat Ghost as alive
+/// so the spectator can walk around. Removed on respawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ghost;
+
 /// Velocity component for movement.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Velocity {

@@ -670,6 +670,200 @@ pub fn render_hud_prompt(ui: &mut rift_engine::ui::im::Ui<'_>, text: &str) {
     });
 }
 
+/// Rift exit-vote panel. Top-center HUD card showing the
+/// countdown, per-voter Yes/No/Pending status, and the local
+/// Y/N hint when our own choice is still Pending. While the vote
+/// is inactive but `cooldown_remaining > 0`, a slim cooldown
+/// banner is shown instead so the player knows why F at the
+/// rift-spawn portal is currently a no-op.
+pub fn render_exit_vote(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    vote: &rift_net::messages::VoteState,
+    our_net_id: Option<rift_net::NetId>,
+) {
+    use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Vec2};
+
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+
+    if !vote.active {
+        if vote.cooldown_remaining <= 0.0 {
+            return;
+        }
+        // Compact cooldown banner — top-center, single line.
+        let label = format!(
+            "EXIT VOTE COOLDOWN  {:.0}s",
+            vote.cooldown_remaining.ceil()
+        );
+        let label_size = 12.0;
+        let text_w = ui.measure_text(&label, label_size);
+        let pad = Pad::symmetric(16.0, 4.0);
+        let outer_w = text_w + pad.left + pad.right;
+        let outer_h = label_size + pad.top + pad.bottom;
+        let rect = Rect::from_xywh(
+            (screen.x - outer_w) / 2.0,
+            screen.y * 0.08,
+            outer_w,
+            outer_h,
+        );
+        let frame = Frame::panel(&theme)
+            .with_fill(Color::rgba(0.10, 0.06, 0.04, 0.88))
+            .with_padding(pad);
+        frame.show(ui, rect, |ui, body| {
+            ui.draw_text(
+                Pos2::new(body.x(), body.y()),
+                &label,
+                label_size,
+                Color::rgba(0.95, 0.55, 0.35, 1.0),
+            );
+        });
+        return;
+    }
+
+    // Active vote panel.
+    let title = "LEAVE THE RIFT?";
+    let title_size = 16.0;
+    let row_size = 12.0;
+    let row_h = row_size + 4.0;
+    let n_rows = vote.voters.len();
+    let pad = Pad::symmetric(20.0, 12.0);
+    let body_w: f32 = 280.0;
+    let countdown_h = 18.0;
+    let footer_h = 16.0;
+    let inner_h = title_size
+        + 6.0
+        + countdown_h
+        + 8.0
+        + (n_rows as f32) * row_h
+        + 6.0
+        + footer_h;
+    let outer_w = body_w + pad.left + pad.right;
+    let outer_h = inner_h + pad.top + pad.bottom;
+    let rect = Rect::from_xywh(
+        (screen.x - outer_w) / 2.0,
+        screen.y * 0.10,
+        outer_w,
+        outer_h,
+    );
+    let frame = Frame::panel(&theme)
+        .with_fill(Color::rgba(0.04, 0.06, 0.10, 0.94))
+        .with_padding(pad);
+
+    let voters = vote.voters.clone();
+    let time_remaining = vote.time_remaining.max(0.0);
+    let we_pending = our_net_id
+        .and_then(|nid| {
+            vote.voters
+                .iter()
+                .find(|(id, _)| *id == nid)
+                .map(|(_, c)| *c)
+        })
+        .map(|c| matches!(c, rift_net::messages::VoteChoice::Pending))
+        .unwrap_or(false);
+
+    frame.show(ui, rect, |ui, body| {
+        // Title.
+        let title_w = ui.measure_text(title, title_size);
+        ui.draw_text(
+            Pos2::new(body.x() + (body.width() - title_w) / 2.0, body.y()),
+            title,
+            title_size,
+            Color::rgba(0.95, 0.85, 0.55, 1.0),
+        );
+
+        // Countdown bar (full width) + numeric label centered.
+        let bar_y = body.y() + title_size + 6.0;
+        let bar_rect = Rect::from_xywh(body.x(), bar_y, body.width(), countdown_h);
+        let frac = (time_remaining / 15.0).clamp(0.0, 1.0);
+        // Background.
+        ui.draw_rect(bar_rect, Color::rgba(0.10, 0.12, 0.16, 1.0));
+        // Fill.
+        let fill_w = bar_rect.width() * frac;
+        let fill_rect = Rect::from_xywh(bar_rect.x(), bar_rect.y(), fill_w, bar_rect.height());
+        let fill_col = if frac > 0.5 {
+            Color::rgba(0.45, 0.85, 0.55, 1.0)
+        } else if frac > 0.25 {
+            Color::rgba(0.95, 0.80, 0.40, 1.0)
+        } else {
+            Color::rgba(0.95, 0.40, 0.30, 1.0)
+        };
+        ui.draw_rect(fill_rect, fill_col);
+        let timer_label = format!("{:.0}s", time_remaining.ceil());
+        let timer_w = ui.measure_text(&timer_label, row_size);
+        ui.draw_text(
+            Pos2::new(
+                bar_rect.x() + (bar_rect.width() - timer_w) / 2.0,
+                bar_rect.y() + (countdown_h - row_size) / 2.0,
+            ),
+            &timer_label,
+            row_size,
+            Color::rgba(0.05, 0.07, 0.10, 1.0),
+        );
+
+        // Voter rows.
+        let mut row_y = bar_y + countdown_h + 8.0;
+        for (nid, choice) in voters.iter() {
+            let (mark, mark_col) = match choice {
+                rift_net::messages::VoteChoice::Yes => {
+                    ("YES", Color::rgba(0.45, 0.85, 0.55, 1.0))
+                }
+                rift_net::messages::VoteChoice::No => {
+                    ("NO", Color::rgba(0.95, 0.40, 0.30, 1.0))
+                }
+                rift_net::messages::VoteChoice::Pending => {
+                    ("...", Color::rgba(0.65, 0.65, 0.70, 1.0))
+                }
+            };
+            let is_us = our_net_id == Some(*nid);
+            let name = if is_us {
+                format!("you (#{})", nid.0)
+            } else {
+                format!("player #{}", nid.0)
+            };
+            let name_col = if is_us {
+                Color::rgba(0.85, 0.92, 1.0, 1.0)
+            } else {
+                Color::rgba(0.65, 0.72, 0.82, 1.0)
+            };
+            ui.draw_text(
+                Pos2::new(body.x(), row_y),
+                &name,
+                row_size,
+                name_col,
+            );
+            let mark_w = ui.measure_text(mark, row_size);
+            ui.draw_text(
+                Pos2::new(body.x() + body.width() - mark_w, row_y),
+                mark,
+                row_size,
+                mark_col,
+            );
+            row_y += row_h;
+        }
+
+        // Footer hint: Y/N when we're pending; otherwise a status note.
+        let footer_y = body.y() + body.height() - footer_h;
+        let hint = if we_pending {
+            "PRESS [Y] YES   [N] NO"
+        } else {
+            "WAITING FOR PARTY..."
+        };
+        let hint_col = if we_pending {
+            Color::rgba(0.95, 0.85, 0.55, 1.0)
+        } else {
+            Color::rgba(0.55, 0.62, 0.72, 1.0)
+        };
+        let hint_w = ui.measure_text(hint, row_size);
+        ui.draw_text(
+            Pos2::new(body.x() + (body.width() - hint_w) / 2.0, footer_y),
+            hint,
+            row_size,
+            hint_col,
+        );
+        let _ = Vec2::ZERO; // silence unused-import warning in degenerate paths
+    });
+}
+
 /// Loot-pickup prompt — same chrome as [`render_hud_prompt`] but
 /// the text colour follows the item's tier (rarity) so the player
 /// can read the rarity at a glance. Placed slightly above the
@@ -1035,3 +1229,4 @@ pub fn draw_world_loading_overlay(renderer: &mut rift_engine::Renderer, progress
         sh,
     );
 }
+

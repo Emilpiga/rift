@@ -78,6 +78,10 @@ pub struct GameState {
     /// triggers the death animation. `None` until the first
     /// frame the local player exists in the world.
     prev_player_hp: Option<f32>,
+    /// Edge-detector mirror of `local_ghost_cached`, used to
+    /// fire `trigger_player_rise` exactly once on the down-pose
+    /// → ghost transition. Cleared on regen / respawn.
+    prev_local_ghost: bool,
     /// `Some(text)` if the local player is standing in an
     /// interaction range this frame and the HUD should show a
     /// press-F prompt. Set during `tick_*_portal` and the stash
@@ -93,6 +97,17 @@ pub struct GameState {
     /// server interprets as "advance one floor" once we're not
     /// in the hub).
     exit_portal: Option<HubPortal>,
+    /// Always-present portal at the rift floor's spawn point.
+    /// Pressing F here opens the rift exit vote (or, solo,
+    /// instantly transitions to the hub). Spawned lazily when a
+    /// rift floor is generated; cleared on hub return.
+    rift_spawn_portal: Option<HubPortal>,
+    /// Latest authoritative rift exit vote snapshot from the
+    /// server. `None` means we've never received one (typical
+    /// at session start before any vote happens). When `active`
+    /// is true the HUD vote panel renders the countdown +
+    /// voter roll.
+    pub exit_vote: Option<rift_net::messages::VoteState>,
 
     /// Per-frame staged init progress (icons, monsters).
     pub loading: LoadingState,
@@ -178,10 +193,13 @@ impl GameState {
             level_up_flash: 0.0,
             transition_fade: 0.0,
             prev_player_hp: None,
+            prev_local_ghost: false,
             hud_prompt: None,
             in_hub: true,
             hub_portal: None,
             exit_portal: None,
+            rift_spawn_portal: None,
+            exit_vote: None,
             loading: LoadingState::default(),
             net: NetState::default(),
             channel: ChannelState::default(),
@@ -263,12 +281,19 @@ impl GameState {
 
     fn reset_for_regeneration(&mut self, renderer: &mut Renderer) {
         self.prev_player_hp = None;
+        self.prev_local_ghost = false;
         self.hud_prompt = None;
         self.damage_flash = 0.0;
         self.level_up_flash = 0.0;
         self.targeting = None;
         self.hub_portal = None;
         self.exit_portal = None;
+        self.rift_spawn_portal = None;
+        // Exit-vote state is not cleared on regen: the server
+        // re-broadcasts the authoritative `RiftExitVote` whenever
+        // we land on a fresh floor (cooldown wipe → dirty flag
+        // → broadcast), and the floor transition itself cancels
+        // any in-flight vote on the server side.
         self.decals.clear();
         self.combat_text.clear();
         // Wipe every live particle / ribbon emitter so loot
@@ -429,6 +454,61 @@ impl GameState {
             dt,
         );
 
+        // Rift spawn portal: always-present near the spawn point
+        // of every rift floor. F-press opens (or, solo, instantly
+        // resolves) the exit vote that returns the party to the
+        // hub with their current loot.
+        let (vote_active, vote_cd) = self
+            .exit_vote
+            .as_ref()
+            .map(|v| (v.active, v.cooldown_remaining))
+            .unwrap_or((false, 0.0));
+        let is_ghost = self.net.local_ghost_cached;
+        portal_system::tick_rift_spawn(
+            &mut self.rift_spawn_portal,
+            &self.world,
+            renderer,
+            input,
+            &mut self.net,
+            &mut self.hud_prompt,
+            self.in_hub,
+            self.floor_mgr.spawn_pos,
+            vote_active,
+            vote_cd,
+            is_ghost,
+            dt,
+        );
+
+        // Exit-vote Y/N keys: only act when a vote is active and
+        // the local player is still Pending. The actual cast is
+        // queued onto `NetState` and shipped by the binary as
+        // `ClientMsg::RiftExitVoteCast`.
+        if vote_active {
+            use winit::keyboard::KeyCode;
+            let our_id = self.net.our_net_id_cached;
+            let we_pending = self
+                .exit_vote
+                .as_ref()
+                .and_then(|v| {
+                    our_id.and_then(|nid| {
+                        v.voters
+                            .iter()
+                            .find(|(id, _)| *id == nid)
+                            .map(|(_, c)| *c)
+                    })
+                })
+                .map(|c| matches!(c, rift_net::messages::VoteChoice::Pending))
+                .unwrap_or(false);
+            if we_pending {
+                if input.key_just_pressed(KeyCode::KeyY) {
+                    self.net.pending_exit_vote_casts.push(true);
+                }
+                if input.key_just_pressed(KeyCode::KeyN) {
+                    self.net.pending_exit_vote_casts.push(false);
+                }
+            }
+        }
+
         // Hub stash chest: F-press toggles the stash panel
         // (queues `OpenStash` / `CloseStash` for the server,
         // forces the inventory UI open, and swaps bag-click
@@ -492,6 +572,28 @@ impl GameState {
             self.trigger_player_death();
         }
 
+        // Edge-detect the down-pose → ghost transition. Server's
+        // `GHOST_RISE_DELAY` elapses, the snapshot row gains
+        // `entity_flags::GHOST`, the binary mirrors that onto
+        // `local_ghost_cached`, and we crossfade out of the
+        // death pose into idle so the spectator avatar is
+        // animated normally.
+        let now_ghost = self.net.local_ghost_cached;
+        if now_ghost && !self.prev_local_ghost {
+            self.trigger_player_rise();
+        }
+        // Inverse edge: ghost → respawned. Strip the `Ghost`
+        // marker so the engine's dead-gates re-engage if HP
+        // somehow lands at 0 again before the world is rebuilt
+        // (e.g. a future revive-shrine flow that doesn't trigger
+        // a floor regen).
+        if !now_ghost && self.prev_local_ghost {
+            if let Some(pid) = self.player_id() {
+                let _ = self.world.remove_one::<rift_engine::ecs::components::Ghost>(pid);
+            }
+        }
+        self.prev_local_ghost = now_ghost;
+
         // Hit-react: detect a damage event on the local player and
         // play a one-shot reaction clip on the upper body. Mirrors
         // `enemy_anim_system`'s HitRecieve handling but lives on
@@ -538,6 +640,17 @@ impl GameState {
 
         skinning_system(&mut self.world, renderer, dt);
         self.decals.update(dt, renderer);
+
+        // Local-avatar ghost tint. The forward pipeline pushes
+        // a per-`RenderObject.tint` vec4; default `[1; 4]` is a
+        // no-op opaque path. While the local player is in ghost
+        // mode we tint the base skinned mesh + every outfit
+        // attachment to a pale cyan-white at ~40% alpha so the
+        // owner sees their own avatar as a translucent spirit.
+        // Reset to opaque on every other frame so the moment
+        // the server respawns us, the avatar instantly looks
+        // solid again (no ramp / decay).
+        self.apply_ghost_tint(renderer);
 
         // Channel beam visuals (Frost Ray etc.) — driven by reliable
         // `WorldEvent::ChannelTick` events buffered into
@@ -686,6 +799,16 @@ impl GameState {
         // in practice — portals don't drop loot) sees both lines.
         if let Some(text) = self.hud_prompt.take() {
             hud::render_hud_prompt(&mut ui, text);
+        }
+
+        // Rift exit-vote panel: top-center card, only when we
+        // either have an active vote or a non-zero cooldown to
+        // surface. Drawn after the prompt so it visually layers
+        // above the F-press hint at the bottom of the screen.
+        if let Some(vote) = self.exit_vote.as_ref() {
+            if vote.active || vote.cooldown_remaining > 0.0 {
+                hud::render_exit_vote(&mut ui, vote, self.net.our_net_id_cached);
+            }
         }
         if let Some((net_id, _)) = nearest_loot {
             if let Some(drop) = self.loot.drops.iter().find(|d| d.net_id == net_id) {
@@ -1102,12 +1225,28 @@ impl GameState {
             .next()
     }
 
-    /// `true` while the local player's `Health` is at zero.
-    /// Derived state — replaces a former `player_dying` field
-    /// that was a parallel mirror of the same condition.
+    /// `true` while the local player is in the post-death
+    /// down-pose: HP is at zero AND the server hasn't yet
+    /// flipped us to ghost mode. Once `local_ghost_cached`
+    /// goes true we leave the down-pose — input + camera +
+    /// movement systems all re-engage so the player can scout.
+    /// Cast / loot pickup remain server-rejected for ghosts.
     fn is_player_dead(&self) -> bool {
+        if self.net.local_ghost_cached {
+            return false;
+        }
         let Some(pid) = self.player_id() else { return false };
         self.world.get::<&Health>(pid).map(|h| h.is_dead()).unwrap_or(false)
+    }
+
+    /// `true` while the local player is a ghost (risen-but-dead).
+    /// Mirrors `NetClient::is_local_ghost()`. Used by the HUD to
+    /// surface the spectator state and (eventually) by the
+    /// renderer to swap the avatar to the translucent ghost
+    /// material.
+    #[allow(dead_code)]
+    fn is_player_ghost(&self) -> bool {
+        self.net.local_ghost_cached
     }
 
     /// Detect HP drops on the local player since last frame and play
@@ -1198,6 +1337,122 @@ impl GameState {
             p.action_timer = 0.0;
             p.vy = 0.0;
             p.airborne = false;
+        }
+    }
+
+    /// Crossfade the local avatar out of the death pose into
+    /// idle once the server flips us to ghost mode. Mirror
+    /// image of [`Self::trigger_player_death`] — same
+    /// component touch-points, opposite clip + intent. Runs
+    /// once per ghost transition (edge-detected via
+    /// `prev_local_ghost`).
+    fn trigger_player_rise(&mut self) {
+        use rift_engine::animation::Animator;
+        use rift_engine::ecs::components::{AnimationSet, Ghost, SpellCast};
+
+        log::info!("Player rose as ghost (rift floor {}).", self.rift.floor);
+
+        let Some(player_id) = self.player_id() else { return };
+
+        // Tag the local avatar with `Ghost` so the engine systems
+        // that gate on `Health::is_dead()` (locomotion, input,
+        // jump-land, roll dispatch) treat us as alive even though
+        // HP is still 0. Removed in `reset_for_regeneration` on
+        // respawn.
+        let _ = self.world.insert_one(player_id, Ghost);
+
+        // Asset pack ships `LayToIdle` (UAL2) which is the perfect
+        // get-up-from-corpse-pose anim. Fall back to plain Idle
+        // crossfade if the rig somehow lacks it.
+        let lay_to_idle = self.world.get::<&AnimationSet>(player_id)
+            .ok()
+            .and_then(|set| set.find_any(&["LayToIdle"]));
+
+        if let Ok(mut cast) = self.world.get::<&mut SpellCast>(player_id) {
+            cast.phase = rift_engine::ecs::components::SpellPhase::Idle;
+            cast.layer_animator = None;
+            cast.weight = 0.0;
+            cast.pending_oneshot = None;
+            cast.oneshot_is_hit = false;
+        }
+        if let Some(clip) = lay_to_idle {
+            // `LayToIdle` is a one-shot get-up animation. After it
+            // finishes the animator holds the last frame (standing
+            // idle pose); locomotion_anim_system then takes over
+            // once the player starts moving (Ghost marker bypasses
+            // the dead-gate).
+            if let Ok(mut anim) = self.world.get::<&mut Animator>(player_id) {
+                anim.cross_fade(clip, false, 0.25);
+                anim.speed = 1.0;
+            }
+            return;
+        }
+
+        // Fallback: straight idle crossfade.
+        let candidates: &[&str] = &["Idle_Loop", "Idle", "Idle01", "Idle_01", "Idle02"];
+        let clip = match self.world.get::<&AnimationSet>(player_id) {
+            Ok(set) => set.find_any(candidates),
+            Err(_) => None,
+        };
+        let Some(clip) = clip else {
+            log::warn!("Idle animation not found for ghost rise");
+            return;
+        };
+        if let Ok(mut anim) = self.world.get::<&mut Animator>(player_id) {
+            anim.cross_fade(clip, true, 0.35);
+            anim.speed = 1.0;
+        }
+    }
+
+    /// Push the ghost tint onto the local player's renderer
+    /// slots when `local_ghost_cached` is true; otherwise force
+    /// them back to opaque white. Touches the base `Renderable`
+    /// slot plus every visible `SkinnedAttachments` piece (so
+    /// outfit gear ghosts together with the body). Cheap O(N)
+    /// over the local avatar's attachments — runs every frame
+    /// from `update_render` so a respawn snaps back to opaque
+    /// without a one-frame flicker.
+    fn apply_ghost_tint(&mut self, renderer: &mut Renderer) {
+        use rift_engine::ecs::components::{LocalPlayer, Renderable, SkinnedAttachments};
+
+        // Pale cyan-white at 40% alpha. RGB > 1.0 in the cyan
+        // channels gives the lit colour a faint spectral lift
+        // even after the multiply (lit * tint), since the
+        // forward pipeline outputs HDR before tonemap.
+        const GHOST_TINT: [f32; 4] = [0.75, 0.92, 1.05, 0.40];
+        const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+        let is_ghost = self.net.local_ghost_cached;
+        let tint = if is_ghost { GHOST_TINT } else { OPAQUE };
+
+        // Drive the post-composite ghost-view effect (desat +
+        // cool tint + radial vignette). Instant-on for now \u2014
+        // could be eased over ~0.3s on the rise edge if we want
+        // a softer transition.
+        renderer.ghost_mix = if is_ghost { 1.0 } else { 0.0 };
+
+        // Find the local player's avatar entity. There's at most
+        // one (`LocalPlayer` is a singleton tag on the predicted
+        // avatar) so we just grab the first match.
+        let mut local_entity = None;
+        for (e, _) in self.world.query::<&LocalPlayer>().iter() {
+            local_entity = Some(e);
+            break;
+        }
+        let Some(entity) = local_entity else { return };
+
+        // Base mesh.
+        if let Ok(r) = self.world.get::<&Renderable>(entity) {
+            if let Some(obj) = renderer.objects.get_mut(r.object_index) {
+                obj.tint = tint;
+            }
+        }
+        // Outfit attachments.
+        if let Ok(attach) = self.world.get::<&SkinnedAttachments>(entity) {
+            for piece in &attach.pieces {
+                if let Some(obj) = renderer.objects.get_mut(piece.object_index) {
+                    obj.tint = tint;
+                }
+            }
         }
     }
 }

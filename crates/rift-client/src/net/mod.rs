@@ -184,6 +184,11 @@ pub struct NetClient {
     /// boss_spawned, boss_killed, floor_complete). Drained by
     /// the binary into `RiftState`.
     pending_rift_progress: Option<(u32, u32, bool, bool, bool)>,
+    /// Latest authoritative rift exit vote snapshot. Replaced
+    /// wholesale on every `ServerMsg::RiftExitVote`. The binary
+    /// drains it into `GameState` so the HUD can render the
+    /// vote panel + cooldown.
+    pending_exit_vote: Option<rift_net::messages::VoteState>,
     /// Our authoritative `ClientId` once `Welcome` lands. Used to
     /// answer "was this loot claimed by us?" without re-walking
     /// the renet handle.
@@ -205,6 +210,13 @@ pub struct NetClient {
     /// the death animation isn't fighting input replay. Cleared
     /// when the server respawns us via `LoadFloor`.
     pub(super) local_dead: bool,
+    /// `true` once the server has flagged our player row with
+    /// `entity_flags::GHOST` — we've risen from the down-pose
+    /// and are spectating. Movement input is re-enabled (the
+    /// flag is checked alongside `local_dead`); abilities + loot
+    /// pickup remain server-rejected. Cleared on `LoadFloor`
+    /// (heal_all clears `is_ghost` server-side).
+    pub(super) local_ghost: bool,
     /// History of inputs we've sent but the server hasn't yet
     /// acked. Each entry is `(seq, dt, cmd)`. On every snapshot we
     /// drop entries with `seq <= ack_seq` and replay the rest on
@@ -286,10 +298,12 @@ impl NetClient {
             pending_character_stats: None,
             pending_loadout: None,
             pending_rift_progress: None,
+            pending_exit_vote: None,
             our_client_id: None,
             predicted: Kinematic::default(),
             predicted_ready: false,
             local_dead: false,
+            local_ghost: false,
             input_history: VecDeque::new(),
             predict_floor: None,
             correction_error: Vec3::ZERO,
@@ -537,6 +551,7 @@ impl NetClient {
                 // hub-respawn after a death would keep input
                 // suppressed indefinitely.
                 self.local_dead = false;
+                self.local_ghost = false;
                 self.input_history.clear();
                 // Discard any in-flight snapshots that predate the
                 // transition tick — they describe the *old* floor.
@@ -637,6 +652,16 @@ impl NetClient {
                     boss_killed,
                     floor_complete,
                 ));
+            }
+            ServerMsg::RiftExitVote(state) => {
+                log::debug!(
+                    "net: RiftExitVote active={} t={:.1}s cd={:.1}s voters={}",
+                    state.active,
+                    state.time_remaining,
+                    state.cooldown_remaining,
+                    state.voters.len()
+                );
+                self.pending_exit_vote = Some(state);
             }
             ServerMsg::Kick { reason } => {
                 log::warn!("net: kicked: {reason}");
@@ -773,6 +798,13 @@ impl NetClient {
         self.pending_rift_progress.take()
     }
 
+    /// Take the most recent `RiftExitVote` snapshot if one has
+    /// arrived since the last call. The binary mirrors it into
+    /// `GameState::exit_vote` so the HUD vote panel can render.
+    pub fn drain_exit_vote(&mut self) -> Option<rift_net::messages::VoteState> {
+        self.pending_exit_vote.take()
+    }
+
     /// Our authoritative `ClientId` once `Welcome` has arrived.
     pub fn our_client_id(&self) -> Option<ClientId> {
         self.our_client_id
@@ -791,6 +823,16 @@ impl NetClient {
     /// while the death animation plays.
     pub fn is_local_dead(&self) -> bool {
         self.local_dead
+    }
+
+    /// `true` once the local player has risen as a ghost
+    /// (`entity_flags::GHOST` on our snapshot row). Implies
+    /// `is_local_dead()` is also `true` — ghosts are still
+    /// dead from the HP point of view; the flag just unlocks
+    /// movement input and switches the avatar to spectator
+    /// mode. Cleared when the server respawns us.
+    pub fn is_local_ghost(&self) -> bool {
+        self.local_ghost
     }
 
     /// Diagnostic disconnect reason, if renet has decided we're done.

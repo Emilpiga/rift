@@ -221,6 +221,40 @@ pub fn dodge_puff() -> Effect {
     }
 }
 
+/// Ghost rise — soft burst of pale cyan-white wisps that
+/// drift upward over ~1s. Played at the dead body's last
+/// position when a player flips into ghost mode, so remote
+/// teammates see a gentle "soul departing" cue instead of
+/// the avatar simply popping out of existence. Owner
+/// suppresses this for themselves.
+pub fn ghost_rise() -> Effect {
+    Effect {
+        duration: 0.10,
+        layers: vec![Layer::Particles(ParticleSpec {
+            spawn: SpawnShape::Sphere,
+            emission: EmissionMode::Burst { count: 24 },
+            speed: (0.6, 1.8),
+            lifetime: (0.8, 1.4),
+            forces: vec![
+                ForceField::Drag { coefficient: 1.4 },
+                ForceField::Gravity {
+                    axis: Vec3::Y,
+                    strength: 1.6, // upward float
+                },
+            ],
+            size: Curve::from_stops([(0.0, 0.18), (0.5, 0.42), (1.0, 0.55)]),
+            color: Gradient::from_stops([
+                (0.0, [0.85, 0.95, 1.05, 0.75]),
+                (0.6, [0.60, 0.80, 1.00, 0.40]),
+                (1.0, [0.35, 0.55, 0.85, 0.0]),
+            ]),
+            sprite: SpriteShape::Smoke,
+            blend: BlendMode::Alpha,
+            opacity: 1.0,
+        })],
+    }
+}
+
 /// Rain of Fire — a 2-second downpour of falling embers over
 /// a 3 m radius column. Replaces `EmitterConfig::rain_of_fire`
 /// driving the AoE-zone visual.

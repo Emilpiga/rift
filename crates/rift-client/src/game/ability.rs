@@ -165,6 +165,27 @@ pub fn on_remote_ability_cast(
         }
     }
 
+    // 1b. Caster-anchored one-shot emitters (Fire Wave etc.).
+    // Mirrors the local-side `SpawnEmitterAtCaster` arm in
+    // `execute_ability` so remote observers see the same burst
+    // on the casting avatar. We use `cast_origin` (server-
+    // authoritative caster position at cast time) as the
+    // anchor; the live remote avatar may have moved since, but
+    // the burst is short-lived enough that the snap to the
+    // cast-time position reads as intentional.
+    for effect in ability.effects {
+        if let rift_game::abilities::AbilityEffect::SpawnEmitterAtCaster {
+            visual,
+            height,
+        } = effect
+        {
+            renderer.vfx_system.spawn(
+                effect_for_vfx(*visual),
+                cast_origin + Vec3::new(0.0, *height, 0.0),
+            );
+        }
+    }
+
     // 2. Remote cast pose. Only projectile / channel shapes drive
     //    a pose today; snapshots cover the rest.
     let Some(entity) = caster_avatar else { return };

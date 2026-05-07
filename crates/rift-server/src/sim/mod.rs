@@ -17,7 +17,7 @@ use hecs::Entity;
 use rift_dungeon::Floor;
 use rift_dungeon::FloorConfig;
 use rift_net::{
-    messages::{InputCmd, Snapshot, WorldEvent},
+    messages::{InputCmd, Snapshot, VoteChoice, WorldEvent},
     ClientId, NetId, NetTick,
 };
 
@@ -30,6 +30,7 @@ pub mod loot;
 pub mod player;
 pub mod projectile;
 pub mod snapshot;
+pub mod vote;
 
 pub use player::ServerPlayer;
 pub use projectile::ServerAoeZone;
@@ -117,18 +118,67 @@ pub struct Sim {
     /// owner. `(client_id, net_id)` so the broadcaster can also
     /// log + drop blood decals.
     pending_player_deaths: Vec<(ClientId, NetId)>,
-    /// Counts down from [`HUB_RESPAWN_DELAY`] once any player has
-    /// died on a non-hub floor. When it hits zero the main loop
+    /// Counts down from [`HUB_RESPAWN_DELAY`] once the **whole
+    /// party has wiped** on a non-hub floor (every connected
+    /// player has `hp <= 0`). When it hits zero the main loop
     /// reads it via [`Sim::take_hub_respawn_request`] and drives
-    /// `transition_floor(0)` so the dead player(s) get back to
-    /// safety. `None` means “no respawn pending”.
+    /// `transition_floor(0)` so the dead party gets back to
+    /// safety. `None` means "no wipe in progress".
+    ///
+    /// Single-player deaths no longer arm this — those players
+    /// linger as ghosts (snapshot `DEAD` flag set, AI ignores
+    /// them, can't deal damage) until the survivors either
+    /// finish the floor, vote-exit, or die themselves.
     hub_respawn_timer: Option<f32>,
+
+    /// Active rift-exit vote, if any. Opened by
+    /// [`Self::request_exit_vote`] when 2+ players are
+    /// connected; ticked down each step in
+    /// [`Self::tick_exit_vote`]; cleared on resolution.
+    /// Single-player exits short-circuit and never touch this.
+    exit_vote: Option<vote::ExitVote>,
+    /// Seconds remaining before another exit vote may be
+    /// opened. Set to [`vote::VOTE_COOLDOWN`] on a fizzle;
+    /// counts down to zero in [`Self::tick_exit_vote`].
+    /// `0.0` when no recent fizzle (or after the cooldown
+    /// has expired).
+    exit_vote_cooldown: f32,
+    /// Set whenever [`Self::exit_vote`] or
+    /// [`Self::exit_vote_cooldown`] crosses a state boundary the
+    /// HUD cares about (vote opened / cast / resolved /
+    /// cooldown finished). Drained by
+    /// [`Self::take_exit_vote_update`] which the main loop turns
+    /// into a broadcast `ServerMsg::RiftExitVote`.
+    exit_vote_dirty: bool,
 }
 
 /// Wall-clock seconds the dying player's avatar lingers in the
 /// rift before the server force-loads them back to the hub. Long
 /// enough for the client's death animation to play through.
 pub const HUB_RESPAWN_DELAY: f32 = 3.5;
+
+/// Seconds a player stays in the down-pose after dying before
+/// rising as a ghost. The window is sized to let the death
+/// animation breathe and to give teammates a beat to register
+/// the loss before the avatar disappears (server filters ghost
+/// rows out of remote snapshots once `is_ghost` flips).
+pub const GHOST_RISE_DELAY: f32 = 3.5;
+
+/// Outcome of [`Sim::request_exit_vote`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitVoteRequest {
+    /// Solo player; caller must wipe ghost loot (none expected
+    /// since the only player must be alive to initiate) and
+    /// transition to the hub immediately.
+    Pass,
+    /// Multiplayer party; vote window opened, broadcast the
+    /// fresh `RiftExitVote` snapshot via
+    /// [`Sim::take_exit_vote_update`].
+    Opened,
+    /// Request rejected (cooldown, dead, in hub, vote already
+    /// active). No state change; nothing to broadcast.
+    Refused,
+}
 
 /// Server-authoritative rift state. One instance per floor —
 /// reset by [`Sim::change_floor`].
@@ -201,6 +251,9 @@ impl Sim {
             pending_stat_updates: Vec::new(),
             pending_player_deaths: Vec::new(),
             hub_respawn_timer: None,
+            exit_vote: None,
+            exit_vote_cooldown: 0.0,
+            exit_vote_dirty: false,
         };
         enemy::spawn_for_floor(
             &mut sim.world,
@@ -253,6 +306,14 @@ impl Sim {
         // carry over.
         self.pending_player_deaths.clear();
         self.hub_respawn_timer = None;
+        // Vote state is per-floor: a transition cancels any
+        // in-flight vote and clears the cooldown so a fresh
+        // descent doesn't carry baggage from the previous one.
+        if self.exit_vote.is_some() || self.exit_vote_cooldown > 0.0 {
+            self.exit_vote = None;
+            self.exit_vote_cooldown = 0.0;
+            self.exit_vote_dirty = true;
+        }
         log::info!(
             "sim: changed to floor {new_index} (seed={}) at spawn {spawn:?}",
             self.floor_seed
@@ -291,6 +352,17 @@ impl Sim {
         }
         self.pending_inputs.remove(&client_id);
         self.cooldowns.remove(&client_id);
+    }
+
+    /// `true` if `client_id` is currently a ghost (risen-but-dead).
+    /// Used by the message dispatch in `main.rs` to silently drop
+    /// gameplay actions (cast, loot pickup, drop) for spectators.
+    pub fn is_ghost(&self, client_id: ClientId) -> bool {
+        let Some(&entity) = self.sessions.get(&client_id) else { return false };
+        self.world
+            .get::<&ServerPlayer>(entity)
+            .map(|p| p.is_ghost)
+            .unwrap_or(false)
     }
 
     /// Stash an input from a client — coalesced against any earlier
@@ -1044,12 +1116,7 @@ impl Sim {
             &mut self.pending_player_deaths,
             melee_damage,
         );
-        if !self.pending_player_deaths.is_empty()
-            && self.floor_index != 0
-            && self.hub_respawn_timer.is_none()
-        {
-            self.hub_respawn_timer = Some(HUB_RESPAWN_DELAY);
-        }
+        self.check_party_wipe();
 
         // 4. Tick ability cooldowns.
         ability::tick_cooldowns(&mut self.cooldowns, dt);
@@ -1111,12 +1178,7 @@ impl Sim {
                 &mut self.pending_player_deaths,
                 enemy_proj_damage,
             );
-            if !self.pending_player_deaths.is_empty()
-                && self.floor_index != 0
-                && self.hub_respawn_timer.is_none()
-            {
-                self.hub_respawn_timer = Some(HUB_RESPAWN_DELAY);
-            }
+            self.check_party_wipe();
         }
 
         // 7. Death-fade: tick the death timer on dying enemies and
@@ -1132,12 +1194,40 @@ impl Sim {
             self.process_kills(&kills);
         }
 
-        // 9. Death-respawn countdown. Once any player has died on
-        //    a non-hub floor we tick this down; the main loop
-        //    reads it via [`Self::take_hub_respawn_request`] when
-        //    it expires and force-loads everyone back to the hub.
+        // 9. Wipe-respawn countdown. `check_party_wipe` arms
+        //    this only when every player on a non-hub floor is
+        //    dead; the main loop reads it via
+        //    [`Self::take_hub_respawn_request`] when it expires
+        //    and force-loads everyone back to the hub.
         if let Some(t) = self.hub_respawn_timer.as_mut() {
             *t -= dt;
+        }
+
+        // 10. Per-player ghost-rise countdown. Each dead player
+        //     ticks their own timer; when it hits 0 they flip
+        //     `is_ghost = true` which (a) lets `apply_inputs`
+        //     accept movement next tick and (b) makes the
+        //     snapshot pipeline drop their row from every other
+        //     viewer's outbound snapshot. We also emit a
+        //     `PlayerGhosted` event so remote clients can play
+        //     a poof VFX at the body's last position instead of
+        //     watching the avatar pop out of existence.
+        let mut risen: Vec<(NetId, [f32; 3])> = Vec::new();
+        for (_e, p) in self.world.query_mut::<&mut player::ServerPlayer>() {
+            if let Some(t) = p.ghost_rise_timer.as_mut() {
+                *t -= dt;
+                if *t <= 0.0 {
+                    p.ghost_rise_timer = None;
+                    p.is_ghost = true;
+                    risen.push((p.net_id, p.k.position.to_array()));
+                }
+            }
+        }
+        for (entity, position) in risen {
+            self.pending_events.push(WorldEvent::PlayerGhosted {
+                entity,
+                position,
+            });
         }
     }
 
@@ -1190,6 +1280,13 @@ impl Sim {
             let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
                 continue;
             };
+            // Skip dead players, ghosts, and players in the
+            // down-pose waiting to rise. Awarding XP here would
+            // also trigger a level-up heal that resurrects a
+            // player who died on the same tick.
+            if p.is_dead_or_ghosting() {
+                continue;
+            }
             let mut total = 0u64;
             for _ in kills.iter().filter(|k| k.role != enemy::role::BOSS) {
                 total += rift_game::experience::Experience::xp_for_kill(
@@ -1303,6 +1400,238 @@ impl Sim {
         std::mem::take(&mut self.pending_player_deaths)
     }
 
+    /// Arm [`Self::hub_respawn_timer`] when every player on a
+    /// non-hub floor has hit zero HP. Idempotent — safe to call
+    /// from every damage-application site. Single deaths leave
+    /// the survivor(s) playing on; only a full party wipe pulls
+    /// everyone back to safety.
+    fn check_party_wipe(&mut self) {
+        if self.floor_index == 0 || self.hub_respawn_timer.is_some() {
+            return;
+        }
+        let mut total = 0usize;
+        let mut dead = 0usize;
+        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
+            total += 1;
+            if p.hp <= 0.0 {
+                dead += 1;
+            }
+        }
+        if total > 0 && dead == total {
+            log::info!(
+                "sim: party wipe on floor {} ({} players); arming hub respawn",
+                self.floor_index,
+                total
+            );
+            self.hub_respawn_timer = Some(HUB_RESPAWN_DELAY);
+        }
+    }
+
+    /// Wipe inventory **and** equipment of every dead player.
+    /// Intended for the wipe-respawn path: called by the main
+    /// loop right before [`Self::change_floor`] when
+    /// [`Self::take_hub_respawn_request`] returns `true`. Stash
+    /// is untouched. Returns the affected `client_id`s so the
+    /// main loop can fan out fresh `InventorySync` +
+    /// `EquipmentSync` and persist the new (empty) bag.
+    pub fn wipe_dead_loot(&mut self) -> Vec<ClientId> {
+        let mut affected: Vec<ClientId> = Vec::new();
+        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
+            if p.hp > 0.0 {
+                continue;
+            }
+            p.inventory.clear();
+            p.equipment = rift_game::loot::Equipment::new();
+            p.recompute_stats();
+            affected.push(p.client_id);
+        }
+        if !affected.is_empty() {
+            log::info!(
+                "sim: wiped loot for {} dead player(s) on rift exit",
+                affected.len()
+            );
+        }
+        affected
+    }
+
+    /// Outcome of [`Self::request_exit_vote`]: either an
+    /// instant-pass (solo, must be exited immediately by the
+    /// caller), an opened vote window, or a refusal (cooldown,
+    /// already in hub, dead, etc.).
+    ///
+    /// See the `ExitVoteRequest` enum below for variants.
+
+    /// Handle a [`rift_net::ClientMsg::RiftExitVoteStart`] from
+    /// `client_id`. Solo players (one connected) get an instant
+    /// `Pass` outcome — caller wipes dead-player loot and
+    /// transitions to the hub. Multiplayer parties get a fresh
+    /// vote window opened with the initiator auto-recorded as
+    /// `Yes`; subsequent ticks resolve via [`Self::tick_exit_vote`].
+    ///
+    /// Silently rejected (returns `Refused`) if:
+    /// - we're already in the hub,
+    /// - the caster is in the down-pose (dead but not yet a
+    ///   ghost — the rise timer hasn't elapsed),
+    /// - a vote is already active,
+    /// - the cooldown timer hasn't expired yet.
+    ///
+    /// Ghost initiators are refused: a ghost could otherwise
+    /// gatekeep their living teammates inside the rift by
+    /// repeatedly opening votes (or by being the lone holdout
+    /// initiator on a vote whose other voters can't even see
+    /// them). Ghosts also can't cast on an open vote (the roll
+    /// is built from living players only). Party-wipe recovery
+    /// is handled by the existing hub-respawn timer.
+    pub fn request_exit_vote(
+        &mut self,
+        client_id: ClientId,
+    ) -> ExitVoteRequest {
+        if self.floor_index == 0 {
+            return ExitVoteRequest::Refused;
+        }
+        if self.exit_vote.is_some() || self.exit_vote_cooldown > 0.0 {
+            return ExitVoteRequest::Refused;
+        }
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return ExitVoteRequest::Refused;
+        };
+        let initiator_alive = self
+            .world
+            .get::<&ServerPlayer>(entity)
+            .map(|p| p.hp > 0.0 && !p.is_ghost)
+            .unwrap_or(false);
+        // Down-pose (dead pre-rise) and ghosts are both refused.
+        // Only living teammates can open or cast on a vote.
+        if !initiator_alive {
+            return ExitVoteRequest::Refused;
+        }
+        // Build the living-voter roll up front so we know whether
+        // we're solo or party. Ghosts are never voters.
+        let mut roll: HashMap<NetId, VoteChoice> = HashMap::new();
+        let mut initiator_net_id: Option<NetId> = None;
+        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
+            if p.hp <= 0.0 {
+                continue;
+            }
+            roll.insert(p.net_id, VoteChoice::Pending);
+            if p.client_id == client_id {
+                initiator_net_id = Some(p.net_id);
+            }
+        }
+        // Solo: alive caller is the only living player.
+        if roll.len() <= 1 {
+            log::info!("vote: solo exit by {:?} instant pass", client_id);
+            return ExitVoteRequest::Pass;
+        }
+        // Multiplayer: stamp the initiator as Yes immediately.
+        if let Some(nid) = initiator_net_id {
+            roll.insert(nid, VoteChoice::Yes);
+        }
+        log::info!(
+            "vote: opened by {:?} ({} living voters)",
+            client_id,
+            roll.len()
+        );
+        self.exit_vote = Some(vote::ExitVote {
+            time_remaining: vote::VOTE_DURATION,
+            votes: roll,
+        });
+        self.exit_vote_dirty = true;
+        ExitVoteRequest::Opened
+    }
+
+    /// Handle a [`rift_net::ClientMsg::RiftExitVoteCast`] from
+    /// `client_id`. Silently no-ops when no vote is active, the
+    /// caster isn't on the voter roll, or the caster has already
+    /// voted. Sets the dirty flag so the main loop broadcasts a
+    /// fresh `RiftExitVote` next iteration.
+    pub fn cast_exit_vote(&mut self, client_id: ClientId, yes: bool) {
+        let Some(vote) = self.exit_vote.as_mut() else { return };
+        let Some(&entity) = self.sessions.get(&client_id) else { return };
+        let Some(net_id) = self
+            .world
+            .get::<&ServerPlayer>(entity)
+            .ok()
+            .map(|p| p.net_id)
+        else {
+            return;
+        };
+        let Some(slot) = vote.votes.get_mut(&net_id) else { return };
+        if !matches!(slot, VoteChoice::Pending) {
+            // No changing your mind.
+            return;
+        }
+        *slot = if yes { VoteChoice::Yes } else { VoteChoice::No };
+        log::info!(
+            "vote: {:?} cast {}",
+            client_id,
+            if yes { "YES" } else { "NO" }
+        );
+        self.exit_vote_dirty = true;
+    }
+
+    /// Per-tick: decrement the active vote's deadline / cooldown
+    /// and resolve once outcome is known. Returns the resolution
+    /// so the main loop can wipe dead-player loot + transition to
+    /// the hub on a `Pass`.
+    pub fn tick_exit_vote(&mut self, dt: f32) -> vote::TickOutcome {
+        // Cooldown countdown (independent of any active vote).
+        if self.exit_vote_cooldown > 0.0 {
+            let prev = self.exit_vote_cooldown;
+            self.exit_vote_cooldown = (prev - dt).max(0.0);
+            // Mark dirty when we cross integer-second boundaries
+            // so the HUD ring animates smoothly. Cheap: at most
+            // one extra broadcast per second.
+            if prev.ceil() != self.exit_vote_cooldown.ceil() {
+                self.exit_vote_dirty = true;
+            }
+        }
+        let Some(vote) = self.exit_vote.as_mut() else {
+            return vote::TickOutcome::Idle;
+        };
+        let prev_remaining = vote.time_remaining;
+        vote.time_remaining = (prev_remaining - dt).max(0.0);
+        if prev_remaining.ceil() != vote.time_remaining.ceil() {
+            // Tick boundary: HUD countdown ring updates.
+            self.exit_vote_dirty = true;
+        }
+        match vote::resolve(vote) {
+            vote::TickOutcome::Idle => vote::TickOutcome::Idle,
+            vote::TickOutcome::Passed => {
+                log::info!("vote: passed unanimously — exiting rift");
+                self.exit_vote = None;
+                self.exit_vote_cooldown = 0.0;
+                self.exit_vote_dirty = true;
+                vote::TickOutcome::Passed
+            }
+            vote::TickOutcome::Fizzled => {
+                log::info!(
+                    "vote: fizzled (no/timeout) — {}s cooldown",
+                    vote::VOTE_COOLDOWN as u32
+                );
+                self.exit_vote = None;
+                self.exit_vote_cooldown = vote::VOTE_COOLDOWN;
+                self.exit_vote_dirty = true;
+                vote::TickOutcome::Fizzled
+            }
+        }
+    }
+
+    /// Drain the dirty flag and produce a wire-shape
+    /// [`VoteState`] reflecting the current sim state. The main
+    /// loop ships this as `ServerMsg::RiftExitVote` whenever it
+    /// returns `Some`.
+    pub fn take_exit_vote_update(&mut self) -> Option<rift_net::messages::VoteState> {
+        if !self.exit_vote_dirty {
+            return None;
+        }
+        self.exit_vote_dirty = false;
+        Some(vote::build_state(
+            self.exit_vote.as_ref(),
+            self.exit_vote_cooldown,
+        ))
+    }
+
     /// `true` once the post-death countdown has elapsed. Consumes
     /// the request — callers are expected to immediately drive
     /// `change_floor(0)`. Returns `false` while the timer is
@@ -1347,6 +1676,10 @@ fn apply_player_damage(
             let net_id = p.net_id;
             let client_id = p.client_id;
             let died = was_alive && p.hp <= 0.0;
+            if died {
+                p.is_ghost = false;
+                p.ghost_rise_timer = Some(GHOST_RISE_DELAY);
+            }
             drop(p);
             events.push(WorldEvent::Damage {
                 target: net_id,

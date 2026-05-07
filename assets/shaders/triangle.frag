@@ -26,6 +26,15 @@ layout(location = 3) in vec2 fragUV;
 
 layout(location = 0) out vec4 outColor;
 
+// Per-object push constant: must mirror the vert layout exactly
+// (mat4 model at offset 0, vec4 tint at offset 64). The frag
+// only consumes `tint`, but the layout has to match the vert
+// because Vulkan validates push-constant ranges per pipeline.
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    vec4 tint;
+} push;
+
 void main() {
     vec3 N = normalize(fragNormal);
     vec3 L = normalize(ubo.lightDir.xyz);
@@ -136,5 +145,10 @@ void main() {
     fogFactor = fogFactor * fogFactor;
     vec3 finalColor = mix(lighting, ubo.fogColor.rgb, fogFactor);
 
-    outColor = vec4(finalColor, 1.0);
+    // Apply per-object tint. RGB multiplies the lit + fogged
+    // colour, alpha goes straight to the output — the forward
+    // pipeline has alpha blending enabled so any tint.a < 1.0
+    // (currently only the local player's avatar in ghost mode)
+    // blends against the framebuffer.
+    outColor = vec4(finalColor * push.tint.rgb, push.tint.a);
 }

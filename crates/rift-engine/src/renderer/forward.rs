@@ -43,6 +43,14 @@ pub struct RenderObject {
     pub material_set: vk::DescriptorSet,
     /// Owned per-object texture, if any. None = default white.
     pub texture: Option<Texture>,
+    /// RGBA tint pushed alongside the model matrix. RGB multiplies
+    /// the lit fragment color, A is the output alpha. Default is
+    /// `[1, 1, 1, 1]` (no-op opaque). Used to make the local
+    /// player's avatar translucent / cyan-tinted while in ghost
+    /// mode — the forward pipeline has alpha blending enabled
+    /// with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, so any object with
+    /// `tint.a < 1.0` blends against the framebuffer.
+    pub tint: [f32; 4],
 }
 
 pub struct Renderer {
@@ -125,6 +133,12 @@ pub struct Renderer {
     /// rift dungeons; game code overrides this per scene
     /// (sunlit hub, etc.) before each frame's render.
     pub key_light: KeyLight,
+    /// Ghost-view post-effect strength in `[0.0, 1.0]`. Driven
+    /// by the client when the local player is in ghost mode.
+    /// Sampled by `record_composite` and fed to
+    /// `post_composite.frag` as a push constant. `0.0` is the
+    /// default no-op (normal scene).
+    pub ghost_mix: f32,
 }
 
 /// Directional key light + ambient floor. The forward shader
@@ -362,6 +376,7 @@ impl Renderer {
             sky_renderer,
             bloom: BloomConfig::default(),
             key_light: KeyLight::default(),
+            ghost_mix: 0.0,
         })
     }
 
@@ -488,6 +503,7 @@ impl Renderer {
             dynamic_vertex_buffers: None,
             material_set: self.material_pool.default_set,
             texture: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
         });
 
         Ok(())
@@ -552,6 +568,7 @@ impl Renderer {
             dynamic_vertex_buffers: Some(dynamic_vertex_buffers),
             material_set: self.material_pool.default_set,
             texture: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
         });
 
         Ok(self.objects.len() - 1)
@@ -1020,6 +1037,7 @@ impl Renderer {
                 descriptor_set: self.uniforms.descriptor_sets[frame],
                 material_set: obj.material_set,
                 model_matrix: obj.model_matrix,
+                tint: obj.tint,
             });
         }
 
@@ -1153,9 +1171,17 @@ impl Renderer {
                 device.cmd_push_constants(
                     cmd,
                     self.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     model_bytes,
+                );
+                let tint_bytes: &[u8] = bytemuck::bytes_of(&draw.tint);
+                device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    64,
+                    tint_bytes,
                 );
                 device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
             }
@@ -1184,7 +1210,7 @@ impl Renderer {
                     extent: self.swapchain.extent,
                 });
             device.cmd_begin_render_pass(cmd, &composite_begin, vk::SubpassContents::INLINE);
-            self.post.record_composite(device, cmd, image_index, &self.bloom);
+            self.post.record_composite(device, cmd, image_index, &self.bloom, self.ghost_mix);
 
             // Overlay (HUD)
             self.overlay.record(frame, device, cmd);

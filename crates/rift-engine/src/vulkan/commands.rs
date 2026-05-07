@@ -32,6 +32,12 @@ pub struct DrawCommand {
     /// uniform set.
     pub material_set: vk::DescriptorSet,
     pub model_matrix: Mat4,
+    /// RGBA tint pushed at offset 64 in the vertex push-constant
+    /// range. RGB multiplies the lit fragment colour, A is the
+    /// output alpha. `[1.0; 4]` is the default no-op opaque
+    /// path; ghost-mode avatars push a pale cyan-white with
+    /// reduced alpha.
+    pub tint: [f32; 4],
 }
 
 pub fn record_render_pass(
@@ -86,14 +92,24 @@ pub fn record_render_pass(
                 &[],
             );
 
-            // Push model matrix per object
+            // Push model matrix (offset 0) + tint (offset 64).
+            // Both stages can see them — vert uses model, frag
+            // uses tint.
             let model_bytes: &[u8] = bytemuck::bytes_of(&draw.model_matrix);
             device.cmd_push_constants(
                 command_buffer,
                 pipeline_layout,
-                vk::ShaderStageFlags::VERTEX,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
                 model_bytes,
+            );
+            let tint_bytes: &[u8] = bytemuck::bytes_of(&draw.tint);
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                64,
+                tint_bytes,
             );
 
             device.cmd_draw_indexed(command_buffer, draw.index_count, 1, 0, 0, 0);
