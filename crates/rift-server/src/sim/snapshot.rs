@@ -33,7 +33,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     // isn't them. Living teammates therefore see no avatar /
     // nameplate / health bar for the ghost, which is what we
     // want for distraction-free spectating.
-    for (_e, p) in world.query::<&ServerPlayer>().iter() {
+    for (e, p) in world.query::<&ServerPlayer>().iter() {
         if p.is_ghost && p.client_id != ack_for {
             continue;
         }
@@ -47,6 +47,10 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         if p.is_ghost {
             flags |= entity_flags::GHOST;
         }
+        let effects = world
+            .get::<&super::effect::EffectStack>(e)
+            .map(|s| s.to_snapshot())
+            .unwrap_or_default();
         entities.push(EntitySnapshot {
             net_id: p.net_id,
             kind: EntityKind::Player {
@@ -61,6 +65,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             velocity: p.k.velocity.to_array(),
             health_pct: (p.hp / p.hp_max).clamp(0.0, 1.0),
             flags,
+            effects,
         });
         if p.client_id == ack_for {
             ack_seq = p.last_input_seq;
@@ -70,7 +75,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
 
     // View-culled enemies. Anim byte is `ATTACK` while the swing
     // window is active, `WALK` while moving, `IDLE` otherwise. The
-    // debuff bitmask comes from any `DebuffStack` component the
+    // debuff bitmask comes from any `EffectStack` component the
     // enemy carries (every enemy gets one at spawn).
     for (e, en) in world.query::<&ServerEnemy>().iter() {
         if !in_view(viewer_pos, en.k.position) {
@@ -86,22 +91,23 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         } else {
             enemy_anim::IDLE
         };
-        let debuffs = world
-            .get::<&super::debuff::DebuffStack>(e)
-            .map(|s| s.bitmask())
-            .unwrap_or(0);
+        let effects = world
+            .get::<&super::effect::EffectStack>(e)
+            .map(|s| s.to_snapshot())
+            .unwrap_or_default();
         let mut flags = 0u8;
         if dying {
             flags |= entity_flags::DEAD;
         }
         entities.push(EntitySnapshot {
             net_id: en.net_id,
-            kind: EntityKind::Enemy { role: en.role, anim, debuffs },
+            kind: EntityKind::Enemy { role: en.role, anim },
             position: en.k.position.to_array(),
             yaw: en.k.yaw,
             velocity: en.k.velocity.to_array(),
             health_pct: (en.hp / en.hp_max.max(0.001)).clamp(0.0, 1.0),
             flags,
+            effects,
         });
     }
 
@@ -122,6 +128,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             velocity: proj.velocity.to_array(),
             health_pct: 1.0,
             flags: 0,
+            effects: Vec::new(),
         });
     }
 
@@ -148,6 +155,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             velocity: [0.0; 3],
             health_pct: 1.0,
             flags: 0,
+            effects: Vec::new(),
         });
     }
 
@@ -170,6 +178,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             velocity: [0.0; 3],
             health_pct: 1.0,
             flags: 0,
+            effects: Vec::new(),
         });
     }
 

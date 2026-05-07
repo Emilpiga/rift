@@ -176,7 +176,7 @@ pub mod boss {
 /// in the per-phase ability list inside [`tick_boss`]. The
 /// active wind-up tracks the resolving ability the same way
 /// — when it expires we look up `ability_id` in the registry
-/// and dispatch through [`super::ability::resolve_enemy_cast`].
+/// and dispatch through [the kernel pipeline (`super::ability::submit` + `super::ability::dispatch`)].
 #[derive(Clone, Debug)]
 pub struct BossState {
     /// Floor index captured at spawn — used for wind-up scaling
@@ -218,7 +218,7 @@ impl BossState {
 /// projectiles) the locked aim direction. On expiry the
 /// caller looks the ability up in
 /// [`rift_game::abilities::REGISTRY`] and dispatches through
-/// [`super::ability::resolve_enemy_cast`].
+/// [the kernel pipeline (`super::ability::submit` + `super::ability::dispatch`)].
 #[derive(Clone, Copy, Debug)]
 pub enum BossAttack {
     Idle,
@@ -299,6 +299,14 @@ pub struct ServerEnemy {
     /// [`AGGRO_RANGE`] for fresh pickups without having packs
     /// drop chase the moment the player ducks past the limit.
     pub target_lock: Option<Entity>,
+    /// Crit roll chance for outgoing damage (0..1). Default
+    /// `0.0` — enemies don't crit unless something tunes them
+    /// to. Plumbed end-to-end so tuning a boss / elite to crit
+    /// is one literal in the spawn block, not a refactor.
+    pub crit_chance: f32,
+    /// Crit damage multiplier added on top of `1.0` when the
+    /// roll succeeds (e.g. `0.5` ⇒ +50 %).
+    pub crit_damage: f32,
 }
 
 impl ServerEnemy {
@@ -315,7 +323,7 @@ impl ServerEnemy {
 /// telegraph visual) or a `Resolve` (wind-up expired, runs
 /// authoritative effects). The caller (`Sim::step`) translates
 /// these into `WorldEvent::AbilityCast` events + dispatches
-/// resolves through [`super::ability::resolve_enemy_cast`].
+/// resolves through [the kernel pipeline (`super::ability::submit` + `super::ability::dispatch`)].
 ///
 /// Unifying every enemy attack onto this single channel means
 /// adding a new attack is a registry-entry append + one
@@ -342,6 +350,11 @@ pub enum EnemyCast {
         origin: Vec3,
         aim: Vec3,
         damage_mult: f32,
+        /// Caster's crit chance (0..1) at resolve time —
+        /// snapshot here rather than re-read from the
+        /// `ServerEnemy` so dispatch is source-agnostic.
+        crit_chance: f32,
+        crit_damage: f32,
         /// Optional ability-specific scalar override applied at
         /// resolve. For [`AbilityKind::DelayedAoe`] this is the
         /// effective radius (m), letting the AI bake in
@@ -361,7 +374,7 @@ pub struct AiOutcome {
     pub melee_damage: Vec<(Entity, f32)>,
     /// Ability cast events (start-of-windup + resolve). Lifted
     /// into `WorldEvent::AbilityCast` and / or dispatched
-    /// through [`super::ability::resolve_enemy_cast`] by
+    /// through [the kernel pipeline (`super::ability::submit` + `super::ability::dispatch`)] by
     /// `Sim::step`.
     pub casts: Vec<EnemyCast>,
 }
@@ -401,7 +414,7 @@ pub fn tick_ai(
 
     let mut outcome = AiOutcome::default();
     for (_e, (en, stack, boss)) in world
-        .query_mut::<(&mut ServerEnemy, Option<&super::debuff::DebuffStack>, Option<&mut BossState>)>()
+        .query_mut::<(&mut ServerEnemy, Option<&super::effect::EffectStack>, Option<&mut BossState>)>()
     {
         // Skip dying enemies — their AI is frozen until the
         // death-fade timer expires and they're despawned.
@@ -775,6 +788,8 @@ fn tick_caster(
                 origin: en.k.position,
                 aim: dir_to,
                 damage_mult,
+                crit_chance: en.crit_chance,
+                crit_damage: en.crit_damage,
                 param_a: 0.0,
             });
             en.attack_cooldown = bolt_cooldown;
@@ -860,7 +875,7 @@ fn tick_boss(
     // 1. Resolve any in-flight wind-up before deciding what to
     //    do this tick. Wind-ups freeze movement; on expiry we
     //    emit an `EnemyCast::Resolve` and let the central
-    //    dispatcher in `super::ability::resolve_enemy_cast`
+    //    dispatcher in the kernel pipeline (`super::ability::submit` + `super::ability::dispatch`)
     //    actually apply the effect (spawn projectiles / damage
     //    / queue summons).
     if let BossAttack::Windup { ability_id, remaining, aim, param_a } = boss.attack {
@@ -881,6 +896,8 @@ fn tick_boss(
                 origin: en.k.position,
                 aim,
                 damage_mult,
+                crit_chance: en.crit_chance,
+                crit_damage: en.crit_damage,
                 param_a,
             });
             // Re-arm the per-ability cooldown from the
@@ -967,7 +984,7 @@ fn tick_boss(
             // Sustained ground-ring telegraph for the wind-up
             // duration. Side-channels through the visual-only
             // GROUND_SLAM_WINDUP wire id; the impact event is
-            // emitted by `resolve_enemy_cast` on resolve.
+            // emitted by the kernel pipeline on resolve.
             outcome.casts.push(EnemyCast::Start {
                 owner: en.net_id,
                 ability_id: ab_id::GROUND_SLAM_WINDUP,
@@ -1059,8 +1076,10 @@ pub fn spawn_summon(
         dying_remaining: 0.0,
         ai_phase: AiPhase::default(),
         target_lock: None,
+        crit_chance: 0.0,
+        crit_damage: 0.0,
     };
-    world.spawn((enemy, super::debuff::DebuffStack::default()));
+    world.spawn((enemy, super::effect::EffectStack::default()));
 }
 
 /// Integrate every enemy's velocity against the floor's wall grid.
@@ -1208,8 +1227,10 @@ pub fn spawn_for_floor(
                     dying_remaining: 0.0,
                     ai_phase: AiPhase::default(),
                     target_lock: None,
+                    crit_chance: 0.0,
+                    crit_damage: 0.0,
                 };
-                world.spawn((enemy, super::debuff::DebuffStack::default()));
+                world.spawn((enemy, super::effect::EffectStack::default()));
                 spawned += 1;
             }
         }

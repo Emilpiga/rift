@@ -20,13 +20,18 @@ use hecs::Entity;
 use rift_game::abilities::ChannelEffect;
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
+use super::enemy::ServerEnemy;
 use super::player::ServerPlayer;
-use super::projectile::{apply_hits_to_enemies, Hit};
+use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADIUS};
 
-/// Component added to a player entity while a channel is active.
+/// Component added to a player or enemy entity while a channel
+/// is active. `team` drives the target list and the damage
+/// routing (enemies for `Player`-team channels, players for
+/// `Enemy`-team channels).
 #[derive(Clone, Debug)]
 pub struct ServerChannel {
     pub ability_id: u8,
+    pub team: Team,
     pub remaining: f32,
     pub tick_interval: f32,
     pub tick_acc: f32,
@@ -38,7 +43,7 @@ pub struct ServerChannel {
     pub crit_damage: f32,
     pub apply_debuff: Option<u8>,
     /// Direction the caster is aiming. Refreshed every server tick
-    /// from the player's current `aim_yaw` so the beam follows the
+    /// from the caster's current `aim_yaw` so the beam follows the
     /// cursor while channeling.
     pub aim: Vec3,
     /// If `true`, any horizontal movement input cancels the
@@ -47,49 +52,50 @@ pub struct ServerChannel {
 }
 
 /// Tick every active channel and queue damage / debuff
-/// applications. Borrows are split: we collect the `(caster_pos,
-/// caster_net_id, channel)` tuples up front, then dispatch hits
-/// against the enemy world afterwards so we can mutate enemy
-/// state freely.
+/// applications.
+///
+/// Player-team channels hit enemies and route through
+/// `apply_hits_to_enemies` like projectile hits. Enemy-team
+/// channels hit players and produce `(player, damage)` rows
+/// returned to the caller for `apply_player_damage`.
+///
+/// `enemies` is the live snapshot used by player-team channels;
+/// `players` is the equivalent for enemy-team channels.
+///
+/// Borrow strategy: walk player-attached channels first
+/// (`(&ServerPlayer, &mut ServerChannel)`), then enemy-attached
+/// channels (`(&ServerEnemy, &mut ServerChannel)`). Hits are
+/// queued during the walk and applied after the borrows end.
 pub fn tick(
     world: &mut hecs::World,
     enemies: &[(Entity, Vec3, NetId, f32)],
+    players: &[(Entity, Vec3)],
     ctx: &mut super::loot::DeathCtx<'_>,
     tick_now: NetTick,
     dt: f32,
-) {
-    // 1. Walk channels: advance clocks, refresh aim from the
-    //    player's current aim_yaw, decide which ones tick this
-    //    frame, and queue the hits + visual events. Mark expired
-    //    or movement-cancelled channels for stripping.
+) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
+    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8)> = Vec::new();
     let mut to_strip: Vec<Entity> = Vec::new();
+
+    // 1. Player-attached channels.
     for (entity, (player, channel)) in
         world.query_mut::<(&ServerPlayer, &mut ServerChannel)>()
     {
-        // Movement-cancel: if the caster is moving and the
-        // ability says so, end the channel immediately.
         if channel.cancel_on_move
             && player.k.velocity.length_squared() > 0.05 * 0.05
         {
             channel.remaining = 0.0;
         }
-
         channel.remaining -= dt;
         channel.tick_acc += dt;
-
-        // Re-derive the caster's aim each tick so beams sweep
-        // with the cursor. `aim_yaw` is updated by
-        // `player::apply_inputs` from the latest InputCmd.
         let yaw = player.k.aim_yaw;
         channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-
         let caster_pos = player.k.position;
         let caster_net_id = player.net_id;
-
         while channel.tick_acc >= channel.tick_interval && channel.remaining > -dt {
             channel.tick_acc -= channel.tick_interval;
-            // Visual event for this tick.
             ctx.events.push(WorldEvent::ChannelTick {
                 caster: caster_net_id,
                 ability: channel.ability_id as u16,
@@ -103,10 +109,12 @@ pub fn tick(
                 caster_net_id,
                 tick_now,
                 enemies,
+                players,
                 &mut hits,
+                &mut player_damage,
+                &mut player_debuffs,
             );
         }
-
         if channel.remaining <= 0.0 {
             to_strip.push(entity);
             ctx.events.push(WorldEvent::ChannelEnd {
@@ -116,101 +124,237 @@ pub fn tick(
         }
     }
 
-    // 2. Apply queued hits to the enemy world.
+    // 2. Enemy-attached channels. Same shape as the player
+    //    pass — refresh aim from the caster's `aim_yaw`,
+    //    cancel-on-move from the caster's velocity, queue
+    //    visual events + hits, mark expired channels.
+    for (entity, (en, channel)) in
+        world.query_mut::<(&ServerEnemy, &mut ServerChannel)>()
+    {
+        if en.is_dying() {
+            // Treat death as channel cancel so the visual
+            // doesn't trail off a corpse.
+            channel.remaining = 0.0;
+        }
+        if channel.cancel_on_move
+            && en.k.velocity.length_squared() > 0.05 * 0.05
+        {
+            channel.remaining = 0.0;
+        }
+        channel.remaining -= dt;
+        channel.tick_acc += dt;
+        let yaw = en.k.aim_yaw;
+        channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+        let caster_pos = en.k.position;
+        let caster_net_id = en.net_id;
+        while channel.tick_acc >= channel.tick_interval && channel.remaining > -dt {
+            channel.tick_acc -= channel.tick_interval;
+            ctx.events.push(WorldEvent::ChannelTick {
+                caster: caster_net_id,
+                ability: channel.ability_id as u16,
+                position: caster_pos.to_array(),
+                dir: [channel.aim.x, channel.aim.z],
+                tick: tick_now,
+            });
+            collect_hits_for_effect(
+                channel,
+                caster_pos,
+                caster_net_id,
+                tick_now,
+                enemies,
+                players,
+                &mut hits,
+                &mut player_damage,
+                &mut player_debuffs,
+            );
+        }
+        if channel.remaining <= 0.0 {
+            to_strip.push(entity);
+            ctx.events.push(WorldEvent::ChannelEnd {
+                caster: caster_net_id,
+                ability: channel.ability_id as u16,
+            });
+        }
+    }
+
+    // 3. Apply queued enemy-side hits.
     apply_hits_to_enemies(world, hits, ctx);
 
-    // 3. Strip expired channels.
+    // 4. Apply queued player-side debuffs (rare path; flag-gated
+    //    on `apply_debuff = Some(_)` per channel).
+    for (player_entity, debuff_id) in player_debuffs {
+        if let Ok(mut stack) =
+            world.get::<&mut super::effect::EffectStack>(player_entity)
+        {
+            stack.apply(debuff_id, None);
+        }
+    }
+
+    // 5. Strip expired channels.
     for entity in to_strip {
         let _ = world.remove_one::<ServerChannel>(entity);
     }
+
+    player_damage
 }
 
-/// Resolve a channel's per-tick hit set against the enemy snapshot.
+/// Resolve a channel's per-tick hit set. For `Player`-team
+/// channels, queue Hits against the enemy snapshot. For
+/// `Enemy`-team channels, queue `(player, damage)` rows
+/// against the player snapshot — crit is rolled at hit time so
+/// the player-damage path receives flat damage values.
 fn collect_hits_for_effect(
     channel: &ServerChannel,
     caster_pos: Vec3,
     caster_net_id: NetId,
     tick_now: NetTick,
     enemies: &[(Entity, Vec3, NetId, f32)],
+    players: &[(Entity, Vec3)],
     hits: &mut Vec<Hit>,
+    player_damage: &mut Vec<(Entity, f32)>,
+    player_debuffs: &mut Vec<(Entity, u8)>,
 ) {
     let crit_chance = channel.crit_chance;
     let crit_damage = channel.crit_damage;
     let salt = (channel.ability_id as u64) ^ (channel.tick_acc.to_bits() as u64);
+    // Build the per-target seed once — every hit on this tick
+    // shares the salt and caster, only the target id varies.
+    let seed_for = |target_id: u64| -> u64 {
+        mix64(
+            (tick_now.0 as u64)
+                ^ (target_id << 8)
+                ^ ((caster_net_id.0 as u64) << 24)
+                ^ salt.rotate_left(7),
+        )
+    };
+    // Helper: roll crit-multiplier at hit time. Used by the
+    // enemy-team path (player-damage rows are flat).
+    let roll_crit_mult = |seed: u64| -> f32 {
+        if crit_chance > 0.0 {
+            let roll = (mix64(seed) >> 40) as f32 / (1u32 << 24) as f32;
+            if roll < crit_chance {
+                1.0 + crit_damage
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        }
+    };
     match channel.effect {
         ChannelEffect::AuraAroundCaster { radius, damage_per_tick } => {
             let r2 = radius * radius;
-            for (en, en_pos, nid, _r) in enemies {
-                let dx = en_pos.x - caster_pos.x;
-                let dz = en_pos.z - caster_pos.z;
-                if dx * dx + dz * dz <= r2 {
-                    hits.push(Hit {
-                        enemy: *en,
-                        enemy_net_id: *nid,
-                        enemy_pos: *en_pos,
-                        damage: damage_per_tick,
-                        crit_chance,
-                        crit_damage,
-                        crit_seed: super::projectile::mix64(
-                            (tick_now.0 as u64)
-                                ^ ((nid.0 as u64) << 8)
-                                ^ ((caster_net_id.0 as u64) << 24)
-                                ^ salt.rotate_left(7),
-                        ),
-                        apply_debuff: channel.apply_debuff,
-                    });
+            match channel.team {
+                Team::Player => {
+                    for (en, en_pos, nid, _r) in enemies {
+                        let dx = en_pos.x - caster_pos.x;
+                        let dz = en_pos.z - caster_pos.z;
+                        if dx * dx + dz * dz <= r2 {
+                            hits.push(Hit {
+                                enemy: *en,
+                                enemy_net_id: *nid,
+                                enemy_pos: *en_pos,
+                                damage: damage_per_tick,
+                                crit_chance,
+                                crit_damage,
+                                crit_seed: seed_for(nid.0 as u64),
+                                apply_debuff: channel.apply_debuff,
+                            });
+                        }
+                    }
+                }
+                Team::Enemy => {
+                    for (pe, ppos) in players {
+                        let dx = ppos.x - caster_pos.x;
+                        let dz = ppos.z - caster_pos.z;
+                        if dx * dx + dz * dz <= r2 {
+                            let mult = roll_crit_mult(seed_for(pe.id() as u64));
+                            player_damage.push((*pe, damage_per_tick * mult));
+                            if let Some(id) = channel.apply_debuff {
+                                player_debuffs.push((*pe, id));
+                            }
+                        }
+                    }
                 }
             }
         }
         ChannelEffect::Beam { range, width, damage_per_tick, pierce_targets } => {
-            // Project each enemy onto the aim axis. In-range if
-            // forward distance is in [0, range] and lateral
-            // distance is in [0, width].
             let aim = channel.aim.normalize_or_zero();
             if aim.length_squared() < 1.0e-4 {
                 return;
             }
-            // Right vector in XZ plane (rotate aim 90°).
             let right = Vec3::new(aim.z, 0.0, -aim.x);
-            // First pass: collect (along, hit-row) for every enemy
-            // inside the beam corridor.
-            let mut candidates: Vec<(f32, Hit)> = Vec::new();
-            for (en, en_pos, nid, _r) in enemies {
-                let to = Vec3::new(en_pos.x - caster_pos.x, 0.0, en_pos.z - caster_pos.z);
-                let along = to.dot(aim);
-                if along < 0.0 || along > range {
-                    continue;
-                }
-                let lateral = to.dot(right).abs();
-                if lateral > width {
-                    continue;
-                }
-                candidates.push((
-                    along,
-                    Hit {
-                        enemy: *en,
-                        enemy_net_id: *nid,
-                        enemy_pos: *en_pos,
-                        damage: damage_per_tick,
-                        crit_chance,
-                        crit_damage,
-                        crit_seed: super::projectile::mix64(
-                            (tick_now.0 as u64)
-                                ^ ((nid.0 as u64) << 8)
-                                ^ ((caster_net_id.0 as u64) << 24)
-                                ^ salt.rotate_left(7),
-                        ),
-                        apply_debuff: channel.apply_debuff,
-                    },
-                ));
-            }
-            // Sort nearest-first, then truncate to `pierce_targets + 1`
-            // (the beam always hits the first target; `pierce_targets`
-            // is *additional* enemies it can pass through).
-            candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let cap = (pierce_targets as usize).saturating_add(1);
-            for (_along, hit) in candidates.into_iter().take(cap) {
-                hits.push(hit);
+            // Player-side vs enemy-side share the projection
+            // math but route into different sinks.
+            match channel.team {
+                Team::Player => {
+                    let mut candidates: Vec<(f32, Hit)> = Vec::new();
+                    for (en, en_pos, nid, _r) in enemies {
+                        let to = Vec3::new(
+                            en_pos.x - caster_pos.x,
+                            0.0,
+                            en_pos.z - caster_pos.z,
+                        );
+                        let along = to.dot(aim);
+                        if along < 0.0 || along > range {
+                            continue;
+                        }
+                        let lateral = to.dot(right).abs();
+                        if lateral > width {
+                            continue;
+                        }
+                        candidates.push((
+                            along,
+                            Hit {
+                                enemy: *en,
+                                enemy_net_id: *nid,
+                                enemy_pos: *en_pos,
+                                damage: damage_per_tick,
+                                crit_chance,
+                                crit_damage,
+                                crit_seed: seed_for(nid.0 as u64),
+                                apply_debuff: channel.apply_debuff,
+                            },
+                        ));
+                    }
+                    candidates.sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (_along, hit) in candidates.into_iter().take(cap) {
+                        hits.push(hit);
+                    }
+                }
+                Team::Enemy => {
+                    let player_width = width.max(PLAYER_HIT_RADIUS);
+                    let mut candidates: Vec<(f32, Entity)> = Vec::new();
+                    for (pe, ppos) in players {
+                        let to = Vec3::new(
+                            ppos.x - caster_pos.x,
+                            0.0,
+                            ppos.z - caster_pos.z,
+                        );
+                        let along = to.dot(aim);
+                        if along < 0.0 || along > range {
+                            continue;
+                        }
+                        let lateral = to.dot(right).abs();
+                        if lateral > player_width {
+                            continue;
+                        }
+                        candidates.push((along, *pe));
+                    }
+                    candidates.sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (_along, pe) in candidates.into_iter().take(cap) {
+                        let mult = roll_crit_mult(seed_for(pe.id() as u64));
+                        player_damage.push((pe, damage_per_tick * mult));
+                        if let Some(id) = channel.apply_debuff {
+                            player_debuffs.push((pe, id));
+                        }
+                    }
+                }
             }
         }
     }

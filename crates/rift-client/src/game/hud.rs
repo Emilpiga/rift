@@ -1,5 +1,5 @@
 use rift_engine::ecs::components::{
-    Boss, Debuffs, Enemy, Health, LocalPlayer, Player, RemotePlayer, Transform,
+    Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Transform,
 };
 use rift_dungeon::NavGrid;
 use rift_engine::ui::im::{
@@ -25,15 +25,21 @@ pub fn render_hud(
     let sw = screen.x;
     let sh = screen.y;
 
-    let stats = player_state.stats();
-    let max_hp_bonus = stats.max_hp - player_state.config.base_hp
-        - player_state.config.hp_per_level * player_state.experience.level as f32;
     // HP + XP bars: stacked, centered above the ability bar so the
     // player's vital stats sit right under their character.
+    //
+    // Server-authoritative HP: `world_sync` writes
+    // `h.current = h.max * snapshot.health_pct`, where
+    // `health_pct = server.hp / server.hp_max`. Because the
+    // server already accounts for gear / level bonuses in its
+    // `hp_max`, the client's `h.current / h.max` is the right
+    // 0..1 fraction. Adding `max_hp_bonus` to the denominator
+    // here would double-count the bonus and prevent the bar
+    // from ever reaching 100% on a geared character.
     let hp_pct = world
         .query::<(&Health, &Player, &LocalPlayer)>()
         .iter()
-        .map(|(_, (h, _, _))| h.current / (h.max + max_hp_bonus))
+        .map(|(_, (h, _, _))| h.current / h.max.max(0.001))
         .next()
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
@@ -53,6 +59,24 @@ pub fn render_hud(
         .fill(hp_color(hp_pct))
         .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
         .show(ui, Rect::from_xywh(bar_x, bar_y, bar_w, bar_h));
+    // HP numerals centred inside the bar — same `current / max`
+    // pattern as the XP bar so the player has a consistent
+    // readout. `stats().max_hp` is the server-authoritative cap
+    // (gear + level baked in); current is `pct * max` rounded.
+    let hp_max = player_state.stats().max_hp;
+    let hp_now = (hp_pct * hp_max).round();
+    let hp_label = format!("{hp_now:.0} / {hp_max:.0}");
+    let hp_text_size = 13.0;
+    let hp_text_w = ui.measure_text(&hp_label, hp_text_size);
+    ui.draw_text(
+        Pos2::new(
+            bar_x + (bar_w - hp_text_w) * 0.5,
+            bar_y + (bar_h - hp_text_size) * 0.5,
+        ),
+        &hp_label,
+        hp_text_size,
+        Color::rgba(0.96, 0.96, 0.98, 0.95),
+    );
 
     // XP bar (slimmer, directly under the HP bar).
     let xp_pct = player_state.experience.progress().clamp(0.0, 1.0);
@@ -84,6 +108,25 @@ pub fn render_hud(
         15.0,
         Color::rgba(0.92, 0.92, 0.92, 1.0),
     );
+
+    // Active buff / debuff strip: sits a few pixels above the HP
+    // bar so duration drains read alongside the HP fill. Same
+    // pip widget as the overhead nameplates so the visual
+    // language matches whether you're looking at yourself, an
+    // ally, or a target.
+    let local_effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
+        .query::<(&Effects, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (e, _))| e.effects.clone())
+        .next()
+        .unwrap_or_default();
+    if !local_effects.is_empty() {
+        draw_effect_pip_strip(
+            ui,
+            Pos2::new(bar_x, bar_y - 34.0),
+            &local_effects,
+        );
+    }
 
     // Level-up banner: appears top-center for ~2.5 s after the
     // server confirms a level-up.
@@ -1140,6 +1183,10 @@ pub fn render_ability_bar(
     ui: &mut Ui<'_>,
     abilities: &AbilitySlot,
     player_level: u32,
+    // Slot index currently in placed / entity targeting mode,
+    // if any. Drawn with the accent outline so the player
+    // knows which ability is awaiting a click confirmation.
+    targeting_slot: Option<usize>,
 ) -> Option<usize> {
     const AB_SIZE: f32 = 64.0;
     const AB_GAP: f32 = 6.0;
@@ -1160,6 +1207,13 @@ pub fn render_ability_bar(
             rift_game::loadout::is_slot_unlocked(i, player_level);
 
         let mut s = ItemSlot::new(AB_SIZE).key_label(AB_KEYS[i]);
+        // Highlight the slot the player is currently aiming
+        // (placed AoE or entity-target heal). Reuses the
+        // generic `selected` outline so the visual matches
+        // the inventory's "this is the active slot" cue.
+        if targeting_slot == Some(i) {
+            s = s.selected(true);
+        }
         if !slot_unlocked {
             // Locked bar slot — render as a disabled "padlock"
             // tile with the unlock level glyph.
@@ -1257,18 +1311,16 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
     const BAR_W: f32 = 52.0;
     const BAR_H: f32 = 6.0;
     const Y_OFFSET: f32 = -24.0;
-    const PIP_SIZE: f32 = 6.0;
-    const PIP_GAP: f32 = 2.0;
 
     let mut wui = WorldUi::new(ui, view_proj);
 
     for (entity, (transform, _enemy, health)) in world.query::<(&Transform, &Enemy, &Health)>().iter() {
-        let debuff_mask = world
-            .get::<&Debuffs>(entity)
-            .map(|d| d.mask)
-            .unwrap_or(0);
+        let effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
+            .get::<&Effects>(entity)
+            .map(|d| d.effects.clone())
+            .unwrap_or_default();
         let damaged = health.current < health.max;
-        if !damaged && debuff_mask == 0 {
+        if !damaged && effects.is_empty() {
             continue;
         }
 
@@ -1290,28 +1342,8 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
                 .map(|anchor| Rect::from_xywh(anchor.x - BAR_W * 0.5, anchor.y + Y_OFFSET, BAR_W, BAR_H))
         };
 
-        // Debuff pips: one little square per active debuff,
-        // coloured from the registered def. Stacked left-to-right
-        // just above the bar.
-        if debuff_mask != 0 {
-            if let Some(rect) = bar_rect {
-                let pips_y = rect.y() - PIP_SIZE - 2.0;
-                let mut x = rect.x();
-                for id in rift_game::debuffs::iter_mask(debuff_mask) {
-                    let Some(def) = rift_game::debuffs::lookup(id) else { continue };
-                    let [r, g, b] = def.color;
-                    // 1 px black outline so pips read on light walls.
-                    wui.ui().draw_rect(
-                        Rect::from_xywh(x - 1.0, pips_y - 1.0, PIP_SIZE + 2.0, PIP_SIZE + 2.0),
-                        Color::rgba(0.0, 0.0, 0.0, 0.85),
-                    );
-                    wui.ui().draw_rect(
-                        Rect::from_xywh(x, pips_y, PIP_SIZE, PIP_SIZE),
-                        Color::rgba(r, g, b, 0.95),
-                    );
-                    x += PIP_SIZE + PIP_GAP;
-                }
-            }
+        if let Some(rect) = bar_rect {
+            draw_effect_pips(&mut wui, rect, &effects);
         }
     }
 }
@@ -1339,7 +1371,7 @@ pub fn render_remote_player_health_bars(
     const Y_OFFSET: f32 = -32.0;
 
     let mut wui = WorldUi::new(ui, view_proj);
-    for (_e, (transform, _rp, health)) in world
+    for (entity, (transform, _rp, health)) in world
         .query::<(&Transform, &RemotePlayer, &Health)>()
         .iter()
     {
@@ -1355,7 +1387,87 @@ pub fn render_remote_player_health_bars(
         } else {
             Color::rgba(0.9, 0.25, 0.15, 0.9)
         };
-        wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color);
+        let bar_rect = wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color);
+        // Effect pips above the bar — buffs (e.g. Rejuvenation)
+        // and debuffs both surface here so allies can read each
+        // other's status at a glance.
+        let effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
+            .get::<&Effects>(entity)
+            .map(|d| d.effects.clone())
+            .unwrap_or_default();
+        if let (Some(rect), false) = (bar_rect, effects.is_empty()) {
+            draw_effect_pips(&mut wui, rect, &effects);
+        }
+    }
+}
+
+/// Draw a horizontal strip of buff / debuff icon pips just above
+/// `anchor` (typically the entity's HP bar). Each pip shows the
+/// effect's icon (or a flat colored fill if no icon is defined)
+/// plus a top-down dark drain overlay sized by `remaining /
+/// duration` — same visual language as the action-bar cooldown
+/// drain so players read remaining time the same way for both.
+fn draw_effect_pips(
+    wui: &mut rift_engine::ui::im::WorldUi<'_, '_>,
+    anchor: Rect,
+    effects: &[rift_engine::ecs::components::ActiveEffect],
+) {
+    const PIP_SIZE: f32 = 28.0;
+    let pips_y = anchor.y() - PIP_SIZE - 3.0;
+    draw_effect_pip_strip(wui.ui(), Pos2::new(anchor.x(), pips_y), effects);
+}
+
+/// Screen-space variant of [`draw_effect_pips`]. Anchors the
+/// strip's top-left at `top_left` and renders the same pip widget
+/// (icon + cooldown drain). Used by the local-player HUD where we
+/// don't go through `WorldUi`.
+fn draw_effect_pip_strip(
+    ui: &mut Ui<'_>,
+    top_left: Pos2,
+    effects: &[rift_engine::ecs::components::ActiveEffect],
+) {
+    const PIP_SIZE: f32 = 28.0;
+    const PIP_GAP: f32 = 3.0;
+
+    let mut x = top_left.x;
+    let y = top_left.y;
+    for eff in effects {
+        let Some(def) = rift_game::effects::lookup(eff.id) else {
+            continue;
+        };
+        let pip = Rect::from_xywh(x, y, PIP_SIZE, PIP_SIZE);
+        // 1 px black frame so the pip reads on bright walls.
+        ui.draw_rect(
+            Rect::from_xywh(pip.x() - 1.0, pip.y() - 1.0, PIP_SIZE + 2.0, PIP_SIZE + 2.0),
+            Color::rgba(0.0, 0.0, 0.0, 0.85),
+        );
+        // Icon if available, else a flat colored fill in the
+        // def's indicator color.
+        if let Some(icon) = def.icon {
+            ui.draw_icon(pip, icon, Color::rgba(1.0, 1.0, 1.0, 1.0));
+        } else {
+            let [r, g, b] = def.color;
+            ui.draw_rect(pip, Color::rgba(r, g, b, 0.95));
+        }
+        // Top-down cooldown drain: shrinks from full to zero as
+        // the effect ticks toward expiry. `duration` is the
+        // applied duration captured when the stack entry was
+        // refreshed, so the overlay always represents this
+        // application's remaining fraction (not the static
+        // `default_duration`).
+        let frac = if eff.duration > 0.001 {
+            (eff.remaining / eff.duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if frac > 0.0 {
+            let drain_h = PIP_SIZE * frac;
+            ui.draw_rect(
+                Rect::from_xywh(pip.x(), pip.y(), PIP_SIZE, drain_h),
+                Color::rgba(0.0, 0.0, 0.0, 0.55),
+            );
+        }
+        x += PIP_SIZE + PIP_GAP;
     }
 }
 /// "Mark for Death" becomes `MD` instead of `MF`.

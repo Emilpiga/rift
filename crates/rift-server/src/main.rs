@@ -248,6 +248,7 @@ impl Server {
                 origin,
                 aim_dir,
                 placed_target,
+                target_net_id,
             } => {
                 // Ghosts (risen-but-dead spectators) can't cast.
                 // Silently drop — the client UI gates this too,
@@ -256,8 +257,15 @@ impl Server {
                 if self.sim.is_ghost(from) {
                     return;
                 }
-                self.sim
-                    .cast_ability(from, ability_id, origin, aim_dir, placed_target, self.tick);
+                self.sim.cast_ability(
+                    from,
+                    ability_id,
+                    origin,
+                    aim_dir,
+                    placed_target,
+                    target_net_id,
+                    self.tick,
+                );
             }
             ClientMsg::EndChannel { ability_id } => {
                 self.sim.end_channel(from, ability_id);

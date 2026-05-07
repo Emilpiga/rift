@@ -21,7 +21,7 @@ pub mod character;
 pub mod hero;
 pub mod loadout;
 pub mod components;
-pub mod debuffs;
+pub mod effects;
 pub mod experience;
 pub mod kinematic;
 pub mod loot;

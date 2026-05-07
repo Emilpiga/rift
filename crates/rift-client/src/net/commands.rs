@@ -222,6 +222,7 @@ impl NetClient {
         origin: Vec3,
         aim_dir: Vec3,
         placed_target: Option<Vec3>,
+        target_net_id: Option<rift_net::NetId>,
     ) {
         let aim = Vec3::new(aim_dir.x, 0.0, aim_dir.z).normalize_or_zero();
         // Locally-predicted side-effects of the cast on the
@@ -238,6 +239,7 @@ impl NetClient {
             origin: origin.to_array(),
             aim_dir: [aim.x, aim.z],
             placed_target: placed_target.map(|v| v.to_array()),
+            target_net_id,
         };
         self.send(Channel::Event, &msg);
     }

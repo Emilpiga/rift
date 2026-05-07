@@ -33,6 +33,9 @@ pub struct RemoteEntity {
     /// (`rift_game::kinematic::action`). Drives the dodge-roll
     /// animation on remote avatars.
     pub action: u8,
+    /// Active buff / debuff list mirrored from the snapshot
+    /// row. Empty for entities without a server-side stack.
+    pub effects: Vec<rift_net::messages::ActiveEffect>,
 }
 
 /// Two-sample interpolation buffer for one remote entity. The
@@ -166,6 +169,7 @@ impl NetClient {
                     health_pct: e.health_pct,
                     airborne: e.flags & rift_net::messages::entity_flags::AIRBORNE != 0,
                     action,
+                    effects: e.effects,
                 },
             );
             self.last_positions.insert(net_id, position);

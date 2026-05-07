@@ -379,13 +379,24 @@ pub struct Enemy {
     pub kind: EnemyKind,
 }
 
-/// Active-debuff bitmask on an entity. One bit per
-/// `rift_game::debuffs::id::*`. The HUD reads this to paint
-/// indicator pips above the entity. Owned by network sync on the
+/// Engine-side mirror of `rift_net::messages::ActiveEffect`.
+/// Duplicated here so this crate doesn't need to depend on
+/// `rift-net`; the client converts at sync time.
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveEffect {
+    pub id: u8,
+    pub remaining: f32,
+    pub duration: f32,
+}
+
+/// Active buffs / debuffs replicated onto an entity. One entry
+/// per running effect, in no particular order. Replaces the
+/// older bit-mask representation so the HUD can render duration
+/// rings and individual icons. Owned by network sync on the
 /// client, by the simulation on the server.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Debuffs {
-    pub mask: u32,
+#[derive(Clone, Debug, Default)]
+pub struct Effects {
+    pub effects: Vec<ActiveEffect>,
 }
 
 /// Marks an entity as a rift boss.

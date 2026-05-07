@@ -118,6 +118,9 @@ pub struct NetCastRequest {
     pub origin: Vec3,
     pub aim_dir: Vec3,
     pub placed_target: Option<Vec3>,
+    /// Friendly entity target for heal-style casts. `None` for
+    /// ability kinds that don't use it.
+    pub target_net_id: Option<rift_net::NetId>,
 }
 
 /// Local channel-ability state (hold-to-channel input + visuals).

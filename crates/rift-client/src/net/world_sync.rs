@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use glam::{Mat4, Quat, Vec3};
 use rift_engine::ecs::components::{
-    AnimationSet, Debuffs, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
+    AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
     Renderable, RemotePlayer, Transform, Velocity,
 };
 use rift_engine::animation::Animator;
@@ -277,6 +277,12 @@ impl NetClient {
                     p.action_timer = 0.0;
                 }
             }
+
+            // Mirror the snapshot's active-effect list into the
+            // remote avatar's `Effects` component. Drives buff /
+            // debuff icons + duration rings in the HUD the same
+            // way enemy effects do.
+            sync_effects(world, entity, &re.effects);
         }
         // Drop interp buffers for entities that have despawned so
         // the map doesn't grow unbounded across long sessions.
@@ -417,23 +423,12 @@ impl NetClient {
             // for skinned enemies reads it to swap to the attack
             // clip. WALK / IDLE are picked by the locomotion
             // animation system off `Velocity` (already set above).
-            if let EntityKind::Enemy { anim, debuffs, .. } = re.kind {
+            if let EntityKind::Enemy { anim, .. } = re.kind {
                 if let Ok(mut ea) = world.get::<&mut EnemyAnim>(entity) {
                     ea.attacking = anim == 2; // server::sim::enemy_anim::ATTACK
                 }
-                // Surface the active-debuff bitmask. HUD reads it
-                // to paint indicator pips above the enemy. Insert
-                // the component on first sight; thereafter just
-                // refresh the mask.
-                let has_debuffs = world.get::<&Debuffs>(entity).is_ok();
-                if has_debuffs {
-                    if let Ok(mut d) = world.get::<&mut Debuffs>(entity) {
-                        d.mask = debuffs;
-                    }
-                } else {
-                    let _ = world.insert_one(entity, Debuffs { mask: debuffs });
-                }
             }
+            sync_effects(world, entity, &re.effects);
         }
     }
 
@@ -635,6 +630,18 @@ impl NetClient {
                 {
                     h.current = h.max * target_pct;
                 }
+                // Mirror active effects onto the local player's
+                // `Effects` so the HUD can render buff icons +
+                // duration rings on the player nameplate the same
+                // way it does for remotes.
+                let entity = world
+                    .query::<(&Player, &LocalPlayer)>()
+                    .iter()
+                    .map(|(e, _)| e)
+                    .next();
+                if let Some(entity) = entity {
+                    sync_effects(world, entity, &re.effects);
+                }
             }
         }
     }
@@ -648,6 +655,31 @@ fn gender_to_game(g: Gender) -> GameGender {
         Gender::Male => GameGender::Male,
         Gender::Female => GameGender::Female,
     }
+}
+
+/// Mirror a snapshot row's `effects` list into the entity's
+/// `Effects` component, inserting it on first sight. The wire
+/// type and the engine type carry the same fields but live in
+/// separate crates (engine doesn't depend on rift-net), so we
+/// convert here.
+fn sync_effects(
+    world: &mut hecs::World,
+    entity: hecs::Entity,
+    src: &[rift_net::messages::ActiveEffect],
+) {
+    let effects: Vec<rift_engine::ecs::components::ActiveEffect> = src
+        .iter()
+        .map(|e| rift_engine::ecs::components::ActiveEffect {
+            id: e.id,
+            remaining: e.remaining,
+            duration: e.duration,
+        })
+        .collect();
+    if let Ok(mut d) = world.get::<&mut Effects>(entity) {
+        d.effects = effects;
+        return;
+    }
+    let _ = world.insert_one(entity, Effects { effects });
 }
 
 /// Map the wire role byte (`rift_server::sim::role::*`) to the

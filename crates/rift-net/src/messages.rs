@@ -122,6 +122,14 @@ pub enum ClientMsg {
         /// Optional reticle target for placed AoE abilities.
         /// `None` for instant casts.
         placed_target: Option<[f32; 3]>,
+        /// Optional entity target for friendly single-target
+        /// casts (heals). The server validates the target is
+        /// alive, on the same team, in range, and has line of
+        /// sight; rejected casts are silently dropped (no
+        /// cooldown burned). `None` for non-targeted abilities
+        /// — the server ignores it for kinds that don't need
+        /// it.
+        target_net_id: Option<NetId>,
     },
 
     /// Player released the action button or moved while channeling.
@@ -651,6 +659,30 @@ pub struct EntitySnapshot {
     pub health_pct: f32,
     /// State flags (airborne, dead, hidden, ...).
     pub flags: u8,
+    /// Currently-active buffs / debuffs on this entity. Empty for
+    /// most rows; populated for any entity carrying a server-side
+    /// `EffectStack`. Drives HUD icons + duration rings on the
+    /// client. See `rift_game::effects` for the id table.
+    #[serde(default)]
+    pub effects: Vec<ActiveEffect>,
+}
+
+/// One active buff / debuff entry on a snapshot row. Replaces
+/// the older `debuffs: u32` bitmask so the HUD can render a
+/// radial duration ring without reverse-engineering tick
+/// timing from snapshot deltas.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ActiveEffect {
+    /// Effect id (`rift_game::effects::id::*`).
+    pub id: u8,
+    /// Seconds left until the effect expires. The HUD divides
+    /// by `duration` to drive the ring fill.
+    pub remaining: f32,
+    /// Duration the effect was applied for (`default_duration`
+    /// or the override the caster passed). Lets the HUD show
+    /// progress relative to the original duration even after a
+    /// refresh.
+    pub duration: f32,
 }
 
 /// What a snapshot row represents. Trailing fields are kept on the
@@ -675,10 +707,6 @@ pub enum EntityKind {
         /// picks the right mesh + animation set.
         role: u8,
         anim: u8,
-        /// Bitmask of active debuffs (`1 << debuff_id`). Drives
-        /// indicator pips above the enemy. See
-        /// `rift_game::debuffs` for the id table.
-        debuffs: u32,
     },
     Projectile {
         /// Ability id that spawned it; clients use this to pick the
@@ -814,7 +842,32 @@ pub enum WorldEvent {
     /// spawn a celebration VFX at each revived position. The
     /// shrine entity itself is despawned in the same tick so
     /// the next snapshot drops its row.
+    /// One or more ghosts have been revived back to full HP by
+    /// a completed revive shrine channel. Each NetId in the
+    /// list refers to a player who was a ghost (or in the
+    /// down-pose) before the channel completed. Clients use
+    /// this to clear their local ghost-tint / vignette and
+    /// spawn a celebration VFX at each revived position. The
+    /// shrine entity itself is despawned in the same tick so
+    /// the next snapshot drops its row.
     PlayersRevived {
         entities: Vec<NetId>,
+    },
+
+    /// Healing was applied to a player. Mirrors
+    /// [`WorldEvent::Damage`] for the friendly path so clients
+    /// can spawn floating-green combat text and trigger
+    /// heal-burst VFX. `caster` may be the same as `target`
+    /// for self-casts.
+    Heal {
+        caster: NetId,
+        target: NetId,
+        amount: f32,
+        /// `true` if this came from a heal-over-time tick
+        /// rather than the original cast — clients use it to
+        /// suppress the heavy burst VFX on tick rows and
+        /// keep just the floating number.
+        over_time: bool,
+        position: [f32; 3],
     },
 }

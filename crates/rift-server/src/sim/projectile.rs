@@ -48,7 +48,7 @@ pub struct ServerProjectile {
     pub pierce_remaining: u32,
     pub size: f32,
     /// Debuff to apply on hit (if any). Wire id from
-    /// `rift_game::debuffs::id::*`. `None` for `Team::Enemy`
+    /// `rift_game::effects::id::*`. `None` for `Team::Enemy`
     /// bolts today.
     pub apply_debuff: Option<u8>,
 }
@@ -57,6 +57,9 @@ pub struct ServerProjectile {
 #[derive(Clone, Debug)]
 pub struct ServerAoeZone {
     pub owner: NetId,
+    /// Which side the zone damages. `Player`-team zones hit
+    /// enemies; `Enemy`-team zones hit players.
+    pub team: Team,
     pub position: Vec3,
     pub radius: f32,
     pub damage_per_tick: f32,
@@ -66,7 +69,9 @@ pub struct ServerAoeZone {
     pub duration: f32,
     pub elapsed: f32,
     pub tick_timer: f32,
-    /// Debuff to apply on every enemy each tick hits.
+    /// Debuff to apply on every target each tick hits. Wire id
+    /// from `rift_game::effects::id::*`. `None` for `Team::Enemy`
+    /// zones today (no player-side debuff stack yet).
     pub apply_debuff: Option<u8>,
 }
 
@@ -158,6 +163,7 @@ pub fn tick(
 ) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
     for (pe, proj) in world.query_mut::<&mut ServerProjectile>() {
         proj.position += proj.velocity * dt;
@@ -211,15 +217,39 @@ pub fn tick(
             }
             Team::Enemy => {
                 // Enemy bolts hit players. First-hit-wins:
-                // pierce / crit / debuffs are not currently
-                // wired for enemy projectiles, so the bolt
-                // detonates on the first overlap.
+                // pierce / debuffs are not currently wired
+                // for enemy projectiles. Crit roll happens
+                // here (rather than at damage-application)
+                // because the player-damage path receives
+                // flat `(Entity, f32)` rows; baking the
+                // multiplier in keeps it source-agnostic.
                 for (player_entity, ppos) in players {
                     let dx = proj.position.x - ppos.x;
                     let dz = proj.position.z - ppos.z;
                     let dist_xz = (dx * dx + dz * dz).sqrt();
                     if dist_xz < PLAYER_HIT_RADIUS + proj.size * 0.5 {
-                        player_damage.push((*player_entity, proj.damage));
+                        let crit_mult = if proj.crit_chance > 0.0 {
+                            let seed = hit_seed(
+                                ctx.tick,
+                                NetId(0),
+                                proj.owner,
+                                proj.net_id.0 as u64,
+                            );
+                            let roll =
+                                (mix64(seed) >> 40) as f32 / (1u32 << 24) as f32;
+                            if roll < proj.crit_chance {
+                                1.0 + proj.crit_damage
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
+                        player_damage
+                            .push((*player_entity, proj.damage * crit_mult));
+                        if let Some(debuff_id) = proj.apply_debuff {
+                            player_debuffs.push((*player_entity, debuff_id));
+                        }
                         consumed = true;
                         break;
                     }
@@ -234,19 +264,36 @@ pub fn tick(
         let _ = world.despawn(e);
     }
     apply_hits_to_enemies(world, hits, ctx);
+    // Player debuff applications run after the projectile
+    // borrow ends so we can mutably grab each player's
+    // `EffectStack` row without aliasing the projectile query.
+    for (player_entity, debuff_id) in player_debuffs {
+        if let Ok(mut stack) =
+            world.get::<&mut super::effect::EffectStack>(player_entity)
+        {
+            stack.apply(debuff_id, None);
+        }
+    }
     player_damage
 }
 
 /// Tick every AoE zone: advance its clock, apply damage on each
 /// `tick_interval`, expire when the duration elapses.
+///
+/// Returns the queued `(player_entity, damage)` rows produced
+/// by `Team::Enemy` zones — applied through `apply_player_damage`
+/// by the caller, the same way enemy projectile rows are.
 pub fn tick_aoe(
     world: &mut hecs::World,
     zones: &mut Vec<ServerAoeZone>,
     enemies: &[(Entity, Vec3, NetId, f32)],
+    players: &[(Entity, Vec3)],
     ctx: &mut super::loot::DeathCtx<'_>,
     dt: f32,
-) {
+) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
+    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8)> = Vec::new();
     let mut idx = 0;
     while idx < zones.len() {
         let zone = &mut zones[idx];
@@ -263,27 +310,65 @@ pub fn tick_aoe(
         let zone_crit_chance = zone.crit_chance;
         let zone_crit_damage = zone.crit_damage;
         let zone_owner = zone.owner;
+        let zone_team = zone.team;
         let expired = zone.elapsed >= zone.duration;
         if tick {
-            for (en_entity, en_pos, en_net_id, _r) in enemies {
-                let dx = en_pos.x - zone_pos.x;
-                let dz = en_pos.z - zone_pos.z;
-                if dx * dx + dz * dz < zone_radius * zone_radius {
-                    hits.push(Hit {
-                        enemy: *en_entity,
-                        enemy_net_id: *en_net_id,
-                        enemy_pos: *en_pos,
-                        damage: zone_dmg,
-                        crit_chance: zone_crit_chance,
-                        crit_damage: zone_crit_damage,
-                        crit_seed: hit_seed(
-                            ctx.tick,
-                            *en_net_id,
-                            zone_owner,
-                            (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
-                        ),
-                        apply_debuff: zone.apply_debuff,
-                    });
+            match zone_team {
+                Team::Player => {
+                    for (en_entity, en_pos, en_net_id, _r) in enemies {
+                        let dx = en_pos.x - zone_pos.x;
+                        let dz = en_pos.z - zone_pos.z;
+                        if dx * dx + dz * dz < zone_radius * zone_radius {
+                            hits.push(Hit {
+                                enemy: *en_entity,
+                                enemy_net_id: *en_net_id,
+                                enemy_pos: *en_pos,
+                                damage: zone_dmg,
+                                crit_chance: zone_crit_chance,
+                                crit_damage: zone_crit_damage,
+                                crit_seed: hit_seed(
+                                    ctx.tick,
+                                    *en_net_id,
+                                    zone_owner,
+                                    (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
+                                ),
+                                apply_debuff: zone.apply_debuff,
+                            });
+                        }
+                    }
+                }
+                Team::Enemy => {
+                    // Enemy-team zones bake crit at hit-time
+                    // since the player-damage path takes flat
+                    // `(Entity, f32)` rows.
+                    for (player_entity, ppos) in players {
+                        let dx = ppos.x - zone_pos.x;
+                        let dz = ppos.z - zone_pos.z;
+                        if dx * dx + dz * dz < zone_radius * zone_radius {
+                            let crit_mult = if zone_crit_chance > 0.0 {
+                                let seed = hit_seed(
+                                    ctx.tick,
+                                    NetId(0),
+                                    zone_owner,
+                                    (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
+                                );
+                                let roll = (mix64(seed) >> 40) as f32
+                                    / (1u32 << 24) as f32;
+                                if roll < zone_crit_chance {
+                                    1.0 + zone_crit_damage
+                                } else {
+                                    1.0
+                                }
+                            } else {
+                                1.0
+                            };
+                            player_damage
+                                .push((*player_entity, zone_dmg * crit_mult));
+                            if let Some(debuff_id) = zone.apply_debuff {
+                                player_debuffs.push((*player_entity, debuff_id));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -294,6 +379,14 @@ pub fn tick_aoe(
         }
     }
     apply_hits_to_enemies(world, hits, ctx);
+    for (player_entity, debuff_id) in player_debuffs {
+        if let Ok(mut stack) =
+            world.get::<&mut super::effect::EffectStack>(player_entity)
+        {
+            stack.apply(debuff_id, None);
+        }
+    }
+    player_damage
 }
 
 /// Apply a batch of hits to enemies: subtract HP (scaled by the
@@ -310,7 +403,7 @@ pub(super) fn apply_hits_to_enemies(
         // Read the incoming-damage multiplier off the target's
         // debuff stack (if any) before grabbing the enemy mutably.
         let dmg_mult = world
-            .get::<&super::debuff::DebuffStack>(hit.enemy)
+            .get::<&super::effect::EffectStack>(hit.enemy)
             .map(|s| s.incoming_damage_mult())
             .unwrap_or(1.0);
         // Roll crit using the per-hit deterministic seed. A
@@ -340,7 +433,7 @@ pub(super) fn apply_hits_to_enemies(
             // start from now.
             if let Some(debuff_id) = hit.apply_debuff {
                 if let Ok(mut stack) =
-                    world.get::<&mut super::debuff::DebuffStack>(hit.enemy)
+                    world.get::<&mut super::effect::EffectStack>(hit.enemy)
                 {
                     stack.apply(debuff_id, None);
                 }

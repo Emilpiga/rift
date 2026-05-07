@@ -51,6 +51,14 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut ui,
         &state.player_state.abilities,
         state.player_state.experience.level,
+        // Highlight whichever slot is mid-targeting so the
+        // player has a clear "you're aiming this one" cue.
+        state
+            .frame
+            .targeting
+            .as_ref()
+            .map(|t| t.slot_index)
+            .or_else(|| state.frame.entity_targeting.as_ref().map(|t| t.slot_index)),
     ) {
         // Click on a HUD bar slot opens the spellbook with that
         // slot pre-targeted; the next pool click assigns directly

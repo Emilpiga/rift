@@ -17,25 +17,24 @@
 //! projectiles, place AoE zones, attach channels, queue summons,
 //! …) — one match arm per kind, shared by every caster type.
 //!
-//! Public wrappers [`cast`] (player) and [`resolve_enemy_cast`]
-//! (AI) compose `submit` + `dispatch` for the two existing call
-//! sites; they exist so `Sim` can keep its high-level method
-//! shapes stable.
+//! Both call sites (`Sim::cast_ability` for players, `Sim::step`
+//! for AI cast resolves) compose `submit` + `dispatch` inline.
 
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use hecs::Entity;
+use rift_dungeon::{Floor, Tile};
 use rift_net::{
     messages::WorldEvent,
     ClientId, NetId, NetTick,
 };
 
 pub use rift_game::abilities::id;
-pub use rift_game::abilities::{lookup, AbilityKind};
+pub use rift_game::abilities::{lookup, AbilityKind, TargetingMode};
 
 use super::player::ServerPlayer;
-use super::projectile::{ServerAoeZone, ServerProjectile};
+use super::projectile::{ServerAoeZone, ServerProjectile, Team};
 
 /// Number of cooldown slots tracked per player. Plenty of headroom
 /// over the 6 ability ids in use today; bumping this is free.
@@ -88,6 +87,10 @@ pub enum CombatIntent {
         client_origin: Vec3,
         aim: Vec3,
         placed_target: Option<Vec3>,
+        /// Friendly entity target for heal-style casts. `None`
+        /// for any ability that doesn't use
+        /// [`TargetingMode::TargetEntity`].
+        target_net_id: Option<NetId>,
     },
     /// AI-driven cast (e.g. enemy bolt at end of wind-up). The
     /// AI is trusted — there's no validation beyond the kind
@@ -98,6 +101,9 @@ pub enum CombatIntent {
         origin: Vec3,
         aim: Vec3,
         damage_mult: f32,
+        /// Caster's crit chance (0..1). `0.0` means "no crit".
+        crit_chance: f32,
+        crit_damage: f32,
         /// Ability-specific scalar override (e.g. boss slam
         /// enrage radius). `0.0` falls back to the registry
         /// value at dispatch time.
@@ -139,10 +145,29 @@ pub struct AcceptedCast {
     pub damage_scalar: f32,
     pub crit_chance: f32,
     pub crit_damage: f32,
+    /// Which side this cast belongs to. Drives team-aware
+    /// downstream effects (projectile target list, AoE-zone
+    /// target list).
+    pub team: Team,
     /// Ability-specific scalar override (e.g. effective slam
     /// radius for `DelayedAoe`). `0.0` means "use the
     /// registry value".
     pub param_a: f32,
+    /// Resolved entity target for heal-style casts. Set by
+    /// [`submit`] from the client-supplied `target_net_id`
+    /// after validation; dispatch arms that need it (Heal,
+    /// HealOverTimeTarget) panic-on-`None` would be a bug, so
+    /// they silently no-op instead.
+    pub target_entity: Option<Entity>,
+    /// Wire id of `target_entity`, mirrored here so dispatch
+    /// can populate `WorldEvent::Heal` without re-querying
+    /// the player row.
+    pub target_net_id: Option<NetId>,
+    /// World-space position of the heal target at submit
+    /// time. Used as the `Heal` event position so the
+    /// floating green number anchors on the right body even
+    /// if the target moves between submit and dispatch.
+    pub target_position: Option<Vec3>,
 }
 
 /// Validate a [`CombatIntent`] and produce an
@@ -158,6 +183,7 @@ pub fn submit(
     world: &hecs::World,
     sessions: &HashMap<ClientId, Entity>,
     cooldowns: &mut CooldownTable,
+    floor: &Floor,
     intent: CombatIntent,
 ) -> Option<AcceptedCast> {
     match intent {
@@ -167,6 +193,7 @@ pub fn submit(
             client_origin,
             aim,
             placed_target,
+            target_net_id,
         } => {
             let ability = lookup(ability_id)?;
             let &entity = sessions.get(&client_id)?;
@@ -191,6 +218,42 @@ pub fn submit(
             let crit_damage = p_ref.stats.crit_damage;
             let ability_mult = p_ref.stats.ability_damage_mult(ability);
             drop(p_ref);
+
+            // Friendly entity-target validation. For abilities
+            // that use [`TargetingMode::TargetEntity`] we
+            // require a live, in-range, line-of-sight target;
+            // any failure silently drops the cast (no cooldown
+            // burn, same shape as a loadout reject). A `None`
+            // wire target falls back to the caster — Landing 1
+            // ships before the client gains a hover-pick UI, so
+            // self-cast is the implicit default.
+            let (target_entity, target_position) =
+                if matches!(ability.targeting, TargetingMode::TargetEntity) {
+                    let want = target_net_id.unwrap_or(net_id);
+                    // Find the player whose `net_id` matches.
+                    // Self-cast is allowed (Shift+key) — the
+                    // alive / range / LOS gates apply
+                    // uniformly.
+                    let mut found: Option<(Entity, Vec3)> = None;
+                    for (e, p) in world.query::<&ServerPlayer>().iter() {
+                        if p.net_id == want && !p.is_dead_or_ghosting() {
+                            found = Some((e, p.k.position));
+                            break;
+                        }
+                    }
+                    let (te, tpos) = found?;
+                    let d = tpos - body;
+                    let dist2 = d.x * d.x + d.z * d.z;
+                    if dist2 > ability.range * ability.range {
+                        return None;
+                    }
+                    if !line_of_sight(floor, body, tpos) {
+                        return None;
+                    }
+                    (Some(te), Some(tpos))
+                } else {
+                    (None, None)
+                };
 
             let cds = cooldowns
                 .entry(client_id)
@@ -231,7 +294,16 @@ pub fn submit(
                 damage_scalar: dmg_scalar * ability_mult,
                 crit_chance,
                 crit_damage,
+                team: Team::Player,
                 param_a: 0.0,
+                target_entity,
+                // Resolved net id may differ from the request:
+                // a `None` wire id was rewritten to the caster
+                // for self-cast.
+                target_net_id: target_entity.map(|_| {
+                    target_net_id.unwrap_or(net_id)
+                }),
+                target_position,
             })
         }
         CombatIntent::Ai {
@@ -240,6 +312,8 @@ pub fn submit(
             origin,
             aim,
             damage_mult,
+            crit_chance,
+            crit_damage,
             param_a,
         } => {
             // AI is trusted — no validation beyond the
@@ -259,15 +333,44 @@ pub fn submit(
                 aim,
                 placed_target: None,
                 damage_scalar: damage_mult,
-                // Enemies don't crit today — leave the roll
-                // weights at zero so the damage-application
-                // path treats every hit as non-crit.
-                crit_chance: 0.0,
-                crit_damage: 0.0,
+                crit_chance,
+                crit_damage,
+                team: Team::Enemy,
                 param_a,
+                target_entity: None,
+                target_net_id: None,
+                target_position: None,
             })
         }
     }
+}
+
+/// Sample tiles along the segment from `a` to `b` and return
+/// `false` if any tile is a wall. Step size matches one tile
+/// (1 m); using the half-tile resolution catches diagonal
+/// corner peeks. Y is ignored — heals fly horizontally.
+fn line_of_sight(floor: &Floor, a: Vec3, b: Vec3) -> bool {
+    let dx = b.x - a.x;
+    let dz = b.z - a.z;
+    let dist = (dx * dx + dz * dz).sqrt();
+    if dist < 0.001 {
+        return true;
+    }
+    let steps = (dist * 2.0).ceil() as i32; // 0.5 m sampling
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let px = a.x + dx * t;
+        let pz = a.z + dz * t;
+        let gx = (px + 0.5).floor();
+        let gz = (pz + 0.5).floor();
+        if gx < 0.0 || gz < 0.0 {
+            return false;
+        }
+        if floor.get(gx as usize, gz as usize) == Tile::Wall {
+            return false;
+        }
+    }
+    true
 }
 
 /// Optional sinks for [`dispatch`]. Each effect produced by
@@ -281,6 +384,14 @@ pub struct DispatchSinks<'a> {
     pub next_projectile_net_id: &'a mut u32,
     /// Damage rows targeted at players (used by `DelayedAoe`).
     pub player_damage: &'a mut Vec<(Entity, f32)>,
+    /// Healing rows targeted at players. Drained by the caller
+    /// after dispatch the same way `player_damage` is — keeps
+    /// dispatch from poking `ServerPlayer.hp` directly while
+    /// the projectile / channel borrow is in scope (matters for
+    /// the AI-tick path even though current heal sources are
+    /// player-only, because future buffs may queue heals from
+    /// inside the same world borrow).
+    pub player_heals: &'a mut Vec<(Entity, f32)>,
     /// Summon spawn requests `(pos, role, hp_mult)` queued for
     /// `Sim::step` to drain into entities. Net-id allocation
     /// stays in `Sim`.
@@ -327,7 +438,7 @@ pub fn dispatch(
                     net_id,
                     ability_id: accepted.ability_id,
                     owner: accepted.caster,
-                    team: Team::Player,
+                    team: accepted.team,
                     position: accepted.spawn_origin,
                     velocity: dir * speed,
                     ttl,
@@ -348,6 +459,7 @@ pub fn dispatch(
                 .unwrap_or(accepted.origin + accepted.aim * 5.0);
             sinks.aoe_zones.push(ServerAoeZone {
                 owner: accepted.caster,
+                team: accepted.team,
                 position: Vec3::new(pos.x, 0.0, pos.z),
                 radius,
                 damage_per_tick: scaled_damage,
@@ -365,13 +477,15 @@ pub fn dispatch(
         } => {
             // Channels need a caster entity to attach to. AI
             // casts pass `None`; if a future enemy ever wants
-            // to channel we'll add an enemy-side channel
-            // component, but for now it's a no-op.
+            // to channel we'll pipe its entity through
+            // `AcceptedCast.caster_entity` (insert directly
+            // with `team: Team::Enemy`).
             if let Some(entity) = accepted.caster_entity {
                 let _ = world.insert_one(
                     entity,
                     super::channel::ServerChannel {
                         ability_id: accepted.ability_id,
+                        team: accepted.team,
                         remaining: duration,
                         tick_interval,
                         tick_acc: 0.0,
@@ -403,7 +517,7 @@ pub fn dispatch(
         }
         // ── AI-shaped kinds ─────────────────────────────────────
         AbilityKind::EnemyProjectiles {
-            count, spread, speed, ttl, windup: _, size,
+            count, spread, speed, ttl, windup: _, size, apply_debuff,
         } => {
             for i in 0..count {
                 let angle_offset = if count > 1 {
@@ -422,16 +536,16 @@ pub fn dispatch(
                     net_id,
                     ability_id: accepted.ability_id,
                     owner: accepted.caster,
-                    team: Team::Enemy,
+                    team: accepted.team,
                     position: accepted.spawn_origin,
                     velocity: dir * speed,
                     ttl,
                     damage: scaled_damage,
-                    crit_chance: 0.0,
-                    crit_damage: 0.0,
+                    crit_chance: accepted.crit_chance,
+                    crit_damage: accepted.crit_damage,
                     pierce_remaining: 0,
                     size,
-                    apply_debuff: None,
+                    apply_debuff,
                 },));
             }
         }
@@ -479,181 +593,40 @@ pub fn dispatch(
                 sinks.summons.push((pos, role, hp_mult));
             }
         }
+        // ── Friendly support kinds ─────────────────────────────
+        AbilityKind::HealTarget { amount } => {
+            // Submit already validated alive / range / LOS, so
+            // a missing target_entity here means the cast
+            // shouldn't have made it past submit — silently
+            // no-op rather than panic.
+            let (Some(target), Some(target_net), Some(tpos)) = (
+                accepted.target_entity,
+                accepted.target_net_id,
+                accepted.target_position,
+            ) else {
+                return;
+            };
+            sinks.player_heals.push((target, amount));
+            sinks.events.push(WorldEvent::Heal {
+                caster: accepted.caster,
+                target: target_net,
+                amount,
+                over_time: false,
+                position: tpos.to_array(),
+            });
+        }
+        AbilityKind::HealOverTimeTarget { apply_buff } => {
+            let Some(target) = accepted.target_entity else {
+                return;
+            };
+            // The buff system keeps its own tick clock — we
+            // just refresh / apply at the registry's default
+            // duration (tooltip says 10 s, registry agrees).
+            if let Ok(mut stack) =
+                world.get::<&mut super::effect::EffectStack>(target)
+            {
+                stack.apply(apply_buff, None);
+            }
+        }
     }
-}
-
-// ─── Public wrappers ─────────────────────────────────────────────────────
-
-/// Resolve a `ClientMsg::CastAbility` into authoritative
-/// effects. Thin wrapper around [`submit`] + [`dispatch`] —
-/// kept so the network handler call site stays unchanged.
-///
-/// Silently no-ops when the ability is on cooldown, the caster
-/// isn't connected, or the ability id is unknown — the client
-/// shouldn't have asked, and there's nothing useful for us to
-/// do.
-pub fn cast(
-    world: &mut hecs::World,
-    sessions: &HashMap<ClientId, Entity>,
-    cooldowns: &mut CooldownTable,
-    aoe_zones: &mut Vec<ServerAoeZone>,
-    events: &mut Vec<WorldEvent>,
-    next_projectile_net_id: &mut u32,
-    client_id: ClientId,
-    ability_id: u8,
-    client_origin: [f32; 3],
-    aim_dir: [f32; 2],
-    placed_target: Option<[f32; 3]>,
-    tick: NetTick,
-) {
-    let aim = {
-        let v = glam::Vec2::from(aim_dir).normalize_or_zero();
-        Vec3::new(v.x, 0.0, v.y)
-    };
-    let intent = CombatIntent::Player {
-        client_id,
-        ability_id,
-        client_origin: Vec3::from_array(client_origin),
-        aim,
-        placed_target: placed_target.map(Vec3::from),
-    };
-    let Some(accepted) = submit(world, sessions, cooldowns, intent) else {
-        return;
-    };
-    // Player casts emit the AbilityCast wire event right at
-    // cast time — there's no separate windup/resolve split for
-    // the player path today. AI casts emit their own
-    // `EnemyCast::Start` event up in the AI tick before this
-    // function ever runs, so dispatch never has to.
-    events.push(WorldEvent::AbilityCast {
-        caster: accepted.caster,
-        ability: accepted.ability_id as u16,
-        origin: accepted.origin.to_array(),
-        dir: [accepted.aim.x, accepted.aim.z],
-        target: accepted.placed_target.map(|t| t.to_array()),
-        start_tick: tick,
-    });
-    // Player casts don't currently produce summons or
-    // player→player damage rows, but the kernel sinks need
-    // valid references regardless.
-    let mut summons: Vec<(Vec3, u8, f32)> = Vec::new();
-    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
-    let no_targets: [(Entity, Vec3); 0] = [];
-    let mut sinks = DispatchSinks {
-        aoe_zones,
-        events,
-        next_projectile_net_id,
-        player_damage: &mut player_damage,
-        summons: &mut summons,
-        player_targets: &no_targets,
-    };
-    dispatch(world, accepted, &mut sinks, tick);
-    debug_assert!(
-        summons.is_empty() && player_damage.is_empty(),
-        "player cast() emitted enemy-shaped effects",
-    );
-}
-
-// ─── Enemy-side wrapper ──────────────────────────────────────────────────
-//
-// Enemies share the [`rift_game::abilities::REGISTRY`] table
-// with players: every projectile, slam, and summon has a single
-// authoritative entry holding its tuning. The AI in
-// `super::enemy` ticks its own per-attack cooldowns + wind-up
-// timers — there's no entity-keyed cooldown table — and emits
-// two kinds of events through `AiOutcome`:
-//
-//  * `EnemyCast::Start` — wind-up has begun. Lifted by
-//    `Sim::step` into a `WorldEvent::AbilityCast` so clients
-//    can play the telegraph (cast pose, ground ring, …).
-//  * `EnemyCast::Resolve` — wind-up has expired. Lifted by
-//    `Sim::step` through [`resolve_enemy_cast`], which builds
-//    a [`CombatIntent::Ai`] and runs it through the shared
-//    [`submit`] + [`dispatch`] pipeline.
-//
-// The split lets the AI control *when* the wind-up ends without
-// the kernel ever caring about role-specific state.
-
-use super::projectile::Team;
-
-/// One in-flight enemy ability resolution emitted by the AI tick
-/// after a wind-up expires. Kept as a distinct struct (rather
-/// than building a [`CombatIntent::Ai`] in the AI tick) so the
-/// existing `EnemyCast::Resolve` payload doesn't have to leak
-/// the kernel types into [`super::enemy`].
-#[derive(Clone, Copy, Debug)]
-pub struct EnemyCastResolve {
-    pub caster: NetId,
-    /// Caster body position at resolve time.
-    pub origin: Vec3,
-    /// Aim direction (XZ-plane unit). Centre of the fan for
-    /// `EnemyProjectiles`; ignored for `DelayedAoe` / `Summon`.
-    pub aim: Vec3,
-    /// One of `rift_game::abilities::id::*`.
-    pub ability_id: u8,
-    /// Floor damage scalar captured at cast start so any
-    /// floor-mid-cast difficulty change doesn't retroactively
-    /// rescale damage.
-    pub damage_mult: f32,
-    /// Optional ability-specific scalar override. For
-    /// [`AbilityKind::DelayedAoe`] this overrides the registry
-    /// radius (m) when non-zero, letting the AI bake in
-    /// per-cast scaling (e.g. boss slam enrage). `0.0` means
-    /// "use the registry value".
-    pub param_a: f32,
-}
-
-/// Resolve one [`EnemyCastResolve`] through the kernel. Thin
-/// wrapper that builds a [`CombatIntent::Ai`], runs [`submit`]
-/// (trivial for AI), and feeds the result through [`dispatch`].
-///
-/// `players` is the live `(entity, position)` snapshot used by
-/// `DelayedAoe` to find who's inside the radius. `melee_damage`
-/// and `summon_queue` are the same `AiOutcome` channels the AI
-/// uses, reused here so resolves go through one damage / spawn
-/// path with the rest of the tick.
-pub fn resolve_enemy_cast(
-    cast: EnemyCastResolve,
-    players: &[(Entity, Vec3)],
-    world: &mut hecs::World,
-    next_projectile_net_id: &mut u32,
-    melee_damage: &mut Vec<(Entity, f32)>,
-    summon_queue: &mut Vec<(Vec3, u8, f32)>,
-    events: &mut Vec<WorldEvent>,
-    tick: NetTick,
-) {
-    // AI submit needs a sessions / cooldowns reference but
-    // doesn't read either; pass empty stand-ins so the kernel
-    // signature stays uniform.
-    let sessions: HashMap<ClientId, Entity> = HashMap::new();
-    let mut cooldowns: CooldownTable = HashMap::new();
-    let intent = CombatIntent::Ai {
-        caster: cast.caster,
-        ability_id: cast.ability_id,
-        origin: cast.origin,
-        aim: cast.aim,
-        damage_mult: cast.damage_mult,
-        param_a: cast.param_a,
-    };
-    let Some(accepted) = submit(world, &sessions, &mut cooldowns, intent) else {
-        return;
-    };
-    // Dummy sink for `aoe_zones` — enemy resolves never queue
-    // persistent AoE zones today (their slam is a single-tick
-    // `DelayedAoe`). Future enemy abilities that do can wire
-    // through `Sim::step`'s real `aoe_zones` slot.
-    let mut aoe_zones: Vec<ServerAoeZone> = Vec::new();
-    let mut sinks = DispatchSinks {
-        aoe_zones: &mut aoe_zones,
-        events,
-        next_projectile_net_id,
-        player_damage: melee_damage,
-        summons: summon_queue,
-        player_targets: players,
-    };
-    dispatch(world, accepted, &mut sinks, tick);
-    debug_assert!(
-        aoe_zones.is_empty(),
-        "enemy cast queued a persistent AoE zone (kind not supported on AI path)",
-    );
 }

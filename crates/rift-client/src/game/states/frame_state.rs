@@ -5,13 +5,18 @@
 //! Owned by [`super::state::GameState::frame`]; phase modules
 //! mutate these fields directly through the struct.
 
-use crate::game::combat_system::PlacedTargeting;
+use crate::game::combat_system::{EntityTargeting, PlacedTargeting};
 
 #[derive(Default)]
 pub struct FrameState {
     /// Active placed-ability targeting (if any). Pure visual /
     /// input state — the actual cast is sent to the server.
     pub targeting: Option<PlacedTargeting>,
+    /// Active entity-target picking for friendly single-target
+    /// abilities (heals). Mutually exclusive with
+    /// [`Self::targeting`] in practice — the keybind dispatch
+    /// only enters one mode at a time.
+    pub entity_targeting: Option<EntityTargeting>,
     /// Eases from 1 -> 0 over ~0.5 s after the player takes damage.
     pub damage_flash: f32,
     /// Eases from 1 -> 0 over ~2.5 s after a level-up. Drives a
@@ -54,6 +59,7 @@ impl FrameState {
     /// future reader can see exactly which fields participate.
     pub fn reset(&mut self) {
         self.targeting = None;
+        self.entity_targeting = None;
         self.damage_flash = 0.0;
         self.level_up_flash = 0.0;
         // `transition_fade` is intentionally NOT cleared here:

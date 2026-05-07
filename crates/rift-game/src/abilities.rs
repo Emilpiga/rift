@@ -21,6 +21,10 @@ pub enum TargetingMode {
     Instant,
     /// Shows a ground circle preview; player clicks to confirm placement.
     Placed { radius: f32 },
+    /// Requires an entity target (currently: alive players for
+    /// friendly heals). The client picks the target through hover
+    /// + click — see `client::game::abilities::targeting`.
+    TargetEntity,
 }
 
 /// Where on the caster a projectile spawns relative to the body.
@@ -73,6 +77,15 @@ pub enum VfxKind {
     /// Self-centred expanding ring of fire used by Fire Wave —
     /// a one-shot blast that grows outward from the caster.
     FireWave,
+    /// Soft golden glow that pulses once on a target on heal
+    /// cast. Marks "you just got healed" — paired with a small
+    /// hand-spark on the caster.
+    HealBurst,
+    /// Sustained gentle green sparkle attached to a target
+    /// receiving a heal-over-time buff. Stays up for the buff's
+    /// duration so other players can see who's currently
+    /// regenerating.
+    HealOverTimeAura,
     /// Placeholder for shapes that don't draw an emitter today
     /// (e.g. Whirlwind aura). Mapped to an empty `Effect`.
     None,
@@ -426,6 +439,8 @@ pub mod id {
     pub const FROST_RAY: u8 = 6;
     pub const WHIRLWIND: u8 = 7;
     pub const FIRE_WAVE: u8 = 8;
+    pub const HEAL_TARGET: u8 = 9;
+    pub const HEAL_OVER_TIME_TARGET: u8 = 10;
 
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
@@ -518,6 +533,12 @@ pub enum AbilityKind {
         ttl: f32,
         windup: f32,
         size: f32,
+        /// Optional debuff applied to the player on hit. Wire
+        /// id from `rift_game::effects::id::*`. None today
+        /// (no enemy ability uses it yet) but the field is
+        /// plumbed end-to-end so a future caster’s slow / DoT
+        /// is one literal instead of a refactor.
+        apply_debuff: Option<u8>,
     },
     /// Single-resolve self-centred AoE at the caster's body
     /// position. Damage = `Ability.base_damage`. After the AI's
@@ -543,6 +564,25 @@ pub enum AbilityKind {
         hp_mult: f32,
         ring_radius: f32,
         windup: f32,
+    },
+    /// Friendly single-target instant heal. Restores `amount`
+    /// HP to the targeted player (clamped at `hp_max`). Does
+    /// nothing if the target is dead, ghosting, or out of
+    /// range / line of sight — those gates live in
+    /// `ability::submit`.
+    HealTarget {
+        amount: f32,
+    },
+    /// Friendly single-target heal over time. Applies the
+    /// [`crate::effects::id::REJUVENATION`] effect to the
+    /// target; the effect tick produces healing rows in
+    /// `effect::tick` the same way DoT debuffs produce damage
+    /// rows, so the gameplay clock is fully data-driven off
+    /// the buff stack.
+    HealOverTimeTarget {
+        /// Buff id to apply (always `REJUVENATION` today, but
+        /// the field is here for symmetry with the DoT pipe).
+        apply_buff: u8,
     },
 }
 
@@ -590,6 +630,8 @@ pub const MARK_FOR_DEATH: AbilityId = AbilityId("mark_for_death");
 pub const FROST_RAY: AbilityId = AbilityId("frost_ray");
 pub const WHIRLWIND: AbilityId = AbilityId("whirlwind");
 pub const FIRE_WAVE: AbilityId = AbilityId("fire_wave");
+pub const HEAL_TARGET: AbilityId = AbilityId("heal_target");
+pub const HEAL_OVER_TIME_TARGET: AbilityId = AbilityId("heal_over_time_target");
 
 /// Master ability table. Server cast dispatch and client cooldown
 /// UI both read from here. Order is purely cosmetic — `lookup`
@@ -664,7 +706,7 @@ pub static REGISTRY: &[Ability] = &[
             speed: 20.0,
             ttl: 2.0,
             pierce: 0,
-            apply_debuff: Some(crate::debuffs::id::SLOW),
+            apply_debuff: Some(crate::effects::id::SLOW),
         },
         visuals: AbilityVisuals {
             cast_spark: None,
@@ -750,7 +792,7 @@ pub static REGISTRY: &[Ability] = &[
             radius: 3.0,
             duration: 2.0,
             tick_interval: 0.5,
-            apply_debuff: Some(crate::debuffs::id::BURN),
+            apply_debuff: Some(crate::effects::id::BURN),
         },
         visuals: AbilityVisuals {
             cast_spark: None,
@@ -851,7 +893,7 @@ pub static REGISTRY: &[Ability] = &[
                 damage_per_tick: 1.6,
                 pierce_targets: 2,
             },
-            apply_debuff: Some(crate::debuffs::id::CHILL),
+            apply_debuff: Some(crate::effects::id::CHILL),
             cancel_on_move: true,
         },
         visuals: AbilityVisuals {
@@ -935,7 +977,7 @@ pub static REGISTRY: &[Ability] = &[
                 radius: 7.5,
                 damage_per_tick: 7.0,
             },
-            apply_debuff: Some(crate::debuffs::id::BURN),
+            apply_debuff: Some(crate::effects::id::BURN),
             // Movement during the half-second pulse feels
             // better than a hard freeze.
             cancel_on_move: false,
@@ -954,6 +996,70 @@ pub static REGISTRY: &[Ability] = &[
             visual: VfxKind::FireWave,
             height: 0.15,
         }],
+    },
+    // ── Friendly support abilities ─────────────────────────────────────
+    //
+    // Single-target friendly casts. `TargetingMode::TargetEntity`
+    // tells the client to pick an alive player (self or other);
+    // the server gates by `IsTargetEntity` (alive, in range, has
+    // line of sight).
+    Ability {
+        id: HEAL_TARGET,
+        wire_id: id::HEAL_TARGET,
+        name: "Heal",
+        description: "Restore 40 HP to a friendly target. Cast on yourself with Shift, or on a teammate by hovering / clicking.",
+        icon: Some("Druid_17"),
+        cooldown: 8.0,
+        resource_cost: 0.0,
+        // HUD-only: heal amount mirrored from the kind for
+        // tooltips. Authoritative value lives on the kind.
+        base_damage: 40.0,
+        damage_mult: 1.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 15.0,
+        unlock_level: 1,
+        element: Element::None,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::Spell,
+        duration: 0.0,
+        targeting: TargetingMode::TargetEntity,
+        kind: AbilityKind::HealTarget { amount: 40.0 },
+        visuals: AbilityVisuals {
+            cast_spark: Some(VfxKind::CastSpark { rgb: [1.6, 2.4, 1.2] }),
+            shape: ShapeVisuals::None,
+        },
+        // Heal cast emits a one-shot HealBurst on the target;
+        // the engine consumes the matching wire event.
+        effects: &[],
+    },
+    Ability {
+        id: HEAL_OVER_TIME_TARGET,
+        wire_id: id::HEAL_OVER_TIME_TARGET,
+        name: "Rejuvenation",
+        description: "Imbue a friendly target with 60 HP regenerated over 10 seconds.",
+        icon: Some("Druid_16"),
+        cooldown: 14.0,
+        resource_cost: 0.0,
+        base_damage: 60.0,
+        damage_mult: 1.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 15.0,
+        unlock_level: 1,
+        element: Element::None,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::Spell,
+        duration: 10.0,
+        targeting: TargetingMode::TargetEntity,
+        kind: AbilityKind::HealOverTimeTarget {
+            apply_buff: crate::effects::id::REJUVENATION,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: Some(VfxKind::CastSpark { rgb: [1.4, 2.6, 1.6] }),
+            shape: ShapeVisuals::None,
+        },
+        effects: &[],
     },
     // ── Enemy abilities (wire ids 64..) ───────────────────────────────
     //
@@ -992,6 +1098,10 @@ pub static REGISTRY: &[Ability] = &[
             ttl: 1.5,
             windup: 0.55,
             size: 0.45,
+            // Necrotic on hit: 50% reduced healing received for
+            // 6 s. Pressures the support player (`HealTarget` /
+            // Rejuvenation) without hard-countering them.
+            apply_debuff: Some(crate::effects::id::NECROTIC),
         },
         visuals: AbilityVisuals {
             cast_spark: None,
@@ -1033,6 +1143,7 @@ pub static REGISTRY: &[Ability] = &[
             ttl: 1.5,
             windup: 0.8,
             size: 0.45,
+            apply_debuff: None,
         },
         visuals: AbilityVisuals {
             cast_spark: None,

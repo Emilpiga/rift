@@ -251,6 +251,9 @@ impl RiftApp {
             WorldEvent::PlayersRevived { entities } => {
                 self.handle_players_revived_event(entities, renderer);
             }
+            WorldEvent::Heal { caster, target, amount, over_time, position } => {
+                self.handle_heal_event(caster, target, amount, over_time, position, renderer);
+            }
         }
     }
 
@@ -272,6 +275,32 @@ impl RiftApp {
             // red vignette to communicate "you got hit".
             renderer.vfx_system.spawn(
                 rift_engine::renderer::vfx::presets::blood_hit_spurt(Vec3::Y),
+                world_pos + Vec3::new(0.0, 1.0, 0.0),
+            );
+        }
+    }
+
+    /// Friendly mirror of [`Self::handle_damage_event`]: spawn
+    /// a green floating-heal number on the target plus a one-shot
+    /// heal-burst VFX at chest height. Heal-over-time tick rows
+    /// suppress the burst (the floating number alone communicates
+    /// the regen tick) and rely on the sustained
+    /// [`VfxKind::HealOverTimeAura`] spawned at cast time.
+    fn handle_heal_event(
+        &mut self,
+        _caster: rift_net::NetId,
+        _target: rift_net::NetId,
+        amount: f32,
+        over_time: bool,
+        position: [f32; 3],
+        renderer: &mut Renderer,
+    ) {
+        let Self { state, .. } = self;
+        let world_pos = Vec3::from_array(position);
+        state.combat_text.spawn_heal(world_pos, amount);
+        if !over_time {
+            renderer.vfx_system.spawn(
+                rift_engine::renderer::vfx::presets::heal_burst(),
                 world_pos + Vec3::new(0.0, 1.0, 0.0),
             );
         }
@@ -574,7 +603,13 @@ impl RiftApp {
         // Locally-issued ability casts — drained every frame so
         // a held key doesn't build up a backlog.
         for cast in state.net.casts.drain(..) {
-            net.request_cast(cast.ability_id, cast.origin, cast.aim_dir, cast.placed_target);
+            net.request_cast(
+                cast.ability_id,
+                cast.origin,
+                cast.aim_dir,
+                cast.placed_target,
+                cast.target_net_id,
+            );
         }
 
         // Channel-end requests (button release / movement-cancel

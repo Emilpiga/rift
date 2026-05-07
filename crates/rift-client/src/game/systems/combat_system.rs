@@ -20,7 +20,7 @@
 use glam::{Mat4, Vec3};
 use winit::keyboard::KeyCode;
 
-use rift_engine::ecs::components::{LocalPlayer, Player, Skinned, Transform};
+use rift_engine::ecs::components::{LocalPlayer, Player, RemotePlayer, Skinned, Transform};
 use rift_engine::input::Input;
 use rift_engine::renderer::Renderer;
 
@@ -43,6 +43,27 @@ pub struct PlacedTargeting {
     pub indicator_obj: Option<usize>,
 }
 
+/// Active entity-target picking state for friendly
+/// single-target abilities (heals). The HUD shows a green
+/// ring under the candidate ally; LMB confirms, RMB / Esc
+/// cancels and refunds the slot's cooldown the same way
+/// [`PlacedTargeting`] does.
+pub struct EntityTargeting {
+    /// Which ability slot triggered this.
+    pub slot_index: usize,
+    /// The ability being targeted (cloned).
+    pub ability: Ability,
+    /// Render object index for the ground hover indicator. We
+    /// always allocate one; when no candidate is hovered the
+    /// model matrix is collapsed to `Mat4::ZERO` so the mesh
+    /// disappears without thrashing the draw list.
+    pub indicator_obj: Option<usize>,
+    /// Net id of the ally currently under the cursor (if
+    /// any). Kept separately from the indicator so confirm /
+    /// cancel can run without re-doing the pick math.
+    pub hovered: Option<rift_net::NetId>,
+}
+
 /// Per-frame combat-input tick. Replaces the old
 /// `GameState::tick_combat` body — gameplay phase code calls
 /// this once after the player+world updates have run.
@@ -61,6 +82,10 @@ pub fn tick(state: &mut GameState, input: &Input, renderer: &mut Renderer, dt: f
     let aim_dir = crate::game::cursor::aim_dir(input, renderer, player_pos);
 
     if tick_placed_targeting(state, input, renderer, player_pos, aim_dir) {
+        return;
+    }
+
+    if tick_entity_targeting(state, input, renderer, player_pos, aim_dir) {
         return;
     }
 
@@ -114,6 +139,8 @@ fn tick_placed_targeting(
                 origin: player_pos,
                 aim_dir,
                 placed_target: Some(cursor_pos),
+                // Placed-AoE casts don't use entity targets.
+                target_net_id: None,
             });
         }
         return true;
@@ -128,6 +155,183 @@ fn tick_placed_targeting(
             }
         }
         if let Some(slot) = state.player_state.abilities.slots[targeting.slot_index].as_mut() {
+            slot.cooldown_remaining = 0.0;
+        }
+        return true;
+    }
+
+    true
+}
+
+/// Pick the alive player whose XZ position lies closest to
+/// `cursor` and within `pick_radius_xz` of it, but only if the
+/// candidate is also within `range` of the caster. Returns
+/// `(net_id, position)` or `None` if no candidate qualifies.
+///
+/// Self-cast is allowed: the local player is included in the
+/// scan with our cached `NetId`. This means hovering over your
+/// own avatar (or just clicking with no other ally near the
+/// cursor) targets yourself, which is the natural fallback
+/// behaviour when soloing.
+fn pick_friendly_target(
+    state: &GameState,
+    cursor: glam::Vec3,
+    caster: glam::Vec3,
+    range: f32,
+    pick_radius_xz: f32,
+) -> Option<(rift_net::NetId, glam::Vec3)> {
+    let our_id = state.net.our_net_id_cached;
+    let r2 = range * range;
+    let pr2 = pick_radius_xz * pick_radius_xz;
+    let mut best: Option<(rift_net::NetId, glam::Vec3, f32)> = None;
+    // Local player (only if we know our own net id; before the
+    // first Welcome we silently skip — the keybind path also
+    // gates on `our_net_id_cached.is_some()` for the same
+    // reason).
+    if let Some(net_id) = our_id {
+        for (_, (t, _, _)) in state
+            .world
+            .query::<(&Transform, &Player, &LocalPlayer)>()
+            .iter()
+        {
+            consider_candidate(t.position, net_id, cursor, caster, r2, pr2, &mut best);
+            break;
+        }
+    }
+    // Remote players. Snapshot-driven, no `LocalPlayer` tag.
+    for (_, (t, _, rp)) in state
+        .world
+        .query::<(&Transform, &Player, &RemotePlayer)>()
+        .iter()
+    {
+        consider_candidate(
+            t.position,
+            rift_net::NetId(rp.net_id),
+            cursor,
+            caster,
+            r2,
+            pr2,
+            &mut best,
+        );
+    }
+    best.map(|(id, pos, _)| (id, pos))
+}
+
+fn consider_candidate(
+    pos: glam::Vec3,
+    net_id: rift_net::NetId,
+    cursor: glam::Vec3,
+    caster: glam::Vec3,
+    range_sq: f32,
+    pick_radius_sq: f32,
+    best: &mut Option<(rift_net::NetId, glam::Vec3, f32)>,
+) {
+    // Range gate (cast distance from caster).
+    let dx = pos.x - caster.x;
+    let dz = pos.z - caster.z;
+    if dx * dx + dz * dz > range_sq {
+        return;
+    }
+    // Pick gate (cursor distance from candidate).
+    let cx = pos.x - cursor.x;
+    let cz = pos.z - cursor.z;
+    let cd2 = cx * cx + cz * cz;
+    if cd2 > pick_radius_sq {
+        return;
+    }
+    if best.map_or(true, |(_, _, d)| cd2 < d) {
+        *best = Some((net_id, pos, cd2));
+    }
+}
+
+/// Drive the entity-target picking indicator. Returns `true`
+/// if the caller should bail out of this frame's combat tick
+/// (mode is active — confirmed, cancelled, or still picking).
+fn tick_entity_targeting(
+    state: &mut GameState,
+    input: &Input,
+    renderer: &mut Renderer,
+    player_pos: Vec3,
+    aim_dir: Vec3,
+) -> bool {
+    if state.frame.entity_targeting.is_none() {
+        return false;
+    }
+
+    // Resolve hover candidate from the current cursor each
+    // frame so the highlight tracks pointer motion.
+    let range = state
+        .frame
+        .entity_targeting
+        .as_ref()
+        .map(|t| t.ability.range)
+        .unwrap_or(15.0);
+    let cursor_pos = crate::game::cursor::world_pos(input, renderer, 0.0);
+    let pick = cursor_pos
+        .and_then(|c| pick_friendly_target(state, c, player_pos, range, 1.2));
+
+    // Update indicator visual + cached hovered net id.
+    {
+        let targeting = state.frame.entity_targeting.as_mut().unwrap();
+        targeting.hovered = pick.map(|(id, _)| id);
+        if let Some(obj_idx) = targeting.indicator_obj {
+            if obj_idx < renderer.objects.len() {
+                renderer.objects[obj_idx].model_matrix = match pick {
+                    Some((_, pos)) => Mat4::from_translation(pos)
+                        * Mat4::from_scale(Vec3::splat(0.9)),
+                    None => Mat4::ZERO,
+                };
+            }
+        }
+    }
+
+    // Left-click: confirm if we have a target, otherwise
+    // ignore the click (so the player can keep waving the
+    // cursor around without burning the cooldown on a miss).
+    if input.left_clicked() {
+        if let Some((target_net_id, _pos)) = pick {
+            let targeting = state.frame.entity_targeting.take().unwrap();
+            if let Some(obj_idx) = targeting.indicator_obj {
+                if obj_idx < renderer.objects.len() {
+                    renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
+                }
+            }
+            // Now that the cast is actually committing, start
+            // the local cooldown — keeps it aligned with the
+            // server's CD which begins only when the cast
+            // arrives. (`tick_ability_keybinds` refunded the
+            // CD when entering targeting mode.)
+            if let Some(slot) =
+                state.player_state.abilities.slots[targeting.slot_index].as_mut()
+            {
+                slot.cooldown_remaining = targeting.ability.cooldown;
+            }
+            state.net.casts.push(NetCastRequest {
+                ability_id: targeting.ability.wire_id,
+                origin: player_pos,
+                aim_dir,
+                placed_target: None,
+                target_net_id: Some(target_net_id),
+            });
+        }
+        return true;
+    }
+
+    // Right-click / Escape: cancel and refund the cooldown.
+    if input.right_clicked() || input.key_just_pressed(KeyCode::Escape) {
+        let targeting = state.frame.entity_targeting.take().unwrap();
+        if let Some(obj_idx) = targeting.indicator_obj {
+            if obj_idx < renderer.objects.len() {
+                renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
+            }
+        }
+        // Cooldown was already refunded on entry, but a future
+        // refactor that consumes it eagerly would still want
+        // this — keep the explicit zero so the invariant
+        // (cancelled cast = 0 CD) is local to this branch.
+        if let Some(slot) =
+            state.player_state.abilities.slots[targeting.slot_index].as_mut()
+        {
             slot.cooldown_remaining = 0.0;
         }
         return true;
@@ -238,6 +442,76 @@ fn tick_ability_keybinds(
                 radius,
                 indicator_obj,
             });
+            break;
+        }
+
+        // Friendly target-entity ability (heals). Shift = fast
+        // self-cast, otherwise enter pick-mode and let the
+        // player click an ally (or themselves).
+        if matches!(ability_clone.targeting, TargetingMode::TargetEntity) {
+            let shift_held = input.is_key_held(KeyCode::ShiftLeft)
+                || input.is_key_held(KeyCode::ShiftRight);
+            if shift_held {
+                if let Some(self_id) = state.net.our_net_id_cached {
+                    state.net.casts.push(NetCastRequest {
+                        ability_id: ability_clone.wire_id,
+                        origin: player_pos,
+                        aim_dir,
+                        placed_target: None,
+                        target_net_id: Some(self_id),
+                    });
+                    crate::game::ability::trigger_local_cast(
+                        &ability_clone,
+                        aim_dir,
+                        player_pos,
+                        &mut state.world,
+                        renderer,
+                        &state.player_state.talents,
+                    );
+                } else {
+                    // Welcome hasn't landed yet — refund the
+                    // cooldown the slot just consumed so the
+                    // press doesn't disappear into the void.
+                    if let Some(slot) =
+                        state.player_state.abilities.slots[i].as_mut()
+                    {
+                        slot.cooldown_remaining = 0.0;
+                    }
+                }
+            } else {
+                // Refund the cooldown that `try_use` just
+                // consumed: targeting mode hasn't actually
+                // committed the cast yet, and the server's
+                // CD doesn't start until the cast arrives. If
+                // we left it consumed here, picking a target
+                // a few seconds later would desync our local
+                // CD ahead of the server's by exactly that
+                // hover time, and the *next* press at local-
+                // CD-elapsed would be silently rejected by
+                // the still-cooling server. Re-consumed on
+                // LMB-confirm in `tick_entity_targeting`.
+                if let Some(slot) =
+                    state.player_state.abilities.slots[i].as_mut()
+                {
+                    slot.cooldown_remaining = 0.0;
+                }
+                // Soft green hover ring under the candidate ally.
+                let indicator_mesh =
+                    rift_engine::Mesh::targeting_circle([0.30, 1.00, 0.50]);
+                let indicator_obj = if let Ok(()) =
+                    renderer.add_mesh(&indicator_mesh, Mat4::ZERO)
+                {
+                    Some(renderer.objects.len() - 1)
+                } else {
+                    None
+                };
+                state.frame.entity_targeting = Some(EntityTargeting {
+                    slot_index: i,
+                    ability: ability_clone,
+                    indicator_obj,
+                    hovered: None,
+                });
+            }
             break;
         }
 
@@ -356,5 +630,10 @@ fn send_cast(
         origin,
         aim_dir,
         placed_target,
+        // Landing 1 ships heal abilities without a hover-pick
+        // UI — the server defaults a `None` target to the
+        // caster (self-cast). Real targeting lands in a
+        // follow-up.
+        target_net_id: None,
     });
 }

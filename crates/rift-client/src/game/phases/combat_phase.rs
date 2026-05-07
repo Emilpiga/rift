@@ -22,11 +22,44 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     let pointer_in_inventory = state.mp_inventory_ui.consumes_mouse(mp.0, mp.1, sw, sh);
 
     // Ability-based combat (sends cast requests to the server).
-    if !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached)
-        && !state.floor.in_hub
-        && !pointer_in_inventory
-    {
+    // Two gates beyond the obvious "alive" check:
+    //  * `is_dead` — covers the down-pose window before the
+    //    server has flipped us to ghost.
+    //  * `local_ghost_cached` — covers the ghost window itself.
+    //    The server already rejects ghost casts, but without
+    //    this gate the client still plays the cast pose / VFX
+    //    locally, which is misleading. Cooldowns also tick on
+    //    `try_use`, so a ghost spamming abilities would come
+    //    back to life with everything on CD.
+    let is_ghost = state.net.local_ghost_cached;
+    let combat_blocked =
+        crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached)
+            || is_ghost
+            || state.floor.in_hub
+            || pointer_in_inventory;
+    if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
+    } else if is_ghost
+        && (state.frame.targeting.is_some() || state.frame.entity_targeting.is_some())
+    {
+        // Drop any in-flight targeting so a stale AoE indicator
+        // or entity-pick cursor doesn't linger after death.
+        // The indicator mesh's matrix is zeroed so it stops
+        // drawing; the renderer slot is recycled lazily.
+        if let Some(t) = state.frame.targeting.take() {
+            if let Some(obj_idx) = t.indicator_obj {
+                if obj_idx < renderer.objects.len() {
+                    renderer.objects[obj_idx].model_matrix = glam::Mat4::ZERO;
+                }
+            }
+        }
+        if let Some(t) = state.frame.entity_targeting.take() {
+            if let Some(obj_idx) = t.indicator_obj {
+                if obj_idx < renderer.objects.len() {
+                    renderer.objects[obj_idx].model_matrix = glam::Mat4::ZERO;
+                }
+            }
+        }
     }
 
     // Catch-all death detection: alive last frame, dead this

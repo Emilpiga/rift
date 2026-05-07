@@ -23,7 +23,7 @@ use rift_net::{
 
 pub mod ability;
 pub mod channel;
-pub mod debuff;
+pub mod effect;
 pub mod enemy;
 pub mod floor;
 pub mod loot;
@@ -365,7 +365,7 @@ impl Sim {
         let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
         let entity = self
             .world
-            .spawn((ServerPlayer::fresh(client_id, net_id, spawn),));
+            .spawn((ServerPlayer::fresh(client_id, net_id, spawn), effect::EffectStack::default()));
         self.sessions.insert(client_id, entity);
         log::info!("sim: spawned player {client_id:?} as {net_id:?} at {spawn:?}");
         net_id
@@ -435,22 +435,100 @@ impl Sim {
         client_origin: [f32; 3],
         aim_dir: [f32; 2],
         placed_target: Option<[f32; 3]>,
+        target_net_id: Option<NetId>,
         tick: NetTick,
     ) {
-        ability::cast(
-            &mut self.world,
-            &self.sessions,
-            &mut self.cooldowns,
-            &mut self.aoe_zones,
-            &mut self.pending_events,
-            &mut self.next_projectile_net_id,
+        let aim = {
+            let v = glam::Vec2::from(aim_dir).normalize_or_zero();
+            Vec3::new(v.x, 0.0, v.y)
+        };
+        let intent = ability::CombatIntent::Player {
             client_id,
             ability_id,
-            client_origin,
-            aim_dir,
-            placed_target,
-            tick,
+            client_origin: Vec3::from_array(client_origin),
+            aim,
+            placed_target: placed_target.map(Vec3::from),
+            target_net_id,
+        };
+        let Some(accepted) = ability::submit(
+            &self.world,
+            &self.sessions,
+            &mut self.cooldowns,
+            &self.floor,
+            intent,
+        ) else {
+            return;
+        };
+        // Player casts emit the AbilityCast wire event right at
+        // cast time — there's no separate windup/resolve split
+        // for the player path today. AI casts emit their own
+        // `EnemyCast::Start` event up in the AI tick before
+        // dispatch ever runs, so dispatch never has to.
+        self.pending_events.push(WorldEvent::AbilityCast {
+            caster: accepted.caster,
+            ability: accepted.ability_id as u16,
+            origin: accepted.origin.to_array(),
+            dir: [accepted.aim.x, accepted.aim.z],
+            target: accepted.placed_target.map(|t| t.to_array()),
+            start_tick: tick,
+        });
+        // Player casts don't currently produce summons or
+        // player-damage rows, but the kernel sinks need valid
+        // references regardless.
+        let mut summons: Vec<(Vec3, u8, f32)> = Vec::new();
+        let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+        let mut player_heals: Vec<(Entity, f32)> = Vec::new();
+        let no_targets: [(Entity, Vec3); 0] = [];
+        let mut sinks = ability::DispatchSinks {
+            aoe_zones: &mut self.aoe_zones,
+            events: &mut self.pending_events,
+            next_projectile_net_id: &mut self.next_projectile_net_id,
+            player_damage: &mut player_damage,
+            player_heals: &mut player_heals,
+            summons: &mut summons,
+            player_targets: &no_targets,
+        };
+        ability::dispatch(&mut self.world, accepted, &mut sinks, tick);
+        debug_assert!(
+            summons.is_empty() && player_damage.is_empty(),
+            "player cast emitted enemy-shaped effects",
         );
+        // Apply queued heals — clamped at hp_max. Healing is
+        // scaled by the target's healing-received multiplier
+        // (Necrotic ⇒ 0.5×) so direct heals honour the same
+        // debuff that HoT ticks do. The pre-mult `Heal` event
+        // pushed by `dispatch` is rewritten in place with the
+        // post-mult amount so floating combat text matches the
+        // HP actually restored.
+        for (target, amount) in player_heals {
+            let mult = self
+                .world
+                .get::<&effect::EffectStack>(target)
+                .map(|s| s.healing_received_mult())
+                .unwrap_or(1.0);
+            let scaled = amount * mult;
+            if let Ok(mut p) = self.world.get::<&mut player::ServerPlayer>(target) {
+                if !p.is_dead_or_ghosting() {
+                    p.hp = (p.hp + scaled).min(p.hp_max);
+                }
+            }
+            // Patch the trailing Heal event(s) for this target
+            // with the post-mult amount. Walk from the back
+            // since dispatch just pushed them; stop on the
+            // first non-Heal so we don't rewrite history.
+            if (mult - 1.0).abs() > f32::EPSILON {
+                for ev in self.pending_events.iter_mut().rev() {
+                    match ev {
+                        WorldEvent::Heal { amount: a, .. } if (*a - amount).abs() < f32::EPSILON => {
+                            *a = scaled;
+                            break;
+                        }
+                        WorldEvent::AbilityCast { .. } => break,
+                        _ => continue,
+                    }
+                }
+            }
+        }
     }
 
     /// Forward a `ClientMsg::EndChannel` request — cancels the
@@ -1157,13 +1235,18 @@ impl Sim {
         // attack flows through this single stream:
         //   * `Start` events translate into `AbilityCast` wire
         //     events so clients can play the telegraph.
-        //   * `Resolve` events run authoritative effects via
-        //     [`ability::resolve_enemy_cast`] which reads the
-        //     ability's registry entry and produces projectiles
-        //     / damage / summons. Summons go through a local
-        //     queue so net-id allocation stays owned by Sim.
+        //   * `Resolve` events run authoritative effects by
+        //     building a [`ability::CombatIntent::Ai`] and
+        //     pushing it through `submit` + `dispatch`.
+        //     Summons go through a local queue so net-id
+        //     allocation stays owned by Sim.
         let mut summon_queue: Vec<(glam::Vec3, u8, f32)> = Vec::new();
         let mut melee_from_resolves: Vec<(hecs::Entity, f32)> = Vec::new();
+        // Stand-in tables for the AI submit gate — AI casts
+        // don't read sessions / cooldowns but the kernel
+        // signature is uniform.
+        let ai_sessions: HashMap<ClientId, Entity> = HashMap::new();
+        let mut ai_cooldowns: ability::CooldownTable = HashMap::new();
         for cast in ai_outcome.casts {
             match cast {
                 enemy::EnemyCast::Start {
@@ -1189,24 +1272,48 @@ impl Sim {
                     origin,
                     aim,
                     damage_mult,
+                    crit_chance,
+                    crit_damage,
                     param_a,
                 } => {
-                    ability::resolve_enemy_cast(
-                        ability::EnemyCastResolve {
-                            caster: owner,
-                            origin,
-                            aim,
-                            ability_id,
-                            damage_mult,
-                            param_a,
-                        },
-                        &player_targets,
-                        &mut self.world,
-                        &mut self.next_projectile_net_id,
-                        &mut melee_from_resolves,
-                        &mut summon_queue,
-                        &mut self.pending_events,
-                        tick,
+                    let intent = ability::CombatIntent::Ai {
+                        caster: owner,
+                        ability_id,
+                        origin,
+                        aim,
+                        damage_mult,
+                        crit_chance,
+                        crit_damage,
+                        param_a,
+                    };
+                    let Some(accepted) = ability::submit(
+                        &self.world,
+                        &ai_sessions,
+                        &mut ai_cooldowns,
+                        &self.floor,
+                        intent,
+                    ) else {
+                        continue;
+                    };
+                    // Persistent AoE zones queued by enemy
+                    // casts go into the same `self.aoe_zones`
+                    // pool as player-cast zones; the unified
+                    // `tick_aoe` branches on `team` to pick
+                    // its target list.
+                    let mut player_heals_unused: Vec<(Entity, f32)> = Vec::new();
+                    let mut sinks = ability::DispatchSinks {
+                        aoe_zones: &mut self.aoe_zones,
+                        events: &mut self.pending_events,
+                        next_projectile_net_id: &mut self.next_projectile_net_id,
+                        player_damage: &mut melee_from_resolves,
+                        player_heals: &mut player_heals_unused,
+                        summons: &mut summon_queue,
+                        player_targets: &player_targets,
+                    };
+                    ability::dispatch(&mut self.world, accepted, &mut sinks, tick);
+                    debug_assert!(
+                        player_heals_unused.is_empty(),
+                        "enemy cast emitted player-heal rows",
                     );
                 }
             }
@@ -1276,16 +1383,18 @@ impl Sim {
             &mut ctx,
             dt,
         );
-        projectile::tick_aoe(
+        let enemy_aoe_damage = projectile::tick_aoe(
             &mut self.world,
             &mut self.aoe_zones,
             &enemies,
+            &player_targets,
             &mut ctx,
             dt,
         );
-        channel::tick(
+        let enemy_channel_damage = channel::tick(
             &mut self.world,
             &enemies,
+            &player_targets,
             &mut ctx,
             tick,
             dt,
@@ -1293,19 +1402,28 @@ impl Sim {
 
         // 6. Tick debuff stacks: decay durations, fire DoT damage,
         //    drop expired entries. Runs last so DoT events ride
-        //    out on this frame's snapshot.
-        debuff::tick(&mut self.world, &mut ctx, dt);
+        //    out on this frame's snapshot. Player DoT damage is
+        //    returned and merged into the enemy-side damage
+        //    pile so it goes through the single
+        //    `apply_player_damage` route below.
+        let player_dot_damage = effect::tick(&mut self.world, &mut ctx, dt);
 
         // Apply the enemy-projectile damage collected before the
         // `DeathCtx` scope. Done here, after `ctx` is dropped, so
         // the player-damage path can borrow `pending_events` /
-        // `pending_player_deaths` without aliasing.
-        if !enemy_proj_damage.is_empty() {
+        // `pending_player_deaths` without aliasing. Enemy-team
+        // AoE rows + player DoT rows are merged in so the same
+        // event-ordering rules apply uniformly.
+        let mut enemy_player_damage = enemy_proj_damage;
+        enemy_player_damage.extend(enemy_aoe_damage);
+        enemy_player_damage.extend(enemy_channel_damage);
+        enemy_player_damage.extend(player_dot_damage);
+        if !enemy_player_damage.is_empty() {
             apply_player_damage(
                 &mut self.world,
                 &mut self.pending_events,
                 &mut self.pending_player_deaths,
-                enemy_proj_damage,
+                enemy_player_damage,
             );
             self.check_party_wipe();
         }
@@ -1493,9 +1611,11 @@ impl Sim {
             attack_anim_remaining: 0.0,
             dying_remaining: 0.0,
             ai_phase: enemy::AiPhase::default(),
+            crit_chance: 0.0,
+            crit_damage: 0.0,
         };
         self.world
-            .spawn((enemy, debuff::DebuffStack::default(), enemy::BossState::new(self.floor_index)));
+            .spawn((enemy, effect::EffectStack::default(), enemy::BossState::new(self.floor_index)));
         self.rift_progress.boss_spawned = true;
         self.progress_dirty = true;
         log::info!(

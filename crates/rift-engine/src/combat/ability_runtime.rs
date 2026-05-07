@@ -34,6 +34,8 @@ pub fn effect_for_vfx(kind: VfxKind) -> Effect {
         VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact(),
         VfxKind::FrostRay => vfx_presets::frost_ray(),
         VfxKind::FireWave => vfx_presets::fire_wave(),
+        VfxKind::HealBurst => vfx_presets::heal_burst(),
+        VfxKind::HealOverTimeAura => vfx_presets::heal_over_time_aura(),
         // Empty effect — caller can guard `VfxKind::None` to skip
         // the spawn call entirely.
         VfxKind::None => Effect { duration: 0.0, layers: Vec::new() },
