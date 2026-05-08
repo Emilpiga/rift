@@ -44,7 +44,12 @@ pub struct Ui<'a> {
     batch: &'a mut OverlayBatch,
     input: &'a Input,
     state: &'a mut UiState,
-    theme: &'a Theme,
+    /// Owned, pre-scaled per-frame theme. `Ui::begin` derives a
+    /// resolution-appropriate scale from the screen height and
+    /// applies it to the spacing / font tokens *here* so every
+    /// widget reading `ui.theme()` automatically gets values in
+    /// device pixels. Colours are not touched.
+    theme: Theme,
     screen: Vec2,
     layers: LayerBuf,
     /// Layer that subsequent `draw_*` calls record into. Mutated
@@ -67,7 +72,7 @@ impl<'a> Ui<'a> {
         batch: &'a mut OverlayBatch,
         input: &'a Input,
         state: &'a mut UiState,
-        theme: &'a Theme,
+        theme: &Theme,
         screen_w: f32,
         screen_h: f32,
     ) -> Self {
@@ -77,6 +82,12 @@ impl<'a> Ui<'a> {
         state.mouse_claimed = false;
         state.keyboard_claimed = false;
         let screen = Vec2::new(screen_w, screen_h);
+        // Derive the per-frame scale from screen height and bake
+        // it into a copy of the theme. Every widget reads through
+        // `ui.theme()` so this propagates without each call site
+        // having to know the scale exists.
+        let scale = Theme::auto_scale_for_size(screen_w, screen_h);
+        let theme = (*theme).with_scale(scale);
         Self {
             batch,
             input,
@@ -108,7 +119,25 @@ impl<'a> Ui<'a> {
     }
 
     pub fn theme(&self) -> &Theme {
-        self.theme
+        &self.theme
+    }
+
+    /// Active UI scale, derived once per frame from screen
+    /// height by [`Self::begin`]. `1.0` is the design-time
+    /// reference (1080p). Layout code that hard-codes pixel
+    /// constants (panel widths, slot sizes) should multiply
+    /// them through this — see [`Self::s`].
+    pub fn scale(&self) -> f32 {
+        self.theme.scale
+    }
+
+    /// Convenience: `value * ui.scale()`. Use at every site
+    /// that holds a raw pixel constant for layout (panel
+    /// widths, slot sizes, gaps not already drawn from
+    /// `theme.spacing`) so the UI scales uniformly with the
+    /// rest of the chrome.
+    pub fn s(&self, v: f32) -> f32 {
+        v * self.theme.scale
     }
 
     pub fn state(&self) -> &UiState {

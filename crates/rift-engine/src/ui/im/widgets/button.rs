@@ -129,24 +129,78 @@ impl<'a> Button<'a> {
             (ButtonVariant::Normal, true, false, _) => theme.colors.bg_panel_alt,
         };
         ui.draw_rounded_rect(rect, theme.spacing.corner_radius, fill);
+
+        // 1px lit edge along the top — same trick as Frame, scaled
+        // down. Inset horizontally by `corner_radius` so the band
+        // never pokes past the rounded corners. Skipped when
+        // disabled (a flat slab reads as "not interactable").
+        if self.enabled
+            && rect.width() > theme.spacing.corner_radius * 2.0 + 2.0
+        {
+            let h_inset = theme.spacing.corner_radius.max(1.0);
+            let top_band = Rect::from_xywh(
+                rect.x() + h_inset,
+                rect.y() + 1.0,
+                rect.width() - h_inset * 2.0,
+                1.0,
+            );
+            ui.draw_rect(top_band, Color::rgba(1.0, 1.0, 1.0, 0.10));
+        }
+
+        // Outline. Hover/active/primary/danger swap the border to
+        // a stronger / accent-tinted stroke so the affordance
+        // doesn't rely solely on the fill colour shift.
+        let (outline_color, outline_thickness) = match (self.variant, self.enabled, hovered) {
+            (_, false, _) => (theme.colors.border, theme.spacing.border_thickness),
+            (ButtonVariant::Active, _, _) => (theme.colors.border_strong, 1.5),
+            (ButtonVariant::Primary, _, _) | (ButtonVariant::Danger, _, _) => {
+                (theme.colors.border_strong, 1.5)
+            }
+            (ButtonVariant::Normal, true, true) => (theme.colors.border_strong, 1.5),
+            (ButtonVariant::Normal, true, false) => (theme.colors.border, theme.spacing.border_thickness),
+        };
         ui.draw_rounded_outline(
             rect,
             theme.spacing.corner_radius,
-            theme.spacing.border_thickness,
-            theme.colors.border,
+            outline_thickness,
+            outline_color,
         );
 
-        // Centred label.
-        let text_size = theme.fonts.size_md;
-        let text_w = ui.measure_text(self.label, text_size);
-        let tx = rect.x() + (rect.width() - text_w) * 0.5;
-        let ty = rect.y() + (rect.height() - text_size) * 0.5;
+        // Centred label. Two-stage overflow guard so a button
+        // can never render text outside its own rect:
+        //   1. If the natural width at `size_md` would overflow,
+        //      shrink the font proportionally, floored at 70%
+        //      of base for legibility.
+        //   2. If even at the floor size the text still
+        //      overflows (very narrow rect / very long label),
+        //      hard-ellipsize the string at that size.
+        let base_size = theme.fonts.size_md;
+        let inset = (theme.spacing.gap_sm.max(6.0)) * 2.0;
+        let avail_w = (rect.width() - inset).max(1.0);
+        let natural_w = ui.measure_text(self.label, base_size);
+        let text_size = if natural_w > avail_w {
+            (base_size * (avail_w / natural_w))
+                .max(base_size * 0.70)
+        } else {
+            base_size
+        };
         let text_color = if self.enabled {
             theme.colors.text
         } else {
             theme.colors.text_muted
         };
-        ui.draw_text(Pos2::new(tx, ty), self.label, text_size, text_color);
+        // Final width with the (possibly shrunken) size.
+        let final_w = ui.measure_text(self.label, text_size);
+        let ty = rect.y() + (rect.height() - text_size) * 0.5;
+        if final_w > avail_w {
+            // Still too wide → ellipsize. Anchor to the inset
+            // so the prefix is visible.
+            let pos = Pos2::new(rect.x() + inset * 0.5, ty);
+            ui.draw_text_ellipsized(pos, self.label, text_size, avail_w, text_color);
+        } else {
+            let tx = rect.x() + (rect.width() - final_w) * 0.5;
+            ui.draw_text(Pos2::new(tx, ty), self.label, text_size, text_color);
+        }
 
         Response {
             id,

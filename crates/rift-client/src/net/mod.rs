@@ -101,8 +101,12 @@ pub struct NetClient {
     /// Outbound input sequence. Bumped each time we send an input.
     pub(super) input_seq: u32,
     /// Wall-clock accumulator for input rate-limiting. We send
-    /// inputs at ~60 Hz regardless of frame rate.
-    input_accumulator: Duration,
+    /// inputs at ~60 Hz regardless of frame rate. Also doubles as
+    /// "time since the last predict step" so the visual position
+    /// in [`world_sync::sync_local_player`] can extrapolate the
+    /// XZ position by `predicted.velocity * accumulator` and
+    /// stay smooth at >60 fps render rates.
+    pub(super) input_accumulator: Duration,
     /// ECS entity per replicated remote player. Populated lazily by
     /// `sync_avatars` once both the profile (from `PlayerJoined`)
     /// and the kinematic state (from a snapshot) are available.

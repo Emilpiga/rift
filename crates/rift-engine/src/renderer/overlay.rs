@@ -210,8 +210,17 @@ impl OverlayBatch {
             let py = cy + a.sin() * r;
             self.vertices.push(OverlayVertex { position: to_ndc(px, py), color, uv });
             if i > 0 {
-                let last = centre + i;
-                self.indices.extend_from_slice(&[centre, last - 1, last]);
+                // The just-pushed arc point is at `centre + i + 1`
+                // (centre at offset 0, arc[0]..arc[segments] at
+                // offsets 1..=segments+1). Each triangle spans
+                // `centre`, `arc[i-1]`, `arc[i]`. Off-by-one in
+                // either index leaves a wedge gap at one end of
+                // the arc — invisible at small radii but very
+                // visible as a hairline notch / "squiggly line"
+                // at the new 8 px corner radius.
+                let prev = centre + i;     // arc[i-1]
+                let curr = centre + i + 1; // arc[i]
+                self.indices.extend_from_slice(&[centre, prev, curr]);
             }
         }
     }

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use hecs::Entity;
-use rift_dungeon::{Floor, Tile};
+use rift_dungeon::Floor;
 use rift_net::{
     messages::WorldEvent,
     ClientId, NetId, NetTick,
@@ -247,7 +247,7 @@ pub fn submit(
                     if dist2 > ability.range * ability.range {
                         return None;
                     }
-                    if !line_of_sight(floor, body, tpos) {
+                    if !floor.line_of_sight(body, tpos) {
                         return None;
                     }
                     (Some(te), Some(tpos))
@@ -343,34 +343,6 @@ pub fn submit(
             })
         }
     }
-}
-
-/// Sample tiles along the segment from `a` to `b` and return
-/// `false` if any tile is a wall. Step size matches one tile
-/// (1 m); using the half-tile resolution catches diagonal
-/// corner peeks. Y is ignored — heals fly horizontally.
-fn line_of_sight(floor: &Floor, a: Vec3, b: Vec3) -> bool {
-    let dx = b.x - a.x;
-    let dz = b.z - a.z;
-    let dist = (dx * dx + dz * dz).sqrt();
-    if dist < 0.001 {
-        return true;
-    }
-    let steps = (dist * 2.0).ceil() as i32; // 0.5 m sampling
-    for i in 1..=steps {
-        let t = i as f32 / steps as f32;
-        let px = a.x + dx * t;
-        let pz = a.z + dz * t;
-        let gx = (px + 0.5).floor();
-        let gz = (pz + 0.5).floor();
-        if gx < 0.0 || gz < 0.0 {
-            return false;
-        }
-        if floor.get(gx as usize, gz as usize) == Tile::Wall {
-            return false;
-        }
-    }
-    true
 }
 
 /// Optional sinks for [`dispatch`]. Each effect produced by

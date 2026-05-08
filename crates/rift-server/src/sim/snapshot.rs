@@ -139,7 +139,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         if !in_view(viewer_pos, loot_row.position) {
             continue;
         }
-        let (base_id, rarity, ilvl, affixes) = loot_row.item.to_wire();
+        let (base_id, rarity, ilvl, affixes, anchored) = loot_row.item.to_wire();
         entities.push(EntitySnapshot {
             net_id: loot_row.net_id,
             kind: EntityKind::Loot {
@@ -148,6 +148,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                     rarity,
                     ilvl,
                     affixes,
+                    anchored,
                 },
             },
             position: loot_row.position.to_array(),

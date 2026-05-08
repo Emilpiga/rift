@@ -129,3 +129,53 @@ pub fn raycast(ray: &Ray, max_distance: f32, aabbs: &[Aabb]) -> Option<RayHit> {
 
     closest
 }
+
+/// Generic horizontal line-of-sight test against a 1 m tile
+/// grid. Walks the XZ segment from `a` to `b` in 0.5 m steps
+/// (half a tile — fine enough to catch diagonal corner peeks
+/// without false-positive "see through" results across
+/// single-tile gaps) and returns `false` as soon as
+/// `is_blocked` reports a sample tile is solid.
+///
+/// `is_blocked` receives integer tile coordinates using the
+/// engine's standard world→grid convention: tile `(i, j)`'s
+/// centre is at world `(i, j)` and covers
+/// `[i-0.5, i+0.5] × [j-0.5, j+0.5]`. Negative coordinates are
+/// passed through as-is so callers can short-circuit
+/// out-of-bounds samples however they prefer (typically by
+/// returning `true`).
+///
+/// Y is ignored. Endpoints are *not* tested — they're usually
+/// at entity origins which can be wall-adjacent (e.g. a melee
+/// enemy shoved into a wall by separation steering); sampling
+/// the literal coordinate would produce a false negative.
+///
+/// Pure function. Lives here so every LOS user (server AI,
+/// targeted abilities, future client-side telegraph culling)
+/// shares one deterministic implementation.
+pub fn line_of_sight_grid<F: FnMut(i32, i32) -> bool>(
+    a: Vec3,
+    b: Vec3,
+    mut is_blocked: F,
+) -> bool {
+    let dx = b.x - a.x;
+    let dz = b.z - a.z;
+    let dist = (dx * dx + dz * dz).sqrt();
+    if dist < 0.001 {
+        return true;
+    }
+    // 0.5 m sampling: smallest step that still catches diagonal
+    // sneak-throughs against the 1 m tile grid.
+    let steps = (dist * 2.0).ceil() as i32;
+    for i in 1..steps {
+        let t = i as f32 / steps as f32;
+        let px = a.x + dx * t;
+        let pz = a.z + dz * t;
+        let gx = (px + 0.5).floor() as i32;
+        let gz = (pz + 0.5).floor() as i32;
+        if is_blocked(gx, gz) {
+            return false;
+        }
+    }
+    true
+}

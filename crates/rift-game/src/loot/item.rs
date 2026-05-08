@@ -100,7 +100,19 @@ pub struct Item {
     pub rarity: Rarity,
     pub ilvl: u32,
     pub affixes: Vec<RolledAffix>,
+    /// `true` when this drop rolled the rare "Anchored" trait.
+    /// Anchored items survive the wipe-on-death floor reset
+    /// (see `Sim::wipe_dead_loot`) so the player keeps them
+    /// across runs. Legendaries only, gated behind
+    /// [`ANCHORED_CHANCE`] inside [`Item::roll`]. Purely
+    /// additive — no stat impact, just persistence.
+    pub anchored: bool,
 }
+
+/// Per-roll chance that a Legendary drop is also Anchored.
+/// 1 in 5 000 — the chase trait is meant to be a long-term
+/// goal, not something every farming session produces.
+pub const ANCHORED_CHANCE: f32 = 1.0 / 5_000.0;
 
 impl Item {
     /// Roll a fresh drop of `base` at the given rarity / item-level.
@@ -208,11 +220,19 @@ impl Item {
             }
         }
 
+        // ── Phase 4: anchored roll ──────────────────────────────
+        // Legendary-only and *very* rare. Decided after the
+        // affix block so the stat roll is independent — players
+        // see the same legendary they would have rolled, just
+        // occasionally tagged Anchored on top.
+        let anchored = rarity == Rarity::Legendary && rng.next_f32() < ANCHORED_CHANCE;
+
         Self {
             base,
             rarity,
             ilvl,
             affixes: rolled,
+            anchored,
         }
     }
 
@@ -232,7 +252,11 @@ impl Item {
     }
 
     pub fn display_name(&self) -> String {
-        format!("{} {}", self.rarity.name(), self.base.name)
+        if self.anchored {
+            format!("Anchored {} {}", self.rarity.name(), self.base.name)
+        } else {
+            format!("{} {}", self.rarity.name(), self.base.name)
+        }
     }
 
     /// Multi-line tooltip ready for UI rendering.
@@ -257,6 +281,11 @@ impl Item {
         let mut out = Vec::with_capacity(8 + self.affixes.len());
         out.push(self.display_name());
         out.push(format!("Item Level {}", self.ilvl));
+        if self.anchored {
+            // Tagged so the renderer can colour this line
+            // distinctly from regular flavour text.
+            out.push("⚓ Anchored — survives death".to_string());
+        }
 
         // Implicits.
         if !self.base.implicit.is_empty() {
@@ -510,7 +539,7 @@ impl Item {
     /// or one of the rolled affix defs doesn't live inside
     /// [`AFFIX_POOL`]. Both invariants are guaranteed for items
     /// produced by [`Item::roll`].
-    pub fn to_wire(&self) -> (u16, u8, u16, Vec<(u16, f32)>) {
+    pub fn to_wire(&self) -> (u16, u8, u16, Vec<(u16, f32)>, bool) {
         // Match by `id` rather than pointer identity — `BASE_ITEMS`
         // and `AFFIX_POOL` are `pub const` slices, so each access
         // can produce a fresh copy with different addresses.
@@ -529,7 +558,7 @@ impl Item {
                 (id, a.value)
             })
             .collect();
-        (base_id, self.rarity as u8, self.ilvl as u16, affixes)
+        (base_id, self.rarity as u8, self.ilvl as u16, affixes, self.anchored)
     }
 
     /// Inverse of [`Item::to_wire`]. Returns `None` if any index is
@@ -539,6 +568,7 @@ impl Item {
         rarity_byte: u8,
         ilvl: u16,
         affixes: &[(u16, f32)],
+        anchored: bool,
     ) -> Option<Self> {
         let base = super::items::BASE_ITEMS.get(base_id as usize)?;
         let rarity = match rarity_byte {
@@ -558,6 +588,7 @@ impl Item {
             rarity,
             ilvl: ilvl as u32,
             affixes: rolled,
+            anchored,
         })
     }
 
@@ -571,7 +602,7 @@ impl Item {
     ///
     /// Panics if `self.base` or any affix def doesn't carry an id
     /// — both invariants hold for items produced by [`Item::roll`].
-    pub fn to_persisted(&self) -> (String, u8, u16, Vec<(String, f32)>) {
+    pub fn to_persisted(&self) -> (String, u8, u16, Vec<(String, f32)>, bool) {
         let affixes = self
             .affixes
             .iter()
@@ -582,6 +613,7 @@ impl Item {
             self.rarity as u8,
             self.ilvl as u16,
             affixes,
+            self.anchored,
         )
     }
 
@@ -593,6 +625,7 @@ impl Item {
         rarity_byte: u8,
         ilvl: u16,
         affixes: &[(String, f32)],
+        anchored: bool,
     ) -> Option<Self> {
         let base = super::items::BASE_ITEMS.iter().find(|b| b.id == base_id)?;
         let rarity = match rarity_byte {
@@ -615,6 +648,7 @@ impl Item {
             rarity,
             ilvl: ilvl as u32,
             affixes: rolled,
+            anchored,
         })
     }
 }

@@ -64,7 +64,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         }
     }
 
-    camera_follow_system(&state.world, renderer, input, &state.floor.wall_aabbs);
+    camera_follow_system(&state.world, renderer, input, &state.floor.wall_aabbs, dt);
     // Anchor the distance fog on the player so zooming the
     // camera out doesn't pull the fog wall in over the
     // character.

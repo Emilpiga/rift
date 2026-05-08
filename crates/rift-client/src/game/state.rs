@@ -101,6 +101,10 @@ pub(super) enum AppState {
     CharacterSelect,
     /// User picked Play. Run heavy world setup one chunk per frame.
     EnteringWorld(super::transition::EnterPhase),
+    /// Server told us to switch floors. Multi-step so the player
+    /// sees a "Entering Floor N…" loading screen instead of a
+    /// frozen frame while dungeon regen runs.
+    NetEntering(super::transition::NetEnterPhase),
     /// Player is in-game (hub or rift).
     Playing,
 }
@@ -215,11 +219,20 @@ impl GameState {
         self.floor_mgr.env.cleanup_gpu(&device, &allocator);
     }
 
-    /// Apply a server-driven floor transition. Thin shim over
-    /// [`crate::game::transition::apply_net_transition`] kept
-    /// because the binary calls it as a method.
+    /// `true` while the staged net-transition state machine is
+    /// active. The binary uses this to gate snapshot → ECS sync
+    /// so we don't try to spawn remote avatars / enemies into a
+    /// half-rebuilt world during the loading screen.
+    pub fn is_net_transitioning(&self) -> bool {
+        matches!(self.app_state, AppState::NetEntering(_))
+    }
+
+    /// Queue a server-driven floor transition. Sets app state
+    /// to [`AppState::NetEntering`]; the staged tick presents a
+    /// loading screen, runs the heavy regen behind it, and
+    /// fades back to gameplay — same UX as the hub-entry flow.
     pub fn apply_net_transition(&mut self, renderer: &mut Renderer, index: u32) {
-        crate::game::transition::apply_net_transition(self, renderer, index);
+        crate::game::transition::queue_net_transition(self, renderer, index);
     }
     pub fn update(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
         match self.app_state.clone() {
@@ -229,6 +242,10 @@ impl GameState {
             }
             AppState::EnteringWorld(phase) => {
                 crate::game::transition::tick_entering_world(self, renderer, phase);
+                return;
+            }
+            AppState::NetEntering(phase) => {
+                crate::game::transition::tick_net_entering(self, renderer, phase);
                 return;
             }
             AppState::Playing => {}

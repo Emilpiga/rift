@@ -58,6 +58,18 @@ pub const ATTACK_RANGE: f32 = 1.6;
 pub const ATTACK_DAMAGE: f32 = 8.0;
 /// Cooldown between consecutive melee swings, in seconds.
 pub const ATTACK_COOLDOWN: f32 = 1.4;
+
+/// Aggro-spread radius. When an enemy takes damage from a
+/// player, every other enemy within this distance of the
+/// victim also locks onto the same attacker (provided they
+/// don't already have a target). Models a "scream / signal"
+/// reaction — wake your packmates when you get hit. Tuned
+/// shorter than [`AGGRO_RANGE`] so it complements rather than
+/// replaces line-of-sight pickup; pulling roughly one-room
+/// radius of neighbours into the fight without alerting a
+/// whole wing of the dungeon. Wall-blind on purpose: shouting
+/// reaches through doorways the way visual aggro does not.
+pub const AGGRO_SPREAD_RADIUS: f32 = 7.0;
 /// How long after committing a swing the attack-anim flag stays
 /// true on the wire — clients use it to play the attack clip.
 pub const ATTACK_ANIM_DUR: f32 = 0.45;
@@ -395,6 +407,7 @@ pub struct AiOutcome {
 ///    converge on a player.
 pub fn tick_ai(
     world: &mut hecs::World,
+    floor: &Floor,
     player_positions: &[(Entity, Vec3)],
     damage_mult: f32,
     dt: f32,
@@ -437,8 +450,9 @@ pub fn tick_ai(
         // and the player still exists within `LEASH_RANGE`,
         // keep chasing them. Otherwise drop the lock and try
         // to pick up a fresh nearest within the (smaller)
-        // `AGGRO_RANGE`.
-        let target = resolve_target(en, player_positions);
+        // `AGGRO_RANGE` — gated by line-of-sight against the
+        // tile grid so enemies don't aggro through walls.
+        let target = resolve_target(en, floor, player_positions);
 
         // Per-role steering + attack.
         match en.role {
@@ -490,10 +504,15 @@ pub fn tick_ai(
 /// target exists.
 fn resolve_target(
     en: &mut ServerEnemy,
+    floor: &Floor,
     players: &[(Entity, Vec3)],
 ) -> Option<(Entity, Vec3, f32)> {
     // 1. Honour an existing lock as long as that player is
-    //    still around and within leash distance.
+    //    still around and within leash distance. We don't
+    //    re-check LOS for an already-locked target — once an
+    //    enemy is engaged it'll chase until the leash drops,
+    //    which matches what players expect when they kite
+    //    around a pillar mid-fight.
     if let Some(locked) = en.target_lock {
         if let Some(&(pe, pp)) = players.iter().find(|(e, _)| *e == locked) {
             let dx = pp.x - en.k.position.x;
@@ -508,9 +527,9 @@ fn resolve_target(
         en.target_lock = None;
     }
 
-    // 2. Fresh aggro: nearest player within the (small)
-    //    `AGGRO_RANGE`.
-    let picked = nearest_player(en.k.position, players);
+    // 2. Fresh aggro: nearest *visible* player within
+    //    `AGGRO_RANGE`. LOS gate prevents aggro through walls.
+    let picked = nearest_visible_player(en.k.position, floor, players);
     if let Some((pe, _, _)) = picked {
         en.target_lock = Some(pe);
     }
@@ -518,9 +537,11 @@ fn resolve_target(
 }
 
 /// Find the nearest entry in `players` within [`AGGRO_RANGE`] of
-/// `pos`. Returns `None` if every player is out of range.
-fn nearest_player(
+/// `pos` that has a clear line of sight against the tile grid.
+/// Returns `None` if every player is out of range or hidden.
+fn nearest_visible_player(
     pos: Vec3,
+    floor: &Floor,
     players: &[(Entity, Vec3)],
 ) -> Option<(Entity, Vec3, f32)> {
     let mut best: Option<(Entity, Vec3, f32)> = None;
@@ -528,13 +549,66 @@ fn nearest_player(
         let dx = pp.x - pos.x;
         let dz = pp.z - pos.z;
         let d2 = dx * dx + dz * dz;
-        if d2 <= AGGRO_RANGE * AGGRO_RANGE
-            && best.map_or(true, |(_, _, bd2)| d2 < bd2)
-        {
-            best = Some((*pe, *pp, d2));
+        if d2 > AGGRO_RANGE * AGGRO_RANGE {
+            continue;
         }
+        if best.map_or(false, |(_, _, bd2)| d2 >= bd2) {
+            continue;
+        }
+        // Cheapest test (range) ran first; LOS is the most
+        // expensive (tile-grid sampling), only run on the
+        // candidate that would actually win.
+        if !floor.line_of_sight(pos, *pp) {
+            continue;
+        }
+        best = Some((*pe, *pp, d2));
     }
     best
+}
+
+/// React to a player attack on `victim`. Forces the victim to
+/// retaliate against `attacker` (overriding any prior target),
+/// and pulls every other live enemy within
+/// [`AGGRO_SPREAD_RADIUS`] into the fight on the same target —
+/// but only ones that don't already have a target_lock, so we
+/// don't yank packs off the player they're currently chasing.
+///
+/// Wall-blind by design: the spread models hearing a
+/// pack-mate's pain shout, not vision. The retaliation on the
+/// victim itself is also wall-blind (you obviously know who
+/// shot you even if there's a pillar between you). Visual
+/// `AGGRO_RANGE` aggro still respects LOS via
+/// [`nearest_visible_player`].
+pub fn notify_attacked(
+    world: &mut hecs::World,
+    victim: Entity,
+    attacker: Entity,
+) {
+    // 1. Force-aggro the victim onto the attacker.
+    let victim_pos = match world.get::<&mut ServerEnemy>(victim) {
+        Ok(mut en) => {
+            if en.is_dying() {
+                return;
+            }
+            en.target_lock = Some(attacker);
+            en.k.position
+        }
+        Err(_) => return,
+    };
+
+    // 2. Spread to packmates: alert every live enemy within
+    //    AGGRO_SPREAD_RADIUS that isn't already engaged.
+    let r2 = AGGRO_SPREAD_RADIUS * AGGRO_SPREAD_RADIUS;
+    for (e, en) in world.query_mut::<&mut ServerEnemy>() {
+        if e == victim || en.is_dying() || en.target_lock.is_some() {
+            continue;
+        }
+        let dx = en.k.position.x - victim_pos.x;
+        let dz = en.k.position.z - victim_pos.z;
+        if dx * dx + dz * dz <= r2 {
+            en.target_lock = Some(attacker);
+        }
+    }
 }
 
 /// Sum repulsion vectors from every neighbour inside

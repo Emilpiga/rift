@@ -5,6 +5,7 @@
 //! and never touch `OverlayBatch` directly, so layer ordering and
 //! input claiming stay consistent.
 
+pub mod banner;
 pub mod button;
 pub mod frame;
 pub mod item_slot;
@@ -12,6 +13,7 @@ pub mod progress_bar;
 pub mod text_field;
 pub mod tooltip;
 
+pub use banner::{Banner, BannerStyle};
 pub use button::{Button, ButtonVariant};
 pub use frame::Frame;
 pub use item_slot::{ItemSlot, SlotInteraction};

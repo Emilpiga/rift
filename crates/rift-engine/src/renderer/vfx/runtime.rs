@@ -25,7 +25,7 @@
 //!    flight age out naturally.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use super::spec::{
     Effect, EmissionMode, ForceField, Layer, ParticleSpec, RibbonSpec, SpawnShape,
@@ -111,6 +111,12 @@ struct EffectInstance {
     /// Optional per-frame override of `anchor`. Lets the gameplay
     /// layer follow a moving caster without respawning the effect.
     follow_anchor: Option<Vec3>,
+    /// Per-effect orientation applied to every particle layer's
+    /// spawn shape and orbit-force axes. Defaults to identity
+    /// (no rotation). Used by world-anchored effects that want
+    /// to billboard toward the camera/player without spawning a
+    /// fresh emitter every frame — e.g. the rift portal disc.
+    orientation: Quat,
     /// Beam endpoints for ribbon layers. Updated each frame from
     /// gameplay code via [`VfxSystem::set_endpoints`]. Defaults
     /// to `(anchor, anchor)` so a not-yet-aimed beam draws as a
@@ -256,6 +262,7 @@ impl VfxSystem {
             spec: Some(effect),
             anchor,
             follow_anchor: None,
+            orientation: Quat::IDENTITY,
             origin: anchor,
             tip: anchor,
             brightness: 1.0,
@@ -294,6 +301,18 @@ impl VfxSystem {
     pub fn set_anchor(&mut self, id: EffectId, anchor: Vec3) {
         if let Some(inst) = self.get_mut(id) {
             inst.follow_anchor = Some(anchor);
+        }
+    }
+
+    /// Replace the per-effect orientation. Future spawns rotate
+    /// their spawn-shape offset / launch direction by this
+    /// quaternion, and `Orbit` force axes are rotated likewise
+    /// at integration time. Already-airborne particles keep
+    /// flying along their existing trajectories — change this
+    /// every frame for a smooth re-aim.
+    pub fn set_orientation(&mut self, id: EffectId, orientation: Quat) {
+        if let Some(inst) = self.get_mut(id) {
+            inst.orientation = orientation;
         }
     }
 
@@ -369,11 +388,12 @@ impl VfxSystem {
                 }
 
                 let anchor = inst.follow_anchor.unwrap_or(inst.anchor);
+                let orientation = inst.orientation;
 
                 // 1) Tick particle layers.
                 for layer in inst.layers.iter_mut() {
                     if let LayerState::Particles(p) = layer {
-                        tick_particles(p, anchor, dt, inst.spawning, total_cap);
+                        tick_particles(p, anchor, orientation, dt, inst.spawning, total_cap);
                     }
                 }
 
@@ -477,7 +497,14 @@ impl VfxSystem {
 /// Per-layer particle simulation. Spawns first (so a freshly-
 /// created layer with `Burst` produces this-frame particles),
 /// then integrates physics on the resulting pool.
-fn tick_particles(p: &mut ParticlesState, anchor: Vec3, dt: f32, spawning: bool, total_cap: usize) {
+fn tick_particles(
+    p: &mut ParticlesState,
+    anchor: Vec3,
+    orientation: Quat,
+    dt: f32,
+    spawning: bool,
+    total_cap: usize,
+) {
     // 1) Spawn — only when the effect is still allowed to.
     if spawning {
         let to_spawn = match p.spec.emission {
@@ -513,7 +540,7 @@ fn tick_particles(p: &mut ParticlesState, anchor: Vec3, dt: f32, spawning: bool,
             if p.pool.len() >= total_cap.max(1) {
                 break;
             }
-            p.pool.push(spawn_one(&p.spec, anchor, &mut p.rng_seed));
+            p.pool.push(spawn_one(&p.spec, anchor, orientation, &mut p.rng_seed));
         }
     }
 
@@ -529,7 +556,7 @@ fn tick_particles(p: &mut ParticlesState, anchor: Vec3, dt: f32, spawning: bool,
         let mut velocity = part.velocity;
         let mut position = part.position;
         for force in &p.spec.forces {
-            apply_force(force, &mut position, &mut velocity, origin, noise_phase, dt2);
+            apply_force(force, &mut position, &mut velocity, origin, orientation, noise_phase, dt2);
         }
         part.velocity = velocity;
         part.position = position + part.velocity * dt2;
@@ -544,6 +571,7 @@ fn apply_force(
     pos: &mut Vec3,
     velocity: &mut Vec3,
     origin: Vec3,
+    orientation: Quat,
     noise_phase: f32,
     dt: f32,
 ) {
@@ -557,7 +585,10 @@ fn apply_force(
         }
         ForceField::Orbit { axis, speed } => {
             // Rotate `pos - origin` around `axis` by `speed * dt`.
-            let n = axis.normalize_or_zero();
+            // The spec axis lives in effect-local space; the
+            // per-effect orientation re-aims orbiting layers
+            // along with the rest of the emitter.
+            let n = (orientation * *axis).normalize_or_zero();
             if n.length_squared() < 0.5 {
                 return;
             }
@@ -588,7 +619,7 @@ fn apply_force(
     }
 }
 
-fn spawn_one(spec: &ParticleSpec, anchor: Vec3, rng: &mut u32) -> LiveParticle {
+fn spawn_one(spec: &ParticleSpec, anchor: Vec3, orientation: Quat, rng: &mut u32) -> LiveParticle {
     let r1 = next_rand(rng);
     let r2 = next_rand(rng);
     let r3 = next_rand(rng);
@@ -643,6 +674,23 @@ fn spawn_one(spec: &ParticleSpec, anchor: Vec3, rng: &mut u32) -> LiveParticle {
             let dir = Vec3::new(theta.cos(), 0.0, theta.sin());
             (off, dir)
         }
+        SpawnShape::RingAxis { radius, thickness, axis } => {
+            // Build an orthonormal basis in the plane perpendicular
+            // to `axis`. Same trick as `Cone` / `Column`.
+            let axis = axis.normalize_or(Vec3::Y);
+            let perp = if axis.y.abs() < 0.99 {
+                axis.cross(Vec3::Y).normalize()
+            } else {
+                axis.cross(Vec3::X).normalize()
+            };
+            let perp2 = axis.cross(perp);
+            let theta = r3 * std::f32::consts::TAU;
+            let radial = lerp(radius - thickness * 0.5, radius + thickness * 0.5, r4);
+            let off = perp * (theta.cos() * radial) + perp2 * (theta.sin() * radial);
+            // Outward radial vector in the ring's plane.
+            let dir = (perp * theta.cos() + perp2 * theta.sin()).normalize_or(perp);
+            (off, dir)
+        }
         SpawnShape::Disc { radius } => {
             let theta = r3 * std::f32::consts::TAU;
             let r = (r4).sqrt() * radius;
@@ -655,6 +703,13 @@ fn spawn_one(spec: &ParticleSpec, anchor: Vec3, rng: &mut u32) -> LiveParticle {
             (off, dir)
         }
     };
+
+    // Re-aim the spawn shape: a per-effect quaternion (set by
+    // gameplay code via `set_orientation`) rotates the offset
+    // and launch direction so the whole emitter visually faces
+    // the desired direction without rebuilding the spec.
+    let offset = orientation * offset;
+    let direction = orientation * direction;
 
     LiveParticle {
         position: anchor + offset,

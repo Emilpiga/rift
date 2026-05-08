@@ -760,6 +760,13 @@ pub struct ItemBlob {
     pub ilvl: u16,
     /// `(affix-pool index, rolled value)` pairs.
     pub affixes: Vec<(u16, f32)>,
+    /// `true` if this drop rolled the rare "Anchored" trait.
+    /// Anchored items skip the wipe-on-death loot reset and
+    /// render with a unique pillar / tooltip cue. Defaults to
+    /// `false` — the wire format is forward-compatible: old
+    /// builds deserialise as non-anchored.
+    #[serde(default)]
+    pub anchored: bool,
 }
 
 /// One-shot reliable event broadcast to interested clients.

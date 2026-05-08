@@ -380,6 +380,74 @@ impl Sim {
         self.cooldowns.remove(&client_id);
     }
 
+    /// Lift a player out of this Sim entirely: removes the ECS
+    /// entity and every per-client side-table entry, returning
+    /// the components so the caller can re-spawn the player in a
+    /// different Sim (hub ↔ rift movement). Returns `None` if
+    /// the client wasn't registered with this Sim.
+    ///
+    /// Cooldowns are intentionally dropped — moving floors is a
+    /// fresh start for the GCD bar, mirroring the
+    /// pre-refactor `change_floor` behaviour. Bag, equipment,
+    /// stash, level, XP, HP percent are all preserved on the
+    /// returned [`ServerPlayer`].
+    pub fn extract_player(
+        &mut self,
+        client_id: ClientId,
+    ) -> Option<(ServerPlayer, effect::EffectStack)> {
+        let entity = self.sessions.remove(&client_id)?;
+        // `world.remove::<(A, B)>` would tear both off in one go,
+        // but we want to be defensive about partial state
+        // (EffectStack might in theory be missing): pull each
+        // component independently and fall back to default for
+        // the optional one.
+        let player = self.world.remove_one::<ServerPlayer>(entity).ok()?;
+        let effects = self
+            .world
+            .remove_one::<effect::EffectStack>(entity)
+            .unwrap_or_default();
+        let _ = self.world.despawn(entity);
+        self.pending_inputs.remove(&client_id);
+        self.cooldowns.remove(&client_id);
+        log::info!("sim: extracted player {client_id:?} from floor {}", self.floor_index);
+        Some((player, effects))
+    }
+
+    /// Drop a previously-extracted player into this Sim. The
+    /// player keeps their existing [`NetId`] (so client-side
+    /// avatar tracking survives the move) but is snapped to this
+    /// floor's spawn position and re-healed per the same policy
+    /// as [`Self::change_floor`] (full heal on hub, living-only
+    /// heal on rift). Returns the player's NetId for convenience.
+    pub fn inject_player(
+        &mut self,
+        client_id: ClientId,
+        mut player: ServerPlayer,
+        effects: effect::EffectStack,
+    ) -> NetId {
+        let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
+        player.k.position = spawn;
+        player.k.velocity = Vec3::ZERO;
+        player.k.vy = 0.0;
+        player.k.airborne = false;
+        // HP / ghost reset matches `change_floor`'s policy: hub
+        // is a safe respawn point that wipes death state,
+        // rift entries top up living players but leave ghosts as
+        // ghosts (they joined to spectate).
+        if self.floor_index == 0 {
+            player.hp = player.hp_max;
+            player.is_ghost = false;
+            player.ghost_rise_timer = None;
+        } else if !player.is_ghost {
+            player.hp = player.hp_max;
+        }
+        let net_id = player.net_id;
+        let entity = self.world.spawn((player, effects));
+        self.sessions.insert(client_id, entity);
+        log::info!("sim: injected player {client_id:?} ({net_id:?}) into floor {}", self.floor_index);
+        net_id
+    }
+
     /// `true` if `client_id` is currently a ghost (risen-but-dead).
     /// Used by the message dispatch in `main.rs` to silently drop
     /// gameplay actions (cast, loot pickup, drop) for spectators.
@@ -1200,8 +1268,8 @@ impl Sim {
         if self.next_loot_net_id >= 0x4000_0000 {
             self.next_loot_net_id = 0x2000_0000;
         }
-        let (base_id, rarity, ilvl, affixes) = item.to_wire();
-        let blob = ItemBlob { base_id, rarity, ilvl, affixes };
+        let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
+        let blob = ItemBlob { base_id, rarity, ilvl, affixes, anchored };
         let loot = loot::ServerLoot {
             net_id,
             position,
@@ -1229,7 +1297,7 @@ impl Sim {
         //    any caster bolts the AI asked for.
         let player_targets = player::target_positions(&self.world);
         let damage_mult = FloorConfig::for_floor(self.floor_index).enemy_damage_mult;
-        let ai_outcome = enemy::tick_ai(&mut self.world, &player_targets, damage_mult, dt);
+        let ai_outcome = enemy::tick_ai(&mut self.world, &self.floor, &player_targets, damage_mult, dt);
         let melee_damage = ai_outcome.melee_damage;
         // Unified enemy ability cast pipeline. Every enemy
         // attack flows through this single stream:
@@ -1695,8 +1763,33 @@ impl Sim {
             if p.hp > 0.0 {
                 continue;
             }
-            p.inventory.clear();
-            p.equipment = rift_game::loot::Equipment::new();
+            // Anchored items survive every wipe path. Filter
+            // bag + equipment in place so the player keeps the
+            // chase drops they earned, while everything else
+            // (regular legendaries included) is lost as usual.
+            let mut kept_inventory: Vec<Option<rift_game::loot::Item>> = Vec::new();
+            for slot in p.inventory.drain(..) {
+                if let Some(it) = slot {
+                    if it.anchored {
+                        kept_inventory.push(Some(it));
+                    }
+                }
+            }
+            p.inventory = kept_inventory;
+            // Equipment: same anchored-survives rule, but
+            // *keep* anchored items in their slots. Dropping
+            // them into the bag would force the player to re-
+            // equip on respawn for no gameplay reason. We walk
+            // every slot, take the item, and either put it
+            // back (anchored) or let it fall into the void
+            // (everything else).
+            for slot in rift_game::loot::EquipSlot::ALL {
+                if let Some(it) = p.equipment.take(slot) {
+                    if it.anchored {
+                        p.equipment.set(slot, Some(it));
+                    }
+                }
+            }
             p.recompute_stats();
             affected.push(p.client_id);
         }

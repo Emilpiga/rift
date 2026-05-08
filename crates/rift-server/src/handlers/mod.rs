@@ -51,12 +51,13 @@ pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
 pub(crate) fn item_to_blob(
     item: &rift_game::loot::Item,
 ) -> rift_net::messages::ItemBlob {
-    let (base_id, rarity, ilvl, affixes) = item.to_wire();
+    let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
     rift_net::messages::ItemBlob {
         base_id,
         rarity,
         ilvl,
         affixes,
+        anchored,
     }
 }
 

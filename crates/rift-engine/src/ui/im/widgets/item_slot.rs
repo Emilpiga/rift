@@ -45,6 +45,11 @@ pub struct ItemSlot<'a> {
     cooldown: f32,
     selected: bool,
     enabled: bool,
+    /// `true` for items carrying the rare "Anchored" trait.
+    /// Renders a distinctive gold outer outline so the trait
+    /// is recognisable at a glance even when the rarity tint
+    /// already maxes the slot's chroma.
+    anchored: bool,
 }
 
 impl<'a> ItemSlot<'a> {
@@ -59,6 +64,7 @@ impl<'a> ItemSlot<'a> {
             cooldown: 0.0,
             selected: false,
             enabled: true,
+            anchored: false,
         }
     }
 
@@ -104,6 +110,15 @@ impl<'a> ItemSlot<'a> {
 
     pub fn enabled(mut self, on: bool) -> Self {
         self.enabled = on;
+        self
+    }
+
+    /// Mark this slot as carrying an Anchored item. Draws an
+    /// additional gold outer outline on top of the normal
+    /// hover/selected outline so the trait is recognisable
+    /// across the bag, equipment panel, and stash.
+    pub fn anchored(mut self, on: bool) -> Self {
+        self.anchored = on;
         self
     }
 
@@ -272,6 +287,19 @@ impl<'a> ItemSlot<'a> {
                 k,
                 size,
                 Color::rgba(0.7, 0.7, 0.7, 0.85),
+            );
+        }
+
+        // Anchored ring sits underneath the hover/selected
+        // outline so the active interaction state still wins
+        // visually but the gold border remains visible at
+        // rest. Width 2.0 to match the selected outline.
+        if self.anchored {
+            ui.draw_rounded_outline(
+                rect,
+                theme.spacing.corner_radius,
+                2.0,
+                Color::rgba(1.00, 0.78, 0.20, 0.95),
             );
         }
 

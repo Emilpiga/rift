@@ -296,6 +296,13 @@ pub struct Player {
     /// True while the player is off the ground (above y=0). Set by
     /// `movement_system` after integrating `vy`.
     pub airborne: bool,
+    /// Leftover frame time carried into the next vertical-integration
+    /// step. The jump arc is integrated at a fixed 120 Hz substep
+    /// inside `movement_system` so a wobbly frame dt (vsync hiccups,
+    /// streaming spikes) doesn't translate into visible stutter
+    /// during the ~0.4 s airborne window. Anything below the
+    /// fixed step gets banked here and consumed next frame.
+    pub vy_accum: f32,
 }
 
 // `PlayerAction` lives in `rift_game::components`; re-exported here

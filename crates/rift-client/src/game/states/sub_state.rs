@@ -316,6 +316,9 @@ pub struct LootDropVisual {
     pub pillar_emitter: rift_engine::renderer::vfx::EffectId,
     /// VFX handle for the bright base pulse.
     pub base_emitter: rift_engine::renderer::vfx::EffectId,
+    /// VFX handle for the gold-cyan halo spawned only when
+    /// `item.anchored` is true. `None` for ordinary drops.
+    pub anchored_emitter: Option<rift_engine::renderer::vfx::EffectId>,
 }
 
 /// Client-side mirror of every revive-shrine row currently

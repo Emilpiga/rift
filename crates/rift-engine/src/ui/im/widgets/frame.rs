@@ -87,12 +87,81 @@ impl Frame {
     /// Draw the frame at `rect` and call `body` with the padded
     /// interior rect. Returns whatever `body` returns so callers
     /// can propagate widget responses cleanly.
+    ///
+    /// Visual layering, bottom → top:
+    ///  1. Soft drop shadow (3 expanding copies of `theme.shadow`),
+    ///     offset down a few pixels so the panel reads as a
+    ///     floating card.
+    ///  2. Fill (rounded).
+    ///  3. 1px lit-edge highlight along the top quarter of the
+    ///     border — lifts the panel off the background without
+    ///     having to render a full gradient.
+    ///  4. Hairline border outline.
+    ///  5. Body, inside the padded interior.
     pub fn show<R>(self, ui: &mut Ui<'_>, rect: Rect, body: impl FnOnce(&mut Ui<'_>, Rect) -> R) -> R {
-        // Fill.
+        // 1. Drop shadow. Three expanding copies with falling
+        //    alpha approximate a Gaussian blur cheaply. Skip
+        //    when fill is fully transparent (no panel ⇒ no
+        //    floating shadow).
+        if self.fill.0[3] > 0.05 {
+            let shadow_color = ui.theme().colors.shadow;
+            // Each pass: grow outward + drop down. Alpha
+            // halves each pass so the closest copy is
+            // strongest, mimicking ambient occlusion.
+            for i in 0..3 {
+                let grow = 2.0 + i as f32 * 4.0;
+                let drop = 2.0 + i as f32 * 2.0;
+                let a = shadow_color.0[3] * 0.55 / (i + 1) as f32;
+                let s = Color::rgba(
+                    shadow_color.0[0],
+                    shadow_color.0[1],
+                    shadow_color.0[2],
+                    a,
+                );
+                let r = Rect::from_min_max(
+                    super::super::rect::Pos2::new(rect.min.x - grow, rect.min.y - grow + drop),
+                    super::super::rect::Pos2::new(rect.max.x + grow, rect.max.y + grow + drop),
+                );
+                ui.draw_rounded_rect(r, self.corner_radius + grow, s);
+            }
+        }
+
+        // 2. Fill.
         if self.fill.0[3] > 0.0 {
             ui.draw_rounded_rect(rect, self.corner_radius, self.fill);
         }
-        // Stroke.
+
+        // 3. Lit top edge — sells the "lit from above" feel
+        //    cheaply. The horizontal inset is `corner_radius`
+        //    so the band sits entirely inside the straight
+        //    section of the top edge — otherwise its flat
+        //    ends would poke outside the rounded corners and
+        //    render as visible nubs.
+        if self.fill.0[3] > 0.05 && rect.width() > self.corner_radius * 2.0 + 2.0 {
+            let h_inset = self.corner_radius.max(1.0);
+            let top_band = Rect::from_xywh(
+                rect.x() + h_inset,
+                rect.y() + 1.0,
+                rect.width() - h_inset * 2.0,
+                1.0,
+            );
+            // Pure rect (radius 0) → no rounding artefacts.
+            ui.draw_rect(top_band, Color::rgba(1.0, 1.0, 1.0, 0.07));
+
+            // Soft falloff band a couple of pixels below.
+            let band_h = (rect.height() * 0.20).min(20.0);
+            if band_h > 4.0 {
+                let soft = Rect::from_xywh(
+                    rect.x() + h_inset,
+                    rect.y() + 2.0,
+                    rect.width() - h_inset * 2.0,
+                    band_h * 0.5,
+                );
+                ui.draw_rect(soft, Color::rgba(1.0, 1.0, 1.0, 0.02));
+            }
+        }
+
+        // 4. Stroke.
         if self.stroke.thickness > 0.0 && self.stroke.color.0[3] > 0.0 {
             ui.draw_rounded_outline(
                 rect,
@@ -101,7 +170,8 @@ impl Frame {
                 self.stroke.color,
             );
         }
-        // Body inside the padded interior.
+
+        // 5. Body inside the padded interior.
         let inner = rect.shrink2(self.padding);
         body(ui, inner)
     }

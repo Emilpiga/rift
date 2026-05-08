@@ -39,15 +39,23 @@ impl App for RiftApp {
         //      (inventory / equipment / XP / progress / claims).
         if self.net.is_some() {
             self.net_pre_phase(renderer, input, dt);
-            self.sync_entities_from_snapshot(renderer, dt);
-            self.handle_world_events(renderer);
+            // Skip ECS sync while the staged net-transition is
+            // running — the world is being rebuilt and any
+            // remote-avatar / enemy / loot spawn from the next
+            // snapshot would land in a half-built scene.
+            if !self.state.is_net_transitioning() {
+                self.sync_entities_from_snapshot(renderer, dt);
+                self.handle_world_events(renderer);
+            }
         }
 
         self.state.update(renderer, input, dt);
 
         if self.net.is_some() {
-            self.forward_client_commands();
-            self.apply_server_pushed_state(renderer);
+            if !self.state.is_net_transitioning() {
+                self.forward_client_commands();
+                self.apply_server_pushed_state(renderer);
+            }
         }
     }
 
@@ -89,7 +97,11 @@ impl RiftApp {
         // Keep the SP regen path using the server's seed.
         state.net.floor_seed = Some(net.rift_seed());
 
-        // Apply any server-driven floor transition.
+        // Apply any server-driven floor transition. This sets
+        // `app_state = NetEntering(FadeOut)`; the staged tick
+        // in `transition::tick_net_entering` walks the phases
+        // (one per frame) so the loading overlay presents
+        // before the heavy regen runs.
         if let Some(pf) = net.take_pending_floor() {
             state.net.floor_seed = Some(pf.seed);
             state.apply_net_transition(renderer, pf.index);
@@ -780,7 +792,7 @@ impl RiftApp {
                 .into_iter()
                 .map(|opt| {
                     opt.and_then(|b| {
-                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes)
+                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored)
                     })
                 })
                 .collect();
@@ -802,6 +814,7 @@ impl RiftApp {
                     blob.rarity,
                     blob.ilvl,
                     &blob.affixes,
+                    blob.anchored,
                 ) else {
                     continue;
                 };
@@ -820,7 +833,7 @@ impl RiftApp {
                 .into_iter()
                 .map(|opt| {
                     opt.and_then(|b| {
-                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes)
+                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored)
                     })
                 })
                 .collect();

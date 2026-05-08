@@ -250,6 +250,50 @@ pub enum Archetype {
     Utility,
 }
 
+/// Spellbook-side grouping. Derived from `Element` + `Archetype`
+/// so adding a new ability never requires touching this list —
+/// the category falls out of the data the ability already carries.
+///
+/// `All` is a sentinel used by the spellbook UI to mean "show
+/// everything"; it is never returned by `Ability::category`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Category {
+    All,
+    Fire,
+    Cold,
+    Lightning,
+    Physical,
+    Utility,
+}
+
+impl Category {
+    /// Display label for the category tab. Short so the left rail
+    /// stays narrow; the icon ladder lives in the spellbook UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::All => "All",
+            Category::Fire => "Fire",
+            Category::Cold => "Cold",
+            Category::Lightning => "Lightning",
+            Category::Physical => "Physical",
+            Category::Utility => "Utility",
+        }
+    }
+
+    /// Iteration order for the spellbook left-rail. `All` first,
+    /// then elemental columns, then physical, then catch-all.
+    pub fn all() -> &'static [Category] {
+        &[
+            Category::All,
+            Category::Fire,
+            Category::Cold,
+            Category::Lightning,
+            Category::Physical,
+            Category::Utility,
+        ]
+    }
+}
+
 /// Which damage-bucket stat the ability scales with. Weapons
 /// always carry both `WeaponDamage` and `SpellDamage` lines so a
 /// single bow + staff inventory works for any loadout — only the
@@ -349,6 +393,28 @@ pub struct AbilityState {
     pub cooldown_remaining: f32,
     pub charges: u32,
     pub max_charges: u32,
+}
+
+impl Ability {
+    /// Spellbook category derived from the ability's damage
+    /// element + shape. Element wins for the four damaging
+    /// columns; movement / utility archetypes (which usually
+    /// carry `Element::None`) fall into the `Utility` bucket.
+    /// Pure `Element::None` damaging abilities (a rarity in the
+    /// current data, but possible in the future) likewise sort
+    /// into `Utility` so they always have a home.
+    pub fn category(&self) -> Category {
+        match self.element {
+            Element::Fire => Category::Fire,
+            Element::Ice => Category::Cold,
+            Element::Lightning => Category::Lightning,
+            Element::Physical => match self.archetype {
+                Archetype::Movement | Archetype::Utility => Category::Utility,
+                _ => Category::Physical,
+            },
+            Element::None => Category::Utility,
+        }
+    }
 }
 
 impl AbilityState {

@@ -40,6 +40,13 @@ pub struct Tooltip<'a> {
     /// Minimum total width — handy when callers want adjacent
     /// tooltips (compare panes) to line up visually.
     min_width: f32,
+    /// Optional rect the tooltip should be anchored adjacent
+    /// to (e.g. the hovered inventory slot). When present,
+    /// [`Self::show`] tries the right side of `anchor_to`
+    /// first and flips to the left if the right side would
+    /// overflow the screen — matching the "tooltip never
+    /// occludes the thing you're hovering" rule.
+    anchor_to: Option<Rect>,
 }
 
 impl<'a> Default for Tooltip<'a> {
@@ -50,6 +57,7 @@ impl<'a> Default for Tooltip<'a> {
             fill: Color::rgba(0.02, 0.03, 0.05, 0.96),
             pad: 8.0,
             min_width: 180.0,
+            anchor_to: None,
         }
     }
 }
@@ -84,11 +92,32 @@ impl<'a> Tooltip<'a> {
         self
     }
 
+    /// Anchor this tooltip adjacent to `r`. The renderer
+    /// prefers the right side of `r`; if the tooltip wouldn't
+    /// fit there, it flips to the left side. Vertically the
+    /// tooltip aligns to `r.top()` and clamps to the screen.
+    /// When set, the `pos` argument to [`Self::show`] is
+    /// ignored.
+    pub fn anchor_to(mut self, r: Rect) -> Self {
+        self.anchor_to = Some(r);
+        self
+    }
+
     /// Render the tooltip with its top-left at `pos` and
     /// return the actual rect drawn (after screen clamping)
     /// so callers can lay siblings next to it.
     pub fn show(self, ui: &mut Ui<'_>, pos: Pos2, lines: &[TooltipLine<'_>]) -> Rect {
         let theme = *ui.theme();
+        // Apply the active UI scale to the tooltip chrome so
+        // a 1.5\u00d7 theme doesn't draw 8px padding around 24px
+        // text (and a 0.6\u00d7 theme doesn't waste a 180px floor
+        // on 9px text). `theme.scale` is already baked at
+        // `Ui::begin`; we just multiply through.
+        let pad = self.pad * theme.scale;
+        let min_width = self.min_width * theme.scale;
+        let gap_anchor = 6.0 * theme.scale;
+        let gap_screen = 4.0 * theme.scale;
+
         // Per-line measurement so we don't have to assume a
         // fixed glyph width.
         let mut max_w = self
@@ -98,19 +127,42 @@ impl<'a> Tooltip<'a> {
         let mut body_h = 0.0_f32;
         for ln in lines {
             max_w = max_w.max(ui.measure_text(ln.text, ln.size));
-            body_h += ln.size + 2.0;
+            body_h += ln.size + 2.0 * theme.scale;
         }
         let header_h = if self.header.is_some() {
-            theme.fonts.size_sm + 4.0
+            theme.fonts.size_sm + 4.0 * theme.scale
         } else {
             0.0
         };
-        let w = (max_w + self.pad * 2.0).max(self.min_width);
-        let h = body_h + header_h + self.pad * 2.0;
+        let w = (max_w + pad * 2.0).max(min_width);
+        let h = body_h + header_h + pad * 2.0;
 
         let screen = ui.screen_size();
-        let x = pos.x.min(screen.x - w - 4.0).max(0.0);
-        let y = pos.y.min(screen.y - h - 4.0).max(0.0);
+        // Anchor-aware positioning. If the caller supplied a
+        // `Rect` to anchor against, pick the side that fits
+        // (right-of-rect first, fall back to left-of-rect)
+        // and align vertically to its top. Otherwise use the
+        // raw `pos` the caller passed in.
+        let (mut x, mut y) = if let Some(anchor) = self.anchor_to {
+            let right_x = anchor.max.x + gap_anchor;
+            let left_x = anchor.min.x - gap_anchor - w;
+            let chosen_x = if right_x + w <= screen.x - gap_screen {
+                right_x
+            } else if left_x >= gap_screen {
+                left_x
+            } else {
+                // Neither side fits — fall back to plain
+                // screen-clamping below the cursor's anchor.
+                right_x
+            };
+            (chosen_x, anchor.min.y)
+        } else {
+            (pos.x, pos.y)
+        };
+        // Final hard clamp to the screen rect so a too-wide
+        // tooltip never bleeds past the edge.
+        x = x.min(screen.x - w - gap_screen).max(gap_screen);
+        y = y.min(screen.y - h - gap_screen).max(gap_screen);
         let rect = Rect::from_xywh(x, y, w, h);
 
         // Always render on the tooltip layer so callers don't
@@ -124,24 +176,24 @@ impl<'a> Tooltip<'a> {
                 theme.colors.border,
             );
 
-            let mut cursor_y = rect.y() + self.pad;
+            let mut cursor_y = rect.y() + pad;
             if let Some(h) = self.header {
                 ui.draw_text(
-                    Pos2::new(rect.x() + self.pad, cursor_y),
+                    Pos2::new(rect.x() + pad, cursor_y),
                     h,
                     theme.fonts.size_sm,
                     self.header_color,
                 );
-                cursor_y += theme.fonts.size_sm + 4.0;
+                cursor_y += theme.fonts.size_sm + 4.0 * theme.scale;
             }
             for ln in lines {
                 ui.draw_text(
-                    Pos2::new(rect.x() + self.pad, cursor_y),
+                    Pos2::new(rect.x() + pad, cursor_y),
                     ln.text,
                     ln.size,
                     ln.color,
                 );
-                cursor_y += ln.size + 2.0;
+                cursor_y += ln.size + 2.0 * theme.scale;
             }
         });
 
@@ -161,7 +213,7 @@ pub fn tooltip_at_mouse(
     if let Some(h) = header {
         t = t.header(h);
     }
-    t.show(ui, Pos2::new(mp.x + 18.0, mp.y), lines)
+    t.show(ui, Pos2::new(mp.x + 18.0 * ui.theme().scale, mp.y), lines)
 }
 
 /// Convenience used by the inventory: build a list of lines

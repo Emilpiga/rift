@@ -103,21 +103,45 @@ pub fn movement_system(world: &mut World, dt: f32) {
             let target_rot = Quat::from_rotation_y(target_yaw);
             transform.rotation = transform.rotation.slerp(target_rot, (dt * 10.0).min(1.0));
         }
-        // Vertical motion (gravity + jump).
+        // Vertical motion (gravity + jump). Integrated at a
+        // FIXED 120 Hz substep, with leftover frame time banked
+        // in `player.vy_accum`. With variable frame dt the
+        // direct `position.y += vy * dt` form produced visible
+        // micro-stutter on the ~0.4 s jump arc — the per-frame
+        // delta would noticeably overshoot/undershoot whenever
+        // dt drifted (vsync hiccups, streaming spikes), giving
+        // the impression of "screen shake" or jitter while
+        // airborne. Substepping makes the trajectory
+        // deterministic regardless of render rate; any leftover
+        // (sub-step) time is consumed on the next frame.
+        const FIXED_DT: f32 = 1.0 / 120.0;
         if player.airborne || player.vy.abs() > 0.001 || transform.position.y > 0.001 {
-            player.vy -= GRAVITY * dt;
-            transform.position.y += player.vy * dt;
-            if transform.position.y <= 0.0 {
-                transform.position.y = 0.0;
-                player.vy = 0.0;
-                player.airborne = false;
-            } else {
-                player.airborne = true;
+            player.vy_accum += dt;
+            // Cap the catch-up so a single-frame stall (debugger
+            // pause, alt-tab) doesn't dump a whole second of
+            // gravity into one frame.
+            if player.vy_accum > 0.25 {
+                player.vy_accum = 0.25;
+            }
+            while player.vy_accum >= FIXED_DT {
+                player.vy -= GRAVITY * FIXED_DT;
+                transform.position.y += player.vy * FIXED_DT;
+                if transform.position.y <= 0.0 {
+                    transform.position.y = 0.0;
+                    player.vy = 0.0;
+                    player.airborne = false;
+                    player.vy_accum = 0.0;
+                    break;
+                } else {
+                    player.airborne = true;
+                }
+                player.vy_accum -= FIXED_DT;
             }
         } else {
             transform.position.y = 0.0;
             player.airborne = false;
             player.vy = 0.0;
+            player.vy_accum = 0.0;
         }
     }
 
@@ -590,12 +614,38 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
 
 /// Make the camera follow the player with a third-person offset.
 /// Pulls the camera forward if a wall is between the player and the camera.
-pub fn camera_follow_system(world: &World, renderer: &mut Renderer, input: &Input, wall_aabbs: &[Aabb]) {
+pub fn camera_follow_system(world: &World, renderer: &mut Renderer, input: &Input, wall_aabbs: &[Aabb], dt: f32) {
     for (_id, (transform, _player, _local)) in world
         .query::<(&Transform, &Player, &super::components::LocalPlayer)>()
         .iter()
     {
-        let target = transform.position + Vec3::new(0.0, 0.8, 0.0);
+        // Anchor the look-at on the player's torso. Vertical
+        // motion is smoothed independently of XZ so jumps don't
+        // drag the world up and down with the character — that
+        // produced a visible "screen shake" each time the player
+        // jumped, because the entire scene was being translated
+        // by the same delta as the player sprite. With this
+        // smoothing the player visibly leaves the ground while
+        // the camera holds steady, which is the standard
+        // top-down / 3rd-person ARPG behaviour.
+        //
+        // The XZ components track the player frame-perfect so
+        // movement still feels responsive; only Y is damped.
+        let target_xz = transform.position + Vec3::new(0.0, 0.8, 0.0);
+        let prev_y = renderer.camera.target.y;
+        // First-order exponential smoothing. `tau` is the time
+        // constant (seconds to reach ~63% of the gap). 0.25 s
+        // keeps the camera glued enough for floor / stair
+        // changes to feel snappy while still hiding a typical
+        // ~0.4 s jump arc almost entirely.
+        const TAU: f32 = 0.25;
+        let alpha = 1.0 - (-(dt.max(0.0) / TAU)).exp();
+        let smoothed_y = if prev_y.is_finite() {
+            prev_y + (target_xz.y - prev_y) * alpha
+        } else {
+            target_xz.y
+        };
+        let target = Vec3::new(target_xz.x, smoothed_y, target_xz.z);
 
         let yaw = input.camera_yaw();
         let pitch = input.camera_pitch();

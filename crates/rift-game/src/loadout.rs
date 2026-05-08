@@ -37,11 +37,10 @@ pub const SLOT_UNLOCK_LEVELS: [u32; SLOT_COUNT] = [1, 3, 6, 10, 15, 20];
 
 /// `true` if the bar slot at `index` is unlocked at `player_level`.
 pub fn is_slot_unlocked(index: usize, player_level: u32) -> bool {
-    // TESTING: all slots unlocked from level 1 regardless of
-    // `SLOT_UNLOCK_LEVELS`. Re-enable the level gate before
-    // shipping.
-    let _ = player_level;
-    index < SLOT_COUNT
+    if index >= SLOT_COUNT {
+        return false;
+    }
+    player_level >= SLOT_UNLOCK_LEVELS[index]
 }
 
 /// The six wire ids the player has slotted on the action bar.
@@ -134,12 +133,8 @@ pub fn is_player_ability(wire_id: u8) -> bool {
 /// `player_level`. Empty / enemy / unknown ids are never
 /// unlocked.
 pub fn is_ability_unlocked(wire_id: u8, player_level: u32) -> bool {
-    // TESTING: every player-castable ability is available from
-    // level 1. Restore the `player_level >= ab.unlock_level`
-    // check before shipping.
-    let _ = player_level;
     let Some(ab) = lookup(wire_id) else { return false };
-    ab.wire_id < 64
+    ab.wire_id < 64 && player_level >= ab.unlock_level
 }
 
 /// Iterator over every player-castable ability in the registry,

@@ -390,20 +390,21 @@ impl CharacterSelect {
         let mut action = SelectAction::None;
 
         Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let s = theme.scale;
             let _ = title(ui, body.min, "ACCOUNT");
             label(
                 ui,
-                body.min + Vec2::new(0.0, 44.0),
+                body.min + Vec2::new(0.0, 44.0 * s),
                 "Enter the account name to load your characters",
             );
 
             // Field label + text input.
-            label(ui, body.min + Vec2::new(0.0, 100.0), "Account name");
+            label(ui, body.min + Vec2::new(0.0, 100.0 * s), "Account name");
             let field_rect = Rect::from_xywh(
                 body.x(),
-                body.y() + 122.0,
+                body.y() + 122.0 * s,
                 body.width(),
-                50.0,
+                50.0 * s,
             );
             let field_id = Id::root("char_select").child("account_field");
             let resp = text_field(
@@ -418,22 +419,22 @@ impl CharacterSelect {
 
             label(
                 ui,
-                body.min + Vec2::new(0.0, 190.0),
+                body.min + Vec2::new(0.0, 190.0 * s),
                 "New name? A fresh account is created automatically.",
             );
 
             // Confirm + Quit row pinned to the bottom of the panel.
             let can_confirm = !self.account_entry.trim().is_empty();
-            let btn_y = body.max.y - 50.0;
+            let btn_y = body.max.y - 50.0 * s;
             let confirm = Button::primary("Continue")
                 .enabled(can_confirm)
                 .show(
                     ui,
-                    Rect::from_xywh(body.x(), btn_y, 160.0, 50.0),
+                    Rect::from_xywh(body.x(), btn_y, 160.0 * s, 50.0 * s),
                 );
             let quit = Button::new("Quit").show(
                 ui,
-                Rect::from_xywh(body.x() + 180.0, btn_y, 120.0, 50.0),
+                Rect::from_xywh(body.x() + 180.0 * s, btn_y, 120.0 * s, 50.0 * s),
             );
 
             // Fire on click, on Enter (when field is focused), or
@@ -457,6 +458,7 @@ impl CharacterSelect {
         let panel = Self::panel_rect(ui);
         let theme = *ui.theme();
         Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let s = theme.scale;
             let _ = title(ui, body.min, "ACCOUNT");
             let dots = match (self.rotation_t * 1.5) as i32 % 4 {
                 0 => "",
@@ -466,7 +468,7 @@ impl CharacterSelect {
             };
             label(
                 ui,
-                body.min + Vec2::new(0.0, 44.0),
+                body.min + Vec2::new(0.0, 44.0 * s),
                 &format!("Loading roster for '{}'{dots}", self.account_name),
             );
         });
@@ -478,25 +480,26 @@ impl CharacterSelect {
         let mut action = SelectAction::None;
 
         Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let s = theme.scale;
             let _ = title(ui, body.min, "CHARACTER SELECT");
             label(
                 ui,
-                body.min + Vec2::new(0.0, 44.0),
+                body.min + Vec2::new(0.0, 44.0 * s),
                 "Choose a character to enter the rift",
             );
 
-            let row_h = 90.0;
-            let row_pad = 12.0;
+            let row_h = 90.0 * s;
+            let row_pad = 12.0 * s;
 
             for i in 0..MAX_CHARACTERS {
-                let y = body.y() + 88.0 + (i as f32) * (row_h + row_pad);
+                let y = body.y() + 88.0 * s + (i as f32) * (row_h + row_pad);
                 let row_rect = Rect::from_xywh(body.x(), y, body.width(), row_h);
 
                 if let Some(profile) = self.roster.get(i) {
                     // Row chrome.
                     Frame::inset(&theme).show(ui, row_rect, |ui, inner| {
                         ui.draw_text(
-                            inner.min + Vec2::new(8.0, 4.0),
+                            inner.min + Vec2::new(8.0 * s, 4.0 * s),
                             &profile.name,
                             theme.fonts.size_lg,
                             theme.colors.text,
@@ -507,22 +510,22 @@ impl CharacterSelect {
                             profile.gender.label(),
                         );
                         ui.draw_text(
-                            inner.min + Vec2::new(8.0, 36.0),
+                            inner.min + Vec2::new(8.0 * s, 36.0 * s),
                             &sub,
                             theme.fonts.size_sm,
                             theme.colors.text_dim,
                         );
 
-                        let btn_y = inner.y() + 14.0;
+                        let btn_y = inner.y() + 14.0 * s;
                         let play = Button::primary("Play").show_with_id(
                             ui,
                             Id::root("char_select").child(("play", i)),
-                            Rect::from_xywh(inner.max.x - 200.0, btn_y, 90.0, 40.0),
+                            Rect::from_xywh(inner.max.x - 200.0 * s, btn_y, 90.0 * s, 40.0 * s),
                         );
                         let del = Button::danger("Delete").show_with_id(
                             ui,
                             Id::root("char_select").child(("delete", i)),
-                            Rect::from_xywh(inner.max.x - 100.0, btn_y, 90.0, 40.0),
+                            Rect::from_xywh(inner.max.x - 100.0 * s, btn_y, 90.0 * s, 40.0 * s),
                         );
                         if play.clicked {
                             let p = self.roster.slots()[i].clone();
@@ -553,7 +556,7 @@ impl CharacterSelect {
                         .with_stroke(Stroke::new(1.0, theme.colors.border));
                     dashed.show_only(ui, row_rect);
                     ui.draw_text(
-                        Pos2::new(row_rect.x() + 14.0, row_rect.y() + row_rect.height() * 0.5 - 7.0),
+                        Pos2::new(row_rect.x() + 14.0 * s, row_rect.y() + row_rect.height() * 0.5 - 7.0 * s),
                         "(empty slot)",
                         theme.fonts.size_sm,
                         theme.colors.text_muted,
@@ -565,7 +568,7 @@ impl CharacterSelect {
             let quit = Button::new("Quit").show_with_id(
                 ui,
                 Id::root("char_select").child("roster_quit"),
-                Rect::from_xywh(body.x(), body.max.y - 40.0, 120.0, 40.0),
+                Rect::from_xywh(body.x(), body.max.y - 40.0 * s, 120.0 * s, 40.0 * s),
             );
             if quit.clicked {
                 action = SelectAction::Quit;
@@ -581,11 +584,12 @@ impl CharacterSelect {
         let action = SelectAction::None;
 
         Frame::panel(&theme).show(ui, panel, |ui, body| {
+            let s = theme.scale;
             let _ = title(ui, body.min, "CREATE CHARACTER");
 
             // Name field.
-            label(ui, body.min + Vec2::new(0.0, 60.0), "Name");
-            let name_rect = Rect::from_xywh(body.x(), body.y() + 82.0, body.width(), 50.0);
+            label(ui, body.min + Vec2::new(0.0, 60.0 * s), "Name");
+            let name_rect = Rect::from_xywh(body.x(), body.y() + 82.0 * s, body.width(), 50.0 * s);
             let name_resp = text_field(
                 ui,
                 Id::root("char_select").child("create_name"),
@@ -597,9 +601,9 @@ impl CharacterSelect {
             );
 
             // Gender row.
-            label(ui, body.min + Vec2::new(0.0, 150.0), "Gender");
-            let male_rect = Rect::from_xywh(body.x(), body.y() + 172.0, 140.0, 50.0);
-            let female_rect = Rect::from_xywh(body.x() + 150.0, body.y() + 172.0, 140.0, 50.0);
+            label(ui, body.min + Vec2::new(0.0, 150.0 * s), "Gender");
+            let male_rect = Rect::from_xywh(body.x(), body.y() + 172.0 * s, 140.0 * s, 50.0 * s);
+            let female_rect = Rect::from_xywh(body.x() + 150.0 * s, body.y() + 172.0 * s, 140.0 * s, 50.0 * s);
             let male_active = self.create_form.gender == Gender::Male;
             let female_active = self.create_form.gender == Gender::Female;
             let male_btn = if male_active {
@@ -621,18 +625,18 @@ impl CharacterSelect {
 
             // Confirm + Cancel.
             let can_confirm = !self.create_form.name.trim().is_empty();
-            let btn_y = body.max.y - 50.0;
+            let btn_y = body.max.y - 50.0 * s;
             let confirm = Button::primary("Confirm")
                 .enabled(can_confirm)
                 .show_with_id(
                     ui,
                     Id::root("char_select").child("create_confirm"),
-                    Rect::from_xywh(body.x(), btn_y, 160.0, 50.0),
+                    Rect::from_xywh(body.x(), btn_y, 160.0 * s, 50.0 * s),
                 );
             let cancel = Button::new("Cancel").show_with_id(
                 ui,
                 Id::root("char_select").child("create_cancel"),
-                Rect::from_xywh(body.x() + 180.0, btn_y, 120.0, 50.0),
+                Rect::from_xywh(body.x() + 180.0 * s, btn_y, 120.0 * s, 50.0 * s),
             );
             let enter = ui.input().enter_just_pressed() && name_resp.focused && can_confirm;
             if (confirm.clicked || enter) && can_confirm {
@@ -659,8 +663,9 @@ impl CharacterSelect {
 
         let theme = *ui.theme();
         let s = ui.screen_size();
-        let mw = 460.0;
-        let mh = 200.0;
+        let sc = theme.scale;
+        let mw = 460.0 * sc;
+        let mh = 200.0 * sc;
         let modal_rect = Rect::from_xywh(
             (s.x - mw) * 0.5,
             (s.y - mh) * 0.5,
@@ -675,24 +680,24 @@ impl CharacterSelect {
 
         ui.with_layer(rift_engine::ui::im::Layer::Modal, |ui| {
             Frame::panel(&theme)
-                .with_padding(Pad::all(20.0))
+                .with_padding(Pad::all(20.0 * sc))
                 .show(ui, modal_rect, |ui, body| {
                     let _ = title(ui, body.min, "Delete character?");
                     label(
                         ui,
-                        body.min + Vec2::new(0.0, 40.0),
+                        body.min + Vec2::new(0.0, 40.0 * sc),
                         &format!("\"{}\" will be permanently removed.", name),
                     );
-                    let btn_y = body.max.y - 50.0;
+                    let btn_y = body.max.y - 50.0 * sc;
                     let yes = Button::danger("Delete").show_with_id(
                         ui,
                         Id::root("char_select").child("del_yes"),
-                        Rect::from_xywh(body.x(), btn_y, 140.0, 50.0),
+                        Rect::from_xywh(body.x(), btn_y, 140.0 * sc, 50.0 * sc),
                     );
                     let no = Button::new("Cancel").show_with_id(
                         ui,
                         Id::root("char_select").child("del_no"),
-                        Rect::from_xywh(body.max.x - 140.0, btn_y, 140.0, 50.0),
+                        Rect::from_xywh(body.max.x - 140.0 * sc, btn_y, 140.0 * sc, 50.0 * sc),
                     );
                     if yes.clicked {
                         self.roster.remove(idx);

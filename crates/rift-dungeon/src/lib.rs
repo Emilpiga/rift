@@ -103,7 +103,43 @@ impl Floor {
         self.tiles[z * self.width + x]
     }
 
+    /// Returns `true` if a horizontal line from `a` to `b` is
+    /// not blocked by any [`Tile::Wall`]. Y is ignored.
+    ///
+    /// Thin wrapper over
+    /// [`rift_math::physics::line_of_sight_grid`] — the
+    /// algorithm (segment sampling, step cadence, world→grid
+    /// rounding) lives in `rift-math` so every LOS user in the
+    /// workspace shares one implementation. This binding only
+    /// supplies the "is this tile a wall?" predicate, which is
+    /// the part that depends on [`Floor`]'s tile storage.
+    ///
+    /// Negative or out-of-bounds samples count as blocked,
+    /// matching [`Floor::get`]'s behaviour for those cases.
+    pub fn line_of_sight(&self, a: Vec3, b: Vec3) -> bool {
+        rift_math::physics::line_of_sight_grid(a, b, |gx, gz| {
+            if gx < 0 || gz < 0 {
+                return true;
+            }
+            self.get(gx as usize, gz as usize) == Tile::Wall
+        })
+    }
+
     /// Get wall positions (only walls adjacent to floor tiles).
+    ///
+    /// Includes diagonal neighbors so inside-corner cells aren't
+    /// culled. With orthogonal-only adjacency, an L-bend like:
+    ///
+    /// ```text
+    ///   W W F
+    ///   W F F
+    ///   F F F
+    /// ```
+    ///
+    /// would drop the top-left wall (no N/E/S/W floor neighbor)
+    /// and leave a visible 1-tile gap at the inside corner. The
+    /// 8-way check fills those corners while still pruning walls
+    /// buried deep in the rock.
     pub fn wall_positions(&self) -> Vec<Vec3> {
         let mut positions = Vec::new();
         for z in 0..self.depth {
@@ -114,6 +150,10 @@ impl Floor {
                         (x + 1, z),
                         (x, z.wrapping_sub(1)),
                         (x, z + 1),
+                        (x.wrapping_sub(1), z.wrapping_sub(1)),
+                        (x + 1, z.wrapping_sub(1)),
+                        (x.wrapping_sub(1), z + 1),
+                        (x + 1, z + 1),
                     ]
                     .iter()
                     .any(|&(nx, nz)| self.get(nx, nz) == Tile::Floor);

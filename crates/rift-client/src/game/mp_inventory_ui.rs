@@ -34,27 +34,178 @@ use super::PlayerState;
 
 // ─── Layout constants ────────────────────────────────────────────────
 //
-// Sizing tuned for readability on 1080p+. Slot is the unit
-// every other dimension is derived from; bumping it scales the
-// whole panel proportionally.
+// Sizing tuned for readability on 1080p+. Everything below is
+// the *unscaled* baseline; per-frame the [`Layout`] struct
+// scales each value by `fit` (the smaller of the global theme
+// scale and the screen-fit factor) so the whole composition
+// shrinks to fit instead of overflowing on small screens.
+//
+// Layout shape:
+//
+//     ┌────────────────────────────────┐  ┌──────────────┐
+//     │ INVENTORY            EQUIPPED  │  │ CHARACTER    │
+//     │ [E][E][E][E][E][E][E][E][E]    │  │              │
+//     │ ─────────────────────────────  │  │ Lv.X  Class  │
+//     │ [B][B][B][B][B][B]             │  │              │
+//     │ [B][B][B][B][B][B]             │  │ OFFENSE      │
+//     │ [B][B][B][B][B][B]             │  │  ...         │
+//     │ [B][B][B][B][B][B]             │  │              │
+//     │ [B][B][B][B][B][B]             │  │ DEFENSE      │
+//     │ TAB: close ...                 │  │  ...         │
+//     └────────────────────────────────┘  └──────────────┘
+//
+// 6-col bag with the 9 equipment slots laid horizontally
+// above it reads more like other ARPG inventories and gives
+// the stats panel real estate to actually breathe.
 
-const SLOT_SIZE: f32 = 72.0;
+const SLOT_SIZE: f32 = 64.0;
 const SLOT_GAP: f32 = 8.0;
-const COLS: usize = 5;
-const ROWS: usize = 6;
+const COLS: usize = 6;
+const ROWS: usize = 5;
+/// Equipment slots laid out in a single row above the bag
+/// grid. There are 9 [`EquipSlot`] variants; the panel is
+/// sized to fit all of them on one line.
+const EQUIP_COLS: usize = 9;
 const PANEL_PAD: f32 = 22.0;
 const HEADER_H: f32 = 44.0;
 const FOOTER_H: f32 = 30.0;
-/// Gutter between bag and equipment column inside the bag panel.
-const INNER_GAP: f32 = 22.0;
-/// Stats panel sits to the right of the bag panel.
-const STATS_W: f32 = 260.0;
+/// Vertical gap between the equipment row and the bag grid.
+const INNER_GAP: f32 = 18.0;
+/// Stats panel sits to the right of the bag panel. Wider than
+/// before because long row labels ("Cooldown Reduction",
+/// "Lightning Damage") need real estate next to their values.
+const STATS_W: f32 = 340.0;
 const STATS_GAP: f32 = 14.0;
-const EQUIP_COL_W: f32 = SLOT_SIZE;
 const STASH_COLS: usize = 6;
 const STASH_ROWS: usize = 6;
-const STASH_COL_W: f32 =
-    STASH_COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PANEL_PAD * 2.0;
+
+/// Per-frame computed layout. All `f32` fields are already
+/// multiplied by [`Self::fit`], so call sites read pixel
+/// values directly without re-applying the scale. `fit` is
+/// the smaller of the user's preferred theme scale and the
+/// largest scale at which the full composition still fits on
+/// screen — so a window resize squeezes the panel down rather
+/// than letting it spill off the edges.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    fit: f32,
+    slot: f32,
+    gap: f32,
+    pad: f32,
+    header_h: f32,
+    footer_h: f32,
+    inner_gap: f32,
+    /// Bag (6×5 grid) + horizontal equip row panel.
+    bag_panel: Rect,
+    /// Stats panel that sits to the right of the bag panel.
+    stats_panel: Rect,
+    /// Optional stash panel (only resolved when stash is open).
+    stash_panel: Rect,
+}
+
+impl Layout {
+    /// Compute a fit-scaled layout for the inventory triptych.
+    /// Centres the (stash? + bag + stats) row on screen and
+    /// shrinks every dimension uniformly so the panel never
+    /// overflows. `stash_open` widens the composition to
+    /// include the stash slab in the fit calculation.
+    fn compute(ui: &Ui<'_>, stash_open: bool) -> Self {
+        let theme = *ui.theme();
+        let screen = ui.screen_size();
+
+        // Unscaled total dimensions.
+        // Bag width is the *content* width of the bag panel;
+        // we size the panel to whichever of (bag, equip row)
+        // is wider so neither clips. The 9-slot equip row
+        // wins over the 6-slot bag, so the panel is `EQUIP_COLS`
+        // slots wide and the bag grid is centred inside it.
+        let bag_grid_w_u = COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
+        let equip_row_w_u = EQUIP_COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
+        let content_w_u = bag_grid_w_u.max(equip_row_w_u);
+        let bag_panel_w_u = content_w_u + PANEL_PAD * 2.0;
+
+        let bag_grid_h_u = ROWS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
+        let body_h_u = SLOT_SIZE + INNER_GAP + bag_grid_h_u;
+        let bag_panel_h_u = body_h_u + PANEL_PAD * 2.0 + HEADER_H + FOOTER_H;
+
+        let stash_w_u = STASH_COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PANEL_PAD * 2.0;
+
+        let total_w_u = if stash_open {
+            stash_w_u + STATS_GAP + bag_panel_w_u + STATS_GAP + STATS_W
+        } else {
+            bag_panel_w_u + STATS_GAP + STATS_W
+        };
+        let total_h_u = bag_panel_h_u;
+
+        // Leave a screen-edge margin so the panel never kisses
+        // the bezel — a few px of dead space looks far better
+        // than a full-width slab and gives tooltips room to
+        // breathe.
+        let margin = theme.spacing.panel_margin();
+        let avail_w = (screen.x - margin * 2.0).max(64.0);
+        let avail_h = (screen.y - margin * 2.0).max(64.0);
+
+        let fit = theme
+            .scale
+            .min(avail_w / total_w_u)
+            .min(avail_h / total_h_u)
+            .max(0.4);
+
+        // Scale every dimension by the chosen fit.
+        let slot = SLOT_SIZE * fit;
+        let gap = SLOT_GAP * fit;
+        let pad = PANEL_PAD * fit;
+        let header_h = HEADER_H * fit;
+        let footer_h = FOOTER_H * fit;
+        let inner_gap = INNER_GAP * fit;
+        let stats_gap = STATS_GAP * fit;
+
+        let bag_panel_w = bag_panel_w_u * fit;
+        let bag_panel_h = bag_panel_h_u * fit;
+        let stash_panel_w = stash_w_u * fit;
+        let stats_panel_w = STATS_W * fit;
+
+        let total_w = total_w_u * fit;
+        let row_x = ((screen.x - total_w) * 0.5).max(margin);
+        let row_y = ((screen.y - bag_panel_h) * 0.5).max(margin);
+
+        let (stash_x, bag_x) = if stash_open {
+            let sx = row_x;
+            let bx = sx + stash_panel_w + stats_gap;
+            (sx, bx)
+        } else {
+            // Stash placeholder rect lives off-screen left so
+            // its (zero-area) hit-test never matches.
+            (-1.0, row_x)
+        };
+        let stats_x = bag_x + bag_panel_w + stats_gap;
+
+        let bag_panel = Rect::from_xywh(bag_x, row_y, bag_panel_w, bag_panel_h);
+        let stats_panel = Rect::from_xywh(stats_x, row_y, stats_panel_w, bag_panel_h);
+        // Stash uses only as much vertical room as it needs;
+        // no footer.
+        let stash_body_h = (STASH_ROWS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP) * fit;
+        let stash_h = stash_body_h + pad * 2.0 + header_h;
+        let stash_panel = if stash_open {
+            Rect::from_xywh(stash_x, row_y, stash_panel_w, stash_h)
+        } else {
+            Rect::from_xywh(-1.0, -1.0, 0.0, 0.0)
+        };
+
+        Self {
+            fit,
+            slot,
+            gap,
+            pad,
+            header_h,
+            footer_h,
+            inner_gap,
+            bag_panel,
+            stats_panel,
+            stash_panel,
+        }
+    }
+}
 
 // ─── Drag payload ───────────────────────────────────────────────────
 
@@ -74,6 +225,14 @@ enum DragSource {
 pub struct MpInventoryUI {
     pub open: bool,
     stash_visible: bool,
+    /// Cached layout rects from the last `frame()` call so the
+    /// input layer's [`Self::consumes_mouse`] check (which
+    /// runs without a `Ui`) can hit-test the *actual* on-
+    /// screen positions instead of recomputing them with a
+    /// stale theme scale.
+    cached_bag: Rect,
+    cached_stats: Rect,
+    cached_stash: Rect,
 }
 
 impl MpInventoryUI {
@@ -117,34 +276,49 @@ impl MpInventoryUI {
         }
 
         let theme = *ui.theme();
-        let screen = ui.screen_size();
+        let layout = Layout::compute(ui, stash_open);
+        // Stash these for `consumes_mouse` (input layer has no
+        // `Ui`, so it can't recompute the layout itself).
+        self.cached_bag = layout.bag_panel;
+        self.cached_stats = layout.stats_panel;
+        self.cached_stash = layout.stash_panel;
 
         // ─── Bag + equipment panel ──────────────────────────────
-        let (px, py, pw, ph) = panel_rect(screen.x, screen.y);
-        let panel_rect = Rect::from_xywh(px, py, pw, ph);
+        let panel_rect = layout.bag_panel;
         let mut hovered_item: Option<Item> = None;
         Frame::panel(&theme)
-            .with_padding(Pad::all(PANEL_PAD))
+            .with_padding(Pad::all(layout.pad))
             .show(ui, panel_rect, |ui, body| {
-                // Title row.
+                // Title row: "INVENTORY" left, "EQUIPPED Y/9"
+                // right. Same row so we don't double-stack
+                // labels (the old layout had EQUIPPED clipping
+                // the bag count).
                 ui.draw_text(
                     Pos2::new(body.x(), body.y()),
                     "INVENTORY",
                     theme.fonts.size_lg,
                     theme.colors.text,
                 );
-                let counts = format!(
-                    "{}/{}    Equipped {}/{}",
-                    items.iter().filter(|s| s.is_some()).count(),
-                    COLS * ROWS,
+                let header_label = format!(
+                    "EQUIPPED  {}/{}        BAG  {}/{}",
                     equipment.count(),
                     EquipSlot::COUNT,
+                    items.iter().filter(|s| s.is_some()).count(),
+                    COLS * ROWS,
                 );
-                let cw = ui.measure_text(&counts, theme.fonts.size_md);
-                ui.draw_text(
-                    Pos2::new(body.max.x - cw, body.y() + 4.0),
-                    &counts,
+                let cw = ui.measure_text(&header_label, theme.fonts.size_md);
+                // If the combined string wouldn't fit (very
+                // narrow `fit`) just ellipsize from the right
+                // edge — `draw_text_ellipsized` keeps it from
+                // bleeding under the title.
+                let counts_max = body.width()
+                    - ui.measure_text("INVENTORY", theme.fonts.size_lg)
+                    - 12.0_f32 * layout.fit;
+                ui.draw_text_ellipsized(
+                    Pos2::new(body.max.x - cw.min(counts_max), body.y() + 4.0),
+                    &header_label,
                     theme.fonts.size_md,
+                    counts_max.max(0.0),
                     theme.colors.text_dim,
                 );
 
@@ -154,59 +328,21 @@ impl MpInventoryUI {
                     theme.colors.border,
                 );
 
-                let grid_y = body.y() + HEADER_H;
-
-                // Bag grid. One `ItemSlot::interact` call per
-                // cell handles draw + drag-source + drop-zone +
-                // click classification; nothing else is wired.
-                for row in 0..ROWS {
-                    for col in 0..COLS {
-                        let idx = row * COLS + col;
-                        let pos = Pos2::new(
-                            body.x() + col as f32 * (SLOT_SIZE + SLOT_GAP),
-                            grid_y + row as f32 * (SLOT_SIZE + SLOT_GAP),
-                        );
-                        let id = Id::root("inv").child(("bag", idx));
-                        let rect = Rect::from_xywh(pos.x, pos.y, SLOT_SIZE, SLOT_SIZE);
-                        let item = items.get(idx).and_then(|o| o.as_ref());
-                        let payload = item.map(|_| DragSource::Bag(idx));
-                        let r = build_item_slot(item).interact::<DragSource>(ui, rect, id, payload);
-                        let hovered = r.response.hovered;
-                        route_slot(
-                            r,
-                            DropTarget::Bag(idx),
-                            stash_open,
-                            pending,
-                            stash_pending,
-                        );
-                        if let Some(it) = item {
-                            if hovered {
-                                hovered_item = Some(it.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Equipment column.
-                let bag_w = COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
-                let ex = body.x() + bag_w + INNER_GAP;
-                // Vertical divider between bag and equipment.
-                ui.draw_rect(
-                    Rect::from_xywh(ex - INNER_GAP * 0.5, grid_y, 1.0,
-                        EquipSlot::COUNT as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP),
-                    theme.colors.border,
-                );
-                // Column heading.
-                ui.draw_text(
-                    Pos2::new(ex, grid_y - theme.fonts.size_sm - 4.0),
-                    "EQUIPPED",
-                    theme.fonts.size_sm,
-                    theme.colors.text_dim,
-                );
+                // ─── Equipment row (above bag) ──────────────
+                // 9 slots laid out horizontally, centred in
+                // the panel body so a 6-column bag below sits
+                // visually inside the same column band.
+                let equip_row_w =
+                    EQUIP_COLS as f32 * (layout.slot + layout.gap) - layout.gap;
+                let equip_x = body.x() + (body.width() - equip_row_w) * 0.5;
+                let equip_y = body.y() + layout.header_h;
                 for (i, slot) in EquipSlot::ALL.iter().enumerate() {
-                    let pos = Pos2::new(ex, grid_y + i as f32 * (SLOT_SIZE + SLOT_GAP));
+                    let pos = Pos2::new(
+                        equip_x + i as f32 * (layout.slot + layout.gap),
+                        equip_y,
+                    );
                     let id = Id::root("inv").child(("equip", i));
-                    let rect = Rect::from_xywh(pos.x, pos.y, SLOT_SIZE, SLOT_SIZE);
+                    let rect = Rect::from_xywh(pos.x, pos.y, layout.slot, layout.slot);
                     let item = equipment.get(*slot);
                     let payload = item.map(|_| DragSource::Equip(*slot));
                     let r = build_item_slot(item).interact::<DragSource>(ui, rect, id, payload);
@@ -228,15 +364,64 @@ impl MpInventoryUI {
                         // what goes here without a tooltip.
                         let label = slot.label();
                         let lw = ui.measure_text(label, theme.fonts.size_sm);
-                        ui.draw_text(
+                        // Cap the label to the slot width
+                        // minus a small margin — most slot
+                        // labels (e.g. "Helmet", "Ring") fit,
+                        // but "Necklace" / "Shoulders" can run
+                        // long and would otherwise spill onto
+                        // neighbours.
+                        let max_lbl = layout.slot - 6.0 * layout.fit;
+                        let draw_w = lw.min(max_lbl);
+                        ui.draw_text_ellipsized(
                             Pos2::new(
-                                rect.x() + (SLOT_SIZE - lw) * 0.5,
-                                rect.y() + (SLOT_SIZE - theme.fonts.size_sm) * 0.5,
+                                rect.x() + (layout.slot - draw_w) * 0.5,
+                                rect.y() + (layout.slot - theme.fonts.size_sm) * 0.5,
                             ),
                             label,
                             theme.fonts.size_sm,
+                            max_lbl,
                             theme.colors.text_muted,
                         );
+                    }
+                }
+
+                // Horizontal divider between equip row and bag.
+                let div_y = equip_y + layout.slot + layout.inner_gap * 0.5;
+                ui.draw_rect(
+                    Rect::from_xywh(body.x(), div_y, body.width(), 1.0),
+                    theme.colors.border,
+                );
+
+                // ─── Bag grid (6 cols × 5 rows) ─────────────
+                let bag_grid_w =
+                    COLS as f32 * (layout.slot + layout.gap) - layout.gap;
+                let bag_x = body.x() + (body.width() - bag_grid_w) * 0.5;
+                let bag_y = equip_y + layout.slot + layout.inner_gap;
+                for row in 0..ROWS {
+                    for col in 0..COLS {
+                        let idx = row * COLS + col;
+                        let pos = Pos2::new(
+                            bag_x + col as f32 * (layout.slot + layout.gap),
+                            bag_y + row as f32 * (layout.slot + layout.gap),
+                        );
+                        let id = Id::root("inv").child(("bag", idx));
+                        let rect = Rect::from_xywh(pos.x, pos.y, layout.slot, layout.slot);
+                        let item = items.get(idx).and_then(|o| o.as_ref());
+                        let payload = item.map(|_| DragSource::Bag(idx));
+                        let r = build_item_slot(item).interact::<DragSource>(ui, rect, id, payload);
+                        let hovered = r.response.hovered;
+                        route_slot(
+                            r,
+                            DropTarget::Bag(idx),
+                            stash_open,
+                            pending,
+                            stash_pending,
+                        );
+                        if let Some(it) = item {
+                            if hovered {
+                                hovered_item = Some(it.clone());
+                            }
+                        }
                     }
                 }
 
@@ -247,7 +432,7 @@ impl MpInventoryUI {
                     "TAB: close  \u{00B7}  drag to reorder/equip/drop  \u{00B7}  SHIFT: compare"
                 };
                 ui.draw_rect(
-                    Rect::from_xywh(body.x(), body.max.y - FOOTER_H + 4.0, body.width(), 1.0),
+                    Rect::from_xywh(body.x(), body.max.y - layout.footer_h + 4.0, body.width(), 1.0),
                     theme.colors.border,
                 );
                 ui.draw_text_ellipsized(
@@ -262,10 +447,9 @@ impl MpInventoryUI {
         // ─── Stash panel ────────────────────────────────────────
         let mut stash_hovered: Option<Item> = None;
         if stash_open {
-            let (spx, spy, spw, sph) = stash_panel_rect(screen.x, screen.y);
-            let stash_rect = Rect::from_xywh(spx, spy, spw, sph);
+            let stash_rect = layout.stash_panel;
             Frame::panel(&theme)
-                .with_padding(Pad::all(PANEL_PAD))
+                .with_padding(Pad::all(layout.pad))
                 .show(ui, stash_rect, |ui, body| {
                     ui.draw_text(
                         Pos2::new(body.x(), body.y()),
@@ -289,16 +473,16 @@ impl MpInventoryUI {
                         Rect::from_xywh(body.x(), body.y() + theme.fonts.size_lg + 8.0, body.width(), 1.0),
                         theme.colors.border,
                     );
-                    let grid_y = body.y() + HEADER_H;
+                    let grid_y = body.y() + layout.header_h;
                     for row in 0..STASH_ROWS {
                         for col in 0..STASH_COLS {
                             let idx = row * STASH_COLS + col;
                             let pos = Pos2::new(
-                                body.x() + col as f32 * (SLOT_SIZE + SLOT_GAP),
-                                grid_y + row as f32 * (SLOT_SIZE + SLOT_GAP),
+                                body.x() + col as f32 * (layout.slot + layout.gap),
+                                grid_y + row as f32 * (layout.slot + layout.gap),
                             );
                             let id = Id::root("inv").child(("stash", idx));
-                            let rect = Rect::from_xywh(pos.x, pos.y, SLOT_SIZE, SLOT_SIZE);
+                            let rect = Rect::from_xywh(pos.x, pos.y, layout.slot, layout.slot);
                             let item = stash_items.get(idx).and_then(|o| o.as_ref());
                             let payload = item.map(|_| DragSource::Stash(idx));
                             let r = build_item_slot(item)
@@ -325,40 +509,61 @@ impl MpInventoryUI {
         // Always shown alongside the bag panel so the player can
         // see their resolved character sheet without leaving the
         // inventory screen.
-        let (stx, sty, stw, sth) = stats_panel_rect(screen.x, screen.y);
-        let stats_rect = Rect::from_xywh(stx, sty, stw, sth);
-        render_stats_panel(ui, stats_rect, player_state);
+        let stats_rect = layout.stats_panel;
+        render_stats_panel(ui, stats_rect, player_state, &layout);
 
         // ─── Tooltip(s) ────────────────────────────────────────
         let tip_target = hovered_item.as_ref().or(stash_hovered.as_ref());
         if let Some(item) = tip_target {
             let mp = ui.mouse_pos();
+            let screen_w = ui.screen_size().x;
+            // Default anchor: just to the right of the cursor.
+            // If we're past the screen midpoint we *prefer* the
+            // left side so the cursor stays free of the
+            // tooltip slab and the compare/delta panes don't
+            // immediately overflow the edge.
+            let primary_anchor = if mp.x > screen_w * 0.5 {
+                Pos2::new(mp.x - ui.s(18.0), mp.y)
+            } else {
+                Pos2::new(mp.x + ui.s(18.0), mp.y)
+            };
             let primary = render_item_tooltip(
                 ui,
                 item,
                 "Hovered",
-                Pos2::new(mp.x + 18.0, mp.y),
+                primary_anchor,
                 Some(&player_state.loadout),
             );
-            // Compare side-by-side. Always show the equipped
-            // counterpart when one exists; SHIFT additionally
-            // surfaces a per-stat delta column so the player
-            // can see exactly what they'd gain or lose.
+            // Compare side-by-side. Pick the side with more
+            // remaining room so two- and three-pane tooltips
+            // don't push past the screen edge on right-half
+            // hovers. SHIFT additionally surfaces a per-stat
+            // delta column so the player can see exactly what
+            // they'd gain or lose.
             if let Some(equipped) = compare_target(equipment, item) {
+                let stack_right = primary.max.x + ui.s(8.0) + 200.0 < screen_w;
+                let eq_anchor = if stack_right {
+                    Pos2::new(primary.max.x + ui.s(8.0), primary.y())
+                } else {
+                    // Stack to the left of `primary`. The
+                    // tooltip's own width-clamp will pull it
+                    // back if it can't fit there either.
+                    Pos2::new(primary.x() - ui.s(8.0) - 200.0, primary.y())
+                };
                 let eq_rect = render_item_tooltip(
                     ui,
                     equipped,
                     "Equipped",
-                    Pos2::new(primary.max.x + 8.0, primary.y()),
+                    eq_anchor,
                     Some(&player_state.loadout),
                 );
                 if ui.shift_held() {
-                    render_compare_delta(
-                        ui,
-                        item,
-                        equipped,
-                        Pos2::new(eq_rect.max.x + 8.0, eq_rect.y()),
-                    );
+                    let delta_anchor = if stack_right {
+                        Pos2::new(eq_rect.max.x + ui.s(8.0), eq_rect.y())
+                    } else {
+                        Pos2::new(eq_rect.x() - ui.s(8.0) - 200.0, eq_rect.y())
+                    };
+                    render_compare_delta(ui, item, equipped, delta_anchor);
                 }
             }
         }
@@ -383,23 +588,23 @@ impl MpInventoryUI {
         true
     }
 
-    pub fn consumes_mouse(&self, mx: f32, my: f32, screen_w: f32, screen_h: f32) -> bool {
+    pub fn consumes_mouse(&self, mx: f32, my: f32, _screen_w: f32, _screen_h: f32) -> bool {
         if !self.open {
             return false;
         }
-        let (px, py, pw, ph) = panel_rect(screen_w, screen_h);
-        if mx >= px && mx < px + pw && my >= py && my < py + ph {
+        let hit = |r: Rect| {
+            r.width() > 0.0
+                && r.height() > 0.0
+                && mx >= r.min.x
+                && mx < r.max.x
+                && my >= r.min.y
+                && my < r.max.y
+        };
+        if hit(self.cached_bag) || hit(self.cached_stats) {
             return true;
         }
-        let (stx, sty, stw, sth) = stats_panel_rect(screen_w, screen_h);
-        if mx >= stx && mx < stx + stw && my >= sty && my < sty + sth {
+        if self.stash_visible && hit(self.cached_stash) {
             return true;
-        }
-        if self.stash_visible {
-            let (spx, spy, spw, sph) = stash_panel_rect(screen_w, screen_h);
-            if mx >= spx && mx < spx + spw && my >= spy && my < spy + sph {
-                return true;
-            }
         }
         false
     }
@@ -423,6 +628,9 @@ fn build_item_slot<'a>(item: Option<&'a Item>) -> ItemSlot<'a> {
     if let Some(it) = item {
         let c = it.rarity.color();
         s = s.rarity_tint(Color::rgba(c[0], c[1], c[2], 1.0));
+        if it.anchored {
+            s = s.anchored(true);
+        }
         if !it.base.icon.is_empty() {
             s = s.icon(it.base.icon);
         } else if let Some(ch) = it.base.name.chars().next() {
@@ -576,6 +784,10 @@ fn render_item_tooltip(
             } else if s.starts_with('★') {
                 // Legendary effect — gold tint.
                 Color::rgba(1.00, 0.70, 0.20, 1.0)
+            } else if s.starts_with('⚓') {
+                // Anchored trait — saturated gold so the
+                // chase-line reads at a glance.
+                Color::rgba(1.00, 0.82, 0.25, 1.0)
             } else if s.starts_with('→') {
                 // Synergy footer — accent.
                 theme.colors.accent
@@ -691,35 +903,13 @@ fn item_for_source<'a>(
 }
 
 // ─── Layout helpers ──────────────────────────────────────────────────
-
-fn panel_rect(screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
-    let bag_w = COLS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
-    let pw = bag_w + INNER_GAP + EQUIP_COL_W + PANEL_PAD * 2.0;
-    let body_h =
-        (EquipSlot::COUNT as f32).max(ROWS as f32) * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
-    let ph = body_h + PANEL_PAD * 2.0 + HEADER_H + FOOTER_H;
-    // Center the *triptych* (bag panel + stats panel) on screen
-    // so the whole composition stays balanced regardless of
-    // whether the stash is visible.
-    let total_w = pw + STATS_GAP + STATS_W;
-    let px = (screen_w - total_w) * 0.5;
-    let py = (screen_h - ph) * 0.5;
-    (px, py, pw, ph)
-}
-
-fn stats_panel_rect(screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
-    let (bx, by, bw, bh) = panel_rect(screen_w, screen_h);
-    (bx + bw + STATS_GAP, by, STATS_W, bh)
-}
-
-fn stash_panel_rect(screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
-    let (bx, by, _, _) = panel_rect(screen_w, screen_h);
-    let stash_body_h = STASH_ROWS as f32 * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP;
-    let pw = STASH_COL_W;
-    let ph = stash_body_h + PANEL_PAD * 2.0 + HEADER_H;
-    let px = bx - pw - STATS_GAP;
-    (px, by, pw, ph)
-}
+//
+// Layout used to live in three free functions taking
+// `(screen_w, screen_h)`; that didn't account for the global
+// theme scale or the screen-fit clamp, so the panel could
+// overflow on small windows. Everything is now driven through
+// [`Layout::compute`] above. `consumes_mouse` reads the cached
+// rects from the previous frame.
 
 // `TooltipLine` is re-exported for symmetry with hud.rs's usage
 // path; kept here so consumers don't have to learn the engine
@@ -732,10 +922,10 @@ type _TooltipLine<'a> = TooltipLine<'a>;
 /// Render the resolved character sheet (level, class, name +
 /// every CharacterStats field) in a panel that mirrors the
 /// inventory chrome. Read-only — no interaction.
-fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, ps: &PlayerState) {
+fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, ps: &PlayerState, layout: &Layout) {
     let theme = *ui.theme();
     Frame::panel(&theme)
-        .with_padding(Pad::all(PANEL_PAD))
+        .with_padding(Pad::all(layout.pad))
         .show(ui, rect, |ui, body| {
             // Title.
             ui.draw_text_ellipsized(
@@ -776,7 +966,7 @@ fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, ps: &PlayerState) {
             } else {
                 ps.name.as_str()
             };
-            let name_y = body.y() + HEADER_H;
+            let name_y = body.y() + layout.header_h;
             ui.draw_text_ellipsized(
                 Pos2::new(body.x(), name_y),
                 name,
@@ -812,14 +1002,26 @@ fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, ps: &PlayerState) {
                            label: &str,
                            value: String,
                            value_color: Color| {
+                // Measure the value first, then ellipsize the
+                // label to whatever space is left after the
+                // right-aligned value (with a small gap). The
+                // old `body.width() * 0.55` cap was relative
+                // to the panel and ignored the value width
+                // entirely — so when the panel scaled down
+                // for a small screen, long labels like
+                // "Cooldown Reduction" punched right through
+                // their own values. The two columns now
+                // *cannot* overlap.
+                let vw = ui.measure_text(&value, theme.fonts.size_md);
+                let gap = 8.0_f32 * layout.fit;
+                let label_max = (body.width() - vw - gap).max(0.0);
                 ui.draw_text_ellipsized(
                     Pos2::new(body.x(), *y),
                     label,
                     theme.fonts.size_md,
-                    body.width() * 0.55,
+                    label_max,
                     theme.colors.text_dim,
                 );
-                let vw = ui.measure_text(&value, theme.fonts.size_md);
                 ui.draw_text(
                     Pos2::new(body.max.x - vw, *y),
                     &value,

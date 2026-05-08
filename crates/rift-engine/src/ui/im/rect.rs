@@ -155,4 +155,15 @@ impl Pad {
     pub const fn symmetric(h: f32, v: f32) -> Self {
         Self { left: h, right: h, top: v, bottom: v }
     }
+
+    /// Multiply every side by `s`. Used by `Theme::with_scale`
+    /// to bake the per-frame UI scale into spacing tokens.
+    pub fn scaled(self, s: f32) -> Self {
+        Self {
+            left: self.left * s,
+            right: self.right * s,
+            top: self.top * s,
+            bottom: self.bottom * s,
+        }
+    }
 }

@@ -10,7 +10,7 @@
 //! Free-standing functions taking explicit borrows of the
 //! `GameState` slices they actually touch.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::{Input, Renderer};
 
@@ -21,6 +21,86 @@ use crate::game::sub_state::{NetState, NetTransitionRequest};
 /// request. Used for both the hub entry portal and the boss-room
 /// exit portal.
 pub const INTERACT_RADIUS: f32 = 2.2;
+
+/// Compute the Y-axis yaw that points the portal's *visible*
+/// face (the side the player should see) at the local player.
+///
+/// The mesh's geometric +Z is mirrored to a back face with the
+/// same colours, so visually either side reads as "the disc",
+/// but the front winding is generated for viewers on the +Z
+/// side. We want the player to be on the front-facing side, so
+/// we rotate so +Z points *away* from the player — that puts
+/// the player on the front-face viewing side. (Earlier we had
+/// the sign flipped; this matches what playtesting shows.)
+fn facing_yaw(world: &hecs::World, portal_pos: Vec3) -> f32 {
+    let Some(p) = world
+        .query::<(&Transform, &Player, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (t, _, _))| t.position)
+        .next()
+    else {
+        return 0.0;
+    };
+    let dx = p.x - portal_pos.x;
+    let dz = p.z - portal_pos.z;
+    if dx.abs() < 1e-4 && dz.abs() < 1e-4 {
+        0.0
+    } else {
+        // Flip 180° vs. naive "+Z toward player" so the
+        // correct face is presented.
+        (-dx).atan2(-dz)
+    }
+}
+
+/// Apply the billboard yaw to both the portal mesh's
+/// `model_matrix` and the VFX emitter's orientation, so the
+/// glowing halo / flame licks rotate together with the disc.
+///
+/// On top of the Y-axis billboard we also spin the mesh around
+/// its *local* Z axis (the disc normal). The frame torus is
+/// rotationally symmetric so the spin only shows on the inner
+/// disc — its radial gradient + per-vertex hash modulation read
+/// as a slowly turning swirl. The VFX emitter's orientation is
+/// also given the Z-spin so the orbiting halo sparks share the
+/// disc's reference frame.
+fn apply_facing(
+    portal: &HubPortal,
+    world: &hecs::World,
+    renderer: &mut Renderer,
+) {
+    /// Radians/sec the disc rotates around its own normal. Slow
+    /// enough to read as "the other side is alive" without
+    /// reading as a fan blade.
+    const DISC_SPIN: f32 = 0.6;
+    /// Y-offset (in model space) of the disc centre — the
+    /// `cy_offset = height / 2` constant baked into
+    /// [`rift_engine::renderer::mesh::Mesh::portal_with_palette`].
+    /// We pivot the Z-spin around this so the disc rotates
+    /// around its own centre instead of the mesh origin (which
+    /// sits at the floor).
+    const DISC_CENTRE_Y: f32 = 1.05;
+
+    let yaw = facing_yaw(world, portal.position);
+    let spin = portal.age * DISC_SPIN;
+    let billboard = Quat::from_rotation_y(yaw);
+    let local_spin = Quat::from_rotation_z(spin);
+    if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
+        // World <- billboard <- pivot-around-disc-centre <- spin.
+        let centre = Vec3::new(0.0, DISC_CENTRE_Y, 0.0);
+        obj.model_matrix = Mat4::from_translation(portal.position)
+            * Mat4::from_quat(billboard)
+            * Mat4::from_translation(centre)
+            * Mat4::from_quat(local_spin)
+            * Mat4::from_translation(-centre);
+    }
+    // The VFX emitter is already anchored at the disc centre
+    // (see `PORTAL_CENTRE_Y` in the portal preset), so no
+    // translation pivot is needed — just hand it the combined
+    // rotation.
+    renderer
+        .vfx_system
+        .set_orientation(portal.emitter_idx, billboard * local_spin);
+}
 
 /// Visual + interaction state for a single portal (hub entry or
 /// boss-room exit). The two are structurally identical; we keep
@@ -42,21 +122,67 @@ pub struct HubPortal {
 /// Spawn the hub entry portal mesh + vortex emitter at `pos`.
 /// Records the render slots in `*hub_portal` so we can spin the
 /// mesh and check the interaction radius each frame.
+///
+/// The portal disc bakes in the *destination* biome's sky
+/// palette — a hub portal opens onto the rift, so we feed in
+/// [`SkyConfig::rift`] (crimson zenith, near-black horizon).
 pub fn spawn_hub(hub_portal: &mut Option<HubPortal>, renderer: &mut Renderer, pos: Vec3) {
-    spawn(hub_portal, renderer, pos, "hub portal");
+    spawn(
+        hub_portal,
+        renderer,
+        pos,
+        "hub portal",
+        rift_engine::SkyConfig::rift(),
+    );
 }
 
 /// Spawn the exit portal mesh + vortex emitter at `pos`.
 /// Same body as `spawn_hub` but writes to `*exit_portal` so the
 /// two portals can coexist.
+///
+/// The exit portal opens onto the *next* rift floor, but for
+/// now the visual destination is "more rift" — same crimson
+/// gloom palette as `spawn_hub`. (When per-floor biomes ship
+/// the caller can pick a different `SkyConfig` here.)
 pub fn spawn_exit(exit_portal: &mut Option<HubPortal>, renderer: &mut Renderer, pos: Vec3) {
-    spawn(exit_portal, renderer, pos, "exit portal");
+    spawn(
+        exit_portal,
+        renderer,
+        pos,
+        "exit portal",
+        rift_engine::SkyConfig::rift(),
+    );
 }
 
-fn spawn(slot: &mut Option<HubPortal>, renderer: &mut Renderer, pos: Vec3, label: &str) {
+/// Spawn a portal whose disc shows the *hub* biome — used by the
+/// boss-room success portal that ferries you back to the safe
+/// zone, as opposed to the deeper-into-the-rift continuation.
+/// Currently unused but kept as a small public hook so the
+/// callsite that wants "portal home" reads as such.
+pub fn spawn_return_to_hub(slot: &mut Option<HubPortal>, renderer: &mut Renderer, pos: Vec3) {
+    spawn(
+        slot,
+        renderer,
+        pos,
+        "hub return portal",
+        rift_engine::SkyConfig::meadow(),
+    );
+}
+
+fn spawn(
+    slot: &mut Option<HubPortal>,
+    renderer: &mut Renderer,
+    pos: Vec3,
+    label: &str,
+    destination: rift_engine::SkyConfig,
+) {
     use rift_engine::renderer::mesh::Mesh;
 
-    let portal_mesh = Mesh::portal();
+    let portal_mesh = Mesh::portal_with_palette(
+        Vec3::from(destination.zenith),
+        Vec3::from(destination.horizon),
+        Vec3::from(destination.ground),
+    );
     if renderer
         .add_mesh(&portal_mesh, Mat4::from_translation(pos))
         .is_err()
@@ -65,9 +191,15 @@ fn spawn(slot: &mut Option<HubPortal>, renderer: &mut Renderer, pos: Vec3, label
         return;
     }
     let obj_idx = renderer.objects.len() - 1;
+    // Anchor the VFX at the *centre* of the mesh ring, not at
+    // floor level — the Strange-style halo orbits a vertical
+    // axis, so the emitter has to sit where the visible ring
+    // is. See `PORTAL_CENTRE_Y` for the offset constant.
+    let emitter_pos = pos
+        + Vec3::Y * rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
     let emitter_id = renderer
         .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::portal_vortex(), pos);
+        .spawn(rift_engine::renderer::vfx::presets::portal_vortex(), emitter_pos);
     *slot = Some(HubPortal {
         position: pos,
         obj_idx,
@@ -150,23 +282,21 @@ pub fn tick_exit(
     // surface the cooldown banner instead of the F-press
     // prompt so the player understands why F doesn't work.
     if vote_active {
-        // Still spin the mesh below.
+        // Still re-orient the disc toward the player below.
         if let Some(portal) = exit_portal.as_mut() {
             portal.age += dt;
-            if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
-                obj.model_matrix = Mat4::from_translation(portal.position)
-                    * Mat4::from_rotation_y(portal.age * 0.6);
-            }
+        }
+        if let Some(portal) = exit_portal.as_ref() {
+            apply_facing(portal, world, renderer);
         }
         return;
     }
     if vote_cooldown > 0.0 {
         if let Some(portal) = exit_portal.as_mut() {
             portal.age += dt;
-            if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
-                obj.model_matrix = Mat4::from_translation(portal.position)
-                    * Mat4::from_rotation_y(portal.age * 0.6);
-            }
+        }
+        if let Some(portal) = exit_portal.as_ref() {
+            apply_facing(portal, world, renderer);
             let player_in_range = world
                 .query::<(&Transform, &Player, &LocalPlayer)>()
                 .iter()
@@ -230,15 +360,22 @@ pub fn tick_rift_spawn(
         // by the floor decal.
         let pos = spawn_pos + Vec3::new(0.0, 0.5, 0.0);
         log::info!("rift spawn portal: spawning at {:?}", pos);
-        spawn(portal_slot, renderer, pos, "rift spawn portal");
+        // Stepping into this portal returns the party to the
+        // hub, so the disc bakes the *meadow* palette — bright
+        // cyan / warm horizon. Reads as a doorway home, in
+        // visual contrast to the crimson hub-entry portal.
+        spawn(
+            portal_slot,
+            renderer,
+            pos,
+            "rift spawn portal",
+            rift_engine::SkyConfig::meadow(),
+        );
     }
 
     let Some(portal) = portal_slot.as_mut() else { return };
     portal.age += dt;
-    if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
-        obj.model_matrix = Mat4::from_translation(portal.position)
-            * Mat4::from_rotation_y(portal.age * 0.6);
-    }
+    apply_facing(portal, world, renderer);
 
     let Some(player_pos) = world
         .query::<(&Transform, &Player, &LocalPlayer)>()
@@ -296,10 +433,7 @@ fn tick(
     let Some(portal) = portal_slot.as_mut() else { return };
     let _ = portal.emitter_idx;
     portal.age += dt;
-    if let Some(obj) = renderer.objects.get_mut(portal.obj_idx) {
-        obj.model_matrix = Mat4::from_translation(portal.position)
-            * Mat4::from_rotation_y(portal.age * 0.6);
-    }
+    apply_facing(portal, world, renderer);
 
     let Some(player_pos) = world
         .query::<(&Transform, &Player, &LocalPlayer)>()

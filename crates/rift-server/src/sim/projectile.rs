@@ -82,6 +82,14 @@ pub(super) struct Hit {
     pub enemy: Entity,
     pub enemy_net_id: NetId,
     pub enemy_pos: Vec3,
+    /// Net id of the attacker that produced this hit (player
+    /// for projectile / AoE / channel sources, enemy for
+    /// friendly-fire which is currently never seen). Used by
+    /// [`apply_hits_to_enemies`] to drive aggro-on-hit + the
+    /// pack-alert spread; resolved to a player [`Entity`] via
+    /// the ECS at apply time so we don't have to thread the
+    /// entity through every hit construction site.
+    pub attacker: NetId,
     pub damage: f32,
     /// Crit roll inputs from the source caster's stats.
     /// `crit_chance` 0..1; `crit_damage` is the multiplier added
@@ -195,6 +203,7 @@ pub fn tick(
                             enemy: *en_entity,
                             enemy_net_id: *en_net_id,
                             enemy_pos: *en_pos,
+                            attacker: proj.owner,
                             damage: proj.damage,
                             crit_chance: proj.crit_chance,
                             crit_damage: proj.crit_damage,
@@ -323,6 +332,7 @@ pub fn tick_aoe(
                                 enemy: *en_entity,
                                 enemy_net_id: *en_net_id,
                                 enemy_pos: *en_pos,
+                                attacker: zone_owner,
                                 damage: zone_dmg,
                                 crit_chance: zone_crit_chance,
                                 crit_damage: zone_crit_damage,
@@ -398,7 +408,19 @@ pub(super) fn apply_hits_to_enemies(
     hits: Vec<Hit>,
     ctx: &mut super::loot::DeathCtx<'_>,
 ) {
+    // Build a one-shot NetId → Entity map of live players so
+    // the aggro-on-hit notify below can resolve the attacker
+    // without hitting the ECS query path once per hit. Done
+    // inline (cheap; player count is small) so callers don't
+    // have to thread it through.
+    let attacker_lookup: Vec<(NetId, Entity)> = world
+        .query::<&super::player::ServerPlayer>()
+        .iter()
+        .map(|(e, p)| (p.net_id, e))
+        .collect();
+
     let mut dead: Vec<(Entity, NetId)> = Vec::new();
+    let mut aggro_alerts: Vec<(Entity, Entity)> = Vec::new();
     for hit in hits {
         // Read the incoming-damage multiplier off the target's
         // debuff stack (if any) before grabbing the enemy mutably.
@@ -440,8 +462,31 @@ pub(super) fn apply_hits_to_enemies(
             }
             if died {
                 dead.push((hit.enemy, hit.enemy_net_id));
+            } else {
+                // Live victim — queue an aggro notify so it
+                // (and nearby packmates) lock onto the
+                // attacker. Skipped for kills since a corpse
+                // doesn't need a target. Resolved here while
+                // we still have the attacker NetId in scope;
+                // the actual mutation runs after the loop so
+                // we don't double-borrow `world`.
+                if let Some((_, attacker_entity)) = attacker_lookup
+                    .iter()
+                    .find(|(nid, _)| *nid == hit.attacker)
+                {
+                    aggro_alerts.push((hit.enemy, *attacker_entity));
+                }
             }
         }
+    }
+    // Apply queued aggro alerts. Done after the hit loop so we
+    // don't conflict with the per-victim mutable borrows above.
+    // De-duplicate on victim — multiple hits in the same tick
+    // (pierce, AoE tick) only need one notify.
+    aggro_alerts.sort_by_key(|(v, _)| v.id());
+    aggro_alerts.dedup_by_key(|(v, _)| v.id());
+    for (victim, attacker) in aggro_alerts {
+        super::enemy::notify_attacked(world, victim, attacker);
     }
     super::loot::finalise_kills(world, ctx, dead);
 }

@@ -125,6 +125,9 @@ pub fn resolve_claim(
     let drop = loot.drops.swap_remove(idx);
     renderer.vfx_system.despawn(drop.pillar_emitter);
     renderer.vfx_system.despawn(drop.base_emitter);
+    if let Some(halo) = drop.anchored_emitter {
+        renderer.vfx_system.despawn(halo);
+    }
     if add_to_local {
         log::info!(
             "loot picked up: {} (item-level {})",
@@ -176,6 +179,7 @@ pub fn on_loot_dropped(
         blob.rarity,
         blob.ilvl,
         &blob.affixes,
+        blob.anchored,
     ) else {
         log::warn!(
             "loot drop {loot_id:?} has unknown indices base={} affixes={:?}; skipping visual",
@@ -192,6 +196,17 @@ pub fn on_loot_dropped(
     let base = renderer
         .vfx_system
         .spawn(rift_engine::renderer::vfx::presets::loot_beam_base(color), position);
+    // Anchored drops get an extra orbital halo so the rare
+    // trait reads at gameplay distance independent of rarity.
+    let anchored_emitter = if item.anchored {
+        Some(
+            renderer
+                .vfx_system
+                .spawn(rift_engine::renderer::vfx::presets::loot_anchored_halo(), position),
+        )
+    } else {
+        None
+    };
     log::info!(
         "loot dropped: {} (item-level {}) at {:?}",
         item.display_name(),
@@ -204,5 +219,6 @@ pub fn on_loot_dropped(
         item,
         pillar_emitter: pillar,
         base_emitter: base,
+        anchored_emitter,
     });
 }

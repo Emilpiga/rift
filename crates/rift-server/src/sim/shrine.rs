@@ -71,34 +71,6 @@ pub fn maybe_spawn(
     floor_index: u32,
     next_misc_net_id: &mut u32,
 ) {
-    // ── DEBUG: guaranteed spawn near the floor entrance for
-    //    local testing. Drops one shrine ~3 tiles north of
-    //    spawn_pos on every rift floor so the channel mechanic
-    //    is exercisable without waiting for the rare roll.
-    //    Remove (or gate behind a cargo feature) before ship.
-    if floor_index >= 1 {
-        let pos = Vec3::new(
-            floor.spawn_pos.x + 3.0,
-            0.0,
-            floor.spawn_pos.z,
-        );
-        let net_id = NetId(*next_misc_net_id);
-        *next_misc_net_id = next_misc_net_id.wrapping_add(1);
-        if *next_misc_net_id >= 0x8000_0000 {
-            *next_misc_net_id = 0x6000_0000;
-        }
-        log::info!(
-            "shrine: [DEBUG] guaranteed shrine {net_id:?} near spawn on floor {floor_index} at {pos:?}"
-        );
-        let _ = world.spawn((ServerReviveShrine {
-            net_id,
-            position: pos,
-            progress: 0.0,
-            channelers: 0,
-            required: 0,
-        },));
-    }
-
     let chance = spawn_chance(floor_index);
     if chance <= 0.0 {
         return;

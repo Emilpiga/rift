@@ -588,8 +588,21 @@ impl NetClient {
             return;
         }
         // Visible position bleeds the residual error away over
-        // time so corrections aren't visually abrupt.
-        let visible = self.predicted.position + self.correction_error;
+        // time so corrections aren't visually abrupt. We also
+        // extrapolate the XZ component by `predicted.velocity *
+        // time_since_last_predict` so the visual stays smooth at
+        // render rates above the 60 Hz prediction cadence — without
+        // this the avatar visibly steps every 16.6 ms while
+        // running, which is especially obvious mid-jump (the
+        // vertical axis is silky 120 Hz, so the diagonal motion
+        // reads as a stutter even though XZ alone moves at 60 Hz).
+        let extrap_dt = self.input_accumulator.as_secs_f32().min(1.0 / 30.0);
+        let mut extrap = self.predicted.velocity * extrap_dt;
+        // Vertical extrap is zero — Y is owned by the local
+        // gravity sim and we don't want this XZ-only smoothing
+        // to perturb it.
+        extrap.y = 0.0;
+        let visible = self.predicted.position + self.correction_error + extrap;
         let yaw = self.predicted.yaw;
         // Lazy-attach `NetControlled` to the local player so
         // `movement_system` and `collision_system` skip its

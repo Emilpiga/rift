@@ -107,6 +107,41 @@ impl SkyConfig {
             horizon_falloff: 2.5,
         }
     }
+
+    /// Crimson-and-black gloom preset for the rift floors. The
+    /// dungeon walls are ceilingless, so this is what the player
+    /// sees above the parapets — paired with a black fog wall it
+    /// reads as a bleeding sky strangled by smoke.
+    ///
+    /// No sun disc: the rift isn't sunlit, the only direct light
+    /// in the scene comes from torches. The horizon sits darker
+    /// than the zenith so the sky-to-fog seam blends rather than
+    /// banding (fog is near-black, horizon is dim oxblood).
+    pub fn rift() -> Self {
+        Self {
+            enabled: true,
+            // Deep oxblood overhead, almost-black at the horizon.
+            // Slight blue lift in the zenith keeps the dome from
+            // looking flat-painted.
+            zenith: [0.42, 0.04, 0.06],
+            horizon: [0.06, 0.012, 0.012],
+            // Ground band is just black — anything below the
+            // horizon line is hidden by the fog wall + walls
+            // anyway, but keeping it dark prevents a bright
+            // smear on the floor-line edge cases (debug cams,
+            // boss-room reveal).
+            ground: [0.010, 0.005, 0.005],
+            // Dummy sun direction — disc disabled, but a
+            // non-degenerate vector keeps the shader happy.
+            sun_dir: Vec3::new(0.0, 1.0, 0.0),
+            sun_size: 1.0,
+            sun_strength: 0.0,
+            // Tight horizon band so the crimson reads as a
+            // bruised dome overhead rather than washing the
+            // whole sky red — keeps the gloom bias.
+            horizon_falloff: 3.5,
+        }
+    }
 }
 
 /// Push-constant struct sent to `sky.frag`. Matches the layout in

@@ -110,6 +110,13 @@ pub enum SpawnShape {
     /// Thin-disc ring of radius `radius` on the XZ plane —
     /// targeting reticles, ground impacts.
     Ring { radius: f32, thickness: f32 },
+    /// Thin ring in the plane perpendicular to `axis`. Same
+    /// shape as [`Self::Ring`] but oriented arbitrarily — used
+    /// by the Doctor-Strange-style portal halo, which needs to
+    /// orbit a *vertical* mesh ring (axis = +Z) rather than
+    /// lying flat on the floor. Outward emission direction is
+    /// the ring's radial vector in that plane.
+    RingAxis { radius: f32, thickness: f32, axis: Vec3 },
     /// Filled disc on the XZ plane — RoF column top, AoE start.
     Disc { radius: f32 },
     /// Line segment between `a` and `b` relative to the spawn

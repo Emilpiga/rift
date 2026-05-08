@@ -18,6 +18,8 @@
 mod color;
 mod id;
 mod layer;
+mod anchor;
+mod fit;
 mod rect;
 mod response;
 mod state;
@@ -26,6 +28,8 @@ mod ui;
 pub mod widgets;
 mod world_ui;
 
+pub use anchor::Anchor;
+pub use fit::FitScale;
 pub use color::{Color, Stroke};
 pub use id::Id;
 pub use layer::Layer;
@@ -35,7 +39,7 @@ pub use state::{DragState, Modal, UiState};
 pub use theme::{Colors, Fonts, Spacing, Theme, DEFAULT_THEME};
 pub use ui::{DragSourceResponse, DroppedPayload, Ui, UiOutput};
 pub use widgets::{
-    hp_color, item_tooltip_lines, Button, ButtonVariant, Frame, ItemSlot, ProgressBar,
-    SlotInteraction, TextField, Tooltip, TooltipLine,
+    hp_color, item_tooltip_lines, Banner, BannerStyle, Button, ButtonVariant, Frame, ItemSlot,
+    ProgressBar, SlotInteraction, TextField, Tooltip, TooltipLine,
 };
 pub use world_ui::WorldUi;

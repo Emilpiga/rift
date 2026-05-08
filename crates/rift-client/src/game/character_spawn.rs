@@ -121,6 +121,7 @@ pub fn spawn_character_entity(
             action_timer: 0.0,
             vy: 0.0,
             airborne: false,
+            vy_accum: 0.0,
         },
         Collider::new(0.3, 0.5, 0.3),
         Health::new(cfg.max_hp),

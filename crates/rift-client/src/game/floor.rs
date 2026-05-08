@@ -90,12 +90,11 @@ impl FloorManager {
             2 => [0.014, 0.004, 0.003, 1.0], // infernal red tint
             _ => [0.003, 0.005, 0.010, 1.0], // icy depths
         };
-        // Fog color slightly warmer than clear (distant haze tint)
-        renderer.fog_color = [
-            renderer.clear_color[0] * 1.4 + 0.002,
-            renderer.clear_color[1] * 1.2 + 0.001,
-            renderer.clear_color[2] * 1.1 + 0.001,
-        ];
+        // Fog color: near-black so the wall reads as smoke, not
+        // distance haze. The sky horizon is tinted to match
+        // (oxblood at the very edge, not crimson) so the seam
+        // between fog wall and sky dome blends instead of banding.
+        renderer.fog_color = [0.020, 0.008, 0.010];
         // Tighter fog for damp, claustrophobic rift floors. The
         // player still has line-of-sight to the room they're in,
         // but anything past the next doorway dissolves into the
@@ -103,11 +102,11 @@ impl FloorManager {
         renderer.fog_start = 6.0;
         renderer.fog_end = 22.0;
 
-        // Indoor dungeon: leave the sky disabled — the fog wall
-        // already swallows everything past ~32 m, and a procedural
-        // sky sneaking through the ceilingless walls would break
-        // the dungeon-y feel.
-        renderer.sky = rift_engine::SkyConfig::default();
+        // Crimson-and-black gloom dome. The dungeon is roofless,
+        // so the player sees the sky above the parapets — paired
+        // with the black fog wall it reads as a bleeding sky
+        // strangled by smoke, which is the rift's whole vibe.
+        renderer.sky = rift_engine::SkyConfig::rift();
         // Cave-dark key + low ambient so torches drive the look.
         renderer.key_light = rift_engine::KeyLight::DUNGEON;
 

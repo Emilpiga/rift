@@ -1050,32 +1050,94 @@ impl Mesh {
 
         Self { vertices, indices }
     }
-    /// Portal: a glowing vertical ring with a swirled, layered
-    /// inner surface. Built as:
-    ///   * an outer torus frame (deep arcane blue),
-    ///   * a thinner inner torus rim (bright cyan),
-    ///   * a multi-ring inner disc whose vertex colours fall off
-    ///     from a hot white core through cyan to deep blue at the
-    ///     edge, mirrored on the back face so the portal reads
-    ///     from any camera angle.
+    /// Doctor-Strange-style portal frame.
+    ///
+    /// Geometry is intentionally minimal — the iconic look comes
+    /// from the [`portal_vortex`](crate::renderer::vfx::presets::portal_vortex)
+    /// VFX preset, which orbits a dense halo of golden sparks
+    /// around the rim. The mesh just provides:
+    ///
+    ///   * a thin outer torus frame in molten copper,
+    ///   * a brighter inner rim in white-hot gold,
+    ///   * a dimmed inner disc with a near-black core fading to
+    ///     a hint of orange at the rim — reads as "burning hole
+    ///     through space" rather than a glowing plate. Mirrored
+    ///     on the back face so the portal reads from any camera
+    ///     angle.
     pub fn portal() -> Self {
+        // Default = the "destination unknown" gold-on-black look.
+        // Spawn sites that know where the portal leads should
+        // call [`Self::portal_with_palette`] instead.
+        Self::portal_with_palette(
+            Vec3::new(0.42, 0.66, 0.92),  // generic cyan zenith
+            Vec3::new(0.85, 0.88, 0.92),  // pale horizon
+            Vec3::new(0.05, 0.04, 0.04),  // dark rim
+        )
+    }
+
+    /// Portal whose inner disc bakes the destination biome's
+    /// sky palette into a fisheye-style radial gradient. The
+    /// caller passes the destination's
+    /// [`SkyConfig`](crate::renderer::sky::SkyConfig) `zenith`,
+    /// `horizon`, and `ground` colours; we map them onto the
+    /// disc as if the player were peering "up" through the
+    /// portal at the other side's sky:
+    ///
+    /// ```text
+    ///                  ┌── center  = zenith (looking up)
+    ///                  │
+    ///                  │       ┌── mid     = horizon
+    ///                  │       │
+    ///                  ▼       ▼   ┌── edge = ground/dark
+    ///   inner disc:  [ Z ─ M ─ E ]
+    /// ```
+    ///
+    /// The forward shader applies lighting + fog + bloom, and
+    /// HDR-boosting the input colours pushes them through the
+    /// bloom pass so the disc reads as a tinted, glowing
+    /// fisheye view of the other biome rather than a flat
+    /// painted plate. Combined with the orbiting fire ring
+    /// from
+    /// [`portal_vortex`](crate::renderer::vfx::presets::portal_vortex)
+    /// the eye reads the whole assembly as "burning portal
+    /// opening onto the other place".
+    ///
+    /// `zenith` / `horizon` / `ground` are passed in linear LDR
+    /// (typical 0..1 range from `SkyConfig`); we boost them
+    /// internally for the bloom hit.
+    pub fn portal_with_palette(zenith: Vec3, horizon: Vec3, ground: Vec3) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let segments: u32 = 48;
+        let segments: u32 = 64;
         let ring_radius = 1.15_f32;
-        let tube_radius = 0.16_f32;
+        // Slimmer than the old cyan version — Strange portals
+        // read as a thin burning ring, not a chunky stargate.
+        let tube_radius = 0.085_f32;
         let height = 2.1_f32;
         let cy_offset = height * 0.5;
 
-        // HDR-ish vertex colours. The forward shader treats vertex
-        // colour as emissive-tinted so values >1.0 push the
-        // bloom pass.
-        let frame_color = Vec3::new(0.25, 0.55, 1.6);
-        let rim_color = Vec3::new(0.7, 1.4, 2.4);
-        let core_color = Vec3::new(2.6, 2.8, 3.0);
-        let mid_color = Vec3::new(0.9, 1.6, 2.6);
-        let edge_color = Vec3::new(0.15, 0.45, 1.4);
+        // Frame palette: gold/copper rim is constant — the rim
+        // is the "magic burning aperture" and shouldn't shift
+        // with the destination. The destination's biome only
+        // shows through the *inner disc*.
+        let frame_color = Vec3::new(2.4, 1.0, 0.20);   // molten copper
+        let rim_color   = Vec3::new(3.6, 2.4, 0.80);   // white-hot gold
+
+        // Inner-disc palette — destination biome, HDR-boosted so
+        // the bloom pass picks them up. Multipliers tuned by eye
+        // against the existing sky presets:
+        //
+        //   * Zenith ×3.5: hottest, sells the "infinite sky"
+        //     bright spot at the disc centre.
+        //   * Horizon ×2.0: still hot enough to bloom but cooler
+        //     than the centre, so the gradient reads as depth.
+        //   * Ground ×0.6: slightly *darken* the rim so the disc
+        //     edge fades into the burning gold ring without
+        //     fighting it for brightness.
+        let core_color = zenith  * 3.5;
+        let mid_color  = horizon * 2.0;
+        let edge_color = ground  * 0.6;
 
         // Helper: emit a torus ring with the given radii and colour.
         let push_torus = |vertices: &mut Vec<Vertex>,
@@ -1100,6 +1162,14 @@ impl Mesh {
                 vertices.push(Vertex { position: Vec3::new(sx1 + n1.x * tube_r, sy1 + n1.y * tube_r, tube_r), normal: n1, color, uv: Vec2::new(0.5, 0.5) });
 
                 indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+                // Mirror winding so the rim ribbon is visible
+                // from the back side too. The renderer doesn't
+                // cull back faces, but lighting (and any future
+                // single-sided shader pass) keys off the
+                // triangle winding — without these reversed
+                // tris the outer ring vanishes when viewed from
+                // -Z (i.e. from behind the portal disc).
+                indices.extend_from_slice(&[base, base + 2, base + 1, base + 2, base, base + 3]);
             }
         };
 
@@ -1108,60 +1178,119 @@ impl Mesh {
         // Bright inner rim torus, sitting just inside the frame.
         push_torus(&mut vertices, &mut indices, ring_radius * 0.92, tube_radius * 0.55, rim_color);
 
-        // Multi-ring inner disc with a radial colour gradient. Three
-        // concentric rings: r = 0 (core), 0.55 (mid), 0.95 (edge).
-        // We emit triangles between the rings so the gradient is
-        // smooth across the disc.
-        let disc_segments: u32 = 32;
+        // Multi-ring inner disc with a radial colour gradient.
+        // Five concentric rings: r = 0 (core/zenith), 0.30, 0.60
+        // (mid/horizon band), 0.85, 1.0 (edge/ground). Five
+        // rings give the gradient enough samples to read as a
+        // smooth fisheye projection rather than two
+        // hard-edged colour bands. Each pair of adjacent
+        // rings is interpolated at bake time so the final
+        // colours are smooth even though Vulkan's flat per-
+        // vertex interpolation is the only thing happening at
+        // draw time.
+        let disc_segments: u32 = 64;
         let disc_r = ring_radius * 0.88;
 
-        // Centre vertex.
+        // Smooth-stepped gradient evaluator: t in [0, 1] →
+        // zenith → horizon → ground. Quadratic ease keeps the
+        // bright zenith centre wide and crushes most of the
+        // fade into the outer half, mimicking how a real
+        // fisheye projection compresses the horizon line.
+        let sample = |t: f32| -> Vec3 {
+            let t = t.clamp(0.0, 1.0);
+            // 0.0..0.5 fades core → mid; 0.5..1.0 fades mid → edge.
+            // Smoothstep on each half.
+            if t < 0.5 {
+                let u = t * 2.0;
+                let u = u * u * (3.0 - 2.0 * u);
+                core_color.lerp(mid_color, u)
+            } else {
+                let u = (t - 0.5) * 2.0;
+                let u = u * u * (3.0 - 2.0 * u);
+                mid_color.lerp(edge_color, u)
+            }
+        };
+
+        // Ring radii (as a fraction of `disc_r`).
+        let ring_ts: [f32; 5] = [0.0, 0.30, 0.60, 0.85, 1.0];
+
+        // Centre vertex (degenerate ring at t = 0 = zenith).
         let center_idx = vertices.len() as u32;
         vertices.push(Vertex {
             position: Vec3::new(0.0, cy_offset, 0.0),
             normal: Vec3::Z,
-            color: core_color,
+            color: sample(0.0),
             uv: Vec2::new(0.5, 0.5),
         });
 
         let push_ring =
-            |vertices: &mut Vec<Vertex>, r_xz: f32, r_y: f32, color: Vec3, normal: Vec3| -> u32 {
+            |vertices: &mut Vec<Vertex>, t: f32, color: Vec3, normal: Vec3| -> u32 {
+                let r_xz = disc_r * t;
+                let r_y = height * 0.45 * t;
                 let start = vertices.len() as u32;
                 for i in 0..disc_segments {
                     let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
+                    // Per-vertex hash → ±20% brightness mod.
+                    // Without this the smooth radial fade reads
+                    // as a flat painted disc; angular noise
+                    // baked into vertex colours gives the GPU's
+                    // flat interpolation something to chew on
+                    // and the disc reads as having structure
+                    // (stipple, sparkle) without any extra draw
+                    // cost. Hash from segment index + ring t so
+                    // the same vertex is stable across frames
+                    // (no flicker) and adjacent rings get
+                    // independent jitter.
+                    let h = {
+                        let k = (i as u32)
+                            .wrapping_mul(0x9E37_79B9)
+                            .wrapping_add((t * 1024.0) as u32)
+                            .wrapping_mul(0x85EB_CA6B);
+                        // Map to [-1, 1).
+                        let f = (k >> 8) as f32 / ((1u32 << 24) as f32);
+                        f * 2.0 - 1.0
+                    };
+                    let mod_color = color * (1.0 + h * 0.20);
                     vertices.push(Vertex {
                         position: Vec3::new(a.cos() * r_xz, a.sin() * r_y + cy_offset, 0.0),
                         normal,
-                        color,
+                        color: mod_color,
                         uv: Vec2::new(0.5, 0.5),
                     });
                 }
                 start
             };
 
-        let mid_start = push_ring(&mut vertices, disc_r * 0.55, height * 0.45 * 0.55, mid_color, Vec3::Z);
-        let edge_start = push_ring(&mut vertices, disc_r, height * 0.45, edge_color, Vec3::Z);
+        // Front-face rings (skip ring_ts[0] — that's the centre vertex).
+        let mut front_starts: [u32; 4] = [0; 4];
+        for (i, &t) in ring_ts[1..].iter().enumerate() {
+            front_starts[i] = push_ring(&mut vertices, t, sample(t), Vec3::Z);
+        }
 
-        // Core fan (centre → mid ring).
+        // Core fan: centre vertex → first ring.
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
             indices.extend_from_slice(&[
                 center_idx,
-                mid_start + i,
-                mid_start + next,
+                front_starts[0] + i,
+                front_starts[0] + next,
             ]);
         }
-        // Mid → edge ring band.
-        for i in 0..disc_segments {
-            let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[
-                mid_start + i,
-                edge_start + i,
-                edge_start + next,
-                mid_start + i,
-                edge_start + next,
-                mid_start + next,
-            ]);
+        // Outer bands: ring[k] → ring[k+1] quads, two tris each.
+        for k in 0..(front_starts.len() - 1) {
+            let inner = front_starts[k];
+            let outer = front_starts[k + 1];
+            for i in 0..disc_segments {
+                let next = (i + 1) % disc_segments;
+                indices.extend_from_slice(&[
+                    inner + i,
+                    outer + i,
+                    outer + next,
+                    inner + i,
+                    outer + next,
+                    inner + next,
+                ]);
+            }
         }
 
         // Back-face mirror so the portal reads from behind too.
@@ -1169,29 +1298,38 @@ impl Mesh {
         vertices.push(Vertex {
             position: Vec3::new(0.0, cy_offset, 0.0),
             normal: -Vec3::Z,
-            color: core_color,
+            color: sample(0.0),
             uv: Vec2::new(0.5, 0.5),
         });
-        let back_mid_start = push_ring(&mut vertices, disc_r * 0.55, height * 0.45 * 0.55, mid_color, -Vec3::Z);
-        let back_edge_start = push_ring(&mut vertices, disc_r, height * 0.45, edge_color, -Vec3::Z);
+        let mut back_starts: [u32; 4] = [0; 4];
+        for (i, &t) in ring_ts[1..].iter().enumerate() {
+            back_starts[i] = push_ring(&mut vertices, t, sample(t), -Vec3::Z);
+        }
+        // Back-face winding is reversed so the back tris face
+        // the right way (we don't cull, but lighting picks the
+        // closer normal).
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
             indices.extend_from_slice(&[
                 back_center,
-                back_mid_start + next,
-                back_mid_start + i,
+                back_starts[0] + next,
+                back_starts[0] + i,
             ]);
         }
-        for i in 0..disc_segments {
-            let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[
-                back_mid_start + i,
-                back_edge_start + next,
-                back_edge_start + i,
-                back_mid_start + i,
-                back_mid_start + next,
-                back_edge_start + next,
-            ]);
+        for k in 0..(back_starts.len() - 1) {
+            let inner = back_starts[k];
+            let outer = back_starts[k + 1];
+            for i in 0..disc_segments {
+                let next = (i + 1) % disc_segments;
+                indices.extend_from_slice(&[
+                    inner + i,
+                    outer + next,
+                    outer + i,
+                    inner + i,
+                    inner + next,
+                    outer + next,
+                ]);
+            }
         }
 
         Self { vertices, indices }

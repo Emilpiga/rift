@@ -78,7 +78,11 @@ impl Server {
     /// on their session. The net id is what the client uses to
     /// recognize itself in subsequent snapshots.
     fn spawn_player_session(&mut self, from: ClientId, _class_id: &str) -> NetId {
-        let net_id = self.sim.spawn_player(from);
+        // New connections always land in the hub. Per-client
+        // floor tracking starts here so the dispatch routes the
+        // correct Sim for every subsequent message.
+        let net_id = self.hub.spawn_player(from);
+        self.client_floor.insert(from, 0);
         if let Some(s) = self.sessions.get_mut(from) {
             s.net_id = Some(net_id);
         }
@@ -96,9 +100,9 @@ impl Server {
         if let Some(rec) = self.sessions.get(from).and_then(|s| s.record.as_ref()) {
             let level = rec.level.max(1) as u32;
             let xp = rec.xp.max(0) as u64;
-            self.sim.set_player_experience(from, level, xp);
+            self.hub.set_player_experience(from, level, xp);
             let loadout = super::loadout_to_u8(rec.loadout);
-            self.sim.set_player_loadout(from, loadout);
+            self.hub.set_player_loadout(from, loadout);
         }
 
         // Inventory: skipped when persistence is disabled (dev
@@ -126,6 +130,7 @@ impl Server {
                         r.rarity as u8,
                         r.ilvl as u16,
                         &r.affixes,
+                        r.anchored,
                     ) else {
                         continue;
                     };
@@ -147,7 +152,7 @@ impl Server {
                     bag_filled,
                     loaded_equipment.count()
                 );
-                self.sim.set_player_inventory(
+                self.hub.set_player_inventory(
                     from,
                     loaded_items.clone(),
                     loaded_equipment,
@@ -169,6 +174,7 @@ impl Server {
                         r.rarity as u8,
                         r.ilvl as u16,
                         &r.affixes,
+                        r.anchored,
                     ) else {
                         continue;
                     };
@@ -179,7 +185,7 @@ impl Server {
                     "persistence: loaded {} stash item(s) for {from:?}",
                     stash_filled,
                 );
-                self.sim.set_player_stash(from, stash_items);
+                self.hub.set_player_stash(from, stash_items);
             }
             Err(e) => log::warn!("persistence: load_stash failed for {from:?}: {e}"),
         }
@@ -199,8 +205,13 @@ impl Server {
         let welcome = ServerMsg::Welcome {
             your_client_id: from,
             your_net_id: net_id,
-            floor_seed: self.sim.floor_seed,
-            floor_index: self.sim.floor_index,
+            // New connections start in the hub regardless of
+            // what the rift sim is doing, so the welcome carries
+            // the hub's seed/index. If the player walks into the
+            // rift portal later, a follow-up `LoadFloor` will
+            // hand them the rift coordinates.
+            floor_seed: self.hub.floor_seed,
+            floor_index: self.hub.floor_index,
             tick: self.tick,
         };
         self.send_to(from, Channel::Control, &welcome);
@@ -225,7 +236,7 @@ impl Server {
         // nothing equipped" signal, which lets it clear any
         // stale UI state from a previous session on the same
         // process (rare but cheap to be correct about).
-        let equip_pairs = self.sim.player_equipment(from);
+        let equip_pairs = self.hub.player_equipment(from);
         let equip_blobs: Vec<(u8, rift_net::messages::ItemBlob)> = equip_pairs
             .iter()
             .map(|(slot, it)| (slot.to_u8(), item_to_blob(it)))
@@ -238,7 +249,7 @@ impl Server {
 
         // Initial XP / level snapshot so the HUD bar is correct
         // before the first kill.
-        if let Some((level, xp, xp_to_next)) = self.sim.player_stats_snapshot(from) {
+        if let Some((level, xp, xp_to_next)) = self.hub.player_stats_snapshot(from) {
             self.send_to(
                 from,
                 Channel::Control,
@@ -248,17 +259,18 @@ impl Server {
         // Initial ability-loadout snapshot so the client's HUD
         // bar shows whatever was persisted (or the default for
         // a brand-new character).
-        if let Some(slots) = self.sim.player_loadout_snapshot(from) {
+        if let Some(slots) = self.hub.player_loadout_snapshot(from) {
             self.send_to(
                 from,
                 Channel::Control,
                 &ServerMsg::Loadout { slots },
             );
         }
-        // Initial rift-progress snapshot (current floor's bar
-        // state, including any kills already racked up by
-        // already-connected players).
-        let rp = self.sim.rift_progress();
+        // Initial rift-progress snapshot: hub players see a
+        // fresh / pristine bar regardless of the active rift's
+        // state. They'll get the real numbers when they walk
+        // through the portal.
+        let rp = self.hub.rift_progress();
         self.send_to(
             from,
             Channel::Control,
@@ -322,7 +334,7 @@ impl Server {
         ability_id: u8,
     ) {
         let Some(slots) = self
-            .sim
+            .sim_for_client_mut(from)
             .set_player_loadout_slot(from, slot_index, ability_id)
         else {
             return;

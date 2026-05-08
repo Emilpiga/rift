@@ -140,12 +140,13 @@ pub fn drop_for_enemy(
             *next_loot_net_id = 0x2000_0000;
         }
 
-        let (base_id, rarity, ilvl_w, affixes) = item.to_wire();
+        let (base_id, rarity, ilvl_w, affixes, anchored) = item.to_wire();
         let blob = ItemBlob {
             base_id,
             rarity,
             ilvl: ilvl_w,
             affixes,
+            anchored,
         };
 
         let loot = ServerLoot {

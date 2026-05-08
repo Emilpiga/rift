@@ -32,6 +32,38 @@ pub enum EnterPhase {
     RebuildWalls,
 }
 
+/// One step of a server-driven floor transition. Split from
+/// [`EnterPhase`] because the inputs differ (we already have a
+/// player + outfits + character-select is gone) and the visual
+/// is a black-curtain "Entering Floor N…" screen rather than
+/// the staged hub-entry overlay.
+///
+/// The phases are designed so the *first* one to run draws the
+/// loading overlay before the heaviest one (`Generate`)
+/// freezes the render thread — that way the user always sees
+/// the loading screen instead of a frozen frame of the old
+/// world. Each phase advances exactly one step per frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetEnterPhase {
+    /// Black out + render the loading overlay one frame early
+    /// so it presents before any heavy work runs. Carries the
+    /// destination floor index forward through every phase.
+    FadeOut { index: u32 },
+    /// Drop per-floor visual state (decals, vfx, loot, …) so
+    /// the new floor's regen sees a clean slate.
+    Reset { index: u32 },
+    /// Run the (single, unavoidably blocking) dungeon regen
+    /// call. Frozen frame is hidden under the overlay we
+    /// already presented in the prior phase.
+    Generate { index: u32 },
+    /// Rebuild static collider caches from the new ECS rows.
+    RebuildWalls,
+    /// One last frame of overlay before handing back to
+    /// gameplay so the fade-in transition starts from a
+    /// known-good frame.
+    FadeIn,
+}
+
 /// Tick the character-select screen.
 pub fn update_character_select(
     state: &mut GameState,
@@ -174,44 +206,114 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
     }
 }
 
-/// Apply a server-driven floor transition. The server has
-/// already authoritatively switched us to floor `index`; this
-/// rebuilds local visuals + ECS to match.
-pub fn apply_net_transition(state: &mut GameState, renderer: &mut Renderer, index: u32) {
-    reset_for_regeneration(state, renderer);
-    // Pin the fade to fully-black for one frame so the world
-    // regenerates behind a curtain. The decay in `update`
-    // will fade it back out over ~0.6 s.
+/// Kick off a staged server-driven floor transition. Caller
+/// (the binary) hands us the destination `index` from
+/// `LoadFloor`; we set `app_state = NetEntering(FadeOut)` and
+/// pin the screen to fully black so the next frame's render
+/// presents the curtain *before* the heavy regen runs.
+///
+/// The actual regen happens in the `Generate` phase a frame
+/// later, by which time the loading overlay has already been
+/// presented. Net result: the player sees a clean fade-out →
+/// "Entering Floor N…" overlay → fade-in, instead of
+/// "world frozen for 3 s → snap to new world".
+pub fn queue_net_transition(state: &mut GameState, _renderer: &mut Renderer, index: u32) {
     state.frame.transition_fade = 1.0;
-    if index == 0 {
-        state.floor.in_hub = true;
-        state.rift = RiftState::new(1);
-        match state.floor_mgr.generate_hub(
-            &mut state.world,
-            renderer,
-            &state.player_state,
-            &mut state.anim_cache,
-        ) {
-            Ok(portal_pos) => {
-                portal_system::spawn_hub(&mut state.floor.hub_portal, renderer, portal_pos)
+    state.app_state = AppState::NetEntering(NetEnterPhase::FadeOut { index });
+}
+
+/// Drive one step of the staged net transition. Single
+/// step-per-frame so the netcode loop keeps pumping and the
+/// loading overlay is guaranteed to present before any
+/// blocking work runs.
+pub fn tick_net_entering(
+    state: &mut GameState,
+    renderer: &mut Renderer,
+    phase: NetEnterPhase,
+) {
+    let (label, progress, next): (&'static str, f32, Option<NetEnterPhase>) = match phase {
+        NetEnterPhase::FadeOut { index } => {
+            // Re-pin in case the per-frame decay nibbled it.
+            state.frame.transition_fade = 1.0;
+            (
+                "Entering world…",
+                0.10,
+                Some(NetEnterPhase::Reset { index }),
+            )
+        }
+        NetEnterPhase::Reset { index } => {
+            reset_for_regeneration(state, renderer);
+            state.frame.transition_fade = 1.0;
+            (
+                if index == 0 {
+                    "Returning to hub…"
+                } else {
+                    "Entering rift…"
+                },
+                0.30,
+                Some(NetEnterPhase::Generate { index }),
+            )
+        }
+        NetEnterPhase::Generate { index } => {
+            // Heavy step. The overlay rendered in the prior
+            // phase is what's currently on screen; this frame's
+            // overlay below covers the post-regen state.
+            if index == 0 {
+                state.floor.in_hub = true;
+                state.rift = RiftState::new(1);
+                match state.floor_mgr.generate_hub(
+                    &mut state.world,
+                    renderer,
+                    &state.player_state,
+                    &mut state.anim_cache,
+                ) {
+                    Ok(portal_pos) => portal_system::spawn_hub(
+                        &mut state.floor.hub_portal,
+                        renderer,
+                        portal_pos,
+                    ),
+                    Err(e) => log::error!("Hub regeneration failed: {}", e),
+                }
+            } else {
+                state.floor.in_hub = false;
+                state.rift = RiftState::new(index);
+                if let Err(e) = state.floor_mgr.generate(
+                    &mut state.world,
+                    renderer,
+                    &state.rift,
+                    &state.player_state,
+                    &mut state.anim_cache,
+                    state.net.floor_seed,
+                ) {
+                    log::error!("Net floor regeneration failed: {}", e);
+                }
             }
-            Err(e) => log::error!("Hub regeneration failed: {}", e),
+            state.frame.transition_fade = 1.0;
+            (
+                "Generating world…",
+                0.70,
+                Some(NetEnterPhase::RebuildWalls),
+            )
         }
-    } else {
-        state.floor.in_hub = false;
-        state.rift = RiftState::new(index);
-        if let Err(e) = state.floor_mgr.generate(
-            &mut state.world,
-            renderer,
-            &state.rift,
-            &state.player_state,
-            &mut state.anim_cache,
-            state.net.floor_seed,
-        ) {
-            log::error!("Net floor regeneration failed: {}", e);
+        NetEnterPhase::RebuildWalls => {
+            rebuild_wall_caches(state);
+            state.frame.transition_fade = 1.0;
+            ("Finalizing…", 0.90, Some(NetEnterPhase::FadeIn))
         }
+        NetEnterPhase::FadeIn => {
+            // Hand back to gameplay. `transition_fade` is left
+            // at 1.0; the per-frame decay in `render_phase`
+            // takes it down to 0 over ~0.6 s.
+            ("Ready", 1.0, None)
+        }
+    };
+
+    hud::draw_world_loading_overlay(renderer, progress, label);
+
+    match next {
+        Some(p) => state.app_state = AppState::NetEntering(p),
+        None => state.app_state = AppState::Playing,
     }
-    rebuild_wall_caches(state);
 }
 
 /// Wipe per-frame and per-floor state that doesn't survive a

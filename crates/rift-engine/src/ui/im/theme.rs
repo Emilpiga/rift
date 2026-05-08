@@ -20,38 +20,124 @@ pub struct Theme {
     pub colors: Colors,
     pub spacing: Spacing,
     pub fonts: Fonts,
+    /// UI scale multiplier baked into the theme by [`Ui::begin`]
+    /// at frame start. `1.0` is the design-time reference
+    /// (1080p). Already pre-multiplied into `spacing` / `fonts`
+    /// fields so callers reading e.g. `theme.fonts.size_md`
+    /// always get the resolution-appropriate value. Exposed
+    /// here so screens that hold *raw* layout constants
+    /// (panel widths, slot sizes, …) can scale them too via
+    /// [`Ui::s`] or by multiplying directly.
+    pub scale: f32,
 }
 
 impl Theme {
-    /// Default dark palette tuned to match the existing HUD /
-    /// inventory aesthetic. Adjusted in Landing 5 once we audit
-    /// the per-file `const COLOR_*` values they currently use.
+    /// Derive the auto UI scale from the active framebuffer
+    /// dimensions. Tuned so 1080p renders at the design
+    /// reference (`1.0`), 4K reads as a comfortable `1.5`, and
+    /// tiny laptops scale below 1.0 instead of overflowing.
+    /// Clamped so extreme values never produce illegible
+    /// chrome.
+    ///
+    /// We take the **smaller** of the per-axis scale factors
+    /// so an ultrawide / portrait window doesn't end up
+    /// scaling the chrome larger than the short axis can
+    /// fit. Falls back to height-only scaling when only one
+    /// dimension is provided.
+    pub fn auto_scale_for_size(screen_w: f32, screen_h: f32) -> f32 {
+        // Reference resolution = 1920×1080. Square-rootish
+        // curve on each axis so big panels don't blow past
+        // the screen edges on 4K while phones / 720p still
+        // stay readable.
+        let raw_h = (screen_h / 1080.0).sqrt();
+        let raw_w = (screen_w / 1920.0).sqrt();
+        raw_h.min(raw_w).clamp(0.75, 2.0)
+    }
+
+    /// Backwards-compatible wrapper. Prefer
+    /// [`Self::auto_scale_for_size`] which also clamps by the
+    /// width axis (important on ultrawide / portrait
+    /// resolutions).
+    pub fn auto_scale_for_height(screen_h: f32) -> f32 {
+        Self::auto_scale_for_size(screen_h * 16.0 / 9.0, screen_h)
+    }
+
+    /// Return a copy of `self` with every spacing / font
+    /// dimension multiplied by `scale`. Colors are unchanged.
+    /// Idempotent only relative to `1.0` — chaining
+    /// `with_scale(a).with_scale(b)` yields `a * b`, not `b`.
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        let s = scale.max(0.01);
+        self.scale *= s;
+        self.spacing.pad_sm = self.spacing.pad_sm.scaled(s);
+        self.spacing.pad_md = self.spacing.pad_md.scaled(s);
+        self.spacing.pad_lg = self.spacing.pad_lg.scaled(s);
+        self.spacing.gap_sm *= s;
+        self.spacing.gap_md *= s;
+        self.spacing.gap_lg *= s;
+        // Border thickness is left unscaled on purpose: the
+        // 1px hairline reads identically on every panel and
+        // scaling it makes selected-state outlines blur into
+        // the surrounding rect at high scales.
+        self.spacing.corner_radius *= s;
+        self.fonts.size_sm *= s;
+        self.fonts.size_md *= s;
+        self.fonts.size_lg *= s;
+        self.fonts.size_xl *= s;
+        self
+    }
+}
+
+impl Theme {
+    /// Default dark palette. Modern dark-slate aesthetic with a
+    /// cool blue-violet undertone and an indigo accent — same
+    /// family as Linear / Vercel / modern Discord redesigns.
+    /// Hairline borders + larger corner radius so panels read
+    /// as soft "cards" rather than boxy gray rectangles.
     pub const DARK: Theme = Theme {
         colors: Colors {
-            bg_panel:      Color::rgba8(18, 18, 24, 230),
-            bg_panel_alt:  Color::rgba8(28, 28, 36, 230),
-            bg_slot:       Color::rgba8(40, 40, 50, 200),
-            bg_slot_hover: Color::rgba8(60, 60, 75, 220),
-            border:        Color::rgba8(80, 80, 100, 255),
-            border_strong: Color::rgba8(140, 140, 170, 255),
-            text:          Color::rgba8(230, 230, 240, 255),
-            text_dim:      Color::rgba8(160, 160, 175, 255),
-            text_muted:    Color::rgba8(110, 110, 125, 255),
-            accent:        Color::rgba8(110, 180, 255, 255),
-            success:       Color::rgba8(110, 220, 130, 255),
-            warning:       Color::rgba8(240, 180, 80,  255),
-            danger:        Color::rgba8(240, 90,  90,  255),
-            shadow:        Color::rgba8(0,   0,   0,   140),
+            // Surface stack: each step is a small lift in
+            // luminance, all sharing the same cool tint so
+            // nesting reads as depth instead of "different
+            // colour". Alphas stay high (panels are opaque)
+            // because the drop-shadow now carries the floating
+            // feel.
+            bg_panel:      Color::rgba8(15, 17, 23, 245),  // base card
+            bg_panel_alt:  Color::rgba8(22, 25, 33, 245),  // raised section / sub-panel
+            bg_slot:       Color::rgba8(30, 34, 44, 235),  // recessed (input, slot)
+            bg_slot_hover: Color::rgba8(46, 52, 70, 240),  // recessed + hover
+            // Hairline borders — low-alpha cool gray so they
+            // separate surfaces without screaming. Strong
+            // variant uses the accent so focus / hover rings
+            // read clearly against the muted base.
+            border:        Color::rgba8(70, 78, 100, 90),
+            border_strong: Color::rgba8(140, 130, 255, 200),
+            text:          Color::rgba8(232, 234, 245, 255),
+            text_dim:      Color::rgba8(168, 172, 190, 255),
+            text_muted:    Color::rgba8(112, 118, 138, 255),
+            // Indigo accent — modern, distinct from "system
+            // blue", reads as deliberate brand colour rather
+            // than default-Windows.
+            accent:        Color::rgba8(140, 130, 255, 255),
+            success:       Color::rgba8(86, 211, 146, 255),
+            warning:       Color::rgba8(245, 184, 92,  255),
+            danger:        Color::rgba8(244, 96,  108, 255),
+            // Soft, slightly cool shadow. Frame::show layers
+            // 3 expanding copies of this for a believable
+            // ambient drop-shadow.
+            shadow:        Color::rgba8(0,   0,   8,   90),
         },
         spacing: Spacing {
-            pad_sm: Pad::all(4.0),
-            pad_md: Pad::all(8.0),
-            pad_lg: Pad::all(12.0),
+            pad_sm: Pad::all(6.0),
+            pad_md: Pad::all(10.0),
+            pad_lg: Pad::all(14.0),
             gap_sm: 4.0,
             gap_md: 8.0,
-            gap_lg: 12.0,
+            gap_lg: 14.0,
             border_thickness: 1.0,
-            corner_radius: 4.0,
+            // Larger radius for the modern soft-card look.
+            // Inset frames halve this (see `Frame::inset`).
+            corner_radius: 8.0,
         },
         fonts: Fonts {
             size_sm: 12.0,
@@ -59,6 +145,7 @@ impl Theme {
             size_lg: 20.0,
             size_xl: 28.0,
         },
+        scale: 1.0,
     };
 
     /// Stroke for ordinary panel borders.
@@ -100,6 +187,40 @@ pub struct Spacing {
     pub gap_lg: f32,
     pub border_thickness: f32,
     pub corner_radius: f32,
+}
+
+impl Spacing {
+    /// Outside breathing room between a modal panel and the
+    /// screen edges. Same value used by every full-screen panel
+    /// (spellbook, inventory, character-select, …) so the chrome
+    /// reads as deliberate margin rather than per-screen drift.
+    /// Pre-scaled.
+    pub fn panel_margin(&self) -> f32 {
+        self.pad_lg.left
+    }
+
+    /// Distance from a panel's outer rect to its content. The
+    /// `Frame::panel` body already inset by `pad_md`; screens
+    /// that draw absolutely-positioned regions inside a panel
+    /// should use this token to match.
+    /// Pre-scaled.
+    pub fn inner_pad(&self) -> f32 {
+        self.pad_lg.left
+    }
+
+    /// Vertical gap between major sections inside a panel
+    /// (header → body, body → footer, region → region).
+    /// Pre-scaled.
+    pub fn section_gap(&self) -> f32 {
+        self.gap_lg
+    }
+
+    /// Vertical gap between sibling rows inside a section
+    /// (label / row, row / row).
+    /// Pre-scaled.
+    pub fn row_gap(&self) -> f32 {
+        self.gap_md
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
