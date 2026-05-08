@@ -84,6 +84,19 @@ pub struct GameState {
     /// binary draining `NetClient::take_pending_chats`;
     /// outbound lines flow out via `state.net.pending_chats_out`.
     pub chat: super::chat::ChatUi,
+    /// Party HUD: top-left frames, invite/error toasts,
+    /// portal-entry modal, per-member confirm modal, and the
+    /// right-click context menu. Mirrors authoritative
+    /// `ServerMsg::PartyState` snapshots; intents flow back
+    /// out via `state.net.pending_party_msgs`,
+    /// `pending_propose_rift_entry`, `pending_portal_confirm`.
+    pub party: super::party::PartyUi,
+    /// Combat-meter HUD panel (bottom-right while in a rift).
+    /// Displays authoritative DMG/HPS/TAKEN/THREAT scores
+    /// pushed by the server roughly once per second. Drained
+    /// from `NetClient::take_pending_meters` by the binary's
+    /// frame loop.
+    pub meters: super::meters::MeterUi,
     /// Shared cache of bound player-skeleton animation sets, keyed by
     /// gender. Populated lazily on first spawn (local or remote).
     pub anim_cache: character_spawn::AnimLibraryCache,
@@ -139,6 +152,8 @@ impl GameState {
             anim_cache: character_spawn::AnimLibraryCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
             chat: super::chat::ChatUi::new(),
+            party: super::party::PartyUi::new(),
+            meters: super::meters::MeterUi::new(),
         }
     }
 

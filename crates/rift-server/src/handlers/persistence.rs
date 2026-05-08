@@ -4,11 +4,12 @@
 //! database integration points live in one file.
 
 use rift_net::{ClientId, Gender};
-use rift_net::messages::RosterEntry;
+use rift_net::messages::{RosterEntry, ServerMsg};
 use rift_persistence::{CharacterRecord, Uuid};
 
 use super::{gender_from_i16, loadout_to_u8};
 use crate::Server;
+use rift_net::Channel;
 
 impl Server {
     /// Persist the latest XP / level snapshot for the supplied
@@ -27,6 +28,30 @@ impl Server {
         if let Some(handle) = &self.persistence {
             let _ = handle.save(rec.clone());
         }
+    }
+
+    /// Raise the player's persistent "deepest cleared floor"
+    /// watermark and notify the client. Called from the per-
+    /// instance boss-kill detection in `simulate_one_tick`.
+    /// No-op when `floor` is not strictly greater than the
+    /// existing value (boss kills can land in any order
+    /// across rerolls).
+    pub(crate) fn bump_deepest_cleared_floor(&mut self, client_id: ClientId, floor: u32) {
+        let Some(s) = self.sessions.get_mut(client_id) else { return };
+        let Some(rec) = s.record.as_mut() else { return };
+        let new_value = (floor as i32).max(0);
+        if new_value <= rec.deepest_cleared_floor {
+            return;
+        }
+        rec.deepest_cleared_floor = new_value;
+        let cloned = rec.clone();
+        if let Some(handle) = &self.persistence {
+            let _ = handle.save(cloned);
+        }
+        let msg = ServerMsg::DeepestFloorCleared {
+            value: new_value as u32,
+        };
+        self.send_to(client_id, Channel::Control, &msg);
     }
 
     /// Resolve the persistent record for a session's `Hello`. If
@@ -81,6 +106,7 @@ impl Server {
             // Mirrors `Loadout::default_hero()` — only Steady
             // Shot is unlocked at level 1.
             loadout: [0, 255, 255, 255, 255, 255],
+            deepest_cleared_floor: 0,
         }
     }
 
@@ -100,6 +126,7 @@ impl Server {
                     gender: gender_from_i16(r.gender),
                     level: r.level.max(0) as u32,
                     loadout: loadout_to_u8(r.loadout),
+                    deepest_cleared_floor: r.deepest_cleared_floor.max(0) as u32,
                 })
                 .collect(),
             Err(e) => {

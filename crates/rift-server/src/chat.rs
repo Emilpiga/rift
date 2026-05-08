@@ -160,13 +160,10 @@ pub fn is_client_sendable(channel: u8) -> bool {
     )
 }
 
-/// One resolved recipient — paired `ClientId` + display name so
-/// the server's send-loop can both `send_to` and (for whisper
-/// success / failure logging) reference the recipient by name
-/// without re-querying the session manager.
+/// One resolved recipient. Just the `ClientId` for now — the
+/// send-loop fans out by id and queries the session manager
+/// when it needs a display name.
 #[derive(Clone, Debug)]
 pub struct Recipient {
     pub client_id: ClientId,
-    #[allow(dead_code)] // reserved for whisper logging / future moderation tools
-    pub character_name: String,
 }

@@ -620,13 +620,12 @@ pub enum AbilityKind {
         windup: f32,
     },
     /// Spawn `count` enemies in a ring around the caster after
-    /// `windup` seconds. Used by boss summons. `role` is one of
-    /// `rift_server::sim::enemy::role::*` (a wire-stable byte).
-    /// `hp_mult` scales the floor's base enemy HP — summons want
-    /// to be a real threat through the enrage phase.
+    /// `windup` seconds. Used by boss summons. `hp_mult` scales
+    /// the floor's base enemy HP — summons want to be a real
+    /// threat through the enrage phase.
     Summon {
         count: u32,
-        role: u8,
+        role: crate::monsters::MonsterRole,
         hp_mult: f32,
         ring_radius: f32,
         windup: f32,
@@ -1279,9 +1278,7 @@ pub static REGISTRY: &[Ability] = &[
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Summon {
             count: 3,
-            // role byte: 0 = BRUTE, mirrors
-            // `rift_server::sim::enemy::role::BRUTE`.
-            role: 0,
+            role: crate::monsters::MonsterRole::Brute,
             hp_mult: 1.5,
             ring_radius: 3.0,
             windup: 1.2,

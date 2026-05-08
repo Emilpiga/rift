@@ -91,16 +91,6 @@ impl LayerBuf {
         self.layers[layer as usize].push(cmd);
     }
 
-    /// Drop every queued command without flushing. Used by the
-    /// future modal-dismissal path which throws away in-progress
-    /// tooltips when a higher-priority modal opens mid-frame.
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        for buf in &mut self.layers {
-            buf.clear();
-        }
-    }
-
     /// Replay every queued command into `batch` in layer order.
     /// `screen_w/h` come from the renderer at flush time so we
     /// don't lock pixel→NDC math into queueing.

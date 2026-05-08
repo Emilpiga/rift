@@ -76,6 +76,18 @@ pub struct PendingChat {
     pub text: String,
 }
 
+/// Latest portal-modal prompt the server has asked us to show.
+/// Mirrors [`rift_net::messages::ServerMsg::PortalPrompt`] but
+/// owned by the binary so the drain step can move it into
+/// `GameState.party` without cloning.
+#[derive(Clone, Debug)]
+pub struct PendingPortalPrompt {
+    pub proposer: String,
+    pub start_floor: u32,
+    pub mode: u8,
+    pub seconds_remaining: u32,
+}
+
 /// Active networking session for a connected client. One per
 /// running game when `--connect` is in use. Owned by the binary
 /// and ticked before each frame's `update`.
@@ -210,6 +222,33 @@ pub struct NetClient {
     /// drained by the binary into the chat scrollback once
     /// per frame.
     pub(super) pending_chats: VecDeque<PendingChat>,
+    /// Latest authoritative party snapshot. Replaced wholesale
+    /// on every `ServerMsg::PartyState`. The binary drains it
+    /// into `GameState.party` once per frame so the party-
+    /// frames widget can re-render. `None` here means "no
+    /// update this frame" (not "solo" — a solo client
+    /// receives a `PartyState` with empty members).
+    pub(super) pending_party_state: Option<rift_net::messages::ServerMsg>,
+    /// Toast queue for incoming party invites. Drained into
+    /// `GameState.party` which surfaces the prompt + tracks
+    /// the most-recent inviter for `/accept` shorthand.
+    pub(super) pending_party_invites: VecDeque<String>,
+    /// Soft-error toasts for refused party actions. Drained
+    /// into the system chat channel.
+    pub(super) pending_party_errors: VecDeque<String>,
+    /// Latest portal-prompt modal request from the server.
+    /// `Some` opens the modal, `None` closes it (set by
+    /// `PortalPromptClosed`).
+    pub(super) pending_portal_prompt: Option<Option<PendingPortalPrompt>>,
+    /// Latest authoritative `deepest_cleared_floor` value for
+    /// our own character. Drives the start-floor picker's
+    /// upper bound in the portal modal.
+    pub(super) pending_deepest_floor: Option<u32>,
+    /// Latest combat-meter snapshot for our current rift
+    /// instance. Replaced wholesale on every
+    /// `ServerMsg::MeterSnapshot` (~1 Hz). Drained by the
+    /// binary into the HUD's `MeterUi`.
+    pending_meters: Option<(f32, Vec<rift_net::messages::MeterEntry>)>,
     /// Our authoritative `ClientId` once `Welcome` lands. Used to
     /// answer "was this loot claimed by us?" without re-walking
     /// the renet handle.
@@ -321,6 +360,12 @@ impl NetClient {
             pending_rift_progress: None,
             pending_exit_vote: None,
             pending_chats: VecDeque::new(),
+            pending_party_state: None,
+            pending_party_invites: VecDeque::new(),
+            pending_party_errors: VecDeque::new(),
+            pending_portal_prompt: None,
+            pending_deepest_floor: None,
+            pending_meters: None,
             our_client_id: None,
             predicted: Kinematic::default(),
             predicted_ready: false,
@@ -701,6 +746,40 @@ impl NetClient {
                     text,
                 });
             }
+            ServerMsg::PartyState { .. } => {
+                // Stash the whole message so the binary's
+                // drain step can take ownership of the
+                // members vec without cloning. Latest wins:
+                // a stale snapshot in the queue would only
+                // overwrite a fresher one we already applied.
+                self.pending_party_state = Some(msg);
+            }
+            ServerMsg::PartyInviteIncoming { from } => {
+                self.pending_party_invites.push_back(from);
+            }
+            ServerMsg::PartyError { reason } => {
+                self.pending_party_errors.push_back(reason);
+            }
+            ServerMsg::PortalPrompt { proposer, start_floor, mode, seconds_remaining } => {
+                self.pending_portal_prompt = Some(Some(PendingPortalPrompt {
+                    proposer,
+                    start_floor,
+                    mode,
+                    seconds_remaining,
+                }));
+            }
+            ServerMsg::PortalPromptClosed => {
+                self.pending_portal_prompt = Some(None);
+            }
+            ServerMsg::DeepestFloorCleared { value } => {
+                self.pending_deepest_floor = Some(value);
+            }
+            ServerMsg::MeterSnapshot {
+                elapsed_seconds,
+                entries,
+            } => {
+                self.pending_meters = Some((elapsed_seconds, entries));
+            }
             ServerMsg::Kick { reason } => {
                 log::warn!("net: kicked: {reason}");
             }
@@ -733,6 +812,66 @@ impl NetClient {
     /// next `LoadFloor` from the server queues another.
     pub fn take_pending_floor(&mut self) -> Option<PendingFloor> {
         self.pending_floor.take()
+    }
+
+    /// Drain the most recent authoritative party-state snapshot
+    /// the server pushed (if any). The binary forwards it into
+    /// `state.party.ingest_state(...)`.
+    pub fn take_pending_party_state(
+        &mut self,
+    ) -> Option<rift_net::messages::ServerMsg> {
+        self.pending_party_state.take()
+    }
+
+    /// Drain queued incoming-invite toasts (one per
+    /// `ServerMsg::PartyInviteIncoming`).
+    pub fn take_pending_party_invites(&mut self) -> Vec<String> {
+        self.pending_party_invites.drain(..).collect()
+    }
+
+    /// Drain queued party-error toasts.
+    pub fn take_pending_party_errors(&mut self) -> Vec<String> {
+        self.pending_party_errors.drain(..).collect()
+    }
+
+    /// Drain a portal-prompt edge. `Some(Some(p))` means the
+    /// server opened a per-member confirm modal for us;
+    /// `Some(None)` means it just closed (timeout / proposer
+    /// cancelled / we already resolved).
+    pub fn take_pending_portal_prompt(
+        &mut self,
+    ) -> Option<Option<PendingPortalPrompt>> {
+        self.pending_portal_prompt.take()
+    }
+
+    /// Drain a deepest-floor watermark edge.
+    pub fn take_pending_deepest_floor(&mut self) -> Option<u32> {
+        self.pending_deepest_floor.take()
+    }
+
+    /// Drain the most-recent combat-meter snapshot, if any.
+    /// Returns `(elapsed_seconds, entries)` matching the wire
+    /// format. Replaced (not accumulated) by the server, so a
+    /// frame that sees `None` should keep showing the previous
+    /// values.
+    pub fn take_pending_meters(
+        &mut self,
+    ) -> Option<(f32, Vec<rift_net::messages::MeterEntry>)> {
+        self.pending_meters.take()
+    }
+
+    /// Look up a remote player's `NetId` by character name
+    /// (case-insensitive). Returns `None` for unknown names
+    /// and for the local player (who isn't in `profiles`).
+    /// Used by friendly-target click handlers to resolve
+    /// "the player with this name on my party frame" into a
+    /// wire-stable id we can ship to the server.
+    pub fn net_id_for_name(&self, name: &str) -> Option<NetId> {
+        let needle = name.to_ascii_lowercase();
+        self.profiles
+            .iter()
+            .find(|(_, p)| p.character_name.to_ascii_lowercase() == needle)
+            .map(|(nid, _)| *nid)
     }
 
     /// Currently-active floor index (0 = hub) according to the most
@@ -853,6 +992,14 @@ impl NetClient {
     /// locally for input responsiveness.
     pub fn our_net_id(&self) -> Option<NetId> {
         self.our_net_id
+    }
+
+    /// Look up a remote player's display name by `NetId`. Returns
+    /// `None` for unknown ids and for our own player (we aren't
+    /// in `profiles`; callers that need to label our row should
+    /// fall back to [`Self::character_name`]).
+    pub fn name_for_net_id(&self, net_id: NetId) -> Option<&str> {
+        self.profiles.get(&net_id).map(|p| p.character_name.as_str())
     }
 
     /// `true` once the latest snapshot flagged our player row with

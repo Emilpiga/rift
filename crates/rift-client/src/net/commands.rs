@@ -177,6 +177,36 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::RequestEnterRift);
     }
 
+    /// Forward a portal-modal proposal. Server may resolve
+    /// instantly (Solo / Matchmade with no party) or open a
+    /// per-member confirm prompt (Party / Matchmade with a
+    /// party). The reply path is `ServerMsg::PortalPrompt`
+    /// for awaiting members and `LoadFloor` for the proposer.
+    pub fn request_propose_rift_entry(&mut self, start_floor: u32, mode: u8) {
+        log::info!(
+            "net: -> ProposeRiftEntry(floor={start_floor}, mode={mode})"
+        );
+        self.send(
+            Channel::Control,
+            &ClientMsg::ProposeRiftEntry { start_floor, mode },
+        );
+    }
+
+    /// Reply to a per-member portal confirm prompt.
+    pub fn request_portal_confirm(&mut self, accept: bool) {
+        log::info!("net: -> PortalConfirm(accept={accept})");
+        self.send(Channel::Control, &ClientMsg::PortalConfirm { accept });
+    }
+
+    /// Forward an arbitrary party-control message (invite /
+    /// accept / decline / leave / kick / promote). Sender is
+    /// the chat slash-command parser and the right-click
+    /// context menu.
+    pub fn send_party_msg(&mut self, msg: ClientMsg) {
+        log::info!("net: -> {msg:?}");
+        self.send(Channel::Control, &msg);
+    }
+
     /// Ask the server to teleport the session back to the hub.
     pub fn request_return_to_hub(&mut self) {
         log::info!("net: -> RequestReturnToHub");

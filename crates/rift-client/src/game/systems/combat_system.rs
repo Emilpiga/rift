@@ -258,6 +258,36 @@ fn tick_entity_targeting(
         return false;
     }
 
+    // Party-frame click shortcut: if the UI tagged a friendly
+    // target this frame (resolved to a `NetId` by main.rs from
+    // `state.frame.party_click_target_name`), confirm the cast
+    // immediately — no cursor pick, no range check (party
+    // members are always valid heal targets if you have line
+    // of sight to a frame). The server still validates range
+    // server-side, so a player who cheaply clicks an
+    // out-of-range frame just eats a rejected cast.
+    if let Some(target_net_id) = state.frame.party_click_target_net_id.take() {
+        let targeting = state.frame.entity_targeting.take().unwrap();
+        if let Some(obj_idx) = targeting.indicator_obj {
+            if obj_idx < renderer.objects.len() {
+                renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
+            }
+        }
+        if let Some(slot) =
+            state.player_state.abilities.slots[targeting.slot_index].as_mut()
+        {
+            slot.cooldown_remaining = targeting.ability.cooldown;
+        }
+        state.net.casts.push(NetCastRequest {
+            ability_id: targeting.ability.wire_id,
+            origin: player_pos,
+            aim_dir,
+            placed_target: None,
+            target_net_id: Some(target_net_id),
+        });
+        return true;
+    }
+
     // Resolve hover candidate from the current cursor each
     // frame so the highlight tracks pointer motion.
     let range = state

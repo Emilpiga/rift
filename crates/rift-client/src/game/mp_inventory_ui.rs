@@ -911,12 +911,6 @@ fn item_for_source<'a>(
 // [`Layout::compute`] above. `consumes_mouse` reads the cached
 // rects from the previous frame.
 
-// `TooltipLine` is re-exported for symmetry with hud.rs's usage
-// path; kept here so consumers don't have to learn the engine
-// import path.
-#[allow(dead_code)]
-type _TooltipLine<'a> = TooltipLine<'a>;
-
 // ─── Stats panel ────────────────────────────────────────────────────
 
 /// Render the resolved character sheet (level, class, name +

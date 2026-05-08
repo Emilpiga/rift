@@ -28,6 +28,7 @@ pub mod effect;
 pub mod enemies;
 pub mod floor;
 pub mod loot;
+pub mod meters;
 pub mod player;
 pub mod projectile;
 pub mod shrine;
@@ -159,6 +160,12 @@ pub struct Sim {
     /// [`Self::take_exit_vote_update`] which the main loop turns
     /// into a broadcast `ServerMsg::RiftExitVote`.
     exit_vote_dirty: bool,
+
+    /// Per-client cumulative combat meters for this run.
+    /// Reset by the server main loop on instance entry; ticked
+    /// every step (`elapsed += dt`); broadcast ~1 Hz as
+    /// `ServerMsg::MeterSnapshot`.
+    pub meters: meters::Meters,
 }
 
 /// Wall-clock seconds the dying player's avatar lingers in the
@@ -270,6 +277,7 @@ impl Sim {
             exit_vote: None,
             exit_vote_cooldown: 0.0,
             exit_vote_dirty: false,
+            meters: meters::Meters::default(),
         };
         enemies::spawn_for_floor(
             &mut sim.world,
@@ -550,7 +558,7 @@ impl Sim {
         // Player casts don't currently produce summons or
         // player-damage rows, but the kernel sinks need valid
         // references regardless.
-        let mut summons: Vec<(Vec3, u8, f32)> = Vec::new();
+        let mut summons: Vec<(Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
         let mut player_damage: Vec<(Entity, f32)> = Vec::new();
         let mut player_heals: Vec<(Entity, f32)> = Vec::new();
         let no_targets: [(Entity, Vec3); 0] = [];
@@ -582,10 +590,20 @@ impl Sim {
                 .map(|s| s.healing_received_mult())
                 .unwrap_or(1.0);
             let scaled = amount * mult;
+            // Pre-heal HP so the meter credits effective HP
+            // restored (i.e. excludes overheal). Overheal would
+            // inflate healer rankings without reflecting any
+            // real impact on survivability.
+            let mut effective = 0.0_f32;
             if let Ok(mut p) = self.world.get::<&mut player::ServerPlayer>(target) {
                 if !p.is_dead_or_ghosting() {
+                    let before = p.hp;
                     p.hp = (p.hp + scaled).min(p.hp_max);
+                    effective = p.hp - before;
                 }
+            }
+            if effective > 0.0 {
+                self.meters.entry(client_id).add_healing(ability_id, effective);
             }
             // Patch the trailing Heal event(s) for this target
             // with the post-mult amount. Walk from the back
@@ -761,6 +779,17 @@ impl Sim {
             p.experience.current_xp,
             p.experience.xp_to_next_level(),
         ))
+    }
+
+    /// Read a player's authoritative `(hp, hp_max)` pair. Used
+    /// by the party-state broadcaster so frame health bars
+    /// stay live across membership changes. `None` when the
+    /// client has no entity in this sim (hub players if asked
+    /// of the rift sim, or vice versa).
+    pub fn player_health(&self, client_id: ClientId) -> Option<(f32, f32)> {
+        let &entity = self.sessions.get(&client_id)?;
+        let p = self.world.get::<&ServerPlayer>(entity).ok()?;
+        Some((p.hp, p.hp_max))
     }
 
     /// Replace the entire ability loadout for `client_id`. Used
@@ -1295,6 +1324,10 @@ impl Sim {
     /// stamp it into their `WorldEvent::ChannelTick` so clients can
     /// interpolate against snapshot timing.
     pub fn step(&mut self, dt: f32, tick: NetTick) {
+        // Bump the meter clock first so the elapsed reading
+        // sent in this tick's broadcast covers everything that
+        // happens below.
+        self.meters.elapsed += dt;
         // 1. Players: ingest inputs, integrate motion.
         player::apply_inputs(&mut self.world, &self.sessions, &mut self.pending_inputs);
         player::integrate_motion(&mut self.world, &self.floor, dt);
@@ -1348,7 +1381,7 @@ impl Sim {
         //     pushing it through `submit` + `dispatch`.
         //     Summons go through a local queue so net-id
         //     allocation stays owned by Sim.
-        let mut summon_queue: Vec<(glam::Vec3, u8, f32)> = Vec::new();
+        let mut summon_queue: Vec<(glam::Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
         let mut melee_from_resolves: Vec<(hecs::Entity, f32)> = Vec::new();
         // Stand-in tables for the AI submit gate — AI casts
         // don't read sessions / cooldowns but the kernel
@@ -1430,11 +1463,11 @@ impl Sim {
         // real enemy entities. Net-ids come from the same
         // allocator the floor packs use so clients see them as
         // ordinary enemies.
-        for (pos, role_byte, hp_mult) in &summon_queue {
+        for (pos, role, hp_mult) in &summon_queue {
             enemies::spawn_summon(
                 &mut self.world,
                 *pos,
-                *role_byte,
+                *role,
                 *hp_mult,
                 self.floor_index,
                 &mut self.next_enemy_net_id,
@@ -1455,6 +1488,7 @@ impl Sim {
             &mut self.world,
             &mut self.pending_events,
             &mut self.pending_player_deaths,
+            &mut self.meters,
             melee_damage,
         );
         self.check_party_wipe();
@@ -1479,6 +1513,7 @@ impl Sim {
         // picks them up.
         let mut thorns_back: Vec<(hecs::Entity, f32)> = Vec::new();
         let mut death_aoe_zones: Vec<projectile::ServerAoeZone> = Vec::new();
+        let mut meter_events: Vec<combat_ctx::MeterEvent> = Vec::new();
         let mut ctx = combat_ctx::CombatCtx {
             events: &mut self.pending_events,
             next_loot_net_id: &mut self.next_loot_net_id,
@@ -1486,6 +1521,7 @@ impl Sim {
             floor_index: self.floor_index,
             kills: &mut kills,
             player_damage_back: &mut thorns_back,
+            meter_events: &mut meter_events,
             death_aoe_zones: &mut death_aoe_zones,
             next_projectile_net_id: &mut self.next_projectile_net_id,
         };
@@ -1550,9 +1586,50 @@ impl Sim {
                 &mut self.world,
                 &mut self.pending_events,
                 &mut self.pending_player_deaths,
+                &mut self.meters,
                 enemy_player_damage,
             );
             self.check_party_wipe();
+        }
+
+        // Fold meter events queued during the CombatCtx scope
+        // (player → enemy hits) into the per-instance meters.
+        // Done after `ctx` drops so we can re-borrow the world
+        // immutably to resolve attacker entity → ClientId.
+        for ev in meter_events.drain(..) {
+            match ev {
+                combat_ctx::MeterEvent::DamageDealt {
+                    attacker,
+                    ability_id,
+                    amount,
+                } => {
+                    let cid = self
+                        .world
+                        .get::<&player::ServerPlayer>(attacker)
+                        .ok()
+                        .map(|p| p.client_id);
+                    if let Some(cid) = cid {
+                        self.meters.entry(cid).add_damage(ability_id, amount);
+                    }
+                }
+                combat_ctx::MeterEvent::HealingDone {
+                    caster,
+                    ability_id,
+                    amount,
+                } => {
+                    // HoT ticks land here. Direct heals are
+                    // credited inline at the cast site and
+                    // never enter the meter_events queue.
+                    let cid = self
+                        .world
+                        .get::<&player::ServerPlayer>(caster)
+                        .ok()
+                        .map(|p| p.client_id);
+                    if let Some(cid) = cid {
+                        self.meters.entry(cid).add_healing(ability_id, amount);
+                    }
+                }
+            }
         }
 
         // 6b. Tick revive shrines after the CombatCtx scope ends so
@@ -1622,7 +1699,7 @@ impl Sim {
 
         let mut spawn_boss_now = false;
         for k in kills {
-            if k.role == enemies::role::BOSS {
+            if k.role == rift_game::monsters::MonsterRole::Boss {
                 if !self.rift_progress.boss_killed {
                     self.rift_progress.boss_killed = true;
                     self.rift_progress.floor_complete = true;
@@ -1668,7 +1745,7 @@ impl Sim {
                 continue;
             }
             let mut total = 0u64;
-            for _ in kills.iter().filter(|k| k.role != enemies::role::BOSS) {
+            for _ in kills.iter().filter(|k| k.role != rift_game::monsters::MonsterRole::Boss) {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -1676,7 +1753,7 @@ impl Sim {
             }
             // Boss kills are worth a fat lump of XP \u2014 5\u00d7 a
             // normal kill at the floor's monster level.
-            for _ in kills.iter().filter(|k| k.role == enemies::role::BOSS) {
+            for _ in kills.iter().filter(|k| k.role == rift_game::monsters::MonsterRole::Boss) {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -1702,7 +1779,7 @@ impl Sim {
     }
 
     /// Spawn the floor's boss in the BSP-derived `boss_room_center`.
-    /// Higher HP, slower speed, role = `enemies::role::BOSS`.
+    /// Higher HP, slower speed, role = `MonsterRole::Boss`.
     /// Idempotent against `rift_progress.boss_spawned`.
     fn spawn_boss(&mut self) {
         if self.rift_progress.boss_spawned {
@@ -1720,7 +1797,7 @@ impl Sim {
         self.next_enemy_net_id = self.next_enemy_net_id.wrapping_add(1).max(1);
         let enemy = enemies::ServerEnemy {
             net_id,
-            role: enemies::role::BOSS,
+            role: rift_game::monsters::MonsterRole::Boss,
             k: rift_game::kinematic::Kinematic {
                 position: boss_pos,
                 velocity: Vec3::ZERO,
@@ -2130,6 +2207,12 @@ impl Sim {
     pub fn build_snapshot(&self, tick: NetTick, ack_for: ClientId) -> Snapshot {
         snapshot::build(&self.world, tick, ack_for)
     }
+
+    /// Build a per-instance meter broadcast. Caller scopes the
+    /// send to the instance's members.
+    pub fn build_meter_snapshot(&self) -> rift_net::messages::ServerMsg {
+        self.meters.build_snapshot(&self.world)
+    }
 }
 
 /// Apply queued enemy → player melee damage and emit one `Damage`
@@ -2140,6 +2223,7 @@ fn apply_player_damage(
     world: &mut hecs::World,
     events: &mut Vec<WorldEvent>,
     deaths: &mut Vec<(ClientId, NetId)>,
+    meters: &mut meters::Meters,
     pending: Vec<(Entity, f32)>,
 ) {
     for (player_entity, amount) in pending {
@@ -2161,6 +2245,9 @@ fn apply_player_damage(
                 p.ghost_rise_timer = Some(GHOST_RISE_DELAY);
             }
             drop(p);
+            // Credit the meter row before emitting the wire
+            // event so the broadcast picks up the same hit.
+            meters.entry(client_id).damage_taken += amount;
             events.push(WorldEvent::Damage {
                 target: net_id,
                 amount,

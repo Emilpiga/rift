@@ -40,6 +40,14 @@ pub struct CharacterRecord {
     /// as `SMALLINT[]` so the column shape is independent of the
     /// (currently 6) bar slot count.
     pub loadout: [i16; 6],
+    /// Highest rift floor this character has ever cleared
+    /// (boss killed). `0` for fresh characters who haven't
+    /// finished a floor yet. Drives the start-floor picker in
+    /// the portal modal: the player can begin a run at any
+    /// floor in `1..=deepest_cleared_floor`. When in a party,
+    /// the leader is capped to `min` of every party member's
+    /// value so nobody is dragged past their cleared content.
+    pub deepest_cleared_floor: i32,
 }
 
 /// One persisted inventory row. Keys items by *stable* string ids
@@ -502,8 +510,8 @@ async fn load_or_create(
     let default_loadout: [i16; 6] = [0, 255, 255, 255, 255, 255];
     sqlx::query(
         "INSERT INTO characters \
-         (id, account_id, name, class_id, gender, level, xp, loadout) \
-         VALUES ($1, $2, $3, $4, $5, 1, 0, $6)",
+         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0)",
     )
     .bind(character_id)
     .bind(account_id)
@@ -525,6 +533,7 @@ async fn load_or_create(
         level: 1,
         xp: 0,
         loadout: default_loadout,
+        deepest_cleared_floor: 0,
     })
 }
 
@@ -553,8 +562,8 @@ async fn list_account_characters(
             id
         }
     };
-    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout \
+    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor \
          FROM characters WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(account_id)
@@ -563,16 +572,21 @@ async fn list_account_characters(
     tx.commit().await?;
     let characters = rows
         .into_iter()
-        .map(|(id, name, class_id, gender, level, xp, loadout)| CharacterRecord {
-            id,
-            account_id,
-            name,
-            class_id,
-            gender,
-            level,
-            xp,
-            loadout: loadout_from_vec(loadout),
-        })
+        .map(
+            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor)| {
+                CharacterRecord {
+                    id,
+                    account_id,
+                    name,
+                    class_id,
+                    gender,
+                    level,
+                    xp,
+                    loadout: loadout_from_vec(loadout),
+                    deepest_cleared_floor,
+                }
+            },
+        )
         .collect();
     Ok((account_id, characters))
 }
@@ -582,31 +596,38 @@ async fn fetch_by_account_and_name(
     account_id: Uuid,
     name: &str,
 ) -> Result<Option<CharacterRecord>, PersistenceError> {
-    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout \
+    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor \
          FROM characters WHERE account_id = $1 AND name = $2",
     )
     .bind(account_id)
     .bind(name)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(row.map(|(id, name, class_id, gender, level, xp, loadout)| CharacterRecord {
-        id,
-        account_id,
-        name,
-        class_id,
-        gender,
-        level,
-        xp,
-        loadout: loadout_from_vec(loadout),
-    }))
+    Ok(
+        row.map(
+            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor)| {
+                CharacterRecord {
+                    id,
+                    account_id,
+                    name,
+                    class_id,
+                    gender,
+                    level,
+                    xp,
+                    loadout: loadout_from_vec(loadout),
+                    deepest_cleared_floor,
+                }
+            },
+        ),
+    )
 }
 
 async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE characters SET \
             class_id = $2, gender = $3, level = $4, xp = $5, \
-            loadout = $6, updated_at = now() \
+            loadout = $6, deepest_cleared_floor = $7, updated_at = now() \
          WHERE id = $1",
     )
     .bind(rec.id)
@@ -615,6 +636,7 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     .bind(rec.level)
     .bind(rec.xp)
     .bind(&rec.loadout[..])
+    .bind(rec.deepest_cleared_floor)
     .execute(pool)
     .await?;
     Ok(())

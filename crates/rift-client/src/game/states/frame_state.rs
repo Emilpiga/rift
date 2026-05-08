@@ -51,6 +51,21 @@ pub struct FrameState {
     /// pressing F. Set in `portal_system::tick_exit`,
     /// consumed in the HUD pass.
     pub descend_prompt: bool,
+    /// Edge-triggered "user clicked party member with this
+    /// character name" intent. Set by [`crate::game::party::PartyUi`]
+    /// when a left-click lands on a party frame; consumed by
+    /// the entity-targeting tick (resolves to a `NetId` via
+    /// [`crate::net::NetClient::net_id_for_name`] and confirms
+    /// the cast as if the player had clicked the avatar).
+    pub party_click_target_name: Option<String>,
+    /// Resolved counterpart to `party_click_target_name`. The
+    /// binary fills this each frame by running the name
+    /// through `NetClient::net_id_for_name`; the combat tick
+    /// then consumes it as a confirmed entity-target click.
+    /// Split from the name field so the lookup can sit in
+    /// the binary (which holds the net session) without
+    /// teaching the combat module about `NetClient`.
+    pub party_click_target_net_id: Option<rift_net::NetId>,
 }
 
 impl FrameState {
@@ -70,5 +85,7 @@ impl FrameState {
         self.prev_local_ghost = false;
         self.hud_prompt = None;
         self.descend_prompt = false;
+        self.party_click_target_name = None;
+        self.party_click_target_net_id = None;
     }
 }

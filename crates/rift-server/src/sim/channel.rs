@@ -76,7 +76,7 @@ pub fn tick(
 ) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<(Entity, f32)> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, Option<Entity>, u8)> = Vec::new();
     let mut to_strip: Vec<Entity> = Vec::new();
 
     // 1. Player-attached channels.
@@ -105,6 +105,7 @@ pub fn tick(
             });
             collect_hits_for_effect(
                 channel,
+                Some(entity),
                 caster_pos,
                 caster_net_id,
                 tick_now,
@@ -158,6 +159,7 @@ pub fn tick(
             });
             collect_hits_for_effect(
                 channel,
+                Some(entity),
                 caster_pos,
                 caster_net_id,
                 tick_now,
@@ -182,11 +184,11 @@ pub fn tick(
 
     // 4. Apply queued player-side debuffs (rare path; flag-gated
     //    on `apply_debuff = Some(_)` per channel).
-    for (player_entity, debuff_id) in player_debuffs {
+    for (player_entity, debuff_id, caster, ability_id) in player_debuffs {
         if let Ok(mut stack) =
             world.get::<&mut super::effect::EffectStack>(player_entity)
         {
-            stack.apply(debuff_id, None);
+            stack.apply(debuff_id, None, caster, ability_id);
         }
     }
 
@@ -205,6 +207,7 @@ pub fn tick(
 /// the player-damage path receives flat damage values.
 fn collect_hits_for_effect(
     channel: &ServerChannel,
+    caster_entity: Option<Entity>,
     caster_pos: Vec3,
     caster_net_id: NetId,
     tick_now: NetTick,
@@ -212,7 +215,7 @@ fn collect_hits_for_effect(
     players: &[(Entity, Vec3)],
     hits: &mut Vec<Hit>,
     player_damage: &mut Vec<(Entity, f32)>,
-    player_debuffs: &mut Vec<(Entity, u8)>,
+    player_debuffs: &mut Vec<(Entity, u8, Option<Entity>, u8)>,
 ) {
     let crit_chance = channel.crit_chance;
     let crit_damage = channel.crit_damage;
@@ -255,6 +258,7 @@ fn collect_hits_for_effect(
                                 enemy_net_id: *nid,
                                 enemy_pos: *en_pos,
                                 attacker: caster_net_id,
+                                ability_id: channel.ability_id,
                                 damage: damage_per_tick,
                                 crit_chance,
                                 crit_damage,
@@ -272,7 +276,12 @@ fn collect_hits_for_effect(
                             let mult = roll_crit_mult(seed_for(pe.id() as u64));
                             player_damage.push((*pe, damage_per_tick * mult));
                             if let Some(id) = channel.apply_debuff {
-                                player_debuffs.push((*pe, id));
+                                player_debuffs.push((
+                                    *pe,
+                                    id,
+                                    caster_entity,
+                                    channel.ability_id,
+                                ));
                             }
                         }
                     }
@@ -312,6 +321,7 @@ fn collect_hits_for_effect(
                                 enemy_net_id: *nid,
                                 enemy_pos: *en_pos,
                                 attacker: caster_net_id,
+                                ability_id: channel.ability_id,
                                 damage: damage_per_tick,
                                 crit_chance,
                                 crit_damage,
@@ -353,7 +363,12 @@ fn collect_hits_for_effect(
                         let mult = roll_crit_mult(seed_for(pe.id() as u64));
                         player_damage.push((pe, damage_per_tick * mult));
                         if let Some(id) = channel.apply_debuff {
-                            player_debuffs.push((pe, id));
+                            player_debuffs.push((
+                                pe,
+                                id,
+                                caster_entity,
+                                channel.ability_id,
+                            ));
                         }
                     }
                 }

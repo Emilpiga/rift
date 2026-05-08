@@ -29,6 +29,7 @@ use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::{Floor, FloorConfig};
 use rift_game::kinematic::{self, loco, Kinematic};
+use rift_game::monsters::MonsterRole;
 use rift_net::NetId;
 
 pub mod boss;
@@ -37,18 +38,6 @@ pub mod caster;
 pub mod stalker;
 
 pub use boss::BossState;
-
-/// Wire role ids for replicated enemies. Stable, picked once and
-/// never reordered — clients use the byte directly to index their
-/// `MonsterCache`.
-#[allow(dead_code)] // BOSS is part of the wire contract.
-pub mod role {
-    pub const BRUTE: u8 = 0;
-    pub const STALKER: u8 = 1;
-    pub const CASTER: u8 = 2;
-    pub const ELITE: u8 = 3;
-    pub const BOSS: u8 = 4;
-}
 
 /// Wire animation ids. Clients map these to clip names locally.
 pub mod enemy_anim {
@@ -269,7 +258,7 @@ impl Default for AiPhase {
 #[derive(Clone, Debug)]
 pub struct ServerEnemy {
     pub net_id: NetId,
-    pub role: u8,
+    pub role: rift_game::monsters::MonsterRole,
     pub k: Kinematic,
     pub speed: f32,
     pub hp_max: f32,
@@ -540,7 +529,7 @@ pub fn tick_ai(
         // Per-role steering + attack. Adding a new role is one
         // arm here + a new sibling module file.
         match en.role {
-            role::STALKER => stalker::tick(
+            MonsterRole::Stalker => stalker::tick(
                 en,
                 &stalker::SPEC,
                 target,
@@ -549,7 +538,7 @@ pub fn tick_ai(
                 dt,
                 &mut outcome,
             ),
-            role::CASTER => caster::tick(
+            MonsterRole::Caster => caster::tick(
                 en,
                 &caster::SPEC,
                 floor,
@@ -559,7 +548,7 @@ pub fn tick_ai(
                 dt,
                 &mut outcome,
             ),
-            role::BOSS => {
+            MonsterRole::Boss => {
                 if let Some(b) = boss_state {
                     boss::tick(
                         en,
@@ -606,7 +595,7 @@ pub fn tick_ai(
         // stacking. Skipped for the boss — there's only ever
         // one of him and the body is huge, so neighbour pushes
         // would just jitter him off his attack mark.
-        if en.role != role::BOSS {
+        if en.role != MonsterRole::Boss {
             let push = separation_steering(en.net_id, en.k.position, &neighbours);
             if push.length_squared() > 1.0e-6 {
                 // Scale by base speed so the shove feels uniform
@@ -888,21 +877,15 @@ pub(crate) fn tick_windup(en: &mut ServerEnemy, dt: f32) -> Option<WindupKind> {
 pub fn spawn_summon(
     world: &mut hecs::World,
     pos: Vec3,
-    role_byte: u8,
+    role: MonsterRole,
     hp_mult: f32,
     floor_index: u32,
     next_enemy_net_id: &mut u32,
 ) {
     let cfg = FloorConfig::for_floor(floor_index);
-    // Look up role stats through `MonsterRole::stats()` so a
-    // new role only needs an entry there. Falls back to neutral
-    // 1.0× if the wire byte is unknown.
-    let role_stats = rift_game::monsters::MonsterRole::from_wire_byte(role_byte)
-        .map(|r| r.stats())
-        .unwrap_or(rift_game::monsters::RoleStats {
-            speed_mult: 1.0,
-            hp_mult: 1.0,
-        });
+    // Per-role spawn stats live on `MonsterRole::stats()` so a
+    // new role only needs an entry there.
+    let role_stats = role.stats();
     // Caller-provided `hp_mult` overrides the role's spawn HP
     // multiplier for summons so the boss can scale brute pack
     // size to its own floor curve.
@@ -912,7 +895,7 @@ pub fn spawn_summon(
     *next_enemy_net_id = next_enemy_net_id.wrapping_add(1).max(1);
     let enemy = ServerEnemy {
         net_id,
-        role: role_byte,
+        role,
         k: Kinematic {
             position: Vec3::new(pos.x, 0.0, pos.z),
             velocity: Vec3::ZERO,
@@ -1038,13 +1021,13 @@ pub fn spawn_for_floor(
                     continue;
                 }
                 let is_elite = has_elite && i == 0;
-                let role_byte = if is_elite {
-                    role::ELITE
+                let role = if is_elite {
+                    MonsterRole::Elite
                 } else {
                     match i % 3 {
-                        0 => role::CASTER,
-                        1 => role::STALKER,
-                        _ => role::BRUTE,
+                        0 => MonsterRole::Caster,
+                        1 => MonsterRole::Stalker,
+                        _ => MonsterRole::Brute,
                     }
                 };
                 // Roll elite affixes deterministically from the
@@ -1074,12 +1057,7 @@ pub fn spawn_for_floor(
                 // `0.8` speed instead of the role's own
                 // numbers (the elite tier is its own tuning
                 // dimension); affixes layer on top of either.
-                let role_stats = rift_game::monsters::MonsterRole::from_wire_byte(role_byte)
-                    .map(|r| r.stats())
-                    .unwrap_or(rift_game::monsters::RoleStats {
-                        speed_mult: 1.0,
-                        hp_mult: 1.0,
-                    });
+                let role_stats = role.stats();
                 let mut hp = if is_elite {
                     cfg.enemy_health * cfg.elite_hp_mult
                 } else {
@@ -1100,7 +1078,7 @@ pub fn spawn_for_floor(
                 *next_enemy_net_id = next_enemy_net_id.wrapping_add(1).max(1);
                 let enemy = ServerEnemy {
                     net_id,
-                    role: role_byte,
+                    role,
                     k: Kinematic {
                         position: Vec3::new(pos.x, 0.0, pos.z),
                         velocity: Vec3::ZERO,

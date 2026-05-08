@@ -35,12 +35,6 @@ pub struct ClientSession {
     /// persistence is disabled (no `--database-url`) or if the load
     /// failed and we fell back to in-memory only.
     pub record: Option<CharacterRecord>,
-    /// Party id for chat routing. Defaults to `client_id.0`
-    /// (singleton party of self) until a real party system
-    /// lands and starts merging members onto a shared id. The
-    /// `chat_channel::PARTY` route already reads this so the
-    /// surface is already in place.
-    pub party_id: u64,
     /// Character names this player has muted. Whisper / chat
     /// from a muted name is silently dropped on the recipient's
     /// `send_to` step; the sender never sees the mute (so they
@@ -62,11 +56,6 @@ impl ClientSession {
             gender: None,
             net_id: None,
             record: None,
-            // Singleton-party stub: each client is in its own
-            // party until a real party system fills in shared
-            // ids. `client_id.0` is a u64 already so the
-            // mapping is collision-free.
-            party_id: client_id.0,
             mute_list: HashSet::new(),
             chat_bucket: ChatRateLimit::default(),
         }

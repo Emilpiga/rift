@@ -33,6 +33,18 @@ pub struct EffectInstance {
     /// Time since last DoT tick fired (seconds). Only meaningful for
     /// debuffs whose def carries a `DamageOverTime` effect.
     pub dot_acc: f32,
+    /// Entity that applied this effect. `None` for system /
+    /// environmental sources. Used to credit DoT damage and
+    /// HoT healing back to the caster in the combat meters.
+    /// Refreshes stomp this with the latest applier so the
+    /// most recent caster owns the running attribution
+    /// (mirrors how most damage meters resolve overlap).
+    pub caster: Option<Entity>,
+    /// Wire ability id of the source that produced the effect.
+    /// Used as the meter's per-ability bucket when DoT / HoT
+    /// ticks credit the caster. `255` (`ABILITY_ID_OTHER`) when
+    /// the source can't be attributed to a specific ability.
+    pub ability_id: u8,
 }
 
 /// Per-entity stack of active debuffs. Tiny by construction —
@@ -43,18 +55,32 @@ pub struct EffectStack {
 }
 
 impl EffectStack {
-    pub fn apply(&mut self, debuff_id: u8, duration_override: Option<f32>) {
+    pub fn apply(
+        &mut self,
+        debuff_id: u8,
+        duration_override: Option<f32>,
+        caster: Option<Entity>,
+        ability_id: u8,
+    ) {
         let Some(def) = lookup(debuff_id) else { return };
         let dur = duration_override.unwrap_or(def.default_duration);
         if let Some(existing) = self.active.iter_mut().find(|d| d.id == debuff_id) {
             existing.remaining = existing.remaining.max(dur);
             existing.applied_duration = existing.applied_duration.max(dur);
+            // Latest applier owns the attribution. Refreshing
+            // a DoT mid-flight transfers credit for the rest
+            // of the duration, which is the convention the
+            // common WoW-style meters use.
+            existing.caster = caster;
+            existing.ability_id = ability_id;
         } else {
             self.active.push(EffectInstance {
                 id: debuff_id,
                 remaining: dur,
                 applied_duration: dur,
                 dot_acc: 0.0,
+                caster,
+                ability_id,
             });
         }
     }
@@ -130,6 +156,13 @@ struct DotHit {
     target_net_id: NetId,
     target_pos: glam::Vec3,
     damage: f32,
+    /// Original applier of the DoT (carried by [`EffectInstance`]).
+    /// Used to credit the per-tick damage to the caster's combat
+    /// meter when the target is an enemy.
+    caster: Option<Entity>,
+    /// Wire ability id of the source. Bucketed in the meter's
+    /// per-ability breakdown.
+    ability_id: u8,
 }
 
 /// One queued heal-over-time tick from `tick`. Player-only (no
@@ -141,6 +174,10 @@ struct HotHit {
     target_net_id: NetId,
     target_pos: glam::Vec3,
     amount: f32,
+    /// Original applier of the HoT. Used to credit the per-
+    /// tick healing to the caster's meter row.
+    caster: Option<Entity>,
+    ability_id: u8,
 }
 
 /// Decay every active debuff, fire any due DoT ticks, drop expired
@@ -188,6 +225,20 @@ pub fn tick(
                 crit: false,
                 position: hit.target_pos.to_array(),
             });
+            // Credit the per-tick damage to the original
+            // caster's combat-meter row + per-ability bucket.
+            // Anonymous DoTs (no caster recorded at apply
+            // time) are skipped — they'd have nowhere to
+            // land, and the wire event still fires.
+            if let Some(caster) = hit.caster {
+                ctx.meter_events.push(
+                    super::combat_ctx::MeterEvent::DamageDealt {
+                        attacker: caster,
+                        ability_id: hit.ability_id,
+                        amount: hit.damage,
+                    },
+                );
+            }
             if en.hp <= 0.0 {
                 dead.push((hit.target, hit.target_net_id));
                 break;
@@ -236,7 +287,13 @@ pub fn tick(
         let heal_mult = stack.healing_received_mult();
         for heal in heals.drain(..).filter(|h| h.target == entity) {
             let amount = heal.amount * heal_mult;
+            // Capture pre-heal HP so the meter can credit only
+            // the *effective* (non-overheal) portion to the
+            // caster's HPS row, matching how direct heals are
+            // booked in `Sim::handle_cast_request`.
+            let before = p.hp;
             p.hp = (p.hp + amount).min(p.hp_max);
+            let effective = p.hp - before;
             ctx.events.push(WorldEvent::Heal {
                 // No caster tracking on debuff instances yet —
                 // self-attribute the tick to the target. Visuals
@@ -247,6 +304,19 @@ pub fn tick(
                 over_time: true,
                 position: heal.target_pos.to_array(),
             });
+            // Credit non-overheal portion to the caster.
+            // Anonymous HoTs are skipped (no row to write).
+            if effective > 0.0 {
+                if let Some(caster) = heal.caster {
+                    ctx.meter_events.push(
+                        super::combat_ctx::MeterEvent::HealingDone {
+                            caster,
+                            ability_id: heal.ability_id,
+                            amount: effective,
+                        },
+                    );
+                }
+            }
         }
     }
     player_damage
@@ -271,6 +341,8 @@ fn accumulate_dot(
                     target_net_id,
                     target_pos,
                     damage: dps * interval,
+                    caster: instance.caster,
+                    ability_id: instance.ability_id,
                 });
             }
         }
@@ -298,6 +370,8 @@ fn accumulate_hot(
                     target_net_id,
                     target_pos,
                     amount: hps * interval,
+                    caster: instance.caster,
+                    ability_id: instance.ability_id,
                 });
             }
         }

@@ -101,7 +101,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         }
         entities.push(EntitySnapshot {
             net_id: en.net_id,
-            kind: EntityKind::Enemy { role: en.role, anim },
+            kind: EntityKind::Enemy { role: en.role.to_wire_byte(), anim },
             position: en.k.position.to_array(),
             yaw: en.k.yaw,
             velocity: en.k.velocity.to_array(),

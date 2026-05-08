@@ -1,11 +1,11 @@
 //! Brute / elite chase-and-melee behaviour.
 //!
 //! Pattern: walk to target, telegraph swing, land damage,
-//! repeat. The same body powers the brute role (`role::BRUTE`),
-//! the elite role (`role::ELITE`), the boss-fallback when its
-//! `BossState` companion is missing, and any unknown wire role
-//! byte. Variants share the [`Spec`] shape and differ only in
-//! the static-spec instance the dispatcher hands them.
+//! repeat. The same body powers `MonsterRole::Brute`,
+//! `MonsterRole::Elite`, and the boss-fallback when its
+//! `BossState` companion is missing. Variants share the
+//! [`Spec`] shape and differ only in the static-spec instance
+//! the dispatcher hands them.
 //!
 //! Three behaviours layered on top of the basic chase:
 //! flanking offsets so packs surround instead of dogpiling,

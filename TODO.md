@@ -7,7 +7,37 @@ goal is shared awareness, not a spec.
 
 ## In progress
 
-_(nothing actively in flight)_
+### Combat-meter: `damage taken` per-ability breakdown
+
+The DMG / HPS tabs in `MeterUi` (bottom-right HUD) already drive a
+click-to-expand per-ability rollup, fed by the
+`MeterAbilityBreakdown` rows the server attaches to every
+`MeterEntry`. The `TAKEN` tab can't do the same yet because enemy
+damage doesn't go through the standard ability pipeline — every
+hit currently fans out as a bare `(Entity, f32)` tuple in
+`AiOutcome::melee_damage`, and Stalker dashes / Brute & Boss melee
+swings don't carry their `Spec::ability_id`. The `lookup` registry
+in `rift-game::abilities` already has wire ids for the boss
+attacks (`ARCANE_BOLT`, `ARCANE_FAN`, `GROUND_SLAM`,
+`SUMMON_BRUTES`), but the regular brute / stalker melee swings
+have no ability entry at all.
+
+**Plan when we pick this up:**
+
+- [ ] Author registry entries for every enemy attack (brute melee,
+      stalker dash, caster auto, …) in `rift-game::abilities` so
+      every hit can be tagged with a wire-stable `ability_id`.
+- [ ] Replace `Vec<(Entity, f32)>` damage queues with a struct that
+      carries `ability_id: u8` (mirror of `MeterEvent::DamageDealt`).
+      Touches `AiOutcome::melee_damage`,
+      `projectile::tick(...)`, `projectile::tick_aoe(...)`,
+      `channel::tick(...)`, and the boss / brute / stalker tick
+      sites.
+- [ ] Pipe through `apply_player_damage` and credit
+      `meters.entry(client_id).by_ability` so the breakdown is
+      symmetric with DMG / HPS.
+- [ ] Drop the "show ability rows" gate on the TAKEN tab and let the
+      same expand UI render them.
 
 ---
 

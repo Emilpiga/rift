@@ -252,28 +252,6 @@ impl Mesh {
         Self { vertices, indices }
     }
 
-    /// A red-tinted enemy — spiky/angular shape to distinguish from player.
-    pub fn enemy() -> Self {
-        // Brute wraith: wide, heavy, low-floating ghost. Blood red HDR.
-        let body = Vec3::new(2.40, 0.20, 0.15);
-        let eye  = Vec3::new(3.20, 0.50, 0.30);
-        Self::wraith(body, body * 0.4, eye, 0.55, 1.10, 0.25)
-    }
-
-    /// Stalker variant: tall thin wisp wraith. Magenta-violet HDR.
-    pub fn enemy_stalker() -> Self {
-        let body = Vec3::new(1.80, 0.40, 2.80);
-        let eye  = Vec3::new(2.40, 0.60, 3.20);
-        Self::wraith(body, body * 0.4, eye, 0.26, 1.55, 0.18)
-    }
-
-    /// Caster variant: hooded mage wraith. Toxic green HDR.
-    pub fn enemy_caster() -> Self {
-        let body = Vec3::new(0.30, 2.60, 0.55);
-        let eye  = Vec3::new(0.40, 3.40, 0.70);
-        Self::wraith(body, body * 0.4, eye, 0.36, 1.40, 0.20)
-    }
-
     /// Wraith template — one continuous lathed surface (revolved profile) with
     /// a tattered, wavy hem at the bottom and two glowing eyes. The profile is
     /// hand-tuned to read as: rounded head -> shoulders -> tapered body ->
@@ -470,77 +448,6 @@ impl Mesh {
                 self.indices.extend_from_slice(&[a, c, b, b, c, d]);
             }
         }
-    }
-
-    /// Configurable enemy mesh — body color, spike color, and shape proportions.
-    /// (Legacy octagonal-prism builder, kept for any callers still using it.)
-    #[allow(dead_code)]
-    pub fn enemy_shape(body_color: Vec3, spike_color: Vec3, radius: f32, height: f32, spike_h: f32) -> Self {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        // Body: octagonal prism with the given proportions.
-        let segments = 8u32;
-        let top_radius = radius * 0.8;
-
-        // Side faces
-        for i in 0..segments {
-            let angle0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let angle1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            let (s0, c0) = (angle0.sin(), angle0.cos());
-            let (s1, c1) = (angle1.sin(), angle1.cos());
-
-            let base_idx = vertices.len() as u32;
-            let normal = Vec3::new((s0 + s1) * 0.5, 0.0, (c0 + c1) * 0.5).normalize();
-
-            vertices.push(Vertex { position: Vec3::new(s0 * radius, 0.0, c0 * radius), normal, color: body_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(s1 * radius, 0.0, c1 * radius), normal, color: body_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(s1 * top_radius, height, c1 * top_radius), normal, color: body_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(s0 * top_radius, height, c0 * top_radius), normal, color: body_color, uv: Vec2::new(0.5, 0.5) });
-
-            indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
-        }
-
-        // Top cap (flat disc to close the body)
-        let cap_center_idx = vertices.len() as u32;
-        vertices.push(Vertex { position: Vec3::new(0.0, height, 0.0), normal: Vec3::Y, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-        for i in 0..segments {
-            let angle0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let angle1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            let idx = vertices.len() as u32;
-            vertices.push(Vertex { position: Vec3::new(angle0.sin() * top_radius, height, angle0.cos() * top_radius), normal: Vec3::Y, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(angle1.sin() * top_radius, height, angle1.cos() * top_radius), normal: Vec3::Y, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-            indices.extend_from_slice(&[cap_center_idx, idx, idx+1]);
-        }
-
-        // Top spike cone (solid, on top of the cap)
-        let spike_tip_idx = vertices.len() as u32;
-        vertices.push(Vertex { position: Vec3::new(0.0, height + spike_h, 0.0), normal: Vec3::Y, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-        for i in 0..segments {
-            let angle0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let angle1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            let idx = vertices.len() as u32;
-            let normal = Vec3::new(angle0.sin(), 0.7, angle0.cos()).normalize();
-            vertices.push(Vertex { position: Vec3::new(angle0.sin() * top_radius * 0.6, height, angle0.cos() * top_radius * 0.6), normal, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-            vertices.push(Vertex { position: Vec3::new(angle1.sin() * top_radius * 0.6, height, angle1.cos() * top_radius * 0.6), normal, color: spike_color, uv: Vec2::new(0.5, 0.5) });
-            indices.extend_from_slice(&[spike_tip_idx, idx, idx+1]);
-        }
-
-        Self { vertices, indices }
-    }
-
-    /// An elite enemy — bigger, more menacing wraith. Steel-blue HDR.
-    pub fn elite_enemy() -> Self {
-        let body = Vec3::new(0.40, 0.70, 1.80);
-        let eye  = Vec3::new(0.80, 1.40, 2.40);
-        Self::wraith(body, body * 0.4, eye, 0.65, 1.70, 0.30)
-    }
-
-    /// Boss — towering archfiend wraith. Deep purple HDR.
-    pub fn boss() -> Self {
-        let body = Vec3::new(0.90, 0.20, 1.80);
-        let eye  = Vec3::new(2.40, 0.40, 2.80);
-        Self::wraith(body, body * 0.4, eye, 0.95, 2.80, 0.40)
     }
 
     /// Generate a batched dungeon floor from tile positions.

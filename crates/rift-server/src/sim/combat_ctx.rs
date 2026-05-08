@@ -51,6 +51,12 @@ pub struct CombatCtx<'a> {
     /// death-on-thorns path runs through one chokepoint. Empty
     /// for hits on non-thorns enemies.
     pub player_damage_back: &'a mut Vec<(Entity, f32)>,
+    /// Combat-meter sink. Damage subsystems push one
+    /// [`MeterEvent`] per attributable hit so [`super::Sim::step`]
+    /// can fold them into the per-instance `Meters` table after
+    /// the world borrow drops. Decoupled from `events` because
+    /// these are server-internal bookkeeping, not wire traffic.
+    pub meter_events: &'a mut Vec<MeterEvent>,
 
     // ---- Kill-time ----------------------------------------
 
@@ -73,11 +79,38 @@ pub struct CombatCtx<'a> {
     pub next_projectile_net_id: &'a mut u32,
 }
 
+/// One row pushed to [`CombatCtx::meter_events`] per damage / heal
+/// hit that can be attributed to a player. Drained at the end of
+/// [`super::Sim::step`] and folded into the per-instance
+/// [`super::Meters`] table.
+#[derive(Clone, Copy, Debug)]
+pub enum MeterEvent {
+    /// Player → enemy damage. `attacker` is the player entity
+    /// that landed the hit; `ability_id` is the wire-stable u8
+    /// from `rift_game::abilities::id::*`, or `255` ("Other")
+    /// when the source can't be attributed (DoT ticks today).
+    DamageDealt {
+        attacker: Entity,
+        ability_id: u8,
+        amount: f32,
+    },
+    /// Player → player healing (effective HP restored, post
+    /// healing-received-mult and post-overheal). `caster` is
+    /// the player entity that originated the heal — used to
+    /// credit HoT ticks whose application site is several
+    /// frames removed from the cast that produced them.
+    HealingDone {
+        caster: Entity,
+        ability_id: u8,
+        amount: f32,
+    },
+}
+
 /// Per-kill information collected during damage subsystems and
 /// drained at the end of [`super::Sim::step`] for XP / progress
 /// bookkeeping.
 #[derive(Clone, Copy, Debug)]
 pub struct KillInfo {
-    /// Wire role byte (`role::BRUTE` ... `role::BOSS`).
-    pub role: u8,
+    /// Role of the slain enemy.
+    pub role: rift_game::monsters::MonsterRole,
 }

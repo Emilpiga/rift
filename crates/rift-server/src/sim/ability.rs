@@ -367,7 +367,7 @@ pub struct DispatchSinks<'a> {
     /// Summon spawn requests `(pos, role, hp_mult)` queued for
     /// `Sim::step` to drain into entities. Net-id allocation
     /// stays in `Sim`.
-    pub summons: &'a mut Vec<(Vec3, u8, f32)>,
+    pub summons: &'a mut Vec<(Vec3, rift_game::monsters::MonsterRole, f32)>,
     /// Live `(entity, position)` rows for every player. Read
     /// by `DelayedAoe` to find who's inside the slam disc.
     pub player_targets: &'a [(Entity, Vec3)],
@@ -431,6 +431,7 @@ pub fn dispatch(
                 .unwrap_or(accepted.origin + accepted.aim * 5.0);
             sinks.aoe_zones.push(ServerAoeZone {
                 owner: accepted.caster,
+                ability_id: accepted.ability_id,
                 team: accepted.team,
                 position: Vec3::new(pos.x, 0.0, pos.z),
                 radius,
@@ -597,7 +598,12 @@ pub fn dispatch(
             if let Ok(mut stack) =
                 world.get::<&mut super::effect::EffectStack>(target)
             {
-                stack.apply(apply_buff, None);
+                stack.apply(
+                    apply_buff,
+                    None,
+                    accepted.caster_entity,
+                    accepted.ability_id,
+                );
             }
         }
     }

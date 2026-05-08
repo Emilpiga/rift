@@ -86,15 +86,9 @@ impl Server {
         //    short-circuits with a system reply.
         let recipients: Vec<Recipient> = match channel {
             chat_channel::GLOBAL => self.recipients_global(),
-            chat_channel::HUB => self.recipients_on_floor(0),
-            chat_channel::FLOOR => {
-                let f = self.floor_for_client(from);
-                self.recipients_on_floor(f)
-            }
-            chat_channel::PARTY => {
-                let pid = self.sessions.get(from).map(|s| s.party_id).unwrap_or(0);
-                self.recipients_in_party(pid)
-            }
+            chat_channel::HUB => self.recipients_on_hub(),
+            chat_channel::FLOOR => self.recipients_in_world_with(from),
+            chat_channel::PARTY => self.recipients_in_party(from),
             chat_channel::WHISPER => {
                 let target_name = match target.as_deref().map(|s| s.trim()) {
                     Some(t) if !t.is_empty() => t.to_string(),
@@ -118,7 +112,6 @@ impl Server {
                         if v[0].client_id != from {
                             v.push(Recipient {
                                 client_id: from,
-                                character_name: sender_name.clone(),
                             });
                         }
                         v
@@ -193,40 +186,58 @@ impl Server {
     fn recipients_global(&self) -> Vec<Recipient> {
         self.sessions
             .iter()
-            .filter_map(|s| {
-                Some(Recipient {
-                    client_id: s.client_id,
-                    character_name: s.character_name.clone()?,
-                })
-            })
+            .filter(|s| s.character_name.is_some())
+            .map(|s| Recipient { client_id: s.client_id })
             .collect()
     }
 
-    /// Every welcomed client on the given floor index.
-    fn recipients_on_floor(&self, floor_index: u32) -> Vec<Recipient> {
+    /// Every welcomed client currently in the hub (i.e. not
+    /// inside any rift instance). Replaces the old
+    /// "floor 0 == hub" lookup now that rift instances no
+    /// longer share a single floor index.
+    fn recipients_on_hub(&self) -> Vec<Recipient> {
+        let hub_clients: std::collections::HashSet<ClientId> =
+            self.clients_on_hub().into_iter().collect();
         self.sessions
             .iter()
-            .filter(|s| self.floor_for_client(s.client_id) == floor_index)
-            .filter_map(|s| {
-                Some(Recipient {
-                    client_id: s.client_id,
-                    character_name: s.character_name.clone()?,
-                })
-            })
+            .filter(|s| hub_clients.contains(&s.client_id))
+            .filter(|s| s.character_name.is_some())
+            .map(|s| Recipient { client_id: s.client_id })
             .collect()
     }
 
-    /// Every welcomed client whose `party_id` matches.
-    fn recipients_in_party(&self, party_id: u64) -> Vec<Recipient> {
+    /// Every welcomed client sharing the same world-scope as
+    /// `viewer` (their rift instance, or every hub player when
+    /// hub-side). Used for FLOOR chat scoping in the new
+    /// per-instance model.
+    fn recipients_in_world_with(&self, viewer: ClientId) -> Vec<Recipient> {
+        let cohort: std::collections::HashSet<ClientId> =
+            self.clients_in_world_with(viewer).into_iter().collect();
         self.sessions
             .iter()
-            .filter(|s| s.party_id == party_id)
-            .filter_map(|s| {
-                Some(Recipient {
-                    client_id: s.client_id,
-                    character_name: s.character_name.clone()?,
-                })
-            })
+            .filter(|s| cohort.contains(&s.client_id))
+            .filter(|s| s.character_name.is_some())
+            .map(|s| Recipient { client_id: s.client_id })
+            .collect()
+    }
+
+    /// Every welcomed client in the same party as `viewer`.
+    /// Returns `vec![viewer]` (echo) when `viewer` is solo.
+    fn recipients_in_party(&self, viewer: ClientId) -> Vec<Recipient> {
+        let members: std::collections::HashSet<ClientId> = self
+            .parties
+            .party_of(viewer)
+            .map(|p| p.members.iter().copied().collect())
+            .unwrap_or_else(|| {
+                let mut s = std::collections::HashSet::new();
+                s.insert(viewer);
+                s
+            });
+        self.sessions
+            .iter()
+            .filter(|s| members.contains(&s.client_id))
+            .filter(|s| s.character_name.is_some())
+            .map(|s| Recipient { client_id: s.client_id })
             .collect()
     }
 
@@ -239,7 +250,6 @@ impl Server {
             if cn.to_ascii_lowercase() == needle {
                 Some(Recipient {
                     client_id: s.client_id,
-                    character_name: cn.clone(),
                 })
             } else {
                 None

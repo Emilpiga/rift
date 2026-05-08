@@ -282,6 +282,33 @@ impl Server {
                 floor_complete: rp.floor_complete,
             },
         );
+
+        // Initial party state: empty (`leader: None, members:
+        // []`) until the player accepts an invite. Sent so the
+        // client UI starts in a known-good "solo" state instead
+        // of inferring it from absence-of-message.
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::PartyState {
+                leader: None,
+                members: Vec::new(),
+            },
+        );
+
+        // Initial deepest-cleared-floor watermark so the portal
+        // modal can clamp its floor stepper to [1, deepest+1].
+        let deepest = self
+            .sessions
+            .get(from)
+            .and_then(|s| s.record.as_ref())
+            .map(|r| r.deepest_cleared_floor.max(0) as u32)
+            .unwrap_or(0);
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::DeepestFloorCleared { value: deepest },
+        );
     }
 
     /// Catch the newcomer up on every already-connected player,

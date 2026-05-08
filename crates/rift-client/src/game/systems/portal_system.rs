@@ -229,6 +229,7 @@ pub fn tick_hub(
         dt,
         "PRESS [F] TO ENTER THE RIFT",
         "hub portal",
+        true,
     );
 }
 
@@ -320,6 +321,7 @@ pub fn tick_exit(
         dt,
         "PRESS [F] TO DESCEND",
         "exit portal",
+        false,
     );
 }
 
@@ -427,6 +429,7 @@ fn tick(
     dt: f32,
     prompt_text: &'static str,
     log_label: &str,
+    is_hub_portal: bool,
 ) {
     use winit::keyboard::KeyCode;
 
@@ -445,9 +448,22 @@ fn tick(
     };
     if player_pos.distance(portal.position) <= INTERACT_RADIUS {
         *hud_prompt = Some(prompt_text);
-        if input.key_just_pressed(KeyCode::KeyF) && net.transition.is_none() {
-            log::info!("{log_label}: requesting EnterRift");
-            net.transition = Some(NetTransitionRequest::EnterRift);
+        if input.key_just_pressed(KeyCode::KeyF) {
+            if is_hub_portal {
+                // Hub portal: defer to the portal modal so the
+                // player picks Solo / Party / Matchmade and a
+                // start floor before the proposal goes out.
+                if !net.pending_open_portal_modal {
+                    log::info!("{log_label}: opening portal modal");
+                    net.pending_open_portal_modal = true;
+                }
+            } else if net.transition.is_none() {
+                // Exit portal: legacy direct-descend path. The
+                // server treats `RequestEnterRift` from inside
+                // a rift as "open the descend vote".
+                log::info!("{log_label}: requesting EnterRift");
+                net.transition = Some(NetTransitionRequest::EnterRift);
+            }
         }
     }
 }

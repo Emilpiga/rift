@@ -71,6 +71,16 @@ pub struct ChatUi {
     /// the channel pip; auto-closes after a selection or when
     /// the chat closes.
     picker_open: bool,
+    /// Slash commands the chat parser didn't recognise — e.g.
+    /// `/invite`, `/accept`. Drained by the UI phase and
+    /// routed to specialised modules (currently the party UI).
+    /// `(head_lowercased, body_trimmed)`.
+    pub pending_slash: Vec<(String, String)>,
+    /// Bottom-left input field rect cached during the most
+    /// recent [`Self::frame`] when `open` was true. Queried by
+    /// `combat_phase::consumes_mouse` so a click on the chat
+    /// input doesn't double-fire as a basic attack.
+    cached_input_rect: Option<Rect>,
 }
 
 const SCROLLBACK_CAP: usize = 200;
@@ -92,7 +102,37 @@ impl ChatUi {
             mutes: HashSet::new(),
             manual_channel: false,
             picker_open: false,
+            pending_slash: Vec::new(),
+            cached_input_rect: None,
         }
+    }
+
+    /// Toggle a name on the local mute list. Returns `true`
+    /// if the name was newly muted, `false` if it was already
+    /// muted (and was therefore unmuted). Used by the party
+    /// frame's right-click context menu so the same UI does
+    /// double duty for mute / unmute.
+    pub fn toggle_mute(&mut self, name: &str) -> bool {
+        if self.mutes.remove(name) {
+            self.push_local_system(&format!("Unmuted '{name}'."));
+            false
+        } else {
+            self.mutes.insert(name.to_string());
+            self.push_local_system(&format!("Muted '{name}'."));
+            true
+        }
+    }
+
+    /// Open the chat input pre-filled with `draft`. Caller is
+    /// responsible for adding any trailing space; we leave the
+    /// caret at the end of the supplied string. The next-frame
+    /// text-input is discarded so the keystroke that triggered
+    /// the open (e.g. a context-menu click) doesn't also land
+    /// in the field.
+    pub fn open_with_draft(&mut self, ui: &mut Ui<'_>, draft: String) {
+        self.open = true;
+        self.draft = draft;
+        ui.input().discard_text_input();
     }
 
     /// Called by the binary when a `LoadFloor` lands. Auto-
@@ -117,6 +157,19 @@ impl ChatUi {
     /// just like any other modal text-input.
     pub fn is_typing(&self) -> bool {
         self.open
+    }
+
+    /// Whether a click at `(mx, my)` lands on the chat input
+    /// field (only meaningful while the field is open).
+    /// Mirrors `mp_inventory_ui::consumes_mouse` — gates the
+    /// gameplay basic-attack click so typing into chat or
+    /// dropping the cursor on the input doesn't fire an
+    /// ability.
+    pub fn consumes_mouse(&self, mx: f32, my: f32) -> bool {
+        match self.cached_input_rect {
+            Some(r) => r.contains(Pos2::new(mx, my)),
+            None => false,
+        }
     }
 
     /// Append an inbound line. System lines (`sender == None`)
@@ -237,6 +290,10 @@ impl ChatUi {
         let s = ui.screen_size();
         let scale = theme.scale;
 
+        // Reset the cached pointer-consume rect; the input
+        // path below resets it when the field is open.
+        self.cached_input_rect = None;
+
         // Bottom-left anchor. Keep clear of HUD bars so the
         // chat doesn't fight with health / mana meters.
         let panel_w = (380.0 * scale).min(s.x * 0.40);
@@ -268,6 +325,7 @@ impl ChatUi {
                 panel_w,
                 input_h,
             );
+            self.cached_input_rect = Some(input_rect);
             // Channel pip drawn to the left of the field so
             // the player always sees which scope a no-prefix
             // send will hit. Clickable — toggles the dropdown
@@ -516,9 +574,11 @@ impl ChatUi {
                     }
                 }
                 _ => {
-                    self.push_local_system(&format!(
-                        "Unknown command: /{head}"
-                    ));
+                    // Unknown to chat. Defer to upstream (party
+                    // UI) before deciding it's truly unknown.
+                    // The UI phase drains `pending_slash` and
+                    // either routes it or pushes a system line.
+                    self.pending_slash.push((head, body.to_string()));
                 }
             }
         } else {
@@ -529,7 +589,7 @@ impl ChatUi {
     /// Drop a local-only system line into the scrollback. Used
     /// for client-side feedback (`/mute`, unknown command,
     /// etc.) without round-tripping the server.
-    fn push_local_system(&mut self, text: &str) {
+    pub fn push_local_system(&mut self, text: &str) {
         // System line, no sender → `our_name` doesn't matter
         // for the whisper-attribution path. Pass `None`.
         self.push(

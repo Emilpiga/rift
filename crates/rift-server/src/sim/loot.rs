@@ -77,6 +77,7 @@ pub fn finalise_kills(
                     ctx.next_projectile_net_id.wrapping_add(1).max(1);
                 ctx.death_aoe_zones.push(super::projectile::ServerAoeZone {
                     owner: zone_net_id,
+                    ability_id: super::meters::ABILITY_ID_OTHER,
                     team: super::projectile::Team::Enemy,
                     position: pos,
                     radius: super::enemies::ELITE_EXPLODER_RADIUS,
@@ -122,12 +123,10 @@ pub fn drop_for_enemy(
     events: &mut Vec<WorldEvent>,
     tick: NetTick,
     enemy_net_id: NetId,
-    enemy_role: u8,
+    role: MonsterRole,
     enemy_pos: Vec3,
     floor_index: u32,
-) {    let Some(role) = MonsterRole::from_wire_byte(enemy_role) else {
-        return;
-    };
+) {
     let table = drops::table_for(role);
     // Seed: floor pollutes the seed so re-entering a floor produces
     // different drops; net_id keeps drops within a tick distinct.

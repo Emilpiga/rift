@@ -127,6 +127,18 @@ impl RiftApp {
                 }
             }
         }
+
+        // Resolve the party-frame click intent (a character
+        // name set by the UI when the player left-clicked a
+        // party frame while a friendly-target ability was
+        // armed) into a `NetId` here, where we hold the net
+        // session. The combat tick consumes the resolved id
+        // on the next frame and confirms the cast — this lag
+        // is fine since the player clicked the previous
+        // render frame.
+        if let Some(name) = state.frame.party_click_target_name.take() {
+            state.frame.party_click_target_net_id = net.net_id_for_name(&name);
+        }
     }
 
     /// Reconcile every ECS entity that's driven off the latest
@@ -752,6 +764,44 @@ impl RiftApp {
             net.send_chat(channel, target, text);
         }
 
+        // Party / portal messages: drain server pushes into
+        // the party UI mirror, and ship any outbound intents
+        // queued by the chat slash parser, the right-click
+        // context menu, the portal modal, and the per-member
+        // confirm modal.
+        if let Some(msg) = net.take_pending_party_state() {
+            if let rift_net::messages::ServerMsg::PartyState { leader, members } = msg {
+                if let Some(name) = net.character_name() {
+                    state.party.set_our_name(name.to_string());
+                }
+                state.party.ingest_state(leader, members);
+            }
+        }
+        for invite in net.take_pending_party_invites() {
+            state.party.ingest_invite(invite);
+        }
+        for err in net.take_pending_party_errors() {
+            state.party.ingest_error(err);
+        }
+        if let Some(prompt) = net.take_pending_portal_prompt() {
+            state.party.ingest_portal_prompt(prompt);
+        }
+        if let Some(value) = net.take_pending_deepest_floor() {
+            state.party.ingest_deepest_floor(value);
+        }
+        if std::mem::take(&mut state.net.pending_open_portal_modal) {
+            state.party.open_portal_modal();
+        }
+        for msg in state.net.pending_party_msgs.drain(..).collect::<Vec<_>>() {
+            net.send_party_msg(msg);
+        }
+        if let Some((floor, mode)) = state.net.pending_propose_rift_entry.take() {
+            net.request_propose_rift_entry(floor, mode);
+        }
+        if let Some(accept) = state.net.pending_portal_confirm.take() {
+            net.request_portal_confirm(accept);
+        }
+
         // Stash transfer requests (deposit / withdraw). Drained
         // alongside equip requests; the server replies with
         // fresh InventorySync + StashSync.
@@ -909,6 +959,11 @@ impl RiftApp {
             state.rift.boss_spawned = boss_spawned;
             state.rift.boss_killed = boss_killed;
             state.rift.floor_complete = complete;
+        }
+
+        // Authoritative combat-meter snapshot (~1 Hz).
+        if let Some((elapsed, entries)) = net.take_pending_meters() {
+            state.meters.apply_snapshot(elapsed, entries, net);
         }
 
         // Authoritative rift exit-vote snapshot. Mirrored onto

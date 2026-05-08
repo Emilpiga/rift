@@ -19,7 +19,9 @@ use rift_net::Gender;
 
 pub mod chat;
 pub mod inventory;
+pub mod party;
 pub mod persistence;
+pub mod portal;
 pub mod session;
 
 /// Decode a stored gender column back to the wire enum. Unknown

@@ -366,7 +366,7 @@ impl NetClient {
             );
         }
         for (net_id, role_byte, position, hp_pct) in to_spawn {
-            let role = match role_byte_to_monster_role(role_byte) {
+            let role = match MonsterRole::from_wire_byte(role_byte) {
                 Some(r) => r,
                 None => continue,
             };
@@ -693,18 +693,4 @@ fn sync_effects(
         return;
     }
     let _ = world.insert_one(entity, Effects { effects });
-}
-
-/// Map the wire role byte (`rift_server::sim::role::*`) to the
-/// client's `MonsterRole`. Unknown values are dropped — a future
-/// new role won't crash an old client; it just won't render.
-fn role_byte_to_monster_role(r: u8) -> Option<MonsterRole> {
-    Some(match r {
-        0 => MonsterRole::Brute,
-        1 => MonsterRole::Stalker,
-        2 => MonsterRole::Caster,
-        3 => MonsterRole::Elite,
-        4 => MonsterRole::Boss,
-        _ => return None,
-    })
 }

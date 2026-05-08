@@ -95,7 +95,83 @@ pub enum ClientMsg {
     /// authority on whether the request is currently valid; it
     /// responds by broadcasting [`ServerMsg::LoadFloor`] to the
     /// whole session if it accepts.
+    ///
+    /// Deprecated by [`ClientMsg::ProposeRiftEntry`] / the
+    /// portal modal flow but kept on the wire for any callers
+    /// still using the bare-press path. Server treats it as
+    /// `ProposeRiftEntry { start_floor: 1, mode: SOLO }`.
     RequestEnterRift,
+
+    /// Player chose Solo / Party / Matchmade in the portal
+    /// modal and is asking the server to start (or join) a rift
+    /// instance at `start_floor`. Solo immediately spins up a
+    /// new instance and ports the caller in. Party sends a
+    /// [`ServerMsg::PortalPrompt`] to every other party member
+    /// for opt-in (the proposer is auto-confirmed). Matchmade
+    /// either joins an open matchmaking instance with capacity
+    /// or opens a new one (the rest of the party, if any, comes
+    /// in as part of the same fill — see [`party_mode`]).
+    ///
+    /// Server validates `start_floor` against the *minimum*
+    /// `deepest_cleared_floor + 1` of the party so nobody is
+    /// dragged past their cleared content. Reliable on
+    /// `Channel::Control`.
+    ProposeRiftEntry {
+        /// Floor index the proposer wants to start on. Must
+        /// satisfy `1 <= start_floor <= min_party_deepest + 1`.
+        start_floor: u32,
+        /// Wire id from [`party_mode`].
+        mode: u8,
+    },
+
+    /// Reply to [`ServerMsg::PortalPrompt`]. Each non-proposer
+    /// party member sends `accept = true` to confirm they want
+    /// to ride along, or `accept = false` to decline. Decline /
+    /// timeout means the proposer's run starts without them
+    /// (they stay in the hub). Reliable on `Channel::Control`.
+    PortalConfirm { accept: bool },
+
+    /// Send a party invite to the player whose character name is
+    /// `name`. Server validates the invitee is online, not
+    /// already in a party (or in *this* party), and that
+    /// neither side is currently inside a rift. On success the
+    /// invitee receives [`ServerMsg::PartyInviteIncoming`] and
+    /// a TTL-bound row is recorded server-side; on failure the
+    /// inviter receives [`ServerMsg::PartyError`]. Reliable on
+    /// `Channel::Control`.
+    PartyInvite { name: String },
+
+    /// Accept the most recent pending invite (or the named one
+    /// if `from` is provided — useful when multiple invites are
+    /// outstanding). Server merges the invitee into the
+    /// inviter's party, broadcasts [`ServerMsg::PartyState`] to
+    /// every member, and clears the invite row. Reliable on
+    /// `Channel::Control`.
+    PartyAccept { from: Option<String> },
+
+    /// Decline a pending invite. Server clears the row and
+    /// notifies the inviter via a system chat line. Reliable on
+    /// `Channel::Control`.
+    PartyDecline { from: Option<String> },
+
+    /// Leave the current party. If the leaver is the leader,
+    /// leadership transfers to the next-longest-serving member.
+    /// If the leaver is the last member, the party is dissolved.
+    /// Server broadcasts a fresh [`ServerMsg::PartyState`] to
+    /// the remaining members. Reliable on `Channel::Control`.
+    PartyLeave,
+
+    /// Leader-only: kick `name` from the party. Same broadcast
+    /// shape as [`Self::PartyLeave`]. Server silently drops the
+    /// request if the caller is not the leader or `name` is not
+    /// a member. Reliable on `Channel::Control`.
+    PartyKick { name: String },
+
+    /// Leader-only: transfer leadership to `name`. Same
+    /// broadcast shape as [`Self::PartyLeave`]. Server silently
+    /// drops if the caller is not the leader or `name` is not a
+    /// member. Reliable on `Channel::Control`.
+    PartyPromote { name: String },
 
     /// Player asked to return to the safe hub (e.g. via a "leave
     /// rift" portal or after a death respawn). Same shape as
@@ -406,6 +482,40 @@ pub struct RosterEntry {
     /// character-select / future "preview" UI can render the
     /// per-character ability bar before the player has logged in.
     pub loadout: [u8; 6],
+    /// Highest rift floor this character has ever cleared
+    /// (boss killed). Surfaced in character select and used by
+    /// the portal modal as the upper bound of the start-floor
+    /// slider.
+    pub deepest_cleared_floor: u32,
+}
+
+/// One member of a party, used in [`ServerMsg::PartyState`]. Carries
+/// just the data the party-frames widget needs to render — class /
+/// level for the static portrait, hp / floor for the live bars.
+/// Wire stable: append-only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PartyMember {
+    /// Stable identity. Renders as the frame's name label and
+    /// also drives `/whisper`, `/kick`, `/promote` targeting.
+    pub character_name: String,
+    /// Class id (matches [`RosterEntry::class_id`]). Drives the
+    /// portrait icon.
+    pub class_id: String,
+    /// Current level. Renders next to the name.
+    pub level: u32,
+    /// Live hp / hp_max for the frame's health bar. Refreshed
+    /// every time the underlying sim's snapshot updates this
+    /// member.
+    pub hp: f32,
+    pub hp_max: f32,
+    /// Floor index the member is currently on. `0` = hub. The
+    /// frame greys out when the member is on a different floor
+    /// than the viewer (so heals can visually flag as
+    /// out-of-instance).
+    pub floor: u32,
+    /// Member's [`RosterEntry::deepest_cleared_floor`]. Used by
+    /// the portal modal to compute the party-wide cap.
+    pub deepest_cleared_floor: u32,
 }
 
 /// One frame of player input. Compact by design — we'll send these
@@ -680,6 +790,144 @@ pub enum ServerMsg {
         /// side.
         text: String,
     },
+
+    /// Authoritative snapshot of the local player's party.
+    /// Broadcast to every member whenever membership or
+    /// leadership changes; also re-broadcast periodically
+    /// (~1 Hz) so the live `hp` / `floor` fields stay fresh on
+    /// every member's frames widget.
+    ///
+    /// `members` is empty *and* `leader` is `None` when the
+    /// receiver is solo — the client uses this as the signal
+    /// to hide the party-frames widget entirely. The receiver
+    /// is always present in `members` when in a party (so the
+    /// widget can render their own frame at slot 0).
+    /// Reliable on `Channel::Control`.
+    PartyState {
+        /// Character name of the leader. `None` only when the
+        /// receiver is solo (no party row exists).
+        leader: Option<String>,
+        /// Every member of the party including the receiver.
+        /// Ordered with the leader first, then by join time.
+        /// Empty when solo.
+        members: Vec<PartyMember>,
+    },
+
+    /// Toast for an incoming party invite. Server emits one
+    /// per recipient after a [`ClientMsg::PartyInvite`] is
+    /// validated. The receiver's HUD shows a transient prompt
+    /// ("X invited you — /accept or /decline") and may also
+    /// render an Accept/Decline button. The matching server
+    /// row TTLs out after ~60 s if no reply arrives.
+    /// Reliable on `Channel::Control`.
+    PartyInviteIncoming { from: String },
+
+    /// Soft error for a party-related action the server
+    /// refused (invalid name, target offline, target already
+    /// in a party, target inside a rift, party full, …).
+    /// Renders in the system chat channel on the client.
+    /// Reliable on `Channel::Control`.
+    PartyError { reason: String },
+
+    /// Sent to every other party member when the leader (or a
+    /// solo player) calls [`ClientMsg::ProposeRiftEntry`] with
+    /// `mode != SOLO`. Each recipient's HUD shows an
+    /// accept/decline modal; their reply rides on
+    /// [`ClientMsg::PortalConfirm`]. Server collects replies
+    /// for ~30 s; once collected (or on timeout), confirmed
+    /// members are ported into the new instance and others
+    /// stay in the hub.
+    ///
+    /// Reliable on `Channel::Control`.
+    PortalPrompt {
+        /// Character name of the proposer. Renders as "{name}
+        /// wants to enter the rift at floor N — Accept /
+        /// Decline".
+        proposer: String,
+        /// Floor index proposed.
+        start_floor: u32,
+        /// Mode (see [`party_mode`]). Surfaced in the modal so
+        /// the recipient knows whether they're opting into a
+        /// private or matchmade run.
+        mode: u8,
+        /// Seconds the recipient has to respond before the
+        /// server auto-declines. Drives the modal countdown.
+        seconds_remaining: u32,
+    },
+
+    /// Server cleared an active portal proposal — either every
+    /// non-proposer replied, the timeout elapsed, or the
+    /// proposer cancelled. The client uses this to dismiss the
+    /// portal modal even if it never received an explicit
+    /// confirm/decline path. Reliable on `Channel::Control`.
+    PortalPromptClosed,
+
+    /// Authoritative `deepest_cleared_floor` snapshot for the
+    /// receiver's character. Sent right after Welcome and
+    /// every time the value bumps (boss kill on a previously-
+    /// uncleared floor). Drives the start-floor picker's upper
+    /// bound. Reliable on `Channel::Control`.
+    DeepestFloorCleared { value: u32 },
+
+    /// Per-instance combat meter snapshot. Sent ~1 Hz to every
+    /// client currently in a rift instance. Carries one row
+    /// per party member with cumulative damage dealt, damage
+    /// taken, healing done, plus the instantaneous threat
+    /// (summed across alive enemies) at the time of capture.
+    /// Counters reset on instance entry and persist across
+    /// floor advances. Reliable on `Channel::Control`.
+    MeterSnapshot {
+        /// Seconds elapsed since the meters were last reset
+        /// (i.e. since the run began). Lets the client render
+        /// per-second rates without keeping its own clock.
+        elapsed_seconds: f32,
+        entries: Vec<MeterEntry>,
+    },
+}
+
+/// One row in a [`ServerMsg::MeterSnapshot`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeterEntry {
+    /// The party member's net id. Clients resolve this to a
+    /// display name through their existing remote-roster.
+    pub net_id: NetId,
+    /// Cumulative damage dealt to enemies, in HP.
+    pub damage_dealt: f32,
+    /// Cumulative damage taken from any source, in HP.
+    pub damage_taken: f32,
+    /// Cumulative healing applied to any player (including
+    /// self), in HP. Overheal is excluded — only counted up
+    /// to the target's `hp_max`.
+    pub healing_done: f32,
+    /// Instantaneous total threat held across every alive
+    /// enemy at capture time. Recomputed each snapshot rather
+    /// than accumulated, so it tracks the live aggro picture.
+    pub threat: f32,
+    /// Per-ability contribution rows. The HUD shows these
+    /// as a click-through breakdown so players can see which
+    /// ability did what. Empty for buckets we can't attribute
+    /// (e.g. damage-taken from enemies). Ability ids are the
+    /// wire-stable u8 from `rift_game::abilities::id::*`; the
+    /// special id `255` means "Other / unattributed" (DoTs
+    /// from unknown casters, basic melee, environmental).
+    pub abilities: Vec<MeterAbilityBreakdown>,
+}
+
+/// Per-ability slice of a player's meter row. One entry per
+/// (player, metric, ability) triple — values for metrics that
+/// don't apply (e.g. healing on a damage-only ability) are
+/// `0.0`. Sorted server-side descending by total contribution
+/// so the client can render directly without resorting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeterAbilityBreakdown {
+    /// Wire id from `rift_game::abilities::id::*`, or `255`
+    /// for "Other / unattributed".
+    pub ability_id: u8,
+    /// Damage dealt by this ability against enemies.
+    pub damage_dealt: f32,
+    /// Healing done by this ability (direct + HoT, where HoT
+    /// caster is known).
+    pub healing_done: f32,
 }
 
 /// Per-tick snapshot. Phase 1 ships the *full* state every tick — we
@@ -999,4 +1247,29 @@ pub mod chat_channel {
     /// Visible to the sender (echo) and the named recipient
     /// only.
     pub const WHISPER: u8 = 5;
+}
+
+/// Maximum members in a party (and the hard cap on a single
+/// rift instance, since a rift instance is bound to one party
+/// or one matchmaking lobby filling to this size). Tuned to
+/// feel like a small co-op group rather than a raid.
+pub const MAX_PARTY: u8 = 4;
+
+/// Stable wire ids for [`ClientMsg::ProposeRiftEntry::mode`] and
+/// [`ServerMsg::PortalPrompt::mode`]. Append-only.
+pub mod party_mode {
+    /// Spin up a fresh, private 1-cap instance for the
+    /// proposer alone. Other party members (if any) are not
+    /// invited; they stay in the hub.
+    pub const SOLO: u8 = 0;
+    /// Spin up a fresh, private instance for the proposer's
+    /// party only. Capacity = number of members who confirm
+    /// the [`super::ServerMsg::PortalPrompt`] within the
+    /// timeout (proposer is auto-confirmed).
+    pub const PARTY: u8 = 1;
+    /// Either join an open matchmaking instance with capacity
+    /// remaining or open a new one. The proposer's party
+    /// (after opt-in) ports in together; the instance then
+    /// fills with other matchmakers up to [`MAX_PARTY`].
+    pub const MATCHMAKE: u8 = 2;
 }

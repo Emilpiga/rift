@@ -107,6 +107,26 @@ pub struct NetState {
     /// `NetClient::send_chat`. `target` is meaningful only for
     /// the whisper channel.
     pub pending_chats_out: Vec<(u8, Option<String>, String)>,
+    /// Outbound party-control commands: invite/accept/decline
+    /// /leave/kick/promote. Each entry is a fully-formed
+    /// `ClientMsg::Party*` ready for the binary to ship on
+    /// the Control channel. Filled by the chat slash-command
+    /// parser and the right-click party-frame context menu.
+    pub pending_party_msgs: Vec<rift_net::messages::ClientMsg>,
+    /// Outbound rift-entry proposal from the portal modal.
+    /// `(start_floor, mode)` — `mode` is one of
+    /// `rift_net::messages::party_mode::*`. Drained by the
+    /// binary into `ClientMsg::ProposeRiftEntry`.
+    pub pending_propose_rift_entry: Option<(u32, u8)>,
+    /// Outbound per-member portal-confirm reply. `Some(true)`
+    /// for accept, `Some(false)` for decline. Drained by the
+    /// binary into `ClientMsg::PortalConfirm`.
+    pub pending_portal_confirm: Option<bool>,
+    /// Edge-triggered request to open the local portal modal.
+    /// Set when the player walks up to the hub portal and
+    /// presses F. The UI phase reads + clears it; the modal
+    /// itself is owned by `GameState.party`.
+    pub pending_open_portal_modal: bool,
 }
 
 /// Multiplayer-only: a request for the binary to forward to the server.

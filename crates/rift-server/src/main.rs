@@ -31,10 +31,14 @@ use rift_persistence::PersistenceHandle;
 
 mod chat;
 mod handlers;
+mod instance;
+mod party;
 mod session;
 mod sim;
 
 use chat::ChatHistory;
+use instance::{InstanceManager, RiftInstanceId};
+use party::PartyManager;
 use session::{ClientSession, SessionManager};
 use sim::Sim;
 
@@ -55,27 +59,37 @@ struct Server {
     last_tick: Instant,
     /// Authoritative simulation for the global hub. All players
     /// land here on connect; they leave by stepping into the
-    /// rift portal (which moves them into [`Self::rift`]).
+    /// rift portal (which moves them into one of the
+    /// [`Self::instances`]).
     hub: Sim,
-    /// Authoritative simulation for the active rift instance.
-    /// In the future this becomes a `Vec<Sim>` so multiple
-    /// 4-player parties can run their own rifts in parallel; for
-    /// now there's exactly one. Kept always-present (rather than
-    /// `Option<Sim>`) so the per-tick step loop doesn't have to
-    /// branch on emptiness — when nobody's in the rift, the
-    /// world simply has no player entities and the AI / projectile
-    /// systems run over empty queries.
-    rift: Sim,
+    /// Active rift instances, keyed by id. Each instance owns
+    /// its own [`Sim`] + envelope of metadata (private vs.
+    /// matchmade, owning party, capacity, start floor). The
+    /// map is empty when no rift run is in progress.
+    instances: InstanceManager,
     /// Maps each connected client to which sim they currently
-    /// inhabit: `0` = hub, `1+` = rift instance index. Updated
-    /// on Hello (always 0) and on portal transitions.
+    /// inhabit: `Some(id)` = rift instance, `None` (no entry) =
+    /// hub. Updated on Hello (always hub) and on portal
+    /// transitions. The matching `client_floor` map below
+    /// mirrors the player's display floor (always `0` when
+    /// hub-side, `instance.sim.floor_index` when in a rift) so
+    /// chat / event scoping logic that pre-dates the instance
+    /// model keeps working.
+    client_instance: HashMap<ClientId, RiftInstanceId>,
     client_floor: HashMap<ClientId, u32>,
+    /// Party state. Solo players have no row here. See
+    /// [`PartyManager`] for the invariant set.
+    parties: PartyManager,
     /// Carries the leftover wall-clock between fixed-step ticks so
     /// we don't drift when frame_dt isn't a clean multiple of the
     /// tick period.
     tick_accumulator: Duration,
     /// Same idea for snapshot broadcasts (decoupled from sim rate).
     snapshot_accumulator: Duration,
+    /// Drives 1 Hz `ServerMsg::MeterSnapshot` broadcasts so the
+    /// HUD damage-meter panel updates without spamming the
+    /// control channel every tick.
+    meter_accumulator: Duration,
     /// Persistence worker handle. `None` when the server is started
     /// without `--database-url`, in which case all characters are
     /// purely in-memory — useful for offline iteration / tests.
@@ -85,10 +99,10 @@ struct Server {
     /// Server-global chat history. New connections replay
     /// recent GLOBAL + SYSTEM lines from this on accept.
     chat: ChatHistory,
-    /// Last-seen value of `RiftProgress::boss_killed` so the
-    /// boss-slain SYSTEM line fires once per actual kill
-    /// instead of once per progress snapshot.
-    prev_boss_killed: bool,
+    /// Pending portal proposals awaiting opt-in from the
+    /// non-proposer party members. Drained per-tick by the
+    /// portal handler. Empty when nobody is mid-modal.
+    pending_portal_proposals: HashMap<ClientId, crate::handlers::portal::PendingProposal>,
 }
 
 impl Server {
@@ -98,27 +112,27 @@ impl Server {
         persistence: Option<PersistenceHandle>,
     ) -> Result<Self> {
         let handle = open_server(bind, public, MAX_CLIENTS, &NetSettings::default())?;
-        // Two simulations always run side by side: the global
-        // hub (floor 0) and the active rift instance (floor 1
-        // for now; future runs may rotate the seed/index per
-        // descend). New connections land in the hub and only
-        // step into the rift once they walk through the portal.
+        // Hub sim is always present. Rift instances are
+        // created on-demand when a player walks through the
+        // portal modal (see `handlers/portal.rs`).
         let hub = Sim::new(42, 0);
-        let rift = Sim::new(42, 1);
         Ok(Self {
             handle,
             tick: NetTick::default(),
             sessions: SessionManager::new(),
             last_tick: Instant::now(),
             hub,
-            rift,
+            instances: InstanceManager::new(),
+            client_instance: HashMap::new(),
             client_floor: HashMap::new(),
+            parties: PartyManager::new(),
             tick_accumulator: Duration::ZERO,
             snapshot_accumulator: Duration::ZERO,
+            meter_accumulator: Duration::ZERO,
             persistence,
             auto_save_accumulator: Duration::ZERO,
             chat: ChatHistory::default(),
-            prev_boss_killed: false,
+            pending_portal_proposals: HashMap::new(),
         })
     }
 
@@ -211,6 +225,16 @@ impl Server {
             self.broadcast_snapshot();
         }
 
+        // Combat-meter broadcast at 1 Hz. The HUD doesn't need
+        // sub-second precision and these messages can grow with
+        // party size, so the cheap rate keeps bandwidth flat.
+        const METER_PERIOD: Duration = Duration::from_secs(1);
+        self.meter_accumulator += frame_dt;
+        if self.meter_accumulator >= METER_PERIOD {
+            self.meter_accumulator -= METER_PERIOD;
+            self.broadcast_meters();
+        }
+
         // Periodic auto-save. Fire-and-forget per session — the
         // persistence worker drains writes off-thread so this loop
         // never blocks on a slow database.
@@ -219,6 +243,13 @@ impl Server {
             self.auto_save_accumulator -= AUTO_SAVE_INTERVAL;
             self.auto_save_all();
         }
+
+        // Time-out expired party invites and stale portal
+        // proposals. Both are cheap O(n) walks over tiny
+        // collections, so we just hit them every frame rather
+        // than carrying a separate accumulator.
+        self.parties.evict_expired_invites(now);
+        self.tick_portal_proposals(now);
 
         // Flush outbound traffic. Must happen after we've enqueued any
         // server-originated messages this frame.
@@ -259,8 +290,39 @@ impl Server {
                     }
                 }
                 self.hub.despawn_player(cid);
-                self.rift.despawn_player(cid);
+                if let Some(instance_id) = self.client_instance.remove(&cid) {
+                    if let Some(inst) = self.instances.get_mut(instance_id) {
+                        inst.sim.despawn_player(cid);
+                    }
+                    // If this disconnect emptied the instance,
+                    // dissolve it so it doesn't tick forever.
+                    if self.clients_in_instance(instance_id).is_empty() {
+                        self.instances.dissolve(instance_id);
+                    }
+                }
                 self.client_floor.remove(&cid);
+                // Drop them from any party they belonged to —
+                // disconnect mirrors a /leave for the rest of
+                // the party's UI. Snapshot the roster before
+                // the remove so the singleton-collapse path
+                // can still notify the orphaned lone member.
+                let pre_members: Vec<ClientId> = self
+                    .parties
+                    .party_of(cid)
+                    .map(|p| p.members.clone())
+                    .unwrap_or_default();
+                let removed_party = self.parties.leave(cid);
+                self.broadcast_party_after_remove(cid, removed_party, &pre_members);
+                // Tear down any portal proposals that involve
+                // this client. Two paths:
+                //  * They were the proposer — cancel the
+                //    proposal and close every awaiting
+                //    member's modal.
+                //  * They were an awaiting confirmer — drop
+                //    them from `awaiting`. If that empties
+                //    the set, resolve the proposal now
+                //    rather than waiting 30 s.
+                self.cancel_portal_proposal_for(cid);
                 if let Some(net_id) = left_net_id {
                     self.broadcast(Channel::Control, &ServerMsg::PlayerLeft { net_id });
                 }
@@ -370,36 +432,44 @@ impl Server {
                 log::info!("Goodbye from {from:?}");
             }
             ClientMsg::RequestEnterRift => {
-                use crate::sim::ExitVoteRequest;
-                let current = self.floor_for_client(from);
-                // Hub → rift: move only this client into the
-                // active rift instance. Other hub players keep
-                // their current scene; the rift sim continues
-                // ticking regardless of who else is in it.
-                if current == 0 {
-                    self.move_client_to_rift(from);
+                // Legacy / shorthand: behave as if the player
+                // chose Solo at floor 1 in the portal modal.
+                // Real entries arrive via `ProposeRiftEntry`.
+                if self.instance_for_client(from).is_none() {
+                    self.handle_propose_rift_entry(
+                        from,
+                        1,
+                        rift_net::messages::party_mode::SOLO,
+                    );
                     return;
                 }
-                // In-rift → next floor: open a descend ready
-                // check unless the party is solo. Solo players
-                // bypass the vote and transition immediately.
-                // (Multi-floor descends happen on the rift sim;
-                // future per-party rifts will keep this scoped
-                // to the requester's instance.)
-                match self.rift.request_descend_vote(from) {
-                    ExitVoteRequest::Pass => {
+                use crate::sim::ExitVoteRequest;
+                let Some(instance_id) = self.instance_for_client(from) else {
+                    return;
+                };
+                let req = self
+                    .instances
+                    .get_mut(instance_id)
+                    .map(|inst| inst.sim.request_descend_vote(from));
+                match req {
+                    Some(ExitVoteRequest::Pass) => {
                         log::info!("vote: solo {from:?} descending");
-                        let next_index = self.rift.floor_index + 1;
-                        self.advance_rift_floor(next_index);
+                        let next_index = self
+                            .instances
+                            .get(instance_id)
+                            .map(|inst| inst.sim.floor_index + 1)
+                            .unwrap_or(1);
+                        self.advance_instance_floor(instance_id, next_index);
                     }
-                    ExitVoteRequest::Opened => { /* broadcast via take_exit_vote_update */ }
-                    ExitVoteRequest::Refused => {
+                    Some(ExitVoteRequest::Opened) => {}
+                    Some(ExitVoteRequest::Refused) => {
                         log::debug!("vote: refused descend from {from:?}");
                     }
+                    None => {}
                 }
             }
             ClientMsg::RequestReturnToHub => {
-                if self.floor_for_client(from) != 0 {
+                if self.instance_for_client(from).is_some() {
                     self.move_client_to_hub(from);
                 }
             }
@@ -410,34 +480,71 @@ impl Server {
             }
             ClientMsg::RiftExitVoteStart => {
                 use crate::sim::ExitVoteRequest;
-                if self.floor_for_client(from) == 0 {
+                let Some(instance_id) = self.instance_for_client(from) else {
                     log::debug!("vote: refused start from hub player {from:?}");
                     return;
-                }
-                match self.rift.request_exit_vote(from) {
-                    ExitVoteRequest::Pass => {
+                };
+                let req = self
+                    .instances
+                    .get_mut(instance_id)
+                    .map(|inst| inst.sim.request_exit_vote(from));
+                match req {
+                    Some(ExitVoteRequest::Pass) => {
                         log::info!("vote: solo {from:?} exiting rift");
-                        let wiped = self.rift.wipe_dead_loot();
-                        self.return_all_rift_to_hub();
+                        let wiped = self
+                            .instances
+                            .get_mut(instance_id)
+                            .map(|inst| inst.sim.wipe_dead_loot())
+                            .unwrap_or_default();
+                        self.return_all_to_hub(instance_id);
                         for cid in wiped {
                             self.broadcast_inventory_state(cid);
                             self.persist_inventory_state(cid);
                         }
                     }
-                    ExitVoteRequest::Opened => { /* broadcast via take_exit_vote_update */ }
-                    ExitVoteRequest::Refused => {
+                    Some(ExitVoteRequest::Opened) => {}
+                    Some(ExitVoteRequest::Refused) => {
                         log::debug!("vote: refused start from {from:?}");
                     }
+                    None => {}
                 }
             }
             ClientMsg::RiftExitVoteCast { yes } => {
-                self.rift.cast_exit_vote(from, yes);
+                if let Some(instance_id) = self.instance_for_client(from) {
+                    if let Some(inst) = self.instances.get_mut(instance_id) {
+                        inst.sim.cast_exit_vote(from, yes);
+                    }
+                }
             }
             ClientMsg::SetShrineChannel { shrine } => {
                 self.sim_for_client_mut(from).set_shrine_channel(from, shrine);
             }
             ClientMsg::ChatSend { channel, target, text } => {
                 self.handle_chat_send(from, channel, target, text);
+            }
+            ClientMsg::ProposeRiftEntry { start_floor, mode } => {
+                self.handle_propose_rift_entry(from, start_floor, mode);
+            }
+            ClientMsg::PortalConfirm { accept } => {
+                self.handle_portal_confirm(from, accept);
+            }
+            ClientMsg::PartyInvite { name } => {
+                self.handle_party_invite(from, name);
+            }
+            ClientMsg::PartyAccept { from: which } => {
+                self.handle_party_accept(from, which);
+            }
+            ClientMsg::PartyDecline { from: which } => {
+                self.handle_party_decline(from, which);
+            }
+            ClientMsg::PartyLeave => {
+                self.handle_party_leave(from);
+            }
+            ClientMsg::PartyKick { name } => {
+                self.handle_party_kick(from, name);
+            }
+            ClientMsg::PartyPromote { name } => {
+                self.handle_party_promote(from, name);
             }
         }
     }
@@ -454,54 +561,126 @@ impl Server {
         self.client_floor.get(&cid).copied().unwrap_or(0)
     }
 
-    /// Resolve which Sim a given client lives in. Hub for floor
-    /// 0, rift for everything else. Used by every per-client
-    /// gameplay handler so the same dispatch table works
-    /// regardless of where the player currently is.
+    /// Resolve which Sim a given client lives in. Hub when
+    /// they're not in any rift instance; otherwise the sim of
+    /// their current instance.
     pub(crate) fn sim_for_client(&self, cid: ClientId) -> &Sim {
-        if self.floor_for_client(cid) == 0 { &self.hub } else { &self.rift }
+        match self.client_instance.get(&cid) {
+            Some(id) => self
+                .instances
+                .get(*id)
+                .map(|i| &i.sim)
+                .unwrap_or(&self.hub),
+            None => &self.hub,
+        }
     }
 
     pub(crate) fn sim_for_client_mut(&mut self, cid: ClientId) -> &mut Sim {
-        if self.floor_for_client(cid) == 0 { &mut self.hub } else { &mut self.rift }
+        match self.client_instance.get(&cid).copied() {
+            Some(id) => match self.instances.get_mut(id) {
+                Some(inst) => &mut inst.sim,
+                None => &mut self.hub,
+            },
+            None => &mut self.hub,
+        }
     }
 
-    /// All currently-connected clients sitting on the given
-    /// floor. Used to scope event / progress / vote broadcasts
-    /// so a hub player never sees rift-only payloads (and vice
-    /// versa once we add hub-only broadcasts).
-    fn clients_on_floor(&self, floor_index: u32) -> Vec<ClientId> {
-        self.client_floor
+    /// `Some(id)` when `cid` is currently inside a rift
+    /// instance. `None` for hub players. Mirrors the gating
+    /// path the chat router and party / portal handlers use to
+    /// scope their work.
+    pub(crate) fn instance_for_client(&self, cid: ClientId) -> Option<RiftInstanceId> {
+        self.client_instance.get(&cid).copied()
+    }
+
+    /// All currently-connected clients sitting in `instance`.
+    /// Used to scope event / progress / vote broadcasts to
+    /// just the instance's audience.
+    pub(crate) fn clients_in_instance(&self, instance: RiftInstanceId) -> Vec<ClientId> {
+        self.client_instance
             .iter()
-            .filter_map(|(cid, &f)| if f == floor_index { Some(*cid) } else { None })
+            .filter_map(|(cid, &id)| if id == instance { Some(*cid) } else { None })
             .collect()
     }
 
-    /// Send a message to every client currently on `floor_index`.
-    /// Implemented as repeated unicast rather than `broadcast`
-    /// because renet has no per-channel multicast and we want
-    /// hub clients to *not* see rift-scoped traffic.
-    fn broadcast_to_floor(&mut self, floor_index: u32, ch: Channel, msg: &ServerMsg) {
-        let recipients = self.clients_on_floor(floor_index);
+    /// All currently-connected clients on the hub (i.e. not
+    /// in any rift instance). Used by `chat_channel::HUB` and
+    /// hub-scoped event broadcasts.
+    pub(crate) fn clients_on_hub(&self) -> Vec<ClientId> {
+        self.sessions
+            .iter()
+            .map(|s| s.client_id)
+            .filter(|cid| !self.client_instance.contains_key(cid))
+            .collect()
+    }
+
+    /// All currently-connected clients sharing the same
+    /// world-scope as `cid`: every other player in their rift
+    /// instance, or every other hub player when `cid` is
+    /// hub-side. Used by the FLOOR chat channel and by
+    /// per-floor system pings.
+    pub(crate) fn clients_in_world_with(&self, cid: ClientId) -> Vec<ClientId> {
+        match self.client_instance.get(&cid) {
+            Some(id) => self.clients_in_instance(*id),
+            None => self.clients_on_hub(),
+        }
+    }
+
+    /// Send a message to every client currently in `instance`.
+    /// Implemented as repeated unicast since renet has no
+    /// per-channel multicast and we want each rift instance's
+    /// traffic isolated from every other instance.
+    pub(crate) fn broadcast_to_instance(
+        &mut self,
+        instance: RiftInstanceId,
+        ch: Channel,
+        msg: &ServerMsg,
+    ) {
+        let recipients = self.clients_in_instance(instance);
         for cid in recipients {
             self.send_to(cid, ch, msg);
         }
     }
 
-    /// Move `cid` from the hub into the active rift instance and
-    /// hand them a `LoadFloor` so their client rebuilds the
-    /// scene. No-op if the client is somehow not in the hub.
-    fn move_client_to_rift(&mut self, cid: ClientId) {
+    /// Send a message to every client currently on the hub
+    /// (i.e. not in any rift instance).
+    pub(crate) fn broadcast_to_hub(&mut self, ch: Channel, msg: &ServerMsg) {
+        let recipients = self.clients_on_hub();
+        for cid in recipients {
+            self.send_to(cid, ch, msg);
+        }
+    }
+
+    /// Move `cid` from the hub into `instance` and hand them a
+    /// `LoadFloor` so their client rebuilds the scene. No-op
+    /// if the client is somehow not in the hub or the
+    /// instance has been dropped underneath us.
+    pub(crate) fn move_client_to_instance(
+        &mut self,
+        cid: ClientId,
+        instance: RiftInstanceId,
+    ) {
         let Some((player, effects)) = self.hub.extract_player(cid) else {
-            log::warn!("move_client_to_rift: {cid:?} has no hub entity");
+            log::warn!("move_client_to_instance: {cid:?} has no hub entity");
             return;
         };
-        let _net_id = self.rift.inject_player(cid, player, effects);
-        self.client_floor.insert(cid, self.rift.floor_index);
-        let spawn = self.rift.floor.spawn_pos;
+        let Some(inst) = self.instances.get_mut(instance) else {
+            log::warn!("move_client_to_instance: instance {instance:?} gone");
+            // Re-inject the player back into the hub so they
+            // don't disappear from every snapshot.
+            let _ = self.hub.inject_player(cid, player, effects);
+            return;
+        };
+        let _net_id = inst.sim.inject_player(cid, player, effects);
+        let floor_idx = inst.sim.floor_index;
+        let seed = inst.sim.floor_seed;
+        let spawn = inst.sim.floor.spawn_pos;
+        let rp = inst.sim.rift_progress();
+        self.client_instance.insert(cid, instance);
+        self.client_floor.insert(cid, floor_idx);
         let load = ServerMsg::LoadFloor {
-            seed: self.rift.floor_seed,
-            index: self.rift.floor_index,
+            seed,
+            index: floor_idx,
             is_hub: false,
             spawn_pos: [spawn.x, 0.0, spawn.z],
             tick: self.tick,
@@ -509,7 +688,6 @@ impl Server {
         self.send_to(cid, Channel::Control, &load);
         // Replay the rift's current progress meter so this
         // late-joiner's HUD lines up with the floor state.
-        let rp = self.rift.rift_progress();
         self.send_to(
             cid,
             Channel::Control,
@@ -521,9 +699,8 @@ impl Server {
                 floor_complete: rp.floor_complete,
             },
         );
-        // FLOOR system ping so existing rift inhabitants see
+        // FLOOR system ping so existing instance inhabitants see
         // who joined them.
-        let floor_idx = self.rift.floor_index;
         let name = self
             .sessions
             .get(cid)
@@ -535,13 +712,23 @@ impl Server {
         );
     }
 
-    /// Move `cid` from the rift back into the hub.
-    fn move_client_to_hub(&mut self, cid: ClientId) {
-        let Some((player, effects)) = self.rift.extract_player(cid) else {
-            log::warn!("move_client_to_hub: {cid:?} has no rift entity");
+    /// Move `cid` from whatever rift instance they're in back
+    /// to the hub. No-op if `cid` is hub-side already. After
+    /// the move, if the instance has no remaining members it
+    /// is dissolved.
+    pub(crate) fn move_client_to_hub(&mut self, cid: ClientId) {
+        let Some(instance_id) = self.client_instance.remove(&cid) else {
             return;
         };
-        let _net_id = self.hub.inject_player(cid, player, effects);
+        let mut maybe_dissolve = false;
+        if let Some(inst) = self.instances.get_mut(instance_id) {
+            if let Some((player, effects)) = inst.sim.extract_player(cid) {
+                let _net_id = self.hub.inject_player(cid, player, effects);
+            }
+            if self.clients_in_instance(instance_id).is_empty() {
+                maybe_dissolve = true;
+            }
+        }
         self.client_floor.insert(cid, 0);
         let spawn = self.hub.floor.spawn_pos;
         let load = ServerMsg::LoadFloor {
@@ -552,46 +739,56 @@ impl Server {
             tick: self.tick,
         };
         self.send_to(cid, Channel::Control, &load);
+        if maybe_dissolve {
+            self.instances.dissolve(instance_id);
+        }
     }
 
-    /// Move every client currently in the rift back to the hub
-    /// and reset the rift instance for the next descent. Used
-    /// by the exit-vote success path and the wipe-respawn timer.
-    fn return_all_rift_to_hub(&mut self) {
-        let rift_clients = self.clients_on_floor(self.rift.floor_index);
-        for cid in &rift_clients {
+    /// Move every client currently in `instance` back to the
+    /// hub and dissolve the instance. Used by the exit-vote
+    /// success path and the wipe-respawn timer.
+    pub(crate) fn return_all_to_hub(&mut self, instance: RiftInstanceId) {
+        let movers = self.clients_in_instance(instance);
+        for cid in &movers {
             self.move_client_to_hub(*cid);
         }
-        // Reset the rift sim so the next entry meets a fresh
-        // floor (enemies despawned, vote / progress cleared).
-        // Future: re-roll the seed here for replay variety.
-        let same_idx = self.rift.floor_index.max(1);
-        self.rift.change_floor(same_idx);
-        // Same-floor reset still wipes the boss-kill state.
-        self.prev_boss_killed = false;
+        // Belt-and-suspenders: if no movers existed (race
+        // between disconnect + vote) but the instance is
+        // still around, drop it explicitly so the map doesn't
+        // leak.
+        if self.instances.get(instance).is_some() {
+            self.instances.dissolve(instance);
+        }
     }
 
-    /// Server-driven floor advance inside the rift. Moves every
-    /// rift client onto the new floor index in lockstep — the
-    /// "shared rift" model where descend votes affect everyone
-    /// who's currently in the instance.
-    fn advance_rift_floor(&mut self, new_index: u32) {
-        // Re-map every client currently in the rift to the new
-        // floor index *before* broadcasting — `client_floor`
-        // is what `broadcast_to_floor` filters on, so without
-        // this update the LoadFloor packet would target the
-        // already-vacated old index and nobody would rebuild.
-        let old_index = self.rift.floor_index;
-        let movers = self.clients_on_floor(old_index);
-        let spawn = self.rift.change_floor(new_index);
+    /// Server-driven floor advance inside `instance`. Moves
+    /// every client in the instance onto the new floor index
+    /// in lockstep — the "shared instance" model where descend
+    /// votes affect everyone who's currently in it.
+    pub(crate) fn advance_instance_floor(
+        &mut self,
+        instance: RiftInstanceId,
+        new_index: u32,
+    ) {
+        let Some(inst) = self.instances.get_mut(instance) else {
+            log::warn!("advance_instance_floor: instance {instance:?} gone");
+            return;
+        };
+        let movers = self
+            .client_instance
+            .iter()
+            .filter_map(|(cid, id)| if *id == instance { Some(*cid) } else { None })
+            .collect::<Vec<_>>();
+        let spawn = inst.sim.change_floor(new_index);
         // Boss-kill rising-edge tracker is per-floor — reset
         // on advance so the next boss is announced fresh.
-        self.prev_boss_killed = false;
+        inst.prev_boss_killed = false;
+        let seed = inst.sim.floor_seed;
         for cid in &movers {
             self.client_floor.insert(*cid, new_index);
         }
         let msg = ServerMsg::LoadFloor {
-            seed: self.rift.floor_seed,
+            seed,
             index: new_index,
             is_hub: false,
             spawn_pos: spawn.to_array(),
@@ -642,32 +839,46 @@ impl Server {
 
     fn simulate_one_tick(&mut self, dt: f32) {
         self.tick = self.tick.next();
-        // Step both sims in lockstep. Order doesn't matter — they
-        // share no entities and gameplay never crosses the floor
-        // boundary mid-tick.
+        // Step the hub plus every active instance. Order
+        // doesn't matter — they share no entities and gameplay
+        // never crosses sim boundaries mid-tick.
         self.hub.step(dt, self.tick);
-        self.rift.step(dt, self.tick);
+        let instance_ids: Vec<RiftInstanceId> =
+            self.instances.iter().map(|(id, _)| *id).collect();
+        for id in &instance_ids {
+            if let Some(inst) = self.instances.get_mut(*id) {
+                inst.sim.step(dt, self.tick);
+            }
+        }
 
-        // World events: each sim emits its own queue. Route every
-        // event to clients on that sim's floor only — a hub
-        // player has no business seeing a damage tick from the
-        // rift (and vice versa).
+        // World events: each sim emits its own queue. Hub
+        // events fan out to hub players only; each instance's
+        // events fan out to its own audience.
         let hub_events = self.hub.drain_events();
         for ev in hub_events {
-            self.broadcast_to_floor(0, Channel::Event, &ServerMsg::Event(ev));
+            self.broadcast_to_hub(Channel::Event, &ServerMsg::Event(ev));
         }
-        let rift_floor = self.rift.floor_index;
-        let rift_events = self.rift.drain_events();
-        for ev in rift_events {
-            self.broadcast_to_floor(rift_floor, Channel::Event, &ServerMsg::Event(ev));
+        for id in &instance_ids {
+            let evs = self
+                .instances
+                .get_mut(*id)
+                .map(|inst| inst.sim.drain_events())
+                .unwrap_or_default();
+            for ev in evs {
+                self.broadcast_to_instance(*id, Channel::Event, &ServerMsg::Event(ev));
+            }
         }
 
         // Per-player XP / level updates: targeted send to each
-        // owner. Drained from both sims so XP earned in either
-        // location persists.
-        for u in self.hub.drain_stat_updates().into_iter()
-            .chain(self.rift.drain_stat_updates().into_iter())
-        {
+        // owner. Drained from every sim so XP earned anywhere
+        // persists.
+        let mut stat_updates = self.hub.drain_stat_updates();
+        for id in &instance_ids {
+            if let Some(inst) = self.instances.get_mut(*id) {
+                stat_updates.extend(inst.sim.drain_stat_updates());
+            }
+        }
+        for u in stat_updates {
             self.persist_xp_for(u.client_id, u.level, u.total_xp);
             self.send_to(
                 u.client_id,
@@ -690,17 +901,18 @@ impl Server {
             }
         }
 
-        // Rift-progress changes: only the rift sim has a
-        // meaningful progress bar. Scoped to clients currently
-        // in the rift.
-        if let Some(rp) = self.rift.take_rift_progress_update() {
-            // Detect boss-kill rising edge so we can fire one
-            // GLOBAL system announcement per kill instead of
-            // one per progress snapshot.
-            let boss_just_killed = rp.boss_killed && !self.prev_boss_killed;
-            self.prev_boss_killed = rp.boss_killed;
-            self.broadcast_to_floor(
-                rift_floor,
+        // Rift-progress changes: per-instance, scoped to that
+        // instance's audience. Boss-kill rising edge fires the
+        // GLOBAL announcement and bumps every member's
+        // `deepest_cleared_floor` once per actual kill.
+        for id in &instance_ids {
+            let Some(inst) = self.instances.get_mut(*id) else { continue };
+            let Some(rp) = inst.sim.take_rift_progress_update() else { continue };
+            let boss_just_killed = rp.boss_killed && !inst.prev_boss_killed;
+            inst.prev_boss_killed = rp.boss_killed;
+            let floor = inst.sim.floor_index;
+            self.broadcast_to_instance(
+                *id,
                 Channel::Control,
                 &ServerMsg::RiftProgress {
                     progress: rp.progress,
@@ -711,85 +923,126 @@ impl Server {
                 },
             );
             if boss_just_killed {
-                let floor = self.rift.floor_index;
                 self.emit_system_global(&format!(
                     "The boss of floor {floor} has been slain!"
                 ));
+                // Bump deepest_cleared_floor for every member
+                // currently in the instance.
+                let members = self.clients_in_instance(*id);
+                for cid in members {
+                    self.bump_deepest_cleared_floor(cid, floor);
+                }
             }
         }
 
-        // Death log (rift only — hub has no enemies).
-        for (cid, net_id) in self.rift.drain_player_deaths() {
-            log::info!("player died: {cid:?} ({net_id:?})");
-            // Look up the dead player's name + which floor
-            // they died on so the FLOOR system message lands
-            // with the right audience.
-            let name = self
-                .sessions
-                .get(cid)
-                .and_then(|s| s.character_name.clone())
-                .unwrap_or_else(|| "A player".to_string());
-            let floor = self.floor_for_client(cid);
-            self.emit_system_floor(floor, &format!("{name} was slain."));
+        // Death log (rift instances only — hub has no enemies).
+        for id in &instance_ids {
+            let deaths = self
+                .instances
+                .get_mut(*id)
+                .map(|inst| inst.sim.drain_player_deaths())
+                .unwrap_or_default();
+            for (cid, net_id) in deaths {
+                log::info!("player died: {cid:?} ({net_id:?})");
+                let name = self
+                    .sessions
+                    .get(cid)
+                    .and_then(|s| s.character_name.clone())
+                    .unwrap_or_else(|| "A player".to_string());
+                let floor = self.floor_for_client(cid);
+                self.emit_system_floor(floor, &format!("{name} was slain."));
+            }
         }
         // Hub sim drain too, just in case (no-op today but
         // keeps the queue from accumulating across reconnects).
         for _ in self.hub.drain_player_deaths() {}
 
-        // Wipe-respawn: rift sim arms the timer when every
-        // player on the rift floor is dead. Pull the whole
-        // party back to the hub and wipe their loot.
-        if self.rift.take_hub_respawn_request() {
-            log::info!("respawning party to hub after wipe");
-            let wiped = self.rift.wipe_dead_loot();
-            self.return_all_rift_to_hub();
-            for cid in wiped {
-                self.broadcast_inventory_state(cid);
-                self.persist_inventory_state(cid);
-            }
-        }
-        // Hub sim's hub-respawn-request shouldn't happen, but
-        // drain it defensively to avoid a stuck flag.
-        let _ = self.hub.take_hub_respawn_request();
-
-        // Rift exit vote: tick + resolve. Only the rift has a vote.
-        // Capture the recipient set *before* resolving the
-        // outcome — a passing Exit vote moves every voter back
-        // to the hub, so by the time `take_exit_vote_update`
-        // hands us the "vote cleared" state, those clients are
-        // no longer on the rift floor and a `broadcast_to_floor`
-        // would target an empty audience. The voters' HUDs
-        // would then keep their stale vote panel visible
-        // forever. Send the post-resolve vote update to whoever
-        // was *in the vote*, regardless of where they're
-        // standing now.
-        let vote_recipients = self.clients_on_floor(rift_floor);
-        let outcome = self.rift.tick_exit_vote(dt);
-        match outcome {
-            crate::sim::vote::TickOutcome::Passed(
-                rift_net::messages::VoteKind::Exit,
-            ) => {
-                log::info!("vote: party voted to leave rift");
-                let wiped = self.rift.wipe_dead_loot();
-                self.return_all_rift_to_hub();
+        // Wipe-respawn: each instance arms its own timer when
+        // every player on its current floor is dead. Pull the
+        // affected party back to the hub and wipe their loot.
+        for id in &instance_ids {
+            let armed = self
+                .instances
+                .get_mut(*id)
+                .map(|inst| inst.sim.take_hub_respawn_request())
+                .unwrap_or(false);
+            if armed {
+                log::info!("respawning party to hub after wipe in {id:?}");
+                let wiped = self
+                    .instances
+                    .get_mut(*id)
+                    .map(|inst| inst.sim.wipe_dead_loot())
+                    .unwrap_or_default();
+                self.return_all_to_hub(*id);
                 for cid in wiped {
                     self.broadcast_inventory_state(cid);
                     self.persist_inventory_state(cid);
                 }
             }
-            crate::sim::vote::TickOutcome::Passed(
-                rift_net::messages::VoteKind::Descend,
-            ) => {
-                log::info!("vote: party voted to descend");
-                let next_index = self.rift.floor_index + 1;
-                self.advance_rift_floor(next_index);
-            }
-            _ => {}
         }
-        if let Some(state) = self.rift.take_exit_vote_update() {
-            let msg = ServerMsg::RiftExitVote(state);
-            for cid in &vote_recipients {
-                self.send_to(*cid, Channel::Control, &msg);
+        let _ = self.hub.take_hub_respawn_request();
+
+        // Rift exit votes: tick + resolve, per instance. Capture
+        // the recipient set *before* resolving the outcome — a
+        // passing Exit vote moves every voter back to the hub,
+        // so by the time `take_exit_vote_update` hands us the
+        // "vote cleared" state, those clients are no longer in
+        // the instance. Send the post-resolve update to whoever
+        // was *in the vote*, regardless of where they're
+        // standing now.
+        for id in &instance_ids {
+            let voters = self.clients_in_instance(*id);
+            let outcome = self
+                .instances
+                .get_mut(*id)
+                .map(|inst| inst.sim.tick_exit_vote(dt));
+            // Drain the wire-shape vote update *before* the
+            // resolve actions below run. A passing Exit vote
+            // calls `return_all_to_hub`, which dissolves the
+            // (now-empty) instance \u2014 after that, the sim is
+            // gone and `take_exit_vote_update` would be a
+            // no-op, so the cleared `VoteState` (active=false,
+            // cooldown=0) would never reach the clients and
+            // their HUD vote panel would stick on screen back
+            // in the hub.
+            let update = self
+                .instances
+                .get_mut(*id)
+                .and_then(|inst| inst.sim.take_exit_vote_update());
+            match outcome {
+                Some(crate::sim::vote::TickOutcome::Passed(
+                    rift_net::messages::VoteKind::Exit,
+                )) => {
+                    log::info!("vote: party voted to leave instance {id:?}");
+                    let wiped = self
+                        .instances
+                        .get_mut(*id)
+                        .map(|inst| inst.sim.wipe_dead_loot())
+                        .unwrap_or_default();
+                    self.return_all_to_hub(*id);
+                    for cid in wiped {
+                        self.broadcast_inventory_state(cid);
+                        self.persist_inventory_state(cid);
+                    }
+                }
+                Some(crate::sim::vote::TickOutcome::Passed(
+                    rift_net::messages::VoteKind::Descend,
+                )) => {
+                    log::info!("vote: party voted to descend in {id:?}");
+                    let next_index = self
+                        .instances
+                        .get(*id)
+                        .map(|inst| inst.sim.floor_index + 1)
+                        .unwrap_or(1);
+                    self.advance_instance_floor(*id, next_index);
+                }
+                _ => {}
+            }
+            if let Some(state) = update {
+                let msg = ServerMsg::RiftExitVote(state);
+                for cid in &voters {
+                    self.send_to(*cid, Channel::Control, &msg);
+                }
             }
         }
     }
@@ -811,6 +1064,27 @@ impl Server {
             let cid = ClientId(raw);
             let snap = self.sim_for_client_mut(cid).build_snapshot(tick, cid);
             self.send_to(cid, Channel::Snapshot, &ServerMsg::Snapshot(snap));
+        }
+    }
+
+    /// Push a `MeterSnapshot` to every member of every active
+    /// rift instance. Hub players don't get one (no fight to
+    /// score). Driven by the 1 Hz `meter_accumulator` in the
+    /// main tick loop.
+    fn broadcast_meters(&mut self) {
+        let instance_ids: Vec<_> = self.instances.iter().map(|(id, _)| *id).collect();
+        for id in instance_ids {
+            let members = self.clients_in_instance(id);
+            if members.is_empty() {
+                continue;
+            }
+            let Some(inst) = self.instances.get(id) else {
+                continue;
+            };
+            let snap = inst.sim.build_meter_snapshot();
+            for cid in members {
+                self.send_to(cid, Channel::Control, &snap);
+            }
         }
     }
 }

@@ -20,6 +20,21 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     // fire a basic attack.
     let mp = input.mouse_pos();
     let pointer_in_inventory = state.mp_inventory_ui.consumes_mouse(mp.0, mp.1, sw, sh);
+    // Same gate, but for the party UI (party frames, portal
+    // modal, per-member confirm prompt, right-click context
+    // menu) and the chat input field. Without this the
+    // gameplay tick consumes `left_clicked()` /
+    // `right_clicked()` in `tick_ability_keybinds` /
+    // targeting tick before the UI phase ever sees them, so
+    // buttons like "Enter" in the portal modal, "Kick" in
+    // the context menu, and the chat field never register a
+    // click.
+    let pointer_in_party_ui = state.party.consumes_mouse(mp.0, mp.1);
+    let pointer_in_chat = state.chat.consumes_mouse(mp.0, mp.1);
+    // Combat-meter HUD (bottom-right). Same contract: when the
+    // cursor is on the panel we want clicks to drive tab
+    // switches / row expand-toggle, not basic attacks.
+    let pointer_in_meters = state.meters.consumes_mouse(mp.0, mp.1);
 
     // Ability-based combat (sends cast requests to the server).
     // Two gates beyond the obvious "alive" check:
@@ -36,7 +51,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached)
             || is_ghost
             || state.floor.in_hub
-            || pointer_in_inventory;
+            || pointer_in_inventory
+            || pointer_in_party_ui
+            || pointer_in_chat
+            || pointer_in_meters;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
     } else if is_ghost

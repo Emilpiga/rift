@@ -53,6 +53,12 @@ pub struct Input {
     /// example). Auto-cleared at the start of every frame's
     /// `end_frame`.
     text_swallow: Cell<bool>,
+    /// Vertical mouse-wheel delta accumulated this frame. Reset
+    /// in [`Self::end_frame`]. Positive values mean scroll
+    /// *up* / *toward* the user (matches winit's `LineDelta.y`).
+    /// UI widgets read this via [`Self::scroll_delta`] to drive
+    /// scrollable panels.
+    scroll_delta: f32,
 }
 
 impl Default for Input {
@@ -76,6 +82,7 @@ impl Default for Input {
             enter_pressed: false,
             text_capture: Cell::new(false),
             text_swallow: Cell::new(false),
+            scroll_delta: 0.0,
         }
     }
 }
@@ -150,6 +157,7 @@ impl Input {
         self.left_just_released = false;
         self.prev_left_mouse_down = self.left_mouse_down;
         self.text_swallow.set(false);
+        self.scroll_delta = 0.0;
     }
 
     /// Push a typed character (printable). Called by the window event loop.
@@ -282,5 +290,20 @@ impl Input {
 
     pub fn on_scroll(&mut self, delta: f32) {
         self.camera_distance = (self.camera_distance - delta * 0.5).clamp(2.0, 20.0);
+        // Also expose the raw frame-scoped delta so UI
+        // widgets (scrollable panels) can react. Camera zoom
+        // and UI scroll co-exist for now — widgets that want
+        // to claim the wheel can do so by checking hover
+        // before reading [`Self::scroll_delta`].
+        self.scroll_delta += delta;
+    }
+
+    /// Vertical mouse-wheel delta accumulated this frame.
+    /// Positive = scroll up / toward the user. Widgets that
+    /// consume this should hit-test the cursor against their
+    /// rect first so background panels don't steal scroll
+    /// from foreground ones.
+    pub fn scroll_delta(&self) -> f32 {
+        self.scroll_delta
     }
 }

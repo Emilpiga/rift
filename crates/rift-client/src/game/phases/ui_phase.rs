@@ -174,5 +174,32 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // open/close edges land in the same frame as the draw.
     state.chat.handle_keys(&mut ui, &mut state.net.pending_chats_out);
     state.chat.frame(&mut ui, 0.0);
+
+    // Drain any chat slash commands the chat HUD didn't
+    // recognise, routing them through the party UI. Anything
+    // the party UI also rejects becomes a local "Unknown
+    // command" system line so the player gets feedback.
+    let pending: Vec<(String, String)> =
+        std::mem::take(&mut state.chat.pending_slash);
+    for (head, body) in pending {
+        match state.party.try_handle_slash(&head, &body) {
+            Some(Ok(msg)) => state.net.pending_party_msgs.push(msg),
+            Some(Err(local)) => state.chat.push_local_system(&local),
+            None => state
+                .chat
+                .push_local_system(&format!("Unknown command: /{head}")),
+        }
+    }
+
+    // Party HUD: top-left frames + portal/confirm modals + any
+    // toasts. Rendered after chat so its modals sit above the
+    // scrollback panel.
+    state.party.frame(&mut ui, &mut state.net, &mut state.chat, &mut state.frame);
+
+    // Combat-meter panel (bottom-right). Only renders inside
+    // a rift — the hub is meter-free.
+    let in_rift = !state.floor.in_hub;
+    state.meters.frame(&mut ui, in_rift);
+
     let _ = ui.end();
 }

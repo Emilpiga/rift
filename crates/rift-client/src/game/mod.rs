@@ -23,6 +23,8 @@ pub mod phases;
 pub mod transition;
 pub mod spellbook;
 pub mod chat;
+pub mod meters;
+pub mod party;
 
 // Flatten the systems / phases / states hierarchies back into
 // the `game` namespace so existing `crate::game::sub_state::*`,
