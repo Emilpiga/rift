@@ -17,7 +17,7 @@ pub mod props;
 pub mod floor;
 pub mod torches;
 pub mod monster_assets;
-pub mod mp_inventory_ui;
+pub mod inventory;
 pub mod systems;
 pub mod phases;
 pub mod transition;

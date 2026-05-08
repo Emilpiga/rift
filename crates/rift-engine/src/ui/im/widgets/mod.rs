@@ -8,15 +8,21 @@
 pub mod banner;
 pub mod button;
 pub mod frame;
+pub mod inline_edit;
 pub mod item_slot;
+pub mod mini_button;
 pub mod progress_bar;
 pub mod text_field;
 pub mod tooltip;
+pub mod two_stage_confirm;
 
 pub use banner::{Banner, BannerStyle};
 pub use button::{Button, ButtonVariant};
 pub use frame::Frame;
+pub use inline_edit::{InlineEditOutcome, InlineEditState};
 pub use item_slot::{ItemSlot, SlotInteraction};
+pub use mini_button::{MiniButton, MiniButtonFills, MiniButtonResponse};
 pub use progress_bar::{hp_color, ProgressBar};
 pub use text_field::{label, text_field, title, TextField};
 pub use tooltip::{item_tooltip_lines, tooltip_at_mouse, Tooltip, TooltipLine};
+pub use two_stage_confirm::{TwoStageConfirm, TwoStageOutcome};

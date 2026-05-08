@@ -9,7 +9,7 @@ use super::character_spawn;
 use super::floor::FloorManager;
 use super::loot_system;
 use super::monster_assets::load_role;
-use super::mp_inventory_ui;
+use super::inventory;
 use super::player_state::PlayerState;
 use super::rift_state::RiftState;
 use super::spellbook;
@@ -33,7 +33,7 @@ pub struct GameState {
     /// [`LootClientState::mp_inventory`] (the server-mirrored bag)
     /// instead of the legacy engine `Inventory`. Owns the Tab
     /// toggle now.
-    pub mp_inventory_ui: mp_inventory_ui::MpInventoryUI,
+    pub mp_inventory_ui: inventory::MpInventoryUI,
     pub combat_text: CombatTextSystem,
     /// Cross-frame immediate-mode UI state — owns focus, hover,
     /// drag, and the modal stack. Borrowed by `Ui::begin` once
@@ -142,7 +142,7 @@ impl GameState {
             rift: RiftState::new(1),
             player_state: PlayerState::new(),
             floor_mgr: FloorManager::new(),
-            mp_inventory_ui: mp_inventory_ui::MpInventoryUI::new(),
+            mp_inventory_ui: inventory::MpInventoryUI::new(),
             combat_text: CombatTextSystem::new(),
             ui_state: rift_engine::ui::im::UiState::new(),
             decals: DecalSystem::new(),

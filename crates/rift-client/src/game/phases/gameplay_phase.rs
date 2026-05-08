@@ -55,10 +55,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         dt,
     );
 
-    // Rift spawn portal: always-present near the spawn point of
-    // every rift floor. F-press opens (or, solo, instantly
-    // resolves) the exit vote that returns the party to the hub
-    // with their current loot.
+    // Rift exit portal (return-to-hub). Lazily spawned in
+    // the boss room *after* the boss dies, side-by-side with
+    // the descend portal — the player picks "leave with
+    // loot" vs "push deeper" right where the boss fell. No
+    // longer spawned at the floor's spawn point: once you
+    // commit to a floor you must clear its boss to get home.
     let is_ghost = state.net.local_ghost_cached;
     portal_system::tick_rift_spawn(
         &mut state.floor.rift_spawn_portal,
@@ -67,8 +69,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         input,
         &mut state.net,
         &mut state.frame.hud_prompt,
+        state.rift.floor_complete,
         state.floor.in_hub,
-        state.floor_mgr.spawn_pos,
+        state.floor_mgr.boss_room_center,
         vote_active,
         vote_cd,
         is_ghost,

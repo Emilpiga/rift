@@ -10,7 +10,7 @@ use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::Input;
 
 use crate::game::floor::FloorManager;
-use crate::game::mp_inventory_ui::MpInventoryUI;
+use crate::game::inventory::MpInventoryUI;
 use crate::game::sub_state::{LootClientState, NetState};
 
 /// Walk-to-interact range for the hub stash chest. Slightly

@@ -258,8 +258,11 @@ pub fn tick_exit(
     if floor_complete && !in_hub && exit_portal.is_none() {
         // Sit slightly above ground so the ring isn't z-fought
         // by the floor decal — mirrors the hub portal's
-        // `+ Y 0.5` offset.
-        let pos = boss_room_center + Vec3::new(0.0, 0.5, 0.0);
+        // `+ Y 0.5` offset. Offset along -X by the same
+        // distance the rift-exit portal uses on +X so the two
+        // boss-room portals sit symmetrically about the room
+        // centre and the player can see both choices at once.
+        let pos = boss_room_center + Vec3::new(-3.5, 0.5, 0.0);
         log::info!("exit portal: spawning at {:?}", pos);
         spawn_exit(exit_portal, renderer, pos);
     }
@@ -325,16 +328,23 @@ pub fn tick_exit(
     );
 }
 
-/// Per-frame rift-spawn-portal tick. Lazily spawns the portal
-/// the first frame we're on a rift floor (i.e. `!in_hub`),
-/// spins the mesh thereafter, and converts an F-press inside
-/// the interact radius into a `pending_exit_vote_start` flag
-/// that the binary forwards as `ClientMsg::RiftExitVoteStart`.
-/// While a vote is already active the prompt is suppressed and
-/// the F-press is ignored — the player should be using Y/N.
-/// Ghosts (risen-but-dead spectators) get no prompt and the F
-/// press is ignored: gatekeeping the living team out of an
-/// exit by spamming votes would be too easy otherwise.
+/// Per-frame rift-exit-portal tick. Lazily spawns the portal
+/// the first frame the floor's boss is dead and we're not in
+/// the hub — i.e. the same gate the descend portal uses, so
+/// the two appear together in the boss room. Spinning the
+/// mesh thereafter, and converts an F-press inside the
+/// interact radius into a `pending_exit_vote_start` flag that
+/// the binary forwards as `ClientMsg::RiftExitVoteStart`.
+/// While a vote is already active the prompt is suppressed
+/// and the F-press is ignored — the player should be using
+/// Y/N. Ghosts (risen-but-dead spectators) get no prompt and
+/// the F press is ignored: gatekeeping the living team out of
+/// an exit by spamming votes would be too easy otherwise.
+///
+/// `boss_room_center` is the anchor for the spawn position;
+/// the portal sits a couple of metres to the side of the
+/// descend portal so the two are clearly distinct choices
+/// rather than overlapping on the same tile.
 pub fn tick_rift_spawn(
     portal_slot: &mut Option<HubPortal>,
     world: &hecs::World,
@@ -342,8 +352,9 @@ pub fn tick_rift_spawn(
     input: &Input,
     net: &mut NetState,
     hud_prompt: &mut Option<&'static str>,
+    floor_complete: bool,
     in_hub: bool,
-    spawn_pos: Vec3,
+    boss_room_center: Vec3,
     vote_active: bool,
     cooldown_remaining: f32,
     is_ghost: bool,
@@ -358,10 +369,21 @@ pub fn tick_rift_spawn(
         return;
     }
     if portal_slot.is_none() {
+        // Gate the exit portal on boss death so the player
+        // can't bail out of a floor they haven't cleared.
+        // Once the boss is down, this portal is the
+        // "leave with loot" half of the boss-room choice;
+        // the descend portal sits next to it.
+        if !floor_complete {
+            return;
+        }
         // Sit slightly above ground so the ring isn't z-fought
-        // by the floor decal.
-        let pos = spawn_pos + Vec3::new(0.0, 0.5, 0.0);
-        log::info!("rift spawn portal: spawning at {:?}", pos);
+        // by the floor decal, and offset a few metres along +X
+        // from the descend portal so the two are visually
+        // distinct doorways rather than a single overlapping
+        // ring.
+        let pos = boss_room_center + Vec3::new(3.5, 0.5, 0.0);
+        log::info!("rift exit portal: spawning at {:?}", pos);
         // Stepping into this portal returns the party to the
         // hub, so the disc bakes the *meadow* palette — bright
         // cyan / warm horizon. Reads as a doorway home, in
@@ -370,7 +392,7 @@ pub fn tick_rift_spawn(
             portal_slot,
             renderer,
             pos,
-            "rift spawn portal",
+            "rift exit portal",
             rift_engine::SkyConfig::meadow(),
         );
     }

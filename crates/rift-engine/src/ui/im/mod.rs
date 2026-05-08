@@ -39,7 +39,9 @@ pub use state::{DragState, Modal, TextSelection, UiState};
 pub use theme::{Colors, Fonts, Spacing, Theme, DEFAULT_THEME};
 pub use ui::{DragSourceResponse, DroppedPayload, Ui, UiOutput};
 pub use widgets::{
-    hp_color, item_tooltip_lines, Banner, BannerStyle, Button, ButtonVariant, Frame, ItemSlot,
-    ProgressBar, SlotInteraction, TextField, Tooltip, TooltipLine,
+    hp_color, item_tooltip_lines, Banner, BannerStyle, Button, ButtonVariant, Frame,
+    InlineEditOutcome, InlineEditState, ItemSlot, MiniButton, MiniButtonFills,
+    MiniButtonResponse, ProgressBar, SlotInteraction, TextField, Tooltip, TooltipLine,
+    TwoStageConfirm, TwoStageOutcome,
 };
 pub use world_ui::WorldUi;
