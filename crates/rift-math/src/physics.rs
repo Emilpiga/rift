@@ -179,3 +179,95 @@ pub fn line_of_sight_grid<F: FnMut(i32, i32) -> bool>(
     }
     true
 }
+
+/// Generic 4-connected A* on an integer tile grid. Returns the
+/// path from `from` (excluded — caller is already there) up to
+/// and including `goal`, or `None` if no path exists or the
+/// search exceeds `max_expanded` nodes (a budget cap so a
+/// runaway search on a fragmented grid can't burn the AI tick).
+///
+/// `is_walkable` answers "may a search node land on this tile?"
+/// using the same `(i32, i32)` convention as
+/// [`line_of_sight_grid`]. Negative / out-of-bounds tiles
+/// should return `false`. The `goal` tile itself is always
+/// allowed to be expanded into even if `is_walkable(goal)` is
+/// `false` — callers don't have to special-case targets that
+/// have briefly clipped into an unwalkable cell.
+///
+/// Heuristic is Manhattan distance, which is admissible for
+/// 4-connected uniform-cost grids and produces optimal paths.
+///
+/// Pure function. Lives here so every grid path consumer
+/// (server enemy nav, future client-side autopath, debug
+/// tools) shares one deterministic implementation.
+pub fn astar_grid<F>(
+    from: (i32, i32),
+    goal: (i32, i32),
+    max_expanded: usize,
+    mut is_walkable: F,
+) -> Option<Vec<(i32, i32)>>
+where
+    F: FnMut(i32, i32) -> bool,
+{
+    use std::cmp::Reverse;
+    use std::collections::{BinaryHeap, HashMap};
+
+    if from == goal {
+        return Some(Vec::new());
+    }
+    // Start cell must be walkable — searching from a wall would
+    // explore nothing useful and return `None` after burning
+    // the budget. Be defensive: callers usually hand us an
+    // entity position which is wall-clamped by the integrator,
+    // but we can't prove it from here.
+    if !is_walkable(from.0, from.1) {
+        return None;
+    }
+
+    let h = |x: i32, z: i32| -> i32 { (x - goal.0).abs() + (z - goal.1).abs() };
+    let mut open: BinaryHeap<Reverse<(i32, (i32, i32))>> = BinaryHeap::new();
+    let mut g_score: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut came_from: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    open.push(Reverse((h(from.0, from.1), from)));
+    g_score.insert(from, 0);
+
+    let mut expanded: usize = 0;
+    while let Some(Reverse((_, current))) = open.pop() {
+        if current == goal {
+            // Reconstruct path back to (but excluding) `from`.
+            let mut path = vec![current];
+            let mut cur = current;
+            while let Some(&prev) = came_from.get(&cur) {
+                if prev == from {
+                    break;
+                }
+                path.push(prev);
+                cur = prev;
+            }
+            path.reverse();
+            return Some(path);
+        }
+        expanded += 1;
+        if expanded > max_expanded {
+            return None;
+        }
+        let g = *g_score.get(&current).unwrap_or(&i32::MAX);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let nx = current.0 + dx;
+            let nz = current.1 + dz;
+            let n = (nx, nz);
+            // Allow expansion into the goal even if it's
+            // unwalkable — the target may briefly clip a wall.
+            if n != goal && !is_walkable(nx, nz) {
+                continue;
+            }
+            let tentative = g + 1;
+            if tentative < *g_score.get(&n).unwrap_or(&i32::MAX) {
+                came_from.insert(n, current);
+                g_score.insert(n, tentative);
+                open.push(Reverse((tentative + h(nx, nz), n)));
+            }
+        }
+    }
+    None
+}

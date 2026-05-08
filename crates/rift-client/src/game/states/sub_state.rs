@@ -101,6 +101,12 @@ pub struct NetState {
     /// The inner `Option<NetId>` is the new intent (i.e.
     /// `Some(shrine)` to start, `None` to stop).
     pub pending_shrine_intent: Option<Option<rift_net::NetId>>,
+    /// Outbound chat lines: `(channel, target, text)`. Filled
+    /// by the chat HUD on `Enter` (or `/command` parsing),
+    /// drained by the binary into
+    /// `NetClient::send_chat`. `target` is meaningful only for
+    /// the whisper channel.
+    pub pending_chats_out: Vec<(u8, Option<String>, String)>,
 }
 
 /// Multiplayer-only: a request for the binary to forward to the server.

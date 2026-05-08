@@ -65,6 +65,17 @@ pub struct ClientProfile {
     pub gender: rift_net::messages::Gender,
 }
 
+/// One inbound chat line awaiting drain into the chat HUD.
+/// Mirrors [`ServerMsg::Chat`] but flattened for the binary's
+/// drain loop. `sender == None` flags a system event.
+#[derive(Clone, Debug)]
+pub struct PendingChat {
+    pub channel: u8,
+    pub sender: Option<String>,
+    pub target: Option<String>,
+    pub text: String,
+}
+
 /// Active networking session for a connected client. One per
 /// running game when `--connect` is in use. Owned by the binary
 /// and ticked before each frame's `update`.
@@ -193,6 +204,12 @@ pub struct NetClient {
     /// drains it into `GameState` so the HUD can render the
     /// vote panel + cooldown.
     pending_exit_vote: Option<rift_net::messages::VoteState>,
+    /// Inbound chat messages awaiting drain into the
+    /// `GameState.chat` UI buffer. Filled by
+    /// `handle_server_msg` on every `ServerMsg::Chat`,
+    /// drained by the binary into the chat scrollback once
+    /// per frame.
+    pub(super) pending_chats: VecDeque<PendingChat>,
     /// Our authoritative `ClientId` once `Welcome` lands. Used to
     /// answer "was this loot claimed by us?" without re-walking
     /// the renet handle.
@@ -303,6 +320,7 @@ impl NetClient {
             pending_loadout: None,
             pending_rift_progress: None,
             pending_exit_vote: None,
+            pending_chats: VecDeque::new(),
             our_client_id: None,
             predicted: Kinematic::default(),
             predicted_ready: false,
@@ -420,6 +438,14 @@ impl NetClient {
             return;
         }
         self.profile = Some(profile);
+    }
+
+    /// Our character name, if `set_profile` has run. Used by the
+    /// chat HUD to tell our own whisper echoes apart from
+    /// inbound whispers (so `/r` only fills with names we
+    /// genuinely received DMs from).
+    pub fn character_name(&self) -> Option<&str> {
+        self.profile.as_ref().map(|p| p.character_name.as_str())
     }
 
     fn send_hello(&mut self) {
@@ -666,6 +692,14 @@ impl NetClient {
                     state.voters.len()
                 );
                 self.pending_exit_vote = Some(state);
+            }
+            ServerMsg::Chat { channel, sender, target, text } => {
+                self.pending_chats.push_back(PendingChat {
+                    channel,
+                    sender,
+                    target,
+                    text,
+                });
             }
             ServerMsg::Kick { reason } => {
                 log::warn!("net: kicked: {reason}");

@@ -23,8 +23,9 @@ use rift_net::{
 
 pub mod ability;
 pub mod channel;
+pub mod combat_ctx;
 pub mod effect;
-pub mod enemy;
+pub mod enemies;
 pub mod floor;
 pub mod loot;
 pub mod player;
@@ -235,6 +236,12 @@ pub struct StatsUpdate {
     /// reconnect can rebuild `(level, current_xp)` without the
     /// server having to re-do the level curve math itself.
     pub total_xp: u64,
+    /// `true` when this update represents at least one level
+    /// transition this tick (XP gain crossed one or more
+    /// thresholds). The server uses this to drive a SYSTEM
+    /// chat line to the levelled-up player without having to
+    /// remember the previous level itself.
+    pub levelled_up: bool,
 }
 
 impl Sim {
@@ -264,7 +271,7 @@ impl Sim {
             exit_vote_cooldown: 0.0,
             exit_vote_dirty: false,
         };
-        enemy::spawn_for_floor(
+        enemies::spawn_for_floor(
             &mut sim.world,
             &sim.floor,
             sim.floor_index,
@@ -295,7 +302,7 @@ impl Sim {
         } else {
             player::heal_living(&mut self.world);
         }
-        enemy::despawn_all(&mut self.world);
+        enemies::despawn_all(&mut self.world);
         projectile::despawn_all(&mut self.world);
         loot::despawn_all(&mut self.world);
         shrine::despawn_all(&mut self.world);
@@ -310,7 +317,7 @@ impl Sim {
         // ghost damage numbers / death sounds against ids the
         // client never saw alive.
         self.pending_events.clear();
-        enemy::spawn_for_floor(
+        enemies::spawn_for_floor(
             &mut self.world,
             &self.floor,
             self.floor_index,
@@ -1297,8 +1304,41 @@ impl Sim {
         //    any caster bolts the AI asked for.
         let player_targets = player::target_positions(&self.world);
         let damage_mult = FloorConfig::for_floor(self.floor_index).enemy_damage_mult;
-        let ai_outcome = enemy::tick_ai(&mut self.world, &self.floor, &player_targets, damage_mult, dt);
+        let ai_outcome = enemies::tick_ai(&mut self.world, &self.floor, &player_targets, damage_mult, dt);
         let melee_damage = ai_outcome.melee_damage;
+        // Pipe through any wire events the AI tick produced
+        // (currently telegraph SFX cues). Done here so they
+        // ride out on the same frame's snapshot, before the
+        // ability dispatch below pushes its own events.
+        self.pending_events.extend(ai_outcome.events);
+        // Apply vampiric heal-back from elite mods. Clamped to
+        // hp_max and accompanied by a Heal event so clients see
+        // floating-green numbers off the affected enemy. No
+        // sound / VFX wiring yet — the event alone is enough.
+        for (entity, amount) in ai_outcome.vampiric_heals {
+            if amount <= 0.0 {
+                continue;
+            }
+            if let Ok(mut en) = self.world.get::<&mut enemies::ServerEnemy>(entity) {
+                if en.is_dying() {
+                    continue;
+                }
+                let healed = (en.hp + amount).min(en.hp_max) - en.hp;
+                if healed > 0.0 {
+                    en.hp += healed;
+                    let pos = en.k.position;
+                    let nid = en.net_id;
+                    drop(en);
+                    self.pending_events.push(rift_net::messages::WorldEvent::Heal {
+                        caster: nid,
+                        target: nid,
+                        amount: healed,
+                        over_time: false,
+                        position: pos.to_array(),
+                    });
+                }
+            }
+        }
         // Unified enemy ability cast pipeline. Every enemy
         // attack flows through this single stream:
         //   * `Start` events translate into `AbilityCast` wire
@@ -1317,7 +1357,7 @@ impl Sim {
         let mut ai_cooldowns: ability::CooldownTable = HashMap::new();
         for cast in ai_outcome.casts {
             match cast {
-                enemy::EnemyCast::Start {
+                enemies::EnemyCast::Start {
                     owner,
                     ability_id,
                     origin,
@@ -1334,7 +1374,7 @@ impl Sim {
                         start_tick: tick,
                     });
                 }
-                enemy::EnemyCast::Resolve {
+                enemies::EnemyCast::Resolve {
                     owner,
                     ability_id,
                     origin,
@@ -1391,7 +1431,7 @@ impl Sim {
         // allocator the floor packs use so clients see them as
         // ordinary enemies.
         for (pos, role_byte, hp_mult) in &summon_queue {
-            enemy::spawn_summon(
+            enemies::spawn_summon(
                 &mut self.world,
                 *pos,
                 *role_byte,
@@ -1404,7 +1444,7 @@ impl Sim {
         // resolves) into one for the player-damage pass.
         let mut melee_damage = melee_damage;
         melee_damage.extend(melee_from_resolves);
-        enemy::integrate_motion(&mut self.world, &self.floor, dt);
+        enemies::integrate_motion(&mut self.world, &self.floor, dt);
 
         // 3. Apply queued enemy → player melee damage. Players
         //    crossing 0 hp emit a `Death` event and queue a
@@ -1424,24 +1464,36 @@ impl Sim {
 
         // 5. Snapshot enemies for collision queries, then run
         //    projectiles + AoE zones + channels against them.
-        //    All damage paths share one `DeathCtx` so DoT and
+        //    All damage paths share one `CombatCtx` so DoT and
         //    direct kills both run through `loot::finalise_kills`
         //    (which emits `Death`, rolls drops, and despawns).
-        let enemies = enemy::snapshot_for_collision(&self.world);
+        let enemies = enemies::snapshot_for_collision(&self.world);
 
-        let mut kills: Vec<loot::KillInfo> = Vec::new();
-        let mut ctx = loot::DeathCtx {
+        let mut kills: Vec<combat_ctx::KillInfo> = Vec::new();
+        // Sinks for the elite-affix flow. `thorns_back` is
+        // drained into `enemy_player_damage` after the CombatCtx
+        // scope so reflected damage runs through the same
+        // `apply_player_damage` chokepoint as enemy melee /
+        // bolt damage. `death_aoe_zones` are appended to
+        // `self.aoe_zones` so the next tick of `tick_aoe`
+        // picks them up.
+        let mut thorns_back: Vec<(hecs::Entity, f32)> = Vec::new();
+        let mut death_aoe_zones: Vec<projectile::ServerAoeZone> = Vec::new();
+        let mut ctx = combat_ctx::CombatCtx {
             events: &mut self.pending_events,
             next_loot_net_id: &mut self.next_loot_net_id,
             tick,
             floor_index: self.floor_index,
             kills: &mut kills,
+            player_damage_back: &mut thorns_back,
+            death_aoe_zones: &mut death_aoe_zones,
+            next_projectile_net_id: &mut self.next_projectile_net_id,
         };
         // Unified projectile tick — handles both player→enemy
         // and enemy→player bolts (distinguished by `Team`).
         // Enemy-team hits are returned as `(player, damage)`
         // rows for the player-damage path below; the player-
-        // team path runs through `DeathCtx` like before, so
+        // team path runs through `CombatCtx` like before, so
         // event ordering stays consistent.
         let enemy_proj_damage = projectile::tick(
             &mut self.world,
@@ -1477,7 +1529,7 @@ impl Sim {
         let player_dot_damage = effect::tick(&mut self.world, &mut ctx, dt);
 
         // Apply the enemy-projectile damage collected before the
-        // `DeathCtx` scope. Done here, after `ctx` is dropped, so
+        // `CombatCtx` scope. Done here, after `ctx` is dropped, so
         // the player-damage path can borrow `pending_events` /
         // `pending_player_deaths` without aliasing. Enemy-team
         // AoE rows + player DoT rows are merged in so the same
@@ -1486,6 +1538,13 @@ impl Sim {
         enemy_player_damage.extend(enemy_aoe_damage);
         enemy_player_damage.extend(enemy_channel_damage);
         enemy_player_damage.extend(player_dot_damage);
+        // Merge thorns reflection back to the attacker into the
+        // same player-damage queue. Done after `ctx` drops so
+        // the borrows on `pending_events` clear.
+        enemy_player_damage.extend(thorns_back);
+        // Push EXPLODER death zones into the active zone pool;
+        // next tick's `tick_aoe` will run them against players.
+        self.aoe_zones.extend(death_aoe_zones);
         if !enemy_player_damage.is_empty() {
             apply_player_damage(
                 &mut self.world,
@@ -1496,7 +1555,7 @@ impl Sim {
             self.check_party_wipe();
         }
 
-        // 6b. Tick revive shrines after the DeathCtx scope ends so
+        // 6b. Tick revive shrines after the CombatCtx scope ends so
         //     the borrow on `pending_events` is free. `shrine::tick`
         //     pushes `WorldEvent::PlayersRevived` directly into the
         //     event queue, so the broadcast picks it up this tick.
@@ -1506,7 +1565,7 @@ impl Sim {
         //    despawn rows whose timer hit zero. Kept separate from
         //    the kill path so the corpse stays in snapshots long
         //    enough for the client to play its `Death` clip.
-        enemy::tick_dying(&mut self.world, dt);
+        enemies::tick_dying(&mut self.world, dt);
 
         // 8. Award XP + bump rift progress for every kill this
         //    tick. Boss kills end the floor; non-boss kills push
@@ -1559,11 +1618,11 @@ impl Sim {
     /// every connected player. Sets `progress_dirty` whenever the
     /// rift state changes so the main loop broadcasts a fresh
     /// `RiftProgress` next iteration.
-    fn process_kills(&mut self, kills: &[loot::KillInfo]) {
+    fn process_kills(&mut self, kills: &[combat_ctx::KillInfo]) {
 
         let mut spawn_boss_now = false;
         for k in kills {
-            if k.role == enemy::role::BOSS {
+            if k.role == enemies::role::BOSS {
                 if !self.rift_progress.boss_killed {
                     self.rift_progress.boss_killed = true;
                     self.rift_progress.floor_complete = true;
@@ -1609,7 +1668,7 @@ impl Sim {
                 continue;
             }
             let mut total = 0u64;
-            for _ in kills.iter().filter(|k| k.role != enemy::role::BOSS) {
+            for _ in kills.iter().filter(|k| k.role != enemies::role::BOSS) {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -1617,7 +1676,7 @@ impl Sim {
             }
             // Boss kills are worth a fat lump of XP \u2014 5\u00d7 a
             // normal kill at the floor's monster level.
-            for _ in kills.iter().filter(|k| k.role == enemy::role::BOSS) {
+            for _ in kills.iter().filter(|k| k.role == enemies::role::BOSS) {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -1626,13 +1685,14 @@ impl Sim {
             if total == 0 {
                 continue;
             }
-            p.grant_xp(total);
+            let rewards = p.grant_xp(total);
             self.pending_stat_updates.push(StatsUpdate {
                 client_id: cid,
                 level: p.experience.level,
                 xp: p.experience.current_xp,
                 xp_to_next: p.experience.xp_to_next_level(),
                 total_xp: p.experience.total_xp,
+                levelled_up: !rewards.is_empty(),
             });
         }
 
@@ -1642,7 +1702,7 @@ impl Sim {
     }
 
     /// Spawn the floor's boss in the BSP-derived `boss_room_center`.
-    /// Higher HP, slower speed, role = `enemy::role::BOSS`.
+    /// Higher HP, slower speed, role = `enemies::role::BOSS`.
     /// Idempotent against `rift_progress.boss_spawned`.
     fn spawn_boss(&mut self) {
         if self.rift_progress.boss_spawned {
@@ -1658,9 +1718,9 @@ impl Sim {
         let speed = cfg.enemy_speed * 0.7;
         let net_id = NetId(self.next_enemy_net_id);
         self.next_enemy_net_id = self.next_enemy_net_id.wrapping_add(1).max(1);
-        let enemy = enemy::ServerEnemy {
+        let enemy = enemies::ServerEnemy {
             net_id,
-            role: enemy::role::BOSS,
+            role: enemies::role::BOSS,
             k: rift_game::kinematic::Kinematic {
                 position: boss_pos,
                 velocity: Vec3::ZERO,
@@ -1678,12 +1738,20 @@ impl Sim {
             attack_cooldown: 0.0,
             attack_anim_remaining: 0.0,
             dying_remaining: 0.0,
-            ai_phase: enemy::AiPhase::default(),
+            ai_phase: enemies::AiPhase::default(),
             crit_chance: 0.0,
             crit_damage: 0.0,
+            stagger_remaining: 0.0,
+            pending_aggro: None,
+            threat: std::collections::HashMap::new(),
+            elite_mods: 0,
+            flank_slot: 0,
+            path: Vec::new(),
+            path_target_tile: None,
+            path_recompute_in: 0.0,
         };
         self.world
-            .spawn((enemy, effect::EffectStack::default(), enemy::BossState::new(self.floor_index)));
+            .spawn((enemy, effect::EffectStack::default(), enemies::BossState::new(self.floor_index)));
         self.rift_progress.boss_spawned = true;
         self.progress_dirty = true;
         log::info!(

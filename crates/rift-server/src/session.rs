@@ -7,10 +7,12 @@
 //! `MAX_CLIENTS` (4) for now, but the hash-keyed access also
 //! removes a class of bugs around stale session indices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rift_net::{ClientId, Gender, NetId};
 use rift_persistence::CharacterRecord;
+
+use crate::chat::ChatRateLimit;
 
 /// Per-connected-client state the server tracks. Most fields are
 /// `None` until the client's `Hello` has been processed and we've
@@ -33,6 +35,21 @@ pub struct ClientSession {
     /// persistence is disabled (no `--database-url`) or if the load
     /// failed and we fell back to in-memory only.
     pub record: Option<CharacterRecord>,
+    /// Party id for chat routing. Defaults to `client_id.0`
+    /// (singleton party of self) until a real party system
+    /// lands and starts merging members onto a shared id. The
+    /// `chat_channel::PARTY` route already reads this so the
+    /// surface is already in place.
+    pub party_id: u64,
+    /// Character names this player has muted. Whisper / chat
+    /// from a muted name is silently dropped on the recipient's
+    /// `send_to` step; the sender never sees the mute (so they
+    /// can't trivially probe for mutes). Cleared on disconnect
+    /// — mute persistence lands with whisper history.
+    pub mute_list: HashSet<String>,
+    /// Per-player chat rate limiter. Sliding window; sends
+    /// over the cap are silently dropped server-side.
+    pub chat_bucket: ChatRateLimit,
 }
 
 impl ClientSession {
@@ -45,6 +62,13 @@ impl ClientSession {
             gender: None,
             net_id: None,
             record: None,
+            // Singleton-party stub: each client is in its own
+            // party until a real party system fills in shared
+            // ids. `client_id.0` is a u64 already so the
+            // mapping is collision-free.
+            party_id: client_id.0,
+            mute_list: HashSet::new(),
+            chat_bucket: ChatRateLimit::default(),
         }
     }
 }

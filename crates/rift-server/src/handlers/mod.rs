@@ -17,6 +17,7 @@
 
 use rift_net::Gender;
 
+pub mod chat;
 pub mod inventory;
 pub mod persistence;
 pub mod session;

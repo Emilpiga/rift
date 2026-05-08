@@ -104,6 +104,12 @@ impl RiftApp {
         // before the heavy regen runs.
         if let Some(pf) = net.take_pending_floor() {
             state.net.floor_seed = Some(pf.seed);
+            // Auto-pivot the chat's active outbound channel
+            // to FLOOR (rift) or HUB (hub). The chat itself
+            // skips the pivot once the player has manually
+            // chosen a channel, so manual picks persist
+            // across transitions.
+            state.chat.on_floor_changed(pf.is_hub);
             state.apply_net_transition(renderer, pf.index);
             // Snap the freshly-spawned local Player to the
             // server's spawn point so the next snapshot's
@@ -265,6 +271,16 @@ impl RiftApp {
             }
             WorldEvent::Heal { caster, target, amount, over_time, position } => {
                 self.handle_heal_event(caster, target, amount, over_time, position, renderer);
+            }
+            WorldEvent::EnemyTelegraph { source, kind, position } => {
+                // Stub: a future audio system will play a
+                // role-specific wind-up cue keyed on `kind`.
+                // Logging at trace keeps the console quiet
+                // unless you actually want to debug telegraphs.
+                log::trace!(
+                    "net: EnemyTelegraph source={source:?} kind={kind} pos={position:?}"
+                );
+                let _ = (source, kind, position, renderer);
             }
         }
     }
@@ -715,6 +731,25 @@ impl RiftApp {
         // for the HUD prompt + beam VFX.
         if let Some(intent) = state.net.pending_shrine_intent.take() {
             net.request_set_shrine_channel(intent);
+        }
+
+        // Chat: drain inbound lines from the net session into
+        // the HUD scrollback, then ship any outbound lines the
+        // chat UI queued this frame.
+        for inbound in net.take_pending_chats() {
+            let our_name = net.character_name().map(|s| s.to_string());
+            state.chat.push(
+                rift_client::game::chat::ChatLine {
+                    channel: inbound.channel,
+                    sender: inbound.sender,
+                    target: inbound.target,
+                    text: inbound.text,
+                },
+                our_name.as_deref(),
+            );
+        }
+        for (channel, target, text) in state.net.pending_chats_out.drain(..).collect::<Vec<_>>() {
+            net.send_chat(channel, target, text);
         }
 
         // Stash transfer requests (deposit / withdraw). Drained

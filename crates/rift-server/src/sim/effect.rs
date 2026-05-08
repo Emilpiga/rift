@@ -15,7 +15,7 @@ use hecs::Entity;
 use rift_game::effects::{EffectDef, EffectKind, lookup};
 use rift_net::{messages::{ActiveEffect, WorldEvent}, NetId};
 
-use super::enemy::ServerEnemy;
+use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 
 /// One running instance of a debuff on a target.
@@ -151,7 +151,7 @@ struct HotHit {
 /// take).
 pub fn tick(
     world: &mut hecs::World,
-    ctx: &mut super::loot::DeathCtx<'_>,
+    ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
 ) -> Vec<(Entity, f32)> {
     let mut hits: Vec<DotHit> = Vec::new();

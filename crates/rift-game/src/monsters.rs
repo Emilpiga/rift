@@ -80,3 +80,45 @@ pub const ALL_ROLES: [MonsterRole; 5] = [
     MonsterRole::Elite,
     MonsterRole::Boss,
 ];
+
+/// Spawn-time stat multipliers applied on top of
+/// [`crate::FloorConfig::enemy_speed`] / `enemy_health`. Picked
+/// once per spawn; elite affixes (JUGGERNAUT/SWIFT) layer on
+/// top of these in a second multiplicative pass.
+///
+/// Centralised here so adding a new role is a single match arm
+/// in [`MonsterRole::stats`] instead of two parallel match
+/// arms across `spawn_summon` and `spawn_for_floor`.
+#[derive(Clone, Copy, Debug)]
+pub struct RoleStats {
+    /// Multiplier on `FloorConfig::enemy_speed`. Reflects the
+    /// role's footprint: brutes are slow, stalkers fast,
+    /// casters average. Elites and bosses are tuned per-fight
+    /// and so use 1.0 here (their HP / speed scaling lives
+    /// in the floor config's elite block).
+    pub speed_mult: f32,
+    /// Multiplier on `FloorConfig::enemy_health`. Inverse of
+    /// damage profile — squishy stalkers / casters compensate
+    /// with mobility / range, brutes soak hits.
+    pub hp_mult: f32,
+}
+
+impl MonsterRole {
+    /// Spawn-time stat multipliers. See [`RoleStats`].
+    pub fn stats(self) -> RoleStats {
+        // Numbers preserved verbatim from the legacy per-role
+        // match arms in `spawn_for_floor` / `spawn_summon`;
+        // only the indirection moved.
+        match self {
+            MonsterRole::Brute   => RoleStats { speed_mult: 0.85, hp_mult: 1.15 },
+            MonsterRole::Stalker => RoleStats { speed_mult: 1.35, hp_mult: 0.75 },
+            MonsterRole::Caster  => RoleStats { speed_mult: 0.95, hp_mult: 0.65 },
+            // Elite hp comes from `cfg.elite_hp_mult`, speed
+            // from a separate 0.8× multiplier — stats here are
+            // the neutral "no extra adjustment" fallback so
+            // callers can layer those on uniformly.
+            MonsterRole::Elite   => RoleStats { speed_mult: 0.80, hp_mult: 1.00 },
+            MonsterRole::Boss    => RoleStats { speed_mult: 1.00, hp_mult: 1.00 },
+        }
+    }
+}

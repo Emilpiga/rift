@@ -29,10 +29,12 @@ use rift_net::{
 };
 use rift_persistence::PersistenceHandle;
 
+mod chat;
 mod handlers;
 mod session;
 mod sim;
 
+use chat::ChatHistory;
 use session::{ClientSession, SessionManager};
 use sim::Sim;
 
@@ -80,6 +82,13 @@ struct Server {
     persistence: Option<PersistenceHandle>,
     /// Wall-clock since the last opportunistic auto-save tick.
     auto_save_accumulator: Duration,
+    /// Server-global chat history. New connections replay
+    /// recent GLOBAL + SYSTEM lines from this on accept.
+    chat: ChatHistory,
+    /// Last-seen value of `RiftProgress::boss_killed` so the
+    /// boss-slain SYSTEM line fires once per actual kill
+    /// instead of once per progress snapshot.
+    prev_boss_killed: bool,
 }
 
 impl Server {
@@ -108,6 +117,8 @@ impl Server {
             snapshot_accumulator: Duration::ZERO,
             persistence,
             auto_save_accumulator: Duration::ZERO,
+            chat: ChatHistory::default(),
+            prev_boss_killed: false,
         })
     }
 
@@ -234,6 +245,14 @@ impl Server {
                     .as_ref()
                     .map(|s| (s.net_id, s.record.clone()))
                     .unwrap_or((None, None));
+                // Capture the leaver's character name (if they
+                // ever finished the Hello handshake) so we can
+                // emit a "X has left" system line *after* the
+                // session row is gone but before the
+                // broadcast loops reuse the borrow.
+                let leaver_name = removed
+                    .as_ref()
+                    .and_then(|s| s.character_name.clone());
                 if let (Some(handle), Some(record)) = (&self.persistence, final_record) {
                     if !handle.save(record) {
                         log::warn!("persistence: final-save dropped for {cid:?}");
@@ -244,6 +263,9 @@ impl Server {
                 self.client_floor.remove(&cid);
                 if let Some(net_id) = left_net_id {
                     self.broadcast(Channel::Control, &ServerMsg::PlayerLeft { net_id });
+                }
+                if let Some(name) = leaver_name {
+                    self.emit_system_global(&format!("{name} has left."));
                 }
             }
         }
@@ -414,6 +436,9 @@ impl Server {
             ClientMsg::SetShrineChannel { shrine } => {
                 self.sim_for_client_mut(from).set_shrine_channel(from, shrine);
             }
+            ClientMsg::ChatSend { channel, target, text } => {
+                self.handle_chat_send(from, channel, target, text);
+            }
         }
     }
 
@@ -496,6 +521,18 @@ impl Server {
                 floor_complete: rp.floor_complete,
             },
         );
+        // FLOOR system ping so existing rift inhabitants see
+        // who joined them.
+        let floor_idx = self.rift.floor_index;
+        let name = self
+            .sessions
+            .get(cid)
+            .and_then(|s| s.character_name.clone())
+            .unwrap_or_else(|| "A player".to_string());
+        self.emit_system_floor(
+            floor_idx,
+            &format!("{name} entered floor {floor_idx}."),
+        );
     }
 
     /// Move `cid` from the rift back into the hub.
@@ -530,6 +567,8 @@ impl Server {
         // Future: re-roll the seed here for replay variety.
         let same_idx = self.rift.floor_index.max(1);
         self.rift.change_floor(same_idx);
+        // Same-floor reset still wipes the boss-kill state.
+        self.prev_boss_killed = false;
     }
 
     /// Server-driven floor advance inside the rift. Moves every
@@ -545,6 +584,9 @@ impl Server {
         let old_index = self.rift.floor_index;
         let movers = self.clients_on_floor(old_index);
         let spawn = self.rift.change_floor(new_index);
+        // Boss-kill rising-edge tracker is per-floor — reset
+        // on advance so the next boss is announced fresh.
+        self.prev_boss_killed = false;
         for cid in &movers {
             self.client_floor.insert(*cid, new_index);
         }
@@ -558,9 +600,18 @@ impl Server {
         for cid in &movers {
             self.send_to(*cid, Channel::Control, &msg);
         }
+        // Single SYSTEM line on the new floor — descend votes
+        // move the whole party in lockstep, so we only need
+        // one announce, not one per mover.
+        if !movers.is_empty() {
+            self.emit_system_floor(
+                new_index,
+                &format!("Party descended to floor {new_index}."),
+            );
+        }
     }
 
-    fn send_to(&mut self, to: ClientId, ch: Channel, msg: &ServerMsg) {
+    pub(crate) fn send_to(&mut self, to: ClientId, ch: Channel, msg: &ServerMsg) {
         let bytes = match encode(msg) {
             Ok(b) => b,
             Err(e) => {
@@ -627,12 +678,27 @@ impl Server {
                     xp_to_next: u.xp_to_next,
                 },
             );
+            // SYSTEM-to-self chat ping on level transitions so
+            // the player gets visible feedback in the
+            // scrollback even if their HUD level pip is
+            // off-screen.
+            if u.levelled_up {
+                self.emit_system_to(
+                    u.client_id,
+                    &format!("You reached level {}!", u.level),
+                );
+            }
         }
 
         // Rift-progress changes: only the rift sim has a
         // meaningful progress bar. Scoped to clients currently
         // in the rift.
         if let Some(rp) = self.rift.take_rift_progress_update() {
+            // Detect boss-kill rising edge so we can fire one
+            // GLOBAL system announcement per kill instead of
+            // one per progress snapshot.
+            let boss_just_killed = rp.boss_killed && !self.prev_boss_killed;
+            self.prev_boss_killed = rp.boss_killed;
             self.broadcast_to_floor(
                 rift_floor,
                 Channel::Control,
@@ -644,11 +710,27 @@ impl Server {
                     floor_complete: rp.floor_complete,
                 },
             );
+            if boss_just_killed {
+                let floor = self.rift.floor_index;
+                self.emit_system_global(&format!(
+                    "The boss of floor {floor} has been slain!"
+                ));
+            }
         }
 
         // Death log (rift only — hub has no enemies).
         for (cid, net_id) in self.rift.drain_player_deaths() {
             log::info!("player died: {cid:?} ({net_id:?})");
+            // Look up the dead player's name + which floor
+            // they died on so the FLOOR system message lands
+            // with the right audience.
+            let name = self
+                .sessions
+                .get(cid)
+                .and_then(|s| s.character_name.clone())
+                .unwrap_or_else(|| "A player".to_string());
+            let floor = self.floor_for_client(cid);
+            self.emit_system_floor(floor, &format!("{name} was slain."));
         }
         // Hub sim drain too, just in case (no-op today but
         // keeps the queue from accumulating across reconnects).

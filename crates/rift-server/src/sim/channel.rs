@@ -20,7 +20,7 @@ use hecs::Entity;
 use rift_game::abilities::ChannelEffect;
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
-use super::enemy::ServerEnemy;
+use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADIUS};
 
@@ -70,7 +70,7 @@ pub fn tick(
     world: &mut hecs::World,
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
-    ctx: &mut super::loot::DeathCtx<'_>,
+    ctx: &mut super::combat_ctx::CombatCtx<'_>,
     tick_now: NetTick,
     dt: f32,
 ) -> Vec<(Entity, f32)> {

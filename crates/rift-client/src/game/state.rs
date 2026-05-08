@@ -79,6 +79,11 @@ pub struct GameState {
     /// `request_set_loadout_slot` and waits for the server to
     /// echo the new bar back through `ServerMsg::Loadout`.
     pub spellbook: spellbook::SpellbookUi,
+    /// In-game chat HUD: scrollback panel + input field +
+    /// per-player mute list. Inbound lines flow in from the
+    /// binary draining `NetClient::take_pending_chats`;
+    /// outbound lines flow out via `state.net.pending_chats_out`.
+    pub chat: super::chat::ChatUi,
     /// Shared cache of bound player-skeleton animation sets, keyed by
     /// gender. Populated lazily on first spawn (local or remote).
     pub anim_cache: character_spawn::AnimLibraryCache,
@@ -133,6 +138,7 @@ impl GameState {
             character_select: character_select::CharacterSelect::new(),
             anim_cache: character_spawn::AnimLibraryCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
+            chat: super::chat::ChatUi::new(),
         }
     }
 
@@ -235,6 +241,13 @@ impl GameState {
         crate::game::transition::queue_net_transition(self, renderer, index);
     }
     pub fn update(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
+        // Suppress gameplay-style key polling whenever the
+        // chat HUD is open so Space / 1..6 / WASD don't leak
+        // into movement + abilities while the player types.
+        // The chat itself uses widget-facing accessors
+        // (chars_typed / enter_just_pressed), which the flag
+        // intentionally leaves alone.
+        input.set_text_capture(self.chat.is_typing());
         match self.app_state.clone() {
             AppState::CharacterSelect => {
                 crate::game::transition::update_character_select(self, renderer, input, dt);

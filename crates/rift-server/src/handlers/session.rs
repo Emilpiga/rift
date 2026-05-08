@@ -314,11 +314,19 @@ impl Server {
         let joined = ServerMsg::PlayerJoined {
             net_id,
             client_id: from,
-            character_name,
+            character_name: character_name.clone(),
             class_id,
             gender,
         };
         self.broadcast(Channel::Control, &joined);
+
+        // Chat: replay the *prior* GLOBAL+SYSTEM history to
+        // the joiner first, then announce the join. If we
+        // announced first, the announcement would land in the
+        // history buffer *and* the live broadcast — the
+        // joiner would see "X joined" twice.
+        self.replay_chat_history_to(from);
+        self.emit_system_global(&format!("{character_name} joined."));
     }
 
     /// Apply a `ClientMsg::SetLoadoutSlot`. Validates against the

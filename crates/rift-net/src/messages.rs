@@ -303,6 +303,33 @@ pub enum ClientMsg {
     /// the floor has matching `Some` intent. Reliable on
     /// `Channel::Control`.
     SetShrineChannel { shrine: Option<NetId> },
+
+    /// Player typed a chat message. Server validates length /
+    /// rate limit, routes to the right recipient set based on
+    /// `channel`, and replies (per-recipient) with
+    /// [`ServerMsg::Chat`]. `target` is meaningful only for
+    /// [`chat_channel::WHISPER`] (recipient character name);
+    /// every other channel ignores it.
+    ///
+    /// Reliable on `Channel::Control` so a dropped chat line
+    /// never silently disappears. Length cap and rate-limit
+    /// rejections are silent today — future revision can add
+    /// a [`ServerMsg::Chat`] system reply describing the
+    /// rejection if useful.
+    ChatSend {
+        /// Wire id from [`chat_channel`] picking the routing
+        /// scope (global / hub / floor / party / whisper).
+        /// `chat_channel::SYSTEM` is server-emit-only; clients
+        /// sending it are silently dropped.
+        channel: u8,
+        /// Recipient's character name for `WHISPER`. `None`
+        /// for every other channel; if `Some` on a non-
+        /// whisper channel the server ignores it.
+        target: Option<String>,
+        /// UTF-8 message body. Server clamps to
+        /// [`CHAT_MAX_LEN`] characters before re-broadcast.
+        text: String,
+    },
 }
 
 /// One voter's choice in an active [`VoteState`]. `Pending` means
@@ -624,6 +651,35 @@ pub enum ServerMsg {
     /// drive their HUD vote panel directly off this. Reliable on
     /// `Channel::Control`. See [`VoteState`].
     RiftExitVote(VoteState),
+
+    /// One chat message destined for the receiving client. Sent
+    /// per-recipient after the server has resolved the
+    /// [`ClientMsg::ChatSend`] routing — clients never receive a
+    /// message they aren't a routed recipient of.
+    ///
+    /// `sender == None` indicates a server-emitted system event
+    /// (joins, deaths, boss kills, level-ups). The client renders
+    /// these in a distinct system colour.
+    ///
+    /// `target == Some(name)` rides on whisper messages so the
+    /// recipient's HUD can render `[from <sender>]` and the
+    /// sender's own echo can render `[to <target>]`.
+    ///
+    /// Reliable on `Channel::Control`.
+    Chat {
+        /// Wire id from [`chat_channel`]. The client uses this
+        /// to colour-code the line and to keep per-channel
+        /// scrollback buffers.
+        channel: u8,
+        /// Sender's character name. `None` for system events.
+        sender: Option<String>,
+        /// Whisper recipient's character name. `Some` only on
+        /// the `WHISPER` channel; `None` everywhere else.
+        target: Option<String>,
+        /// UTF-8 message body. Already length-clamped server-
+        /// side.
+        text: String,
+    },
 }
 
 /// Per-tick snapshot. Phase 1 ships the *full* state every tick — we
@@ -877,4 +933,70 @@ pub enum WorldEvent {
         over_time: bool,
         position: [f32; 3],
     },
+
+    /// An enemy is *winding up* a generic action that doesn't
+    /// flow through the [ability] registry — currently brute
+    /// melee swings, stalker dashes, and caster bolts. Sent
+    /// at wind-up start so the client can play a directional
+    /// SFX cue and (optionally) flash the enemy briefly.
+    /// Damage / projectile spawn arrives separately on resolve.
+    ///
+    /// `kind` discriminates the SFX bucket — see
+    /// [`telegraph_kind`] for the stable id list. Lightweight
+    /// on purpose: just `(source, kind, position)`. Anything
+    /// richer (radius, aim, ...) belongs on
+    /// [`WorldEvent::AbilityCast`].
+    EnemyTelegraph {
+        source: NetId,
+        kind: u8,
+        position: [f32; 3],
+    },
+}
+
+/// Stable wire ids for [`WorldEvent::EnemyTelegraph::kind`].
+/// Append-only — never reorder or repurpose existing values.
+pub mod telegraph_kind {
+    /// Brute / boss melee wind-up — short, percussive cue.
+    pub const MELEE_WINDUP: u8 = 0;
+    /// Caster bolt wind-up — magical / chargey cue.
+    pub const RANGED_WINDUP: u8 = 1;
+    /// Stalker dash wind-up — sharp inhale / hiss cue.
+    pub const DASH_WINDUP: u8 = 2;
+}
+
+/// Maximum UTF-8 character count of a [`ClientMsg::ChatSend::text`]
+/// body. Server clamps anything longer before re-broadcast — the
+/// constant lives here so the client can show a "you've typed
+/// too much" cue without having to round-trip and rely on a
+/// silent truncation. Tuned for one-line readability in the
+/// scrollback panel without wrapping wider than the panel.
+pub const CHAT_MAX_LEN: usize = 256;
+
+/// Stable wire ids for [`ClientMsg::ChatSend::channel`] and
+/// [`ServerMsg::Chat::channel`]. Append-only — never reorder
+/// or repurpose. The client uses these to keep per-channel
+/// scrollback buffers and to colour-code lines.
+pub mod chat_channel {
+    /// Server-emitted system events (join / leave, death, boss
+    /// kill, level-up). Clients sending this id on
+    /// [`super::ClientMsg::ChatSend`] are silently dropped.
+    pub const SYSTEM: u8 = 0;
+    /// Visible to every connected player on the server.
+    pub const GLOBAL: u8 = 1;
+    /// Visible to every player currently in the hub.
+    pub const HUB: u8 = 2;
+    /// Visible to every player currently on the same rift floor
+    /// as the sender.
+    pub const FLOOR: u8 = 3;
+    /// Visible to every player in the sender's party. Until a
+    /// real party system lands, every player is in a singleton
+    /// party of themselves, so PARTY messages echo back to the
+    /// sender only — but the wire path is in place so the
+    /// surface doesn't need to grow on the day parties land.
+    pub const PARTY: u8 = 4;
+    /// Whisper from one player to another, addressed by
+    /// character name in [`super::ClientMsg::ChatSend::target`].
+    /// Visible to the sender (echo) and the named recipient
+    /// only.
+    pub const WHISPER: u8 = 5;
 }

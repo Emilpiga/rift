@@ -125,6 +125,29 @@ impl Floor {
         })
     }
 
+    /// 4-way A* on the floor's tile grid. Thin wrapper over
+    /// [`rift_math::physics::astar_grid`] with the "tile is
+    /// walkable iff in-bounds and [`Tile::Floor`]" rule baked
+    /// in. See the underlying fn for path-format and budget
+    /// semantics.
+    ///
+    /// Used by enemy AI to navigate around walls when
+    /// straight-line LOS to the target is blocked.
+    pub fn path(
+        &self,
+        from: (i32, i32),
+        goal: (i32, i32),
+        max_expanded: usize,
+    ) -> Option<Vec<(i32, i32)>> {
+        rift_math::physics::astar_grid(from, goal, max_expanded, |x, z| {
+            x >= 0
+                && z >= 0
+                && (x as usize) < self.width
+                && (z as usize) < self.depth
+                && self.get(x as usize, z as usize) == Tile::Floor
+        })
+    }
+
     /// Get wall positions (only walls adjacent to floor tiles).
     ///
     /// Includes diagonal neighbors so inside-corner cells aren't

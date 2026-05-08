@@ -35,6 +35,24 @@ pub struct Input {
     backspace_pressed: u32,
     /// Enter pressed this frame.
     enter_pressed: bool,
+    /// When set, gameplay-style key polling
+    /// (`is_key_held` / `key_just_pressed`) reports nothing.
+    /// Widget-style accessors (`chars_typed`,
+    /// `backspace_count`, `enter_just_pressed`) are unaffected
+    /// so a focused text field can still receive its input.
+    /// Toggled per-frame by callers that own a text-capture
+    /// surface (chat, character-select, etc.) — defaults to
+    /// off so gameplay isn't accidentally muted on startup.
+    text_capture: Cell<bool>,
+    /// When set for the current frame, widget-style text
+    /// accessors (`chars_typed`, `backspace_count`,
+    /// `enter_just_pressed`) report nothing. Used when a UI
+    /// surface opens *because of* a keystroke that would
+    /// otherwise leak into the freshly-focused text field
+    /// (the chat HUD's `T`-to-open being the canonical
+    /// example). Auto-cleared at the start of every frame's
+    /// `end_frame`.
+    text_swallow: Cell<bool>,
 }
 
 impl Default for Input {
@@ -56,6 +74,8 @@ impl Default for Input {
             chars_typed: Vec::new(),
             backspace_pressed: 0,
             enter_pressed: false,
+            text_capture: Cell::new(false),
+            text_swallow: Cell::new(false),
         }
     }
 }
@@ -66,6 +86,9 @@ impl Input {
     }
 
     pub fn is_key_held(&self, key: KeyCode) -> bool {
+        if self.text_capture.get() {
+            return false;
+        }
         self.keys_held.contains(&key)
     }
 
@@ -91,7 +114,31 @@ impl Input {
 
     /// Returns true if the key was just pressed this frame (wasn't held last frame).
     pub fn key_just_pressed(&self, key: KeyCode) -> bool {
+        if self.text_capture.get() {
+            return false;
+        }
         self.keys_held.contains(&key) && !self.prev_keys_held.contains(&key)
+    }
+
+    /// Same as [`Self::key_just_pressed`] but ignores the
+    /// text-capture flag. For widget-internal use only — the
+    /// chat HUD reads its own Esc / Tab / R bindings through
+    /// here so they keep working while typing (which is
+    /// exactly when text-capture is on).
+    pub fn key_just_pressed_raw(&self, key: KeyCode) -> bool {
+        self.keys_held.contains(&key) && !self.prev_keys_held.contains(&key)
+    }
+
+    /// Set the text-capture flag. While `on`, gameplay-style
+    /// key polling (`is_key_held` / `key_just_pressed`) is
+    /// suppressed so typing into a chat / form field doesn't
+    /// also fire WASD / hotbar bindings. Widget-facing
+    /// accessors are unaffected. Reset every frame by the
+    /// caller (no auto-clear) — the chat HUD calls this at
+    /// the top of each frame from its own `is_typing()` so
+    /// the flag tracks the open/closed state without staleness.
+    pub fn set_text_capture(&self, on: bool) {
+        self.text_capture.set(on);
     }
 
     /// Call at end of frame to snapshot key state.
@@ -102,6 +149,7 @@ impl Input {
         self.enter_pressed = false;
         self.left_just_released = false;
         self.prev_left_mouse_down = self.left_mouse_down;
+        self.text_swallow.set(false);
     }
 
     /// Push a typed character (printable). Called by the window event loop.
@@ -124,16 +172,38 @@ impl Input {
 
     /// Drain characters typed this frame.
     pub fn chars_typed(&self) -> &[char] {
+        if self.text_swallow.get() {
+            return &[];
+        }
         &self.chars_typed
     }
 
     /// Number of backspaces pressed this frame.
     pub fn backspace_count(&self) -> u32 {
+        if self.text_swallow.get() {
+            return 0;
+        }
         self.backspace_pressed
     }
 
     pub fn enter_just_pressed(&self) -> bool {
+        if self.text_swallow.get() {
+            return false;
+        }
         self.enter_pressed
+    }
+
+    /// Drop any text-input events buffered for this frame
+    /// (typed chars + backspace + enter). Used when a UI
+    /// surface opens *because of* a keystroke that would
+    /// otherwise leak into the freshly-focused text field —
+    /// e.g. the chat HUD's `T` to open: without this, the
+    /// `T` press also lands in the field as the first
+    /// character. Interior-mutable so widget code with
+    /// `&Input` can call it; auto-clears at the next
+    /// `end_frame`.
+    pub fn discard_text_input(&self) {
+        self.text_swallow.set(true);
     }
 
     pub fn on_mouse_button(&mut self, button: winit::event::MouseButton, pressed: bool) {

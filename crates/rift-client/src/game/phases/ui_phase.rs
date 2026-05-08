@@ -167,5 +167,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     if state.frame.transition_fade > 0.001 {
         hud::render_fade_to_black(&mut ui, state.frame.transition_fade);
     }
+
+    // Chat HUD — rendered last so the input field overlays
+    // every other widget but *before* the fade overlay so a
+    // black-out hides it. Keys handled before the panel so
+    // open/close edges land in the same frame as the draw.
+    state.chat.handle_keys(&mut ui, &mut state.net.pending_chats_out);
+    state.chat.frame(&mut ui, 0.0);
     let _ = ui.end();
 }

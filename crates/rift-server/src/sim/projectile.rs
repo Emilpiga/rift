@@ -10,7 +10,7 @@ use hecs::Entity;
 use rift_dungeon::{Floor, Tile};
 use rift_net::{messages::WorldEvent, NetId};
 
-use super::enemy::ServerEnemy;
+use super::enemies::ServerEnemy;
 
 /// Which side a projectile belongs to. Drives target-list
 /// filtering in [`tick`]: `Player`-team bolts collide with
@@ -166,7 +166,7 @@ pub fn tick(
     floor: &Floor,
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
-    ctx: &mut super::loot::DeathCtx<'_>,
+    ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
 ) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
@@ -297,7 +297,7 @@ pub fn tick_aoe(
     zones: &mut Vec<ServerAoeZone>,
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
-    ctx: &mut super::loot::DeathCtx<'_>,
+    ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
 ) -> Vec<(Entity, f32)> {
     let mut hits: Vec<Hit> = Vec::new();
@@ -403,10 +403,27 @@ pub fn tick_aoe(
 /// target's `IncomingDamageMult` debuffs), push `Damage` events,
 /// `Death` + despawn for any enemy that crosses zero HP, and apply
 /// any `apply_debuff` carried by the hit.
+/// Apply a batch of hits to enemies: subtract HP (scaled by the
+/// target's `IncomingDamageMult` debuffs), push `Damage` events,
+/// `Death` + despawn for any enemy that crosses zero HP, and apply
+/// any `apply_debuff` carried by the hit. Also drives:
+/// * **Threat accumulation** — every hit adds `scaled` to the
+///   victim's `threat[attacker]` so the AI can target whoever
+///   is dealing the most damage rather than whoever is
+///   closest. See [`super::enemies::THREAT_DECAY_TAU`].
+/// * **Stagger** — non-juggernaut enemies hit for more than
+///   [`super::enemies::STAGGER_THRESHOLD`] of `hp_max`, or by any
+///   crit, get `stagger_remaining` set to interrupt their next
+///   AI tick. Pushes a [`WorldEvent::Hit`] so the client can
+///   start a hit-react clip without waiting for the next snapshot.
+/// * **Thorns** — elites with [`super::enemies::elite_mod::THORNS`]
+///   reflect a fraction of every incoming hit back at the
+///   attacker, queued through `ctx.player_damage_back`.
+/// * **Aggro spread** — see [`super::enemies::notify_attacked`].
 pub(super) fn apply_hits_to_enemies(
     world: &mut hecs::World,
     hits: Vec<Hit>,
-    ctx: &mut super::loot::DeathCtx<'_>,
+    ctx: &mut super::combat_ctx::CombatCtx<'_>,
 ) {
     // Build a one-shot NetId → Entity map of live players so
     // the aggro-on-hit notify below can resolve the attacker
@@ -435,6 +452,12 @@ pub(super) fn apply_hits_to_enemies(
         let crit = hit.crit_chance > 0.0 && roll < hit.crit_chance;
         let crit_mult = if crit { 1.0 + hit.crit_damage } else { 1.0 };
         let scaled = hit.damage * dmg_mult * crit_mult;
+        // Resolve attacker entity once per hit — used by threat,
+        // aggro spread, and thorns reflection.
+        let attacker_entity = attacker_lookup
+            .iter()
+            .find(|(nid, _)| *nid == hit.attacker)
+            .map(|(_, e)| *e);
         if let Ok(mut en) = world.get::<&mut ServerEnemy>(hit.enemy) {
             // Already dying \u2014 ignore further hits so we don't
             // double-emit Damage events on the same corpse.
@@ -443,6 +466,29 @@ pub(super) fn apply_hits_to_enemies(
             }
             en.hp = (en.hp - scaled).max(0.0);
             let died = en.hp <= 0.0;
+            // Stagger: any crit, or any hit > threshold of hp_max,
+            // and the enemy isn't a juggernaut. Skipped on the
+            // killing blow — the death anim takes over there.
+            let juggernaut = (en.elite_mods
+                & super::enemies::elite_mod::JUGGERNAUT)
+                != 0;
+            let stagger_eligible = !died
+                && !juggernaut
+                && (crit || scaled > en.hp_max * super::enemies::STAGGER_THRESHOLD);
+            if stagger_eligible {
+                en.stagger_remaining = en
+                    .stagger_remaining
+                    .max(super::enemies::STAGGER_DUR);
+            }
+            // Threat accumulation: by raw scaled damage so big
+            // hits weigh proportionally. Skipped on death (the
+            // corpse won't aggro anyone).
+            if !died {
+                if let Some(ae) = attacker_entity {
+                    *en.threat.entry(ae).or_insert(0.0) += scaled;
+                }
+            }
+            let thorns = (en.elite_mods & super::enemies::elite_mod::THORNS) != 0;
             drop(en);
             ctx.events.push(WorldEvent::Damage {
                 target: hit.enemy_net_id,
@@ -450,6 +496,12 @@ pub(super) fn apply_hits_to_enemies(
                 crit,
                 position: hit.enemy_pos.to_array(),
             });
+            if stagger_eligible {
+                ctx.events.push(WorldEvent::Hit {
+                    target: hit.enemy_net_id,
+                    start_tick: ctx.tick,
+                });
+            }
             // Apply any debuff carried by the source ability. We
             // do this *after* the damage write so DoT clocks
             // start from now.
@@ -458,6 +510,19 @@ pub(super) fn apply_hits_to_enemies(
                     world.get::<&mut super::effect::EffectStack>(hit.enemy)
                 {
                     stack.apply(debuff_id, None);
+                }
+            }
+            // Thorns reflect: drain a fraction of `scaled` back
+            // to the attacker. Routed through the player-damage
+            // queue so the death-on-thorns path uses the same
+            // chokepoint as a normal melee swing — emits
+            // Damage / Death events and arms the rise timer.
+            if thorns && !died {
+                if let Some(ae) = attacker_entity {
+                    let reflect = scaled * super::enemies::ELITE_THORNS_FRAC;
+                    if reflect > 0.0 {
+                        ctx.player_damage_back.push((ae, reflect));
+                    }
                 }
             }
             if died {
@@ -470,11 +535,8 @@ pub(super) fn apply_hits_to_enemies(
                 // we still have the attacker NetId in scope;
                 // the actual mutation runs after the loop so
                 // we don't double-borrow `world`.
-                if let Some((_, attacker_entity)) = attacker_lookup
-                    .iter()
-                    .find(|(nid, _)| *nid == hit.attacker)
-                {
-                    aggro_alerts.push((hit.enemy, *attacker_entity));
+                if let Some(ae) = attacker_entity {
+                    aggro_alerts.push((hit.enemy, ae));
                 }
             }
         }
@@ -486,7 +548,7 @@ pub(super) fn apply_hits_to_enemies(
     aggro_alerts.sort_by_key(|(v, _)| v.id());
     aggro_alerts.dedup_by_key(|(v, _)| v.id());
     for (victim, attacker) in aggro_alerts {
-        super::enemy::notify_attacked(world, victim, attacker);
+        super::enemies::notify_attacked(world, victim, attacker);
     }
     super::loot::finalise_kills(world, ctx, dead);
 }

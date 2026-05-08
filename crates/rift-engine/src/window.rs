@@ -118,6 +118,11 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                     match &event.logical_key {
                         Key::Named(NamedKey::Backspace) => self.input.on_backspace(),
                         Key::Named(NamedKey::Enter) => self.input.on_enter(),
+                        // Space arrives as a *named* key, not as
+                        // `Character(" ")`, so route it into the
+                        // text stream explicitly. Without this
+                        // text fields can never type a space.
+                        Key::Named(NamedKey::Space) => self.input.on_char(' '),
                         Key::Character(s) => {
                             for ch in s.chars() {
                                 self.input.on_char(ch);

@@ -119,22 +119,73 @@ impl<'a> TextField<'a> {
         ui.draw_rounded_rect(rect, radius, fill);
         ui.draw_rounded_outline(rect, radius, theme.spacing.border_thickness, border);
 
-        // Draw text or placeholder.
+        // Draw text or placeholder. The interior width
+        // (`rect.width() - pad_x*2`) caps how much can be
+        // shown — placeholders ellipsize and a long value
+        // scrolls so the *tail* (where the caret lives) stays
+        // visible instead of overflowing the field.
         let text_size = theme.fonts.size_lg;
         let pad_x = 12.0;
         let pad_y = (rect.height() - text_size) * 0.5;
         let pos = Pos2::new(rect.x() + pad_x, rect.y() + pad_y);
+        let inner_w = (rect.width() - pad_x * 2.0).max(0.0);
+        // Width of the substring actually drawn — used to
+        // place the caret flush against the right edge of
+        // the visible text.
+        let mut visible_w = 0.0_f32;
         if value.is_empty() {
-            ui.draw_text(pos, self.placeholder, text_size, theme.colors.text_dim);
+            // Placeholder: drawn dimmed, ellipsized to the
+            // available width so it can never overflow no
+            // matter what the caller sets.
+            ui.draw_text_ellipsized(
+                pos,
+                self.placeholder,
+                text_size,
+                inner_w,
+                theme.colors.text_dim,
+            );
         } else {
-            ui.draw_text(pos, value, text_size, theme.colors.text);
+            // Value scroll: when the rendered text is wider
+            // than the field we don't have real scissor
+            // support, so instead of offsetting the whole
+            // string (which leaks past the left edge of the
+            // field) we trim leading characters until the
+            // remaining tail fits inside `inner_w` and draw
+            // *that* flush-left at `pos`. The caret-side
+            // (right) stays where the user is typing.
+            let text_w = ui.measure_text(value, text_size);
+            if text_w <= inner_w {
+                ui.draw_text(pos, value, text_size, theme.colors.text);
+                visible_w = text_w;
+            } else {
+                let mut start = 0usize;
+                let bytes = value.as_bytes();
+                let len = value.len();
+                // Walk forward one char at a time dropping
+                // the leading char until the suffix fits.
+                while start < len {
+                    // Advance to next char boundary.
+                    let mut next = start + 1;
+                    while next < len && (bytes[next] & 0xC0) == 0x80 {
+                        next += 1;
+                    }
+                    let suffix = &value[next..];
+                    let w = ui.measure_text(suffix, text_size);
+                    if w <= inner_w {
+                        ui.draw_text(pos, suffix, text_size, theme.colors.text);
+                        visible_w = w;
+                        break;
+                    }
+                    start = next;
+                }
+            }
         }
         // Caret: blink at ~2 Hz when focused.
         if focused && self.caret {
             let on = ((time * 2.0) as i32) % 2 == 0;
             if on {
                 let glyph_w = ui.measure_text("M", text_size);
-                let cx = rect.x() + pad_x + ui.measure_text(value, text_size);
+                let cx = rect.x() + pad_x + visible_w;
                 ui.draw_rect(
                     Rect::from_xywh(cx + 1.0, pos.y, (glyph_w * 0.1).max(2.0), text_size),
                     theme.colors.text,

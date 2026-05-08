@@ -418,4 +418,22 @@ impl NetClient {
             &ClientMsg::UnequipToBagSlot { slot, inventory_index },
         );
     }
+
+    /// Ship a chat line. `target` is meaningful only on the
+    /// whisper channel; ignored everywhere else. Length /
+    /// rate-limit / channel validation happen server-side.
+    pub fn send_chat(&mut self, channel: u8, target: Option<String>, text: String) {
+        log::debug!("net: -> ChatSend channel={channel} target={target:?}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::ChatSend { channel, target, text },
+        );
+    }
+
+    /// Drain every inbound chat line received since the last
+    /// drain. Called once per frame by the binary; the entries
+    /// flow into `GameState.chat`.
+    pub fn take_pending_chats(&mut self) -> Vec<super::PendingChat> {
+        self.pending_chats.drain(..).collect()
+    }
 }

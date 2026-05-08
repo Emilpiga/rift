@@ -21,30 +21,8 @@ use rift_net::{
     NetId, NetTick,
 };
 
-use super::enemy::ServerEnemy;
-
-/// Context the death-finalisation path needs to roll loot. Passed
-/// down from [`super::Sim::step`] into the projectile / debuff
-/// damage helpers so each subsystem can finalise kills uniformly.
-pub struct DeathCtx<'a> {
-    pub events: &'a mut Vec<WorldEvent>,
-    pub next_loot_net_id: &'a mut u32,
-    pub tick: NetTick,
-    pub floor_index: u32,
-    /// One row per kill produced this tick. Drained by
-    /// [`super::Sim::step`] to bump rift progress, grant XP, and
-    /// detect the boss kill.
-    pub kills: &'a mut Vec<KillInfo>,
-}
-
-/// Per-kill information collected during damage subsystems and
-/// drained at the end of [`super::Sim::step`] for XP / progress
-/// bookkeeping.
-#[derive(Clone, Copy, Debug)]
-pub struct KillInfo {
-    /// Wire role byte (`role::BRUTE` ... `role::BOSS`).
-    pub role: u8,
-}
+use super::combat_ctx::{CombatCtx, KillInfo};
+use super::enemies::ServerEnemy;
 
 /// Finalise a batch of kills queued by a damage subsystem:
 /// 1. Read each dead enemy's role + position out of the ECS.
@@ -53,25 +31,27 @@ pub struct KillInfo {
 ///    entities, push [`WorldEvent::LootDropped`] per drop.
 /// 4. Mark the corpse with `dying_remaining = DEATH_FADE_DUR` so
 ///    the snapshot keeps shipping it for the death-anim window;
-///    [`super::enemy::tick_dying`] does the actual despawn once
+///    [`super::enemies::tick_dying`] does the actual despawn once
 ///    the timer runs out.
 pub fn finalise_kills(
     world: &mut hecs::World,
-    ctx: &mut DeathCtx<'_>,
+    ctx: &mut CombatCtx<'_>,
     dead: Vec<(Entity, NetId)>,
 ) {
     for (entity, net_id) in dead {
         // Snapshot the corpse before flipping it into dying mode \u2014
-        // the loot drop needs role + position.
+        // the loot drop needs role + position. Pull `elite_mods`
+        // too so the death-effect pass can read EXPLODER without
+        // re-borrowing the row.
         let info = world
             .get::<&ServerEnemy>(entity)
             .ok()
-            .map(|en| (en.role, en.k.position));
+            .map(|en| (en.role, en.k.position, en.elite_mods));
         ctx.events.push(WorldEvent::Death {
             entity: net_id,
             killer: None,
         });
-        if let Some((role, pos)) = info {
+        if let Some((role, pos, elite_mods)) = info {
             ctx.kills.push(KillInfo { role });
             drop_for_enemy(
                 world,
@@ -83,9 +63,36 @@ pub fn finalise_kills(
                 pos,
                 ctx.floor_index,
             );
+            // Elite EXPLODER mod: spawn an enemy-team AoE zone
+            // at the corpse so anyone standing on top of a fresh
+            // kill takes a delayed pop. Tick interval matches
+            // duration so it fires exactly once — reads as a
+            // single "pop" rather than a sustained pool. Routed
+            // through the same zone pool the AbilityKind path
+            // uses so the existing tick / replication code
+            // handles it without special casing.
+            if (elite_mods & super::enemies::elite_mod::EXPLODER) != 0 {
+                let zone_net_id = rift_net::NetId(*ctx.next_projectile_net_id);
+                *ctx.next_projectile_net_id =
+                    ctx.next_projectile_net_id.wrapping_add(1).max(1);
+                ctx.death_aoe_zones.push(super::projectile::ServerAoeZone {
+                    owner: zone_net_id,
+                    team: super::projectile::Team::Enemy,
+                    position: pos,
+                    radius: super::enemies::ELITE_EXPLODER_RADIUS,
+                    damage_per_tick: super::enemies::ELITE_EXPLODER_DAMAGE,
+                    crit_chance: 0.0,
+                    crit_damage: 0.0,
+                    tick_interval: 0.55,
+                    duration: 0.55,
+                    elapsed: 0.0,
+                    tick_timer: 0.55,
+                    apply_debuff: None,
+                });
+            }
         }
         if let Ok(mut en) = world.get::<&mut ServerEnemy>(entity) {
-            en.dying_remaining = super::enemy::DEATH_FADE_DUR;
+            en.dying_remaining = super::enemies::DEATH_FADE_DUR;
             en.k.velocity = glam::Vec3::ZERO;
             en.attack_anim_remaining = 0.0;
         }

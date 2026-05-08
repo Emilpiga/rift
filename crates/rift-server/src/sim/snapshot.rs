@@ -11,7 +11,7 @@ use rift_net::{
     ClientId, NetTick,
 };
 
-use super::enemy::{enemy_anim, ServerEnemy};
+use super::enemies::{enemy_anim, ServerEnemy};
 use super::loot::ServerLoot;
 use super::player::ServerPlayer;
 use super::projectile::ServerProjectile;
