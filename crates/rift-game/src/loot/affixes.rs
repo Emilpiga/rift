@@ -476,7 +476,7 @@ pub fn signature_count(slot: super::items::EquipSlot) -> usize {
         // Vitality + CritChance + CritDamage
         Hands => 3,
         // Vitality + slot-specific defensive / utility line
-        Helm | Chest | Legs | Boots => 2,
+        Helm | Shoulders | Chest | Legs | Boots => 2,
         // Vitality + one random element / archetype line
         Ring1 | Ring2 | Amulet => 2,
     }
@@ -502,6 +502,7 @@ pub fn signature_for(
             out.push("pct_spell_damage");
         }
         Helm => out.push("pct_cooldown"),
+        Shoulders => out.push("pct_armor"),
         Chest => out.push("flat_health"),
         Legs => out.push("flat_armor"),
         Hands => {

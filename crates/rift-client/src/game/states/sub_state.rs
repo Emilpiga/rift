@@ -243,10 +243,12 @@ pub struct LootClientState {
     /// Local mirror of the per-character private stash. Replaced
     /// wholesale on every `ServerMsg::StashSync` (which the
     /// server sends in reply to `OpenStash` and after every
-    /// authoritative deposit / withdraw). Empty until the player
-    /// opens the chest. Sparse — `None` slots represent gaps
-    /// the player has carved out via drag-and-drop.
-    pub stash_items: Vec<Option<rift_game::loot::Item>>,
+    /// authoritative deposit / withdraw / tab edit). Empty
+    /// until the player opens the chest. One [`StashTabClient`]
+    /// per page; items inside each tab are sparse — `None`
+    /// slots represent gaps the player has carved out via
+    /// drag-and-drop.
+    pub stash_tabs: Vec<StashTabClient>,
     /// Stash transfer requests (deposit / withdraw) the binary
     /// forwards to the server. Drained per frame.
     pub pending_stash_requests: Vec<StashRequest>,
@@ -258,6 +260,27 @@ pub struct LootClientState {
     /// the inventory panel open in the UI layer; panel
     /// visibility itself stays in [`super::mp_inventory_ui`].
     pub stash_session: bool,
+    /// Set when `equipment` was rewritten by an `EquipmentSync`
+    /// but the local-player avatar's modular outfit attachments
+    /// haven't been refreshed yet. Consumed by the binary's
+    /// frame loop, which re-runs `apply_local_equipment_visuals`
+    /// once a `LocalPlayer` entity exists. Necessary because
+    /// the first `EquipmentSync` arrives during `EnteringWorld`
+    /// — before the avatar is spawned — so a one-shot apply on
+    /// receive would silently no-op.
+    pub equipment_visuals_dirty: bool,
+}
+
+/// Client-side mirror of one stash tab. Built fresh from each
+/// `ServerMsg::StashSync`. Items use the runtime
+/// `rift_game::loot::Item` type; the wire-blob conversion
+/// happens once in `NetClient`'s `apply_stash_sync` path.
+#[derive(Clone, Debug, Default)]
+pub struct StashTabClient {
+    pub name: String,
+    /// Packed `0xRRGGBB` (alpha implicit, opaque).
+    pub color: u32,
+    pub items: Vec<Option<rift_game::loot::Item>>,
 }
 
 impl LootClientState {
@@ -276,7 +299,7 @@ impl LootClientState {
         // exists in the hub, and a stale "stash open" flag
         // would cause bag clicks to deposit into nothing.
         self.stash_session = false;
-        self.stash_items.clear();
+        self.stash_tabs.clear();
     }
 }
 
@@ -285,24 +308,32 @@ impl LootClientState {
 /// `NetClient::request_deposit_to_stash` /
 /// `NetClient::request_withdraw_from_stash`. Open / close are
 /// handled separately by the proximity prompt; only the
-/// item-movement events flow through here.
-#[derive(Clone, Copy, Debug)]
+/// item-movement and tab-management events flow through here.
+#[derive(Clone, Debug)]
 pub enum StashRequest {
-    Deposit { inventory_index: u32 },
-    Withdraw { stash_index: u32 },
+    Deposit { inventory_index: u32, tab_index: u8 },
+    Withdraw { tab_index: u8, stash_index: u32 },
     /// Reorder stash: swap two stash slots in place. Either
     /// index may be empty (past the current stash length); the
-    /// server grows the stash with `None` placeholders to fit
+    /// server grows the tab with `None` placeholders to fit
     /// and then trims back to the last filled slot.
-    Swap { a: u32, b: u32 },
+    Swap { tab_index: u8, a: u32, b: u32 },
     /// Deposit an inventory item into a specific stash slot.
     /// If the destination is occupied the two items swap
     /// (occupant comes back to `inventory_index`); if empty,
     /// the item simply moves into the requested slot.
-    DepositToSlot { inventory_index: u32, stash_index: u32 },
+    DepositToSlot { inventory_index: u32, tab_index: u8, stash_index: u32 },
     /// Withdraw a stash item into a specific bag slot.
     /// Same swap semantics as `DepositToSlot`.
-    WithdrawToSlot { stash_index: u32, inventory_index: u32 },
+    WithdrawToSlot { tab_index: u8, stash_index: u32, inventory_index: u32 },
+    /// Buy a new stash tab with shards. Server validates cost
+    /// and tab cap; on success the new tab is appended at the
+    /// end and the player's shard total drops accordingly.
+    BuyTab,
+    /// Rename a stash tab.
+    RenameTab { tab_index: u8, name: String },
+    /// Recolor a stash tab. `color` is packed `0xRRGGBB`.
+    RecolorTab { tab_index: u8, color: u32 },
 }
 
 /// Outgoing equip / unequip request shape, queued by the
@@ -317,6 +348,14 @@ pub enum EquipRequest {
     /// Drop the bag item out onto the ground at the player's
     /// position (server picks the spawn point).
     DropToWorld { inventory_index: u32 },
+    /// Salvage the bag item for shards. Server validates the
+    /// item isn't anchored, removes it from the bag, and
+    /// pushes back fresh `InventorySync` + `ShardsSync`.
+    Salvage { inventory_index: u32 },
+    /// Bulk-salvage every non-anchored bag item whose rarity is
+    /// at most `rarity_max`. Wired to the inventory panel's
+    /// "Salvage Trash" button (with a 2-stage confirm).
+    SalvageBulk { rarity_max: u8 },
     /// Unequip into a specific bag index. The previous occupant
     /// of that slot is shoved into `slot` if it fits, otherwise
     /// appended at the end of the bag.

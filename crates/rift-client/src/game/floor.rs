@@ -13,6 +13,210 @@ use super::props::{self, Props};
 use super::rift_state::RiftState;
 use super::torches::TorchSystem;
 
+/// Hub thunderstorm driver. Lives on [`FloorManager`] for the
+/// duration of the player's stay in the hub and is dropped on
+/// rift entry. Each frame `tick` is called from the render
+/// phase: it restores the cached "calm" lighting values, then
+/// — if a strike is currently flashing — overlays a brighter
+/// key/ambient/fog tint and pushes a single very-large-radius
+/// point light at the strike's cloud anchor so the platform
+/// itself catches the white-blue rim of the bolt.
+///
+/// Strikes are sequenced as 1–3 sub-pulses (a short on, a
+/// short off, another on, …) before settling into a longer
+/// dark gap before the next strike. That cadence reads as a
+/// real lightning fork rather than a metronome flash.
+pub struct HubStorm {
+    /// Calm-state values, captured at hub generation. Each
+    /// `tick` resets the renderer to these before applying the
+    /// active flash so flash bursts are purely additive and a
+    /// dropped tick can't leave the hub permanently glowing.
+    base_key_color: glam::Vec3,
+    base_key_ambient: f32,
+    base_fog_color: [f32; 3],
+    /// Candidate strike positions — the visible cloud blobs
+    /// that ring the platform. A new strike picks one at
+    /// random.
+    cloud_anchors: Vec<Vec3>,
+    state: StormState,
+    rng: super::props::placement::SmallRng,
+}
+
+enum StormState {
+    /// Calm sky; counting down to the next strike.
+    Idle { cooldown: f32 },
+    /// A bolt is currently lit. `intensity` decays each frame;
+    /// when it hits zero we either jump to a `Gap` (if more
+    /// sub-pulses are queued) or back to `Idle`.
+    Flash {
+        intensity: f32,
+        decay: f32,
+        pos: Vec3,
+        color: Vec3,
+        pulses_left: u8,
+    },
+    /// Brief dark beat between sub-pulses of the same strike.
+    Gap {
+        remaining: f32,
+        pos: Vec3,
+        color: Vec3,
+        pulses_left: u8,
+    },
+}
+
+impl HubStorm {
+    fn schedule_next(rng: &mut super::props::placement::SmallRng) -> StormState {
+        // 4–14 seconds between strikes — enough silence that
+        // each fork lands as an event rather than wallpaper.
+        StormState::Idle { cooldown: rng.frange(4.0, 14.0) }
+    }
+
+    fn begin_flash(
+        rng: &mut super::props::placement::SmallRng,
+        anchors: &[Vec3],
+        pulses_left: u8,
+        carry_pos: Option<Vec3>,
+        carry_color: Option<Vec3>,
+    ) -> StormState {
+        // Reuse the prior pulse's anchor/color when this is a
+        // sub-pulse of an in-flight strike (so the bolt looks
+        // like one continuous fork blinking), otherwise sample
+        // a fresh cloud + slight color jitter.
+        let pos = carry_pos.unwrap_or_else(|| {
+            if anchors.is_empty() {
+                Vec3::ZERO
+            } else {
+                let i = (rng.next() as usize) % anchors.len();
+                anchors[i]
+            }
+        });
+        let color = carry_color.unwrap_or_else(|| {
+            // Cool-white-blue with occasional warm amber tint
+            // (rare red-orange storms read as hellfire flares
+            // instead of cold sky lightning).
+            if rng.frange(0.0, 1.0) < 0.18 {
+                Vec3::new(1.6, 0.55, 0.25)
+            } else {
+                Vec3::new(0.85, 0.95, 1.25)
+            }
+        });
+        // Punchy onset, fast decay — feels like a real strike.
+        StormState::Flash {
+            intensity: rng.frange(1.4, 2.4),
+            decay: rng.frange(8.0, 14.0),
+            pos,
+            color,
+            pulses_left,
+        }
+    }
+
+    pub fn tick(&mut self, renderer: &mut Renderer, dt: f32) {
+        // Always restore base values before re-applying the
+        // active flash. Torches don't run in the hub so the
+        // point-light vec is owned exclusively by the storm.
+        renderer.key_light.color = self.base_key_color;
+        renderer.key_light.ambient = self.base_key_ambient;
+        renderer.fog_color = self.base_fog_color;
+        renderer.sky.cloud_flash = 0.0;
+        renderer.point_lights.clear();
+
+        // State machine step.
+        let next = match self.state {
+            StormState::Idle { cooldown } => {
+                let cd = cooldown - dt;
+                if cd <= 0.0 {
+                    // 1 = single pop, 2–3 = forked multi-pulse.
+                    let pulses = 1 + (self.rng.range(0, 3) as u8);
+                    Self::begin_flash(&mut self.rng, &self.cloud_anchors, pulses.saturating_sub(1), None, None)
+                } else {
+                    StormState::Idle { cooldown: cd }
+                }
+            }
+            StormState::Flash {
+                intensity,
+                decay,
+                pos,
+                color,
+                pulses_left,
+            } => {
+                let next_i = intensity - decay * dt;
+                if next_i <= 0.0 {
+                    if pulses_left > 0 {
+                        // Short dark beat, then another sub-pulse.
+                        StormState::Gap {
+                            remaining: self.rng.frange(0.04, 0.12),
+                            pos,
+                            color,
+                            pulses_left: pulses_left - 1,
+                        }
+                    } else {
+                        Self::schedule_next(&mut self.rng)
+                    }
+                } else {
+                    StormState::Flash {
+                        intensity: next_i,
+                        decay,
+                        pos,
+                        color,
+                        pulses_left,
+                    }
+                }
+            }
+            StormState::Gap {
+                remaining,
+                pos,
+                color,
+                pulses_left,
+            } => {
+                let r = remaining - dt;
+                if r <= 0.0 {
+                    Self::begin_flash(&mut self.rng, &self.cloud_anchors, pulses_left, Some(pos), Some(color))
+                } else {
+                    StormState::Gap { remaining: r, pos, color, pulses_left }
+                }
+            }
+        };
+        self.state = next;
+
+        // Apply the visual contribution of an active flash.
+        if let StormState::Flash { intensity, pos, color, .. } = self.state {
+            let i = intensity.clamp(0.0, 3.0);
+            // Lift the directional + ambient toward the bolt
+            // color so the whole platform catches the strike,
+            // not just the rim that the point light reaches.
+            let key_lift = color * 0.35 * i;
+            renderer.key_light.color = self.base_key_color + key_lift;
+            renderer.key_light.ambient = self.base_key_ambient + 0.18 * i;
+            // Fog brightens during the flash so the abyss
+            // momentarily reveals the cloud silhouettes /
+            // mountain tops that were drowning in black.
+            renderer.fog_color = [
+                (self.base_fog_color[0] + color.x * 0.10 * i).min(0.9),
+                (self.base_fog_color[1] + color.y * 0.10 * i).min(0.9),
+                (self.base_fog_color[2] + color.z * 0.10 * i).min(0.9),
+            ];
+            // Single huge-radius point light at the cloud
+            // anchor so the bolt also rim-lights the platform
+            // / chest from the strike's actual direction. The
+            // shader caps point lights at 8; in the hub we
+            // own all 8 slots so this is always visible.
+            renderer.point_lights.push(rift_engine::PointLight {
+                position: pos,
+                color,
+                radius: 140.0,
+                intensity: 8.0 * i,
+            });
+            // Light up the procedural sky clouds with the
+            // bolt's colour. The shader scales the flash by a
+            // per-fragment hash so it reads as a fork
+            // sweeping through the cumulonimbus rather than a
+            // uniform fade.
+            renderer.sky.cloud_flash = i;
+            renderer.sky.cloud_flash_color = color;
+        }
+    }
+}
+
 /// Manages floor generation: creating the dungeon, spawning entities.
 pub struct FloorManager {
     pub boss_room_center: Vec3,
@@ -34,6 +238,12 @@ pub struct FloorManager {
     /// the rift-spawn portal can sit on top of it. Mirrors
     /// `rift_dungeon::Floor::spawn_pos` for the latest floor.
     pub spawn_pos: Vec3,
+    /// Hub-only thunderstorm driver. `Some` while the player is
+    /// in the hub; `None` on rift floors. Owns the cached base
+    /// lighting values so per-frame flash modulation can restore
+    /// them, and the cloud-anchor positions used as strike
+    /// origins.
+    pub hub_storm: Option<HubStorm>,
 }
 
 impl FloorManager {
@@ -48,6 +258,7 @@ impl FloorManager {
             torches: TorchSystem::new(),
             stash_chest_pos: None,
             spawn_pos: Vec3::ZERO,
+            hub_storm: None,
         }
     }
 
@@ -59,6 +270,7 @@ impl FloorManager {
         rift: &RiftState,
         player_state: &PlayerState,
         anim_cache: &mut super::character_spawn::AnimLibraryCache,
+        cosmetics: &mut super::avatar_cosmetics::AvatarCosmeticsCache,
         seed_override: Option<u64>,
     ) -> anyhow::Result<()> {
         *world = hecs::World::new();
@@ -66,6 +278,10 @@ impl FloorManager {
         // Rift floors don't host the chest; clear any stale
         // hub-floor position so proximity tests can't false-fire.
         self.stash_chest_pos = None;
+        // Rift floors have no thunderstorm — drop the hub
+        // storm driver so it doesn't keep stomping on the
+        // dungeon's torch lights / fog tint.
+        self.hub_storm = None;
         // Despawn the previous floor's torch VFX before we
         // regenerate. Their `EffectId`s belong to the old
         // particle system slots; leaving them around would
@@ -165,7 +381,7 @@ impl FloorManager {
         // reuse the same skinned-character + animation-set bring-up.
         let spawn = floor.spawn_pos;
         self.spawn_pos = spawn;
-        self.spawn_player(world, renderer, spawn, player_state, anim_cache)?;
+        self.spawn_player(world, renderer, spawn, player_state, anim_cache, cosmetics)?;
 
         // Enemies — server-authoritative. The floor visuals (walls,
         // props, player) are spawned here but enemy entities arrive
@@ -190,6 +406,7 @@ impl FloorManager {
         renderer: &mut Renderer,
         player_state: &PlayerState,
         anim_cache: &mut super::character_spawn::AnimLibraryCache,
+        cosmetics: &mut super::avatar_cosmetics::AvatarCosmeticsCache,
     ) -> anyhow::Result<Vec3> {
         *world = hecs::World::new();
         renderer.clear_objects();
@@ -198,61 +415,194 @@ impl FloorManager {
         self.boss_room_center = Vec3::ZERO;
         self.nav_grid = NavGrid::from_floor(&floor);
 
-        // Bright sunny meadow ambience: pale-blue sky, soft warm haze.
-        renderer.clear_color = [0.55, 0.78, 0.95, 1.0];
-        renderer.fog_color = [0.78, 0.88, 0.96];
-        // Pushed-out fog so the procedural sky is actually
-        // visible — keeping the old 7..14 wall meant the dome
-        // got tinted out before it could read. The grass apron
-        // disc is 80 m wide so 14..60 still hides the rim.
-        renderer.fog_start = 14.0;
-        renderer.fog_end = 60.0;
+        // Brooding "floating obsidian platform over an abyss"
+        // ambience. The platform is dark stone, the sky is a
+        // crimson thunderstorm, and the fog is a dark crimson-
+        // grey haze (NOT pure black) so it reads as a *visible*
+        // wall of mist that swallows the mountain bases and
+        // platform underside, instead of blending invisibly
+        // into the abyss.
+        renderer.clear_color = [0.02, 0.01, 0.02, 1.0];
+        // Fog color is matched to the sky's `ground` band so
+        // the seam where mountain bases meet the horizon
+        // blends seamlessly — no visible cutoff line where
+        // geometry ends and sky begins. Keep this in sync with
+        // `SkyConfig::abyss_hub`'s `ground` value.
+        renderer.fog_color = [0.06, 0.025, 0.035];
+        // Tight fog: starts close enough to grip the platform
+        // edge, ends just past the mountain ridge so the
+        // peaks read as silhouettes rising out of the haze
+        // and the bases dissolve completely into it.
+        renderer.fog_start = 12.0;
+        renderer.fog_end = 50.0;
 
-        // Sunny outdoor sky for the hub.
-        renderer.sky = rift_engine::SkyConfig::meadow();
-        // Bright warm key + lifted ambient — the hub is meant
-        // to feel safe and readable, not cave-dark like the
-        // rift floors.
-        renderer.key_light = rift_engine::KeyLight::SUNLIT;
+        // Crimson stormy sky. Brooding overhead, fire-orange
+        // band on the horizon so the silhouettes of the
+        // distant mountains read as cut-outs against flame.
+        renderer.sky = rift_engine::SkyConfig::abyss_hub();
+        // Dim crimson key light + low warm ambient — the only
+        // source of light is the distant horizon storm.
+        renderer.key_light = rift_engine::KeyLight::STORMLIT;
 
-        // Hub floor: use the oversized grass-apron disc only.
-        // The dungeon-floor batch tints itself with a per-floor
-        // base color (dark stone for floor_num 0), which left a
-        // visibly darker square patch over the playable tiles
-        // even when the grass texture was bound. Drawing just
-        // the apron \u2014 which uses a neutral white tint and
-        // world-space UVs \u2014 gives a single uniform grass
-        // surface across the whole hub. Wall collision still
-        // comes from `wall_positions` below; the inner floor
-        // mesh was always purely visual.
+        // Hub floor: a single dark obsidian platform disc.
+        // Slightly oversized vs. the playable square so the
+        // edge clearly extends past the walkable area before
+        // falling into void.
         let hub_centre = Vec3::new(
             (floor.width / 2) as f32,
             -0.01,
             (floor.depth / 2) as f32,
         );
-        let apron = Mesh::ground_disc(hub_centre, 80.0, 96, Vec3::splat(1.0));
-        renderer.add_mesh(&apron, Mat4::IDENTITY)?;
-        let apron_obj_idx = renderer.objects.len() - 1;
-        self.env.ensure_grass(renderer);
-        if let Some(set) = self.env.grass_floor_set {
-            renderer.set_object_shared_material(apron_obj_idx, set);
+        const PLATFORM_RADIUS: f32 = 42.0;
+        let platform = Mesh::ground_disc(
+            hub_centre,
+            PLATFORM_RADIUS,
+            96,
+            // White vertex color so the demon-ground texture
+            // shows through unmodulated. UVs are scaled so one
+            // tile of the procedural crimson-stone texture
+            // spans ~14 m of world space — large enough that
+            // the eye doesn't latch on to the repeat across
+            // the platform.
+            Vec3::splat(1.0),
+            1.0 / 14.0,
+        );
+        renderer.add_mesh(&platform, Mat4::IDENTITY)?;
+        let platform_obj_idx = renderer.objects.len() - 1;
+        // Bind the procedural crimson cracked-stone tile.
+        // Cached on `EnvTextures` so re-entering the hub
+        // doesn't re-run the generator.
+        self.env.ensure_crimson_stone(renderer);
+        if let Some(set) = self.env.crimson_stone_set {
+            renderer.set_object_shared_material(platform_obj_idx, set);
+        }
+        // Thin glowing crimson rim along the platform edge so
+        // the floating-island silhouette reads when the player
+        // walks toward it.
+        let rim = Mesh::ring(
+            hub_centre + Vec3::new(0.0, 0.012, 0.0),
+            PLATFORM_RADIUS - 0.25,
+            PLATFORM_RADIUS,
+            128,
+            Vec3::new(2.4, 0.35, 0.20),
+        );
+        renderer.add_mesh(&rim, Mat4::IDENTITY)?;
+
+        // Platform underside: a downward squashed ellipsoid
+        // hanging below the disc. The ellipsoid is centered at
+        // y = -(scale.y) so its TOP vertex sits at y=0 (right
+        // at the platform disc) and the entire shape extends
+        // *downward* into the abyss — no dome rising above the
+        // platform. The lower half drowns in fog.
+        const UNDERSIDE_DEPTH: f32 = 32.0;
+        let mut underside = Mesh::empty();
+        underside.append_ellipsoid(
+            // Slightly wider than the top disc so the silhouette
+            // bulges before tapering. Tall vertical scale gives
+            // a dramatic root.
+            Vec3::new(PLATFORM_RADIUS * 1.05, UNDERSIDE_DEPTH, PLATFORM_RADIUS * 1.05),
+            // Center sits a hair below the disc surface so the
+            // very top of the ellipsoid (y = center + scale.y)
+            // tucks just under the platform instead of poking
+            // through it.
+            hub_centre + Vec3::new(0.0, -UNDERSIDE_DEPTH - 0.02, 0.0),
+            Vec3::new(0.025, 0.018, 0.025),
+            32,
+            18,
+        );
+        renderer.add_mesh(&underside, Mat4::IDENTITY)?;
+
+        // Distant procedural mountain ring. Bases are sunk
+        // ~40 m below the platform so the player→base distance
+        // is significantly larger than the player→peak
+        // distance, which is what lets distance fog
+        // differentiate the two. Result: ridge crests cut
+        // crisply against the crimson sky band, bases dissolve
+        // into the dark crimson fog wall. Seed is fixed so the
+        // skyline is stable across hub returns.
+        let mountains = Mesh::mountain_ring(
+            hub_centre,
+            /*radius*/ 46.0,
+            /*base_y*/ -40.0,
+            /*min_height*/ 6.0,
+            /*max_height*/ 16.0,
+            /*segments*/ 96,
+            /*seed*/ 0xA855_E575_FACE_BEEF,
+            // Color matches the fog/sky-ground band so as the
+            // mountain dissolves into haze it does so without
+            // a perceptible color shift. Slightly darker than
+            // the fog itself so a faint silhouette survives
+            // even after fog saturates.
+            Vec3::new(0.04, 0.018, 0.025),
+        );
+        renderer.add_mesh(&mountains, Mat4::IDENTITY)?;
+
+        // Lightning strike anchors. The cloud cover itself is
+        // now drawn procedurally by the sky shader (see
+        // `SkyConfig::cloud_strength`), so we no longer need
+        // any cloud meshes — but the storm driver still wants
+        // a handful of world-space points to rim-light the
+        // platform from when a strike fires. Spread them in a
+        // ring high overhead so the per-strike point light
+        // hits the platform from a believable cloud direction.
+        const CLOUD_COUNT: usize = 7;
+        const CLOUD_RADIUS: f32 = 38.0;
+        const CLOUD_HEIGHT: f32 = 22.0;
+        let mut cloud_anchors: Vec<Vec3> = Vec::with_capacity(CLOUD_COUNT);
+        let mut cloud_rng = super::props::placement::SmallRng::new(0xC10D_5EED_BAAD_F00D);
+        for i in 0..CLOUD_COUNT {
+            let a = (i as f32 / CLOUD_COUNT as f32) * std::f32::consts::TAU
+                + cloud_rng.frange(-0.18, 0.18);
+            let r = CLOUD_RADIUS + cloud_rng.frange(-4.0, 4.0);
+            let h = CLOUD_HEIGHT + cloud_rng.frange(-4.0, 6.0);
+            cloud_anchors.push(hub_centre + Vec3::new(a.cos() * r, h, a.sin() * r));
         }
 
-        // Wall colliders only — no wall mesh, no tree perimeter. The
-        // fog horizon hides the floor edge so the hub reads as a
-        // mysterious circular platform floating in mist.
-        let wall_positions = floor.wall_positions();
-        for pos in &wall_positions {
+        // Defensive: drop any previous hub storm before we
+        // replace it (e.g. hub-to-hub regenerate during a
+        // debug teleport).
+        self.hub_storm = None;
+
+        // Hand cloud anchors to the storm driver. Capture
+        // calm-state lighting so each frame's flash is purely
+        // additive on top of the restored base.
+        self.hub_storm = Some(HubStorm {
+            base_key_color: renderer.key_light.color,
+            base_key_ambient: renderer.key_light.ambient,
+            base_fog_color: renderer.fog_color,
+            cloud_anchors,
+            state: StormState::Idle { cooldown: 1.5 },
+            rng: super::props::placement::SmallRng::new(0x57AC_C170_BEAD_5EED),
+        });
+
+        // Wall colliders only — no wall mesh. Instead of the
+        // dungeon grid wall ring, we ring the platform edge
+        // with a chain of small AABB colliders so the player
+        // can roam the full circular ground out to the
+        // mountain bases. AABB-only collider type means we
+        // approximate the circle with densely-packed boxes;
+        // 160 segments around the circumference overlap enough
+        // that no axis-aligned wedge can squeeze through.
+        const COLLIDER_RING_SEGMENTS: usize = 160;
+        // Sit the wall a hair inside the visible rim so the
+        // player doesn't scrape against geometry that looks
+        // like it should still be walkable.
+        let collider_ring_radius = PLATFORM_RADIUS - 0.6;
+        for i in 0..COLLIDER_RING_SEGMENTS {
+            let a = (i as f32 / COLLIDER_RING_SEGMENTS as f32)
+                * std::f32::consts::TAU;
+            let p = hub_centre
+                + Vec3::new(
+                    a.cos() * collider_ring_radius,
+                    2.5,
+                    a.sin() * collider_ring_radius,
+                );
             world.spawn((
-                Transform::from_position(*pos + Vec3::new(0.0, 2.5, 0.0)),
-                Collider::new(0.5, 2.5, 0.5),
+                Transform::from_position(p),
+                Collider::new(0.9, 2.5, 0.9),
                 Static,
             ));
         }
-
-        // Outdoor decoration: forest border + ground scatter.
-        // Fixed seed = stable layout across deaths.
-        props::nature::decorate_hub(&mut self.props, world, renderer, &floor, 0xC0FFEE);
 
         // Player stash chest. Sits a couple of tiles to the south-east
         // of the central portal so it's visible from the spawn point
@@ -273,7 +623,7 @@ impl FloorManager {
 
         let spawn = floor.spawn_pos;
         self.spawn_pos = spawn;
-        self.spawn_player(world, renderer, spawn, player_state, anim_cache)?;
+        self.spawn_player(world, renderer, spawn, player_state, anim_cache, cosmetics)?;
 
         let portal_pos = floor.first_room_center() + Vec3::new(0.0, 0.5, 0.0);
         log::info!("Hub generated. Portal at {:?}", portal_pos);
@@ -291,11 +641,13 @@ impl FloorManager {
         spawn: Vec3,
         player_state: &PlayerState,
         anim_cache: &mut super::character_spawn::AnimLibraryCache,
+        cosmetics: &mut super::avatar_cosmetics::AvatarCosmeticsCache,
     ) -> anyhow::Result<()> {
         let entity = super::character_spawn::spawn_character_entity(
             world,
             renderer,
             anim_cache,
+            cosmetics,
             super::character_spawn::CharacterSpawn {
                 position: spawn,
                 gender: player_state.gender,

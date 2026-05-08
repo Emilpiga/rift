@@ -197,3 +197,111 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
         })],
     }
 }
+
+/// "Return to hell" — played at the moment an enemy's death
+/// animation completes and the corpse despawns. Reads as the
+/// body dissolving back into the underworld:
+///
+/// 1. **Brimstone flash** — a single bright orange-red HDR pop
+///    at the body's centre. Sells the dissolution moment.
+/// 2. **Embers** — a wide upward cone of additive sparks that
+///    rise briefly before being yanked back down by strong
+///    negative gravity (drawn into the ground).
+/// 3. **Charcoal smoke** — a slow ground-hugging puff of dark
+///    smoke that lingers ~0.8 s, hiding the moment of vanish.
+pub fn enemy_soul_return() -> Effect {
+    Effect {
+        duration: 0.05,
+        layers: vec![
+            // 1. Brimstone flash — short HDR burst. Sized to
+            //    cover roughly the enemy's torso so the puff
+            //    visually swallows the body on the despawn
+            //    frame instead of looking like a small floating
+            //    spark.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 6 },
+                speed: (0.0, 0.6),
+                lifetime: (0.22, 0.34),
+                forces: vec![ForceField::Drag { coefficient: 6.0 }],
+                size: Curve::from_stops([
+                    (0.00, 0.90),
+                    (0.30, 1.80),
+                    (1.00, 0.55),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [3.5, 1.4, 0.30, 0.95]),
+                    (0.50, [2.0, 0.55, 0.10, 0.70]),
+                    (1.00, [0.40, 0.06, 0.02, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 2. Embers — bright additive sparks rising then
+            //    dragged back down (souls being pulled under).
+            //    Wider cone + more particles + longer sparks so
+            //    the upward column reads from across the room.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Cone {
+                    axis: Vec3::Y,
+                    half_angle: 1.05,
+                },
+                emission: EmissionMode::Burst { count: 48 },
+                speed: (3.2, 6.5),
+                lifetime: (0.65, 1.05),
+                forces: vec![
+                    ForceField::Drag { coefficient: 0.9 },
+                    // Strong downward pull — embers arc up then
+                    // fall back through the floor.
+                    ForceField::Gravity {
+                        axis: -Vec3::Y,
+                        strength: 14.0,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.18),
+                    (0.70, 0.13),
+                    (1.00, 0.0),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [3.2, 1.10, 0.20, 1.00]),
+                    (0.50, [2.0, 0.40, 0.06, 0.90]),
+                    (1.00, [0.40, 0.05, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::Spark,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 3. Charcoal smoke — slow, dark, ground-hugging
+            //    puff that hides the despawn frame. Doubled in
+            //    size and count so a body-sized enemy gets a
+            //    body-sized cloud rather than a sparrow's puff.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Burst { count: 18 },
+                speed: (0.6, 1.7),
+                lifetime: (0.75, 1.05),
+                forces: vec![
+                    ForceField::Drag { coefficient: 2.6 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 0.5,
+                    },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.65),
+                    (1.00, 1.55),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.10, 0.06, 0.05, 0.70]),
+                    (0.60, [0.06, 0.03, 0.03, 0.45]),
+                    (1.00, [0.02, 0.01, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}

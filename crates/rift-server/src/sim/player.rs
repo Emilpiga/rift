@@ -24,6 +24,35 @@ use rift_game::stats::CharacterStats;
 /// wired through. Drives `CharacterStats::compute`.
 pub const DEFAULT_LEVEL: u32 = 1;
 
+/// Default tab name handed out when the persistence layer has
+/// no row for `tab_index = 0` — matches the on-creation "Tab 1"
+/// label so existing characters with stashed items see a
+/// sensible page header on their first post-migration login.
+pub const DEFAULT_STASH_TAB_COLOR: u32 = 0x6E6E78;
+
+/// Server-side stash page. One [`Item`] grid per tab plus a
+/// player-chosen name + color. Sparse like the bag — `None`
+/// is an empty slot the player carved out.
+#[derive(Clone, Debug)]
+pub struct StashTab {
+    pub name: String,
+    /// Packed `0xRRGGBB`.
+    pub color: u32,
+    pub items: Vec<Option<rift_game::loot::Item>>,
+}
+
+impl StashTab {
+    /// Build a fresh empty tab with the default color and the
+    /// "Tab N" auto-name.
+    pub fn fresh(index: usize) -> Self {
+        Self {
+            name: format!("Tab {}", index + 1),
+            color: DEFAULT_STASH_TAB_COLOR,
+            items: Vec::new(),
+        }
+    }
+}
+
 /// Component bundle for a connected player.
 #[derive(Clone, Debug)]
 pub struct ServerPlayer {
@@ -32,6 +61,18 @@ pub struct ServerPlayer {
     pub k: Kinematic,
     pub hp_max: f32,
     pub hp: f32,
+    /// Current essence pool (universal ability resource).
+    /// Server-authoritative. Drained at cast time
+    /// (`Ability::resource_cost`) and per-tick during channels
+    /// (`Ability::channel_cost_per_sec`); regenerates at
+    /// `stats.essence_regen` per second after a short
+    /// `essence_regen_pause`.
+    pub essence: f32,
+    /// Seconds remaining before passive essence regen resumes.
+    /// Set every time a cost is paid; ticks down each
+    /// `Sim::step`. While > 0 the regen branch is skipped so
+    /// the bar visibly hitches after a spend.
+    pub essence_regen_pause: f32,
     /// Last input `seq` we successfully applied. Echoed back in
     /// snapshots so the client can prune its prediction buffer.
     pub last_input_seq: u32,
@@ -51,13 +92,15 @@ pub struct ServerPlayer {
     /// server. Stat / damage formulas read from this set; the
     /// bag never contributes affixes.
     pub equipment: rift_game::loot::Equipment,
-    /// Per-character private stash. Lives in its own DB table
-    /// (`stash_items`) and is hydrated alongside `inventory` at
-    /// Hello time. Items here are pure storage — they never
-    /// contribute to stats and aren't visible from the bag UI
-    /// unless the player explicitly opens the chest. Sparse like
-    /// [`Self::inventory`].
-    pub stash: Vec<Option<rift_game::loot::Item>>,
+    /// Per-character private stash. Lives in its own DB tables
+    /// (`stash_items` + `stash_tabs`) and is hydrated alongside
+    /// `inventory` at Hello time. Items here are pure storage
+    /// — they never contribute to stats and aren't visible from
+    /// the bag UI unless the player explicitly opens the chest.
+    /// Each tab is a separately-named, color-coded page;
+    /// players start with one free tab and pay shards to
+    /// unlock more (see `Sim::buy_stash_tab`).
+    pub stash: Vec<StashTab>,
     /// Whether the owner currently has an active stash session
     /// (i.e. is interacting with the chest in the hub). Gates
     /// `DepositToStash` / `WithdrawFromStash` so out-of-band
@@ -113,6 +156,14 @@ pub struct ServerPlayer {
     /// `shrine::tick` when the player walks out of range,
     /// dies, or the shrine despawns.
     pub channeling_shrine: Option<NetId>,
+    /// Persistent salvage currency ("shards"). Minted by
+    /// salvaging items in the bag (yield scales with rarity
+    /// and ilvl) and spent on stash expansion / future
+    /// crafting. Mirrored to the owning client via
+    /// `ServerMsg::ShardsSync`. Persisted on the
+    /// `characters.shards` column; loaded at hello time
+    /// alongside XP.
+    pub shards: u32,
 }
 
 impl ServerPlayer {
@@ -130,6 +181,7 @@ impl ServerPlayer {
         );
         let ability_mods = equipment.ability_mods();
         let hp_max = stats.max_hp;
+        let max_essence = stats.max_essence;
         Self {
             client_id,
             net_id,
@@ -145,10 +197,12 @@ impl ServerPlayer {
             },
             hp_max,
             hp: hp_max,
+            essence: max_essence,
+            essence_regen_pause: 0.0,
             last_input_seq: 0,
             inventory: Vec::new(),
             equipment,
-            stash: Vec::new(),
+            stash: vec![StashTab::fresh(0)],
             stash_open: false,
             level: DEFAULT_LEVEL,
             attrs,
@@ -160,6 +214,7 @@ impl ServerPlayer {
             is_ghost: false,
             ghost_rise_timer: None,
             channeling_shrine: None,
+            shards: 0,
         }
     }
 
@@ -185,6 +240,13 @@ impl ServerPlayer {
         };
         self.hp_max = new_stats.max_hp;
         self.hp = new_stats.max_hp * hp_pct;
+        // Mirror the HP-rescale on essence so equipping a
+        // `+Max Essence` item heals the pool to the same
+        // fraction it was at before the resize — no surprise
+        // "swap rings, lose 30 essence" moments.
+        let essence_max_old = self.stats.max_essence.max(1.0);
+        let essence_pct = (self.essence / essence_max_old).clamp(0.0, 1.0);
+        self.essence = new_stats.max_essence * essence_pct;
         self.stats = new_stats;
         // Equipment changes also rotate the affix-driven
         // gameplay-changing mods (extra projectiles, transforms,
@@ -246,7 +308,65 @@ impl ServerPlayer {
     pub fn is_dead_or_ghosting(&self) -> bool {
         self.hp <= 0.0 || self.is_ghost || self.ghost_rise_timer.is_some()
     }
+
+    /// Universal essence-cost gate. Returns `true` and deducts
+    /// `cost` if the player can afford it; returns `false`
+    /// otherwise (caller should reject the cast). A successful
+    /// spend also pauses passive regen for [`ESSENCE_SPEND_PAUSE`]
+    /// seconds so the bar visibly hitches after a cast.
+    /// Treats `cost <= 0.0` as a free, no-op success so the
+    /// existing free-cast abilities (Melee, Evasive Roll,
+    /// triggers) keep working.
+    pub fn try_spend_essence(&mut self, cost: f32) -> bool {
+        if cost <= 0.0 {
+            return true;
+        }
+        if self.essence + 1e-3 < cost {
+            return false;
+        }
+        self.essence -= cost;
+        self.essence_regen_pause = ESSENCE_SPEND_PAUSE;
+        true
+    }
+
+    /// Drain `cost` essence without an affordability check.
+    /// Used by the channel tick to bleed essence each frame:
+    /// if the pool empties mid-channel the channel itself is
+    /// ended cleanly by [`super::channel::tick`], so we just
+    /// clamp at zero here.
+    pub fn drain_essence(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        self.essence = (self.essence - amount).max(0.0);
+        self.essence_regen_pause = ESSENCE_SPEND_PAUSE;
+    }
+
+    /// Per-tick essence regen. Counts down the post-spend pause
+    /// first; once it elapses, restores `stats.essence_regen` per
+    /// second up to `stats.max_essence`. Dead / ghost players
+    /// don't regen so a downed player can't sneak a cast off the
+    /// instant they rise.
+    pub fn tick_essence(&mut self, dt: f32) {
+        if self.is_dead_or_ghosting() {
+            return;
+        }
+        if self.essence_regen_pause > 0.0 {
+            self.essence_regen_pause = (self.essence_regen_pause - dt).max(0.0);
+            return;
+        }
+        if self.essence < self.stats.max_essence {
+            self.essence = (self.essence + self.stats.essence_regen * dt)
+                .min(self.stats.max_essence);
+        }
+    }
 }
+
+/// Seconds passive essence regen pauses after every spend (cast
+/// upfront cost or channel per-tick drain). Matches the feel of
+/// classic ARPG resource bars: spam-cast and the bar visibly
+/// hitches; let go and it ramps back smoothly.
+pub const ESSENCE_SPEND_PAUSE: f32 = 0.6;
 
 /// Edge-triggered button bits we forward across input coalescing so a
 /// brief press never gets dropped between server ticks.

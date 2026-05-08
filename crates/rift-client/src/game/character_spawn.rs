@@ -21,6 +21,8 @@ use rift_engine::{Mesh, Renderer};
 
 use rift_game::character::Gender;
 
+use super::avatar_cosmetics::{self, AvatarCosmeticsCache, is_body_mesh_name};
+
 /// Paths to the animation packs we ship. Loaded in order; later
 /// entries override clips with the same (case-insensitive) name
 /// from earlier ones, so library-two acts as an extension/patch
@@ -80,11 +82,15 @@ pub fn spawn_character_entity(
     world: &mut hecs::World,
     renderer: &mut Renderer,
     cache: &mut AnimLibraryCache,
+    cosmetics: &mut AvatarCosmeticsCache,
     cfg: CharacterSpawn,
 ) -> anyhow::Result<hecs::Entity> {
     let (mesh_path, tex_path) = rift_game::hero::base_model_paths(cfg.gender);
 
-    let (object_index, skinned_component) = match SkinnedMesh::from_gltf(mesh_path) {
+    let (object_index, skinned_component) = match SkinnedMesh::from_gltf_filtered(
+        mesh_path,
+        |n| is_body_mesh_name(n),
+    ) {
         Ok(skinned) => {
             let mut bind_mesh = Mesh::empty();
             bind_mesh.vertices = skinned.bind_vertices.clone();
@@ -225,6 +231,11 @@ pub fn spawn_character_entity(
     } else {
         log::warn!("no right-hand joint found in player skeleton; beam VFX will fall back to chest");
     }
+
+    // Dress the avatar with white eyes, eyebrows, and per-gender
+    // hair before returning. Idempotent + cached, so cheap on
+    // every subsequent spawn of the same gender.
+    avatar_cosmetics::apply_avatar_cosmetics(world, renderer, cosmetics, entity, cfg.gender);
 
     Ok(entity)
 }

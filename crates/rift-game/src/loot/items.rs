@@ -82,6 +82,14 @@ pub enum ItemSlot {
 
 /// Physical slot on the character. Defined here (not in `inventory`)
 /// because [`BaseItem`] needs to refer to it.
+///
+/// **Wire / persistence note:** the discriminant of each variant is
+/// its position in this declaration (`self as u8`) and is mirrored
+/// 1:1 by [`EquipSlot::ALL`]. New variants must be appended at the
+/// end — inserting in the middle silently shifts every later
+/// `equipped_slot` SMALLINT in the database to the wrong slot.
+/// Display order on the paperdoll is decoupled and lives in
+/// `loot::inventory::ALL_SLOTS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EquipSlot {
     Weapon,
@@ -93,13 +101,14 @@ pub enum EquipSlot {
     Ring1,
     Ring2,
     Amulet,
+    Shoulders,
 }
 
 impl EquipSlot {
     /// Stable wire / persistence ordering of every slot. Index in
     /// this array doubles as the `u8` discriminant on the wire and
     /// in the `equipped_slot` SMALLINT column.
-    pub const ALL: [EquipSlot; 9] = [
+    pub const ALL: [EquipSlot; 10] = [
         EquipSlot::Weapon,
         EquipSlot::Helm,
         EquipSlot::Chest,
@@ -109,6 +118,7 @@ impl EquipSlot {
         EquipSlot::Ring1,
         EquipSlot::Ring2,
         EquipSlot::Amulet,
+        EquipSlot::Shoulders,
     ];
 
     /// Number of physical slots — also the length of
@@ -133,6 +143,7 @@ impl EquipSlot {
         match self {
             EquipSlot::Weapon => "Weapon",
             EquipSlot::Helm => "Helm",
+            EquipSlot::Shoulders => "Shoulders",
             EquipSlot::Chest => "Chest",
             EquipSlot::Legs => "Legs",
             EquipSlot::Hands => "Hands",
@@ -167,6 +178,36 @@ pub struct BaseItem {
     /// shared `IconUvRegistry`; an unknown key falls back to the
     /// rarity-coloured placeholder.
     pub icon: &'static str,
+    /// Optional per-gender glTF/GLB worn on the character avatar
+    /// when this item is equipped. The mesh is expected to be
+    /// skinned against the same logical skeleton as the matching
+    /// gender's base player rig (modular outfit pipeline). `None`
+    /// items render no visual; either gender slot can be `None`
+    /// independently while art catches up.
+    pub models: Option<GenderedModel>,
+}
+
+/// Gendered art override for a `BaseItem`. Each field is the
+/// path to a glTF/GLB rigged against the corresponding base
+/// player skeleton. `None` for a gender means "no visual on
+/// avatars of that gender" — the equipment is still functional,
+/// it just doesn't dress the model. Use [`GenderedModel::for_gender`]
+/// at the call site so the lookup stays in one place.
+#[derive(Clone, Copy, Debug)]
+pub struct GenderedModel {
+    pub female: Option<&'static str>,
+    pub male: Option<&'static str>,
+}
+
+impl GenderedModel {
+    /// Pick the path matching `gender`, or `None` when the
+    /// matching gender's art hasn't been authored yet.
+    pub fn for_gender(&self, gender: crate::character::Gender) -> Option<&'static str> {
+        match gender {
+            crate::character::Gender::Female => self.female,
+            crate::character::Gender::Male => self.male,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -183,6 +224,7 @@ pub struct BaseItem {
 //   Robe    → caster, utility, mana regen
 //   Ring    → wildcard (ALL tags allowed)
 //   Amulet  → wildcard (ALL tags allowed)
+//   Shoulders → armor, defense, utility
 
 use tag::*;
 
@@ -198,6 +240,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::SpellDamage, 0.08)],
         min_ilvl: 1,
         icon: "",
+        models: None,
     },
     BaseItem {
         id: "sword_basic",
@@ -209,6 +252,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::WeaponDamage, 0.10)],
         min_ilvl: 1,
         icon: "",
+        models: None,
     },
     BaseItem {
         id: "dagger_basic",
@@ -220,6 +264,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::WeaponDamage, 0.06), (Stat::CritChance, 0.05)],
         min_ilvl: 1,
         icon: "",
+        models: None,
     },
     BaseItem {
         id: "wand_basic",
@@ -231,6 +276,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::SpellDamage, 0.06), (Stat::CooldownReduction, 0.04)],
         min_ilvl: 1,
         icon: "",
+        models: None,
     },
     // ---- Armor — Helm, Chest, Legs, Hands, Boots ---------------------
     // Each base picks one EquipSlot. New bases (different art / name /
@@ -245,6 +291,22 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::Armor, 12.0), (Stat::Health, 15.0)],
         min_ilvl: 1,
         icon: "loot/Helmets/Helmet_1",
+        models: None,
+    },
+    BaseItem {
+        id: "light_shoulders",
+        name: "Leather Spaulders",
+        slot: ItemSlot::Armor(ArmorKind::Light),
+        equip_slot: EquipSlot::Shoulders,
+        allowed_tags: SPEED | CRIT | DEFENSE | UTILITY,
+        favored_tags: SPEED | CRIT,
+        implicit: &[(Stat::Evasion, 0.02), (Stat::Health, 12.0)],
+        min_ilvl: 1,
+        icon: "loot/Shoulders/Shoulders_1",
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/shoulderpads/armor_shoulderpads_leather_01_female.glb"),
+            male: Some("assets/models/loot/shoulderpads/armor_shoulderpads_leather_01_male.glb"),
+        }),
     },
     BaseItem {
         id: "heavy_chest",
@@ -256,6 +318,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::Armor, 24.0), (Stat::Health, 30.0)],
         min_ilvl: 1,
         icon: "loot/BodyArmor/BodyArmor_1",
+        models: None,
     },
     BaseItem {
         id: "light_chest",
@@ -267,10 +330,18 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::Evasion, 0.05), (Stat::Health, 18.0)],
         min_ilvl: 1,
         icon: "loot/BodyArmor/BodyArmor_2",
+        // Bring-up: first modular armor visual. Studded Vest is the
+        // closest fit thematically; once we have more art each base
+        // gets its own mesh. Male model not yet authored — male
+        // avatars equip it for stats but render bare-chested.
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/chest_pieces/armor_chest_leather_01_female.glb"),
+            male: Some("assets/models/loot/chest_pieces/armor_chest_leather_01_male.glb"),
+        }),
     },
     BaseItem {
         id: "light_boots",
-        name: "Swift Boots",
+        name: "Leather Boots",
         slot: ItemSlot::Armor(ArmorKind::Light),
         equip_slot: EquipSlot::Boots,
         allowed_tags: SPEED | CRIT | DEFENSE | UTILITY,
@@ -278,6 +349,10 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::MoveSpeed, 0.05), (Stat::Evasion, 0.03)],
         min_ilvl: 1,
         icon: "loot/Boots/Boots_1",
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/feet/armor_boots_leather_01_female.glb"),
+            male: Some("assets/models/loot/feet/armor_boots_leather_01_male.glb"),
+        }),
     },
     BaseItem {
         id: "robe_chest",
@@ -289,28 +364,37 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::Health, 14.0), (Stat::ResourceRegen, 0.08)],
         min_ilvl: 1,
         icon: "loot/BodyArmor/BodyArmor_3",
+        models: None,
     },
     BaseItem {
-        id: "robe_hands",
-        name: "Silken Gloves",
-        slot: ItemSlot::Armor(ArmorKind::Robe),
+        id: "light_gloves",
+        name: "Leather Gloves",
+        slot: ItemSlot::Armor(ArmorKind::Light),
         equip_slot: EquipSlot::Hands,
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY,
         favored_tags: CASTER | ANY_ELEMENT,
         implicit: &[(Stat::CooldownReduction, 0.03)],
         min_ilvl: 1,
         icon: "loot/Gloves/Gloves_1",
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/gloves/armor_gloves_leather_01_female.glb"),
+            male: Some("assets/models/loot/gloves/armor_gloves_leather_01_male.glb"),
+        }),
     },
     BaseItem {
-        id: "heavy_legs",
-        name: "Plated Greaves",
-        slot: ItemSlot::Armor(ArmorKind::Heavy),
+        id: "light_legs",
+        name: "Leather Leggings",
+        slot: ItemSlot::Armor(ArmorKind::Light),
         equip_slot: EquipSlot::Legs,
         allowed_tags: DEFENSE | MELEE | UTILITY,
         favored_tags: DEFENSE,
         implicit: &[(Stat::Armor, 16.0), (Stat::Health, 20.0)],
         min_ilvl: 1,
         icon: "loot/Pants/Pants_1",
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/legs/armor_legs_leather_01_female.glb"),
+            male: Some("assets/models/loot/legs/armor_legs_leather_01_male.glb"),
+        }),
     },
     // ---- Accessories — wildcards -------------------------------------
     BaseItem {
@@ -323,6 +407,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[],
         min_ilvl: 1,
         icon: "loot/Rings/Ring_1",
+        models: None,
     },
     BaseItem {
         id: "amulet_basic",
@@ -334,5 +419,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         implicit: &[(Stat::Health, 10.0)],
         min_ilvl: 1,
         icon: "loot/Necklaces/Necklace_1",
+        models: None,
     },
 ];

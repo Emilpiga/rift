@@ -215,6 +215,14 @@ impl<'a> Ui<'a> {
 
     /// Mark keyboard input as claimed (focused text field, modal
     /// Esc handler, …).
+    ///
+    /// **Does NOT** flip [`Input::set_text_capture`] — that's a
+    /// frame-scoped flag the host updates exactly once at the
+    /// top of `GameState::update`, fed by the union of every
+    /// "I want text" surface (chat open, stash rename open, …).
+    /// Toggling it mid-frame from inside a widget would cause
+    /// any later sibling that reads `key_just_pressed` (e.g.
+    /// the chat's `T` shortcut) to silently miss its key.
     pub fn claim_keyboard(&mut self) {
         self.state.keyboard_claimed = true;
     }

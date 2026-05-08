@@ -77,6 +77,31 @@ pub fn update_character_select(
     state
         .character_select
         .tick_preview(&mut state.world, renderer, dt);
+    // Apply head cosmetics (white eyes / eyebrows / hair) and
+    // equipped gear so the preview matches what the player will
+    // see in-world. Both passes are cache-backed so they
+    // short-circuit on every frame after the first.
+    if let Some((entity, gender)) = state.character_select.preview_entity() {
+        super::avatar_cosmetics::apply_avatar_cosmetics(
+            &mut state.world,
+            renderer,
+            &mut state.avatar_cosmetics_cache,
+            entity,
+            gender,
+        );
+        if let Some(base_ids) = state.character_select.preview_equipped_base_ids() {
+            let desired = super::equipment_visuals::desired_visuals_for_base_ids(
+                base_ids, gender,
+            );
+            super::equipment_visuals::apply_equipment_visuals(
+                &mut state.world,
+                renderer,
+                &mut state.equipment_visual_cache,
+                entity,
+                &desired,
+            );
+        }
+    }
     rift_engine::ecs::systems::skinning_system(&mut state.world, renderer, dt);
 
     // Fused input + render through the immediate-mode UI stack.
@@ -182,12 +207,19 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
                 renderer,
                 &state.player_state,
                 &mut state.anim_cache,
+                &mut state.avatar_cosmetics_cache,
             ) {
                 Ok(portal_pos) => {
                     portal_system::spawn_hub(&mut state.floor.hub_portal, renderer, portal_pos)
                 }
                 Err(e) => log::error!("Hub generation failed: {}", e),
             }
+            // Fresh world / fresh local avatar — the
+            // `SkinnedAttachments` component is empty. Mark
+            // dirty so the binary's per-frame retry loop
+            // re-applies the local equipment visuals on the
+            // new entity.
+            state.loot.equipment_visuals_dirty = true;
             ("Generating hub…", Some(EnterPhase::AttachOutfits))
         }
         EnterPhase::AttachOutfits => ("Preparing outfits…", Some(EnterPhase::LoadOutfits)),
@@ -266,6 +298,7 @@ pub fn tick_net_entering(
                     renderer,
                     &state.player_state,
                     &mut state.anim_cache,
+                    &mut state.avatar_cosmetics_cache,
                 ) {
                     Ok(portal_pos) => portal_system::spawn_hub(
                         &mut state.floor.hub_portal,
@@ -283,6 +316,7 @@ pub fn tick_net_entering(
                     &state.rift,
                     &state.player_state,
                     &mut state.anim_cache,
+                    &mut state.avatar_cosmetics_cache,
                     state.net.floor_seed,
                 ) {
                     log::error!("Net floor regeneration failed: {}", e);
@@ -339,6 +373,11 @@ pub fn reset_for_regeneration(state: &mut GameState, renderer: &mut Renderer) {
     state.loot.reset_for_floor();
     state.shrines.reset_for_floor();
     state.mp_inventory_ui.open = false;
+    // The world wipe just erased every `SkinnedAttachments`
+    // component along with the player entity. Set the dirty
+    // flag so the binary's per-frame retry loop re-applies the
+    // local equipment visuals once the new avatar is spawned.
+    state.loot.equipment_visuals_dirty = true;
 }
 
 /// Rebuild the wall collider + AABB caches from current

@@ -108,7 +108,7 @@ pub fn tick(
 
     // 1. Player-attached channels.
     for (entity, (player, channel)) in
-        world.query_mut::<(&ServerPlayer, &mut ServerChannel)>()
+        world.query_mut::<(&mut ServerPlayer, &mut ServerChannel)>()
     {
         // Death / ghost transition ends the channel
         // immediately. Without this the channel keeps ticking
@@ -126,6 +126,22 @@ pub fn tick(
             && player.k.velocity.length_squared() > 0.05 * 0.05
         {
             channel.remaining = 0.0;
+        }
+        // Per-frame essence drain for held channels (e.g.
+        // Frost Ray). Looked up from the registry so authoring
+        // a new channel ability with `channel_cost_per_sec` is
+        // a one-line change. Empties → end channel cleanly,
+        // same path as key release.
+        let drain = rift_game::abilities::lookup(channel.ability_id)
+            .map(|a| a.channel_cost_per_sec)
+            .unwrap_or(0.0);
+        if drain > 0.0 {
+            let cost = drain * dt;
+            if player.essence + 1e-3 < cost {
+                channel.remaining = 0.0;
+            } else {
+                player.drain_essence(cost);
+            }
         }
         channel.remaining -= dt;
         channel.elapsed += dt;

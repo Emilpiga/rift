@@ -24,6 +24,15 @@ pub struct EnvTextures {
     /// theme. Optional — only uploaded when first requested via
     /// [`Self::ensure_grass`].
     pub grass_floor_set: Option<vk::DescriptorSet>,
+    /// Demon-ground tile bound on the hub platform for the
+    /// abyss / hellish theme. Loaded from
+    /// `assets/textures/demon_ground_01.jpg` on first use via
+    /// [`Self::ensure_demon_ground`].
+    pub demon_ground_set: Option<vk::DescriptorSet>,
+    /// Procedural crimson cracked-stone tile used for the
+    /// abyss-hub platform surface. Generated on first use via
+    /// [`Self::ensure_crimson_stone`].
+    pub crimson_stone_set: Option<vk::DescriptorSet>,
     textures: Vec<Texture>,
 }
 
@@ -33,6 +42,8 @@ impl Default for EnvTextures {
             floor_set: None,
             wall_set: None,
             grass_floor_set: None,
+            demon_ground_set: None,
+            crimson_stone_set: None,
             textures: Vec::new(),
         }
     }
@@ -74,6 +85,8 @@ impl EnvTextures {
         self.floor_set = None;
         self.wall_set = None;
         self.grass_floor_set = None;
+        self.demon_ground_set = None;
+        self.crimson_stone_set = None;
     }
 
     /// Lazy-initialise the grass tile used by the outdoor hub.
@@ -90,6 +103,51 @@ impl EnvTextures {
                 self.grass_floor_set = Some(set);
             }
             Err(e) => log::warn!("env grass texture upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the `demon_ground_01` tile used as the
+    /// hub platform surface. Decoded once from the JPG asset
+    /// and reused across hub regenerations. No-op once the
+    /// descriptor set has been allocated.
+    pub fn ensure_demon_ground(&mut self, renderer: &mut Renderer) {
+        if self.demon_ground_set.is_some() {
+            return;
+        }
+        match renderer.upload_shared_texture_from_file(
+            "assets/textures/demon_ground_01.jpg",
+        ) {
+            Ok((tex, set)) => {
+                self.textures.push(tex);
+                self.demon_ground_set = Some(set);
+            }
+            Err(e) => log::warn!("env demon_ground texture upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the procedural crimson cracked-stone
+    /// tile used for the abyss-hub floating platform. Generated
+    /// once, cached for the rest of the session. The tile is a
+    /// dark oxblood plate veined with thin glowing crimson
+    /// cracks and weathered with fbm grime so each platform
+    /// region reads as natural rather than uniform.
+    pub fn ensure_crimson_stone(&mut self, renderer: &mut Renderer) {
+        if self.crimson_stone_set.is_some() {
+            return;
+        }
+        // Generated at higher resolution than the dungeon
+        // floor tile because the hub platform stretches the
+        // texture across ~14 m per repeat (vs. 1 m for dungeon
+        // floors), so each texel covers more world space and
+        // we need more detail to keep features crisp.
+        const CRIMSON_SIZE: u32 = 512;
+        let pixels = generate_crimson_stone(CRIMSON_SIZE);
+        match renderer.upload_shared_texture_from_rgba(CRIMSON_SIZE, CRIMSON_SIZE, &pixels) {
+            Ok((tex, set)) => {
+                self.textures.push(tex);
+                self.crimson_stone_set = Some(set);
+            }
+            Err(e) => log::warn!("env crimson_stone texture upload failed: {}", e),
         }
     }
 }
@@ -364,6 +422,90 @@ fn generate_grass(size: u32) -> Vec<u8> {
             let speck2 = fbm(u, v, 96, 2, 0x21B5_DDAA);
             if speck2 > 0.90 && clump > 0.40 {
                 color = lerp3(color, [0.92, 0.92, 0.86], 0.55);
+            }
+
+            let i = ((y * size + x) * 4) as usize;
+            let p = pack(color);
+            out[i] = p[0];
+            out[i + 1] = p[1];
+            out[i + 2] = p[2];
+            out[i + 3] = p[3];
+        }
+    }
+    out
+}
+
+/// Crimson cracked stone: dark oxblood plate veined with thin
+/// glowing fissures and weathered with low-frequency grime so
+/// the tile reads as natural rather than uniform. Used as the
+/// abyss-hub floating platform surface. Tiles seamlessly at
+/// the same scale as the other floor textures.
+fn generate_crimson_stone(size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let inv = 1.0 / size as f32;
+
+    for y in 0..size {
+        for x in 0..size {
+            let u = x as f32 * inv;
+            let v = y as f32 * inv;
+
+            // Two-layer base: a slow patchy stain that biases
+            // the plate between dim oxblood and near-black,
+            // plus a finer crunch for surface microvariation.
+            let stain = fbm(u, v, 3, 4, 0xC110_55E1);
+            let crunch = fbm(u, v, 24, 4, 0xD1A8_011D);
+
+            let dim = [0.060, 0.020, 0.024];
+            let mid = [0.140, 0.045, 0.050];
+            let mut color = lerp3(dim, mid, stain);
+
+            // Microvariation: brighten / darken by +/-15 % based
+            // on the fine fbm so the plate has visible grain.
+            let micro = (crunch - 0.5) * 0.30;
+            color = [
+                (color[0] * (1.0 + micro)).max(0.0),
+                (color[1] * (1.0 + micro)).max(0.0),
+                (color[2] * (1.0 + micro)).max(0.0),
+            ];
+
+            // Soot patches: a separate low-freq fbm pulls some
+            // areas toward near-black so the surface looks
+            // burnt unevenly rather than tinted.
+            let soot = fbm(u, v, 5, 3, 0x5007_F00D);
+            let soot_t = ((0.42 - soot).max(0.0) * 2.5).clamp(0.0, 0.65);
+            color = lerp3(color, [0.020, 0.010, 0.012], soot_t);
+
+            // Cracks: two crossing thin-line networks of
+            // different scales. Each line is detected by the
+            // thin-isovalue trick: |fbm - threshold| < epsilon
+            // => on the crack.
+            let crack_a = fbm(u, v, 3, 5, 0xCA1A_DA17);
+            let crack_b = fbm(u, v, 7, 5, 0x9F00_BABE);
+
+            // Wide structural fissures with a glowing oxblood
+            // core so they read as splits with residual heat.
+            if (crack_a - 0.50).abs() < 0.012 {
+                let d = (crack_a - 0.50).abs() / 0.012;
+                let edge = 1.0 - d;
+                let hot = [0.55, 0.10, 0.06];
+                let groove = [0.020, 0.005, 0.005];
+                let line_color = lerp3(groove, hot, edge.powf(2.0));
+                color = lerp3(color, line_color, edge.clamp(0.0, 1.0) * 0.85);
+            }
+            // Finer secondary cracks: narrower, dimmer.
+            if (crack_b - 0.55).abs() < 0.008 {
+                let d = (crack_b - 0.55).abs() / 0.008;
+                let edge = 1.0 - d;
+                color = lerp3(color, [0.030, 0.008, 0.010], edge * 0.65);
+            }
+
+            // Sparse molten flecks: rare bright points where
+            // the cracks intersect a hot pocket. Drives bloom
+            // into the floor so the platform glints under
+            // lightning flashes.
+            let flecks = fbm(u, v, 64, 2, 0xF1A1_B0B0);
+            if flecks > 0.92 && stain > 0.45 {
+                color = lerp3(color, [0.95, 0.32, 0.12], 0.55);
             }
 
             let i = ((y * size + x) * 4) as usize;

@@ -341,65 +341,96 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::CloseStash);
     }
 
-    /// Move the bag item at `inventory_index` into the stash.
-    /// Server replies with fresh `InventorySync` + `StashSync`.
-    pub fn request_deposit_to_stash(&mut self, inventory_index: u32) {
-        log::debug!("net: -> DepositToStash idx={inventory_index}");
+    /// Move the bag item at `inventory_index` into stash tab
+    /// `tab_index`. Server replies with fresh `InventorySync`
+    /// + `StashSync`.
+    pub fn request_deposit_to_stash(&mut self, inventory_index: u32, tab_index: u8) {
+        log::debug!("net: -> DepositToStash idx={inventory_index} tab={tab_index}");
         self.send(
             Channel::Control,
-            &ClientMsg::DepositToStash { inventory_index },
+            &ClientMsg::DepositToStash { inventory_index, tab_index },
         );
     }
 
-    /// Move the stash item at `stash_index` back into the bag.
-    /// Server replies with fresh `InventorySync` + `StashSync`.
-    pub fn request_withdraw_from_stash(&mut self, stash_index: u32) {
-        log::debug!("net: -> WithdrawFromStash idx={stash_index}");
+    /// Move the stash item at `(tab_index, stash_index)` back
+    /// into the bag. Server replies with fresh `InventorySync`
+    /// + `StashSync`.
+    pub fn request_withdraw_from_stash(&mut self, tab_index: u8, stash_index: u32) {
+        log::debug!("net: -> WithdrawFromStash tab={tab_index} idx={stash_index}");
         self.send(
             Channel::Control,
-            &ClientMsg::WithdrawFromStash { stash_index },
+            &ClientMsg::WithdrawFromStash { tab_index, stash_index },
         );
     }
 
     /// Deposit the bag item at `inventory_index` into a specific
-    /// `stash_index`. Swap-or-place: if the stash slot is
-    /// occupied, the prior occupant moves back to the freed bag
-    /// slot. Server replies with fresh `InventorySync` +
-    /// `StashSync`.
+    /// `(tab_index, stash_index)`. Swap-or-place: if the stash
+    /// slot is occupied, the prior occupant moves back to the
+    /// freed bag slot. Server replies with fresh
+    /// `InventorySync` + `StashSync`.
     pub fn request_deposit_to_stash_slot(
         &mut self,
         inventory_index: u32,
+        tab_index: u8,
         stash_index: u32,
     ) {
         log::debug!(
-            "net: -> DepositToStashSlot inv={inventory_index} stash={stash_index}"
+            "net: -> DepositToStashSlot inv={inventory_index} tab={tab_index} stash={stash_index}"
         );
         self.send(
             Channel::Control,
             &ClientMsg::DepositToStashSlot {
                 inventory_index,
+                tab_index,
                 stash_index,
             },
         );
     }
 
-    /// Withdraw the stash item at `stash_index` into a specific
-    /// `inventory_index`. Mirror of
+    /// Withdraw the stash item at `(tab_index, stash_index)`
+    /// into a specific `inventory_index`. Mirror of
     /// `request_deposit_to_stash_slot`.
     pub fn request_withdraw_from_stash_slot(
         &mut self,
+        tab_index: u8,
         stash_index: u32,
         inventory_index: u32,
     ) {
         log::debug!(
-            "net: -> WithdrawFromStashSlot stash={stash_index} inv={inventory_index}"
+            "net: -> WithdrawFromStashSlot tab={tab_index} stash={stash_index} inv={inventory_index}"
         );
         self.send(
             Channel::Control,
             &ClientMsg::WithdrawFromStashSlot {
+                tab_index,
                 stash_index,
                 inventory_index,
             },
+        );
+    }
+
+    /// Spend shards on a new stash tab. Server validates cost.
+    pub fn request_buy_stash_tab(&mut self) {
+        log::debug!("net: -> BuyStashTab");
+        self.send(Channel::Control, &ClientMsg::BuyStashTab);
+    }
+
+    /// Rename `tab_index`. The server clamps the name and
+    /// rejects empty strings.
+    pub fn request_rename_stash_tab(&mut self, tab_index: u8, name: String) {
+        log::debug!("net: -> RenameStashTab tab={tab_index} name={name:?}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::RenameStashTab { tab_index, name },
+        );
+    }
+
+    /// Recolor `tab_index`. `color` is packed `0xRRGGBB`.
+    pub fn request_recolor_stash_tab(&mut self, tab_index: u8, color: u32) {
+        log::debug!("net: -> RecolorStashTab tab={tab_index} color={color:#08X}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::RecolorStashTab { tab_index, color },
         );
     }
 
@@ -419,11 +450,11 @@ impl NetClient {
     /// Either may be empty (past the current stash length) —
     /// the server will grow the stash with placeholders to fit
     /// and then trim back down. Requires an open stash session.
-    pub fn request_swap_stash_slots(&mut self, a: u32, b: u32) {
-        log::debug!("net: -> SwapStashSlots {a} <-> {b}");
+    pub fn request_swap_stash_slots(&mut self, tab_index: u8, a: u32, b: u32) {
+        log::debug!("net: -> SwapStashSlots tab={tab_index} {a} <-> {b}");
         self.send(
             Channel::Control,
-            &ClientMsg::SwapStashSlots { a, b },
+            &ClientMsg::SwapStashSlots { tab_index, a, b },
         );
     }
 
@@ -435,6 +466,29 @@ impl NetClient {
         self.send(
             Channel::Control,
             &ClientMsg::DropInventoryItem { inventory_index },
+        );
+    }
+
+    /// Salvage the bag item at `inventory_index` for shards.
+    /// Server validates the slot and the item's anchored flag,
+    /// then replies with fresh `InventorySync` + `ShardsSync`.
+    pub fn request_salvage_inventory_item(&mut self, inventory_index: u32) {
+        log::debug!("net: -> SalvageInventoryItem idx={inventory_index}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::SalvageInventoryItem { inventory_index },
+        );
+    }
+
+    /// Bulk-salvage every non-anchored bag item whose rarity is
+    /// at most `rarity_max` (Common=0, Magic=1, Rare=2,
+    /// Legendary=3). Server replies with fresh
+    /// `InventorySync` + `ShardsSync`.
+    pub fn request_salvage_inventory_bulk(&mut self, rarity_max: u8) {
+        log::debug!("net: -> SalvageInventoryBulk rarity_max={rarity_max}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::SalvageInventoryBulk { rarity_max },
         );
     }
 

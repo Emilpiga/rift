@@ -16,7 +16,7 @@
 use glam::{Mat4, Vec3};
 use rift_engine::{
     animation::{Animator, Clip},
-    ecs::components::{AnimationSet, Renderable, Skinned, Transform},
+    ecs::components::{AnimationSet, Renderable, Skinned, SkinnedAttachments, Transform},
     renderer::mesh::SkinnedMesh,
     ui::im::{
         widgets::{label, text_field, title},
@@ -143,6 +143,7 @@ impl CharacterSelect {
             };
             let mut profile = CharacterProfile::new(e.character_name, gender);
             profile.level = e.level;
+            profile.equipped_base_ids = e.equipped_base_ids;
             self.roster.add(profile);
         }
         if matches!(self.view, ViewKind::LoadingRoster) {
@@ -176,18 +177,37 @@ impl CharacterSelect {
         }
     }
 
+    /// Equipped base-item indices to dress the preview avatar
+    /// with. `None` when no profile drives the preview (account
+    /// entry / loading / create form). Pulled from the cached
+    /// `RosterEntry::equipped_base_ids` the server sent on
+    /// roster lookup, so the preview matches what that
+    /// character is actually wearing on the server.
+    pub fn preview_equipped_base_ids(&self) -> Option<&[u16]> {
+        let profile = match &self.view {
+            ViewKind::AccountEntry | ViewKind::LoadingRoster | ViewKind::Create => None,
+            ViewKind::Roster => self.roster.slots().first(),
+            ViewKind::DeleteConfirm { idx } => self.roster.get(*idx),
+        }?;
+        Some(&profile.equipped_base_ids)
+    }
+
+    /// Currently-alive preview avatar entity + the gender it
+    /// was spawned with. `None` between view changes when
+    /// `tick_preview` is about to rebuild it.
+    pub fn preview_entity(&self) -> Option<(hecs::Entity, Gender)> {
+        self.preview_state
+            .as_ref()
+            .map(|s| (s.entity, s.gender))
+    }
+
     /// Drop the preview avatar entity and free its render-object
     /// slot. Called by `GameState` right before generating the
     /// hub so the dynamic mesh slot can be reclaimed (and so the
     /// preview model doesn't briefly appear inside the hub).
     pub fn teardown_preview(&mut self, world: &mut hecs::World, renderer: &mut Renderer) {
         if let Some(prev) = self.preview_state.take() {
-            if let Ok(r) = world.get::<&Renderable>(prev.entity) {
-                let idx = r.object_index;
-                if idx < renderer.objects.len() {
-                    renderer.objects[idx].model_matrix = glam::Mat4::ZERO;
-                }
-            }
+            collapse_preview_render_slots(world, renderer, prev.entity);
             let _ = world.despawn(prev.entity);
         }
     }
@@ -207,12 +227,7 @@ impl CharacterSelect {
             return;
         }
         if let Some(prev) = self.preview_state.take() {
-            if let Ok(r) = world.get::<&Renderable>(prev.entity) {
-                let idx = r.object_index;
-                if idx < renderer.objects.len() {
-                    renderer.objects[idx].model_matrix = glam::Mat4::ZERO;
-                }
-            }
+            collapse_preview_render_slots(world, renderer, prev.entity);
             let _ = world.despawn(prev.entity);
         }
         if let Some(gender) = desired {
@@ -229,7 +244,10 @@ impl CharacterSelect {
         gender: Gender,
     ) -> Option<hecs::Entity> {
         let (model_path, tex_path) = hero::base_model_paths(gender);
-        let skinned = match SkinnedMesh::from_gltf(model_path) {
+        let skinned = match SkinnedMesh::from_gltf_filtered(
+            model_path,
+            |n| super::avatar_cosmetics::is_body_mesh_name(n),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Preview model load failed ({:?}): {}", gender, e);
@@ -708,5 +726,30 @@ impl CharacterSelect {
                 });
         });
         SelectAction::None
+    }
+}
+
+/// Zero out the renderer model matrices of every dynamic-mesh
+/// slot the preview avatar owns: the base body, plus every
+/// modular-outfit `AttachmentPiece`. Without this the slots
+/// linger as garbage in the renderer until reused, which would
+/// briefly draw the preview gear inside the freshly-generated
+/// hub.
+fn collapse_preview_render_slots(
+    world: &hecs::World,
+    renderer: &mut Renderer,
+    entity: hecs::Entity,
+) {
+    if let Ok(r) = world.get::<&Renderable>(entity) {
+        if r.object_index < renderer.objects.len() {
+            renderer.objects[r.object_index].model_matrix = glam::Mat4::ZERO;
+        }
+    }
+    if let Ok(atts) = world.get::<&SkinnedAttachments>(entity) {
+        for piece in &atts.pieces {
+            if piece.object_index < renderer.objects.len() {
+                renderer.objects[piece.object_index].model_matrix = glam::Mat4::ZERO;
+            }
+        }
     }
 }

@@ -175,6 +175,16 @@ impl KeyLight {
         color: Vec3::new(1.10, 1.00, 0.85),
         ambient: 0.35,
     };
+
+    /// Brooding crimson stormlight for the abyss hub. Cooler-than-
+    /// sunlit, slightly biased red on the directional, with a
+    /// dim warm ambient so the platform reads as lit by the
+    /// distant fire-storm horizon rather than a sun.
+    pub const STORMLIT: Self = Self {
+        direction: Vec3::new(0.2, 0.7, 0.5),
+        color: Vec3::new(0.65, 0.30, 0.28),
+        ambient: 0.18,
+    };
 }
 
 impl Default for KeyLight {
@@ -722,6 +732,26 @@ impl Renderer {
         Ok((texture, set))
     }
 
+    /// Decode a PNG/JPG file from disk and upload it as a shared
+    /// SRGB RGBA8 texture, returning the texture handle and a
+    /// freshly allocated descriptor set. The caller owns the
+    /// texture and must keep it alive for as long as the
+    /// descriptor set is bound to any object.
+    pub fn upload_shared_texture_from_file<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<(crate::renderer::texture::Texture, vk::DescriptorSet)> {
+        let texture = crate::renderer::material::load_texture_from_file(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            path,
+        )?;
+        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        Ok((texture, set))
+    }
+
     /// Bind a previously-allocated shared descriptor set to an object.
     /// Unlike `set_object_texture*`, the renderer does NOT take
     /// ownership of any texture — the caller must keep the underlying
@@ -1152,6 +1182,7 @@ impl Renderer {
                 self.camera.view_matrix(),
                 self.camera.projection_matrix(),
                 &self.sky,
+                self.start_time.elapsed().as_secs_f32(),
             );
 
             // 3D scene

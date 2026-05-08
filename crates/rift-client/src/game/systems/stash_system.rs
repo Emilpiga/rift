@@ -72,7 +72,7 @@ pub fn tick(
                 log::info!("stash: closing");
                 // Stale stash mirror is harmless but tidier
                 // to drop on close.
-                loot.stash_items.clear();
+                loot.stash_tabs.clear();
             }
         }
     } else if loot.stash_session {
@@ -80,7 +80,7 @@ pub fn tick(
         log::info!("stash: out of range, auto-closing");
         loot.stash_session = false;
         mp_inventory_ui.open = false;
-        loot.stash_items.clear();
+        loot.stash_tabs.clear();
         net.stash_session_requests.push(false);
     }
 }

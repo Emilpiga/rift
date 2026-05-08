@@ -84,8 +84,9 @@ pub fn render_hud(
 
     let bar_w = 360.0 * s;
     let bar_h = 22.0 * s;
+    let essence_h = 12.0 * s;
     let xp_h = 9.0 * s;
-    let bars_total_h = bar_h + 2.0 * s + xp_h;
+    let bars_total_h = bar_h + 2.0 * s + essence_h + 2.0 * s + xp_h;
     let bar_x = (sw - bar_w) / 2.0;
     let bar_y = sh - 80.0 * s - 16.0 * s - bars_total_h;
 
@@ -109,9 +110,36 @@ pub fn render_hud(
         Color::rgba(0.96, 0.96, 0.98, 0.95),
     );
 
-    // XP bar (slimmer, directly under the HP bar).
+    // Essence bar (universal ability resource — see
+    // `CharacterStats::max_essence`). Sits directly under HP so
+    // the eye reads "vital pools" as a single block. Max value
+    // comes from the local cached stat sheet; current fraction
+    // is the server-mirrored `essence_pct`.
+    let essence_pct = player_state.essence_pct.clamp(0.0, 1.0);
+    let essence_y = bar_y + bar_h + 2.0 * s;
+    ProgressBar::new(essence_pct)
+        .fill(Color::rgba(0.32, 0.55, 0.95, 0.95))
+        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
+        .rounded(false)
+        .show(ui, Rect::from_xywh(bar_x, essence_y, bar_w, essence_h));
+    let max_essence = player_state.stats().max_essence;
+    let essence_now = (essence_pct * max_essence).round();
+    let essence_label = format!("{essence_now:.0} / {max_essence:.0}");
+    let essence_text_size = 11.0 * s;
+    let essence_text_w = ui.measure_text(&essence_label, essence_text_size);
+    ui.draw_text(
+        Pos2::new(
+            bar_x + (bar_w - essence_text_w) * 0.5,
+            essence_y + (essence_h - essence_text_size) * 0.5,
+        ),
+        &essence_label,
+        essence_text_size,
+        Color::rgba(0.94, 0.96, 1.0, 0.95),
+    );
+
+    // XP bar (slimmer, directly under the essence bar).
     let xp_pct = player_state.experience.progress().clamp(0.0, 1.0);
-    let xp_y = bar_y + bar_h + 2.0 * s;
+    let xp_y = essence_y + essence_h + 2.0 * s;
     let xp_now = player_state.experience.current_xp;
     let xp_need = player_state.experience.xp_to_next_level();
     let xp_label = format!("{xp_now} / {xp_need} XP");
@@ -138,6 +166,19 @@ pub fn render_hud(
         Color::rgba(0.92, 0.92, 0.92, 1.0),
     );
 
+    // Shard balance: salvage currency. Drawn just under the
+    // level pip so the player's "wallet" sits with their other
+    // persistent stats. The diamond glyph is a Unicode
+    // fallback — once a dedicated shard icon ships we can swap
+    // this for a small textured quad.
+    let shard_text = format!("\u{25C6} {}", player_state.shards);
+    ui.draw_text(
+        Pos2::new(bar_x - 50.0 * s, bar_y + 22.0 * s),
+        &shard_text,
+        13.0 * s,
+        Color::rgba(0.55, 0.85, 0.95, 1.0),
+    );
+
     // Active buff / debuff strip.
     let local_effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
         .query::<(&Effects, &LocalPlayer)>()
@@ -146,10 +187,17 @@ pub fn render_hud(
         .next()
         .unwrap_or_default();
     if !local_effects.is_empty() {
+        // Local HUD pips: bigger so the icon reads at a glance
+        // and the rect is comfortably hoverable. Bumped from
+        // 28px (engine default) so the strip's top edge moves
+        // up accordingly.
+        let pip = 40.0 * s;
         draw_effect_pip_strip(
             ui,
-            Pos2::new(bar_x, bar_y - 34.0 * s),
+            Pos2::new(bar_x, bar_y - pip - 6.0 * s),
             &local_effects,
+            pip,
+            true,
         );
     }
 
@@ -269,6 +317,10 @@ pub fn render_ability_bar(
     ui: &mut Ui<'_>,
     abilities: &AbilitySlot,
     player_level: u32,
+    // Current essence pool in raw units (`essence_pct *
+    // max_essence`). Drives the unaffordable-slot tint and the
+    // cost line in the tooltip.
+    current_essence: f32,
     targeting_slot: Option<usize>,
 ) -> Option<usize> {
     const AB_SIZE_BASE: f32 = 64.0;
@@ -304,6 +356,12 @@ pub fn render_ability_bar(
         } else if let Some(state) = slot {
             let remaining = 1.0 - state.cooldown_progress();
             sb = sb.cooldown(remaining);
+            // Dim slots the player can't afford right now. Cost
+            // 0 abilities (Melee, Evasive Roll, free triggers)
+            // are always affordable.
+            if state.ability.resource_cost > current_essence + 1e-3 {
+                sb = sb.enabled(false);
+            }
             if let Some(name) = state.ability.icon {
                 sb = sb.icon(name);
             } else {
@@ -346,6 +404,16 @@ pub fn render_ability_bar(
             } else {
                 format!("Dmg: {:.0}%", state.ability.damage_mult * 100.0)
             };
+            let cost_line = if state.ability.channel_cost_per_sec > 0.0 {
+                Some(format!(
+                    "Essence: {:.0} / sec",
+                    state.ability.channel_cost_per_sec
+                ))
+            } else if state.ability.resource_cost > 0.0 {
+                Some(format!("Essence: {:.0}", state.ability.resource_cost))
+            } else {
+                None
+            };
             let proj = if state.ability.projectile_count > 1 {
                 Some(format!("Projectiles: {}", state.ability.projectile_count))
             } else {
@@ -375,6 +443,15 @@ pub fn render_ability_bar(
                     Color::rgba(0.7, 0.7, 0.7, 0.8),
                 ));
             }
+            if let Some(ref c) = cost_line {
+                let affordable = state.ability.resource_cost <= current_essence + 1e-3;
+                let color = if affordable {
+                    Color::rgba(0.55, 0.75, 0.95, 0.95)
+                } else {
+                    Color::rgba(0.85, 0.45, 0.45, 0.95)
+                };
+                lines.push(TooltipLine::new(c.as_str(), theme.fonts.size_sm, color));
+            }
             let slot_rect = Rect::from_xywh(
                 ab_x + idx as f32 * (ab_size + ab_gap),
                 ab_y,
@@ -397,26 +474,38 @@ pub fn render_ability_bar(
 
 /// Screen-space buff / debuff pip strip. Anchors the strip's
 /// top-left at `top_left` and renders one pip per active effect
-/// (icon + cooldown drain). Used by the local-player HUD and
-/// re-exported to the world-overlay module so enemy / ally pips
-/// share the exact same visual.
+/// (icon + cooldown drain).
+///
+/// `pip_size` lets the local HUD use a chunkier hover-friendly
+/// size while the world-overlay variants keep the smaller pip
+/// that fits above an enemy's HP bar without dwarfing it.
+///
+/// When `interactive` is `true`, each pip registers an
+/// [`Ui::interact_hover`] and shows a tooltip describing the
+/// effect (name, remaining duration, and a one-line summary
+/// per `EffectKind`). Pass `false` for purely visual strips.
 pub(crate) fn draw_effect_pip_strip(
     ui: &mut Ui<'_>,
     top_left: Pos2,
     effects: &[rift_engine::ecs::components::ActiveEffect],
+    pip_size: f32,
+    interactive: bool,
 ) {
-    const PIP_SIZE: f32 = 28.0;
-    const PIP_GAP: f32 = 3.0;
+    let pip_gap = (pip_size * 0.12).max(2.0);
 
     let mut x = top_left.x;
     let y = top_left.y;
-    for eff in effects {
+    // Tooltip is drawn in a second pass after every pip rect
+    // is laid out, so a hovered pip's tooltip sits on top of
+    // any later pip in the same strip.
+    let mut tooltip_for: Option<(usize, Pos2)> = None;
+    for (i, eff) in effects.iter().enumerate() {
         let Some(def) = rift_game::effects::lookup(eff.id) else {
             continue;
         };
-        let pip = Rect::from_xywh(x, y, PIP_SIZE, PIP_SIZE);
+        let pip = Rect::from_xywh(x, y, pip_size, pip_size);
         ui.draw_rect(
-            Rect::from_xywh(pip.x() - 1.0, pip.y() - 1.0, PIP_SIZE + 2.0, PIP_SIZE + 2.0),
+            Rect::from_xywh(pip.x() - 1.0, pip.y() - 1.0, pip_size + 2.0, pip_size + 2.0),
             Color::rgba(0.0, 0.0, 0.0, 0.85),
         );
         if let Some(icon) = def.icon {
@@ -431,14 +520,123 @@ pub(crate) fn draw_effect_pip_strip(
             0.0
         };
         if frac > 0.0 {
-            let drain_h = PIP_SIZE * frac;
+            let drain_h = pip_size * frac;
             ui.draw_rect(
-                Rect::from_xywh(pip.x(), pip.y(), PIP_SIZE, drain_h),
+                Rect::from_xywh(pip.x(), pip.y(), pip_size, drain_h),
                 Color::rgba(0.0, 0.0, 0.0, 0.55),
             );
         }
-        x += PIP_SIZE + PIP_GAP;
+        // Remaining seconds — small numeric label so the player
+        // doesn't have to estimate the drain height. Skip when
+        // the pip is tiny (world-overlay variants) so the text
+        // doesn't smear over the icon.
+        if pip_size >= 26.0 && eff.remaining > 0.05 {
+            let secs = eff.remaining.ceil() as i32;
+            let lbl = if secs >= 10 {
+                format!("{secs}")
+            } else {
+                format!("{:.1}", eff.remaining)
+            };
+            let lbl_size = (pip_size * 0.30).max(10.0);
+            let lw = ui.measure_text(&lbl, lbl_size);
+            // Outline-ish: draw a slightly offset shadow then
+            // the foreground so the digit reads against either
+            // a bright icon or a dark drain.
+            let lx = pip.max.x - lw - 2.0;
+            let ly = pip.max.y - lbl_size - 1.0;
+            ui.draw_text(Pos2::new(lx + 1.0, ly + 1.0), &lbl, lbl_size, Color::rgba(0.0, 0.0, 0.0, 0.85));
+            ui.draw_text(Pos2::new(lx, ly), &lbl, lbl_size, Color::rgba(1.0, 1.0, 1.0, 0.95));
+        }
+        if interactive {
+            let id = Id::root("hud_effect_pip").child((eff.id as u32, i));
+            let hovered = ui.interact_hover(id, pip);
+            if hovered && tooltip_for.is_none() {
+                tooltip_for = Some((i, Pos2::new(pip.x(), pip.max.y + 6.0)));
+            }
+        }
+        x += pip_size + pip_gap;
     }
+
+    if let Some((i, pos)) = tooltip_for {
+        if let Some(eff) = effects.get(i) {
+            if let Some(def) = rift_game::effects::lookup(eff.id) {
+                draw_effect_tooltip(ui, pos, eff, def);
+            }
+        }
+    }
+}
+
+/// One-shot tooltip for a single hovered effect pip. Pulled
+/// out of `draw_effect_pip_strip` so the strip body stays
+/// readable; called once per frame at most.
+fn draw_effect_tooltip(
+    ui: &mut Ui<'_>,
+    pos: Pos2,
+    eff: &rift_engine::ecs::components::ActiveEffect,
+    def: &rift_game::effects::EffectDef,
+) {
+    use rift_game::effects::EffectKind;
+    let theme = *ui.theme();
+    let [r, g, b] = def.color;
+    let header_col = Color::rgba(r, g, b, 1.0);
+
+    // Owned strings live in this Vec so the borrow handed to
+    // `TooltipLine` stays valid for the `Tooltip::show` call.
+    let mut texts: Vec<(String, f32, Color)> = Vec::new();
+    texts.push((
+        format!("{:.1}s remaining", eff.remaining.max(0.0)),
+        theme.fonts.size_md,
+        theme.colors.text_dim,
+    ));
+    for kind in def.effects {
+        let line = match kind {
+            EffectKind::DamageOverTime { dps, interval } => {
+                format!("{:.0} damage / sec (every {:.1}s)", dps, interval)
+            }
+            EffectKind::HealOverTime { hps, interval } => {
+                format!("{:.0} heal / sec (every {:.1}s)", hps, interval)
+            }
+            EffectKind::MoveSpeedMult(m) => {
+                let pct = ((m - 1.0) * 100.0).round() as i32;
+                if pct >= 0 {
+                    format!("+{pct}% movement speed")
+                } else {
+                    format!("{pct}% movement speed")
+                }
+            }
+            EffectKind::IncomingDamageMult(m) => {
+                let pct = ((m - 1.0) * 100.0).round() as i32;
+                if pct >= 0 {
+                    format!("+{pct}% damage taken")
+                } else {
+                    format!("{pct}% damage taken")
+                }
+            }
+            EffectKind::HealingReceivedMult(m) => {
+                let pct = ((m - 1.0) * 100.0).round() as i32;
+                if pct >= 0 {
+                    format!("+{pct}% healing received")
+                } else {
+                    format!("{pct}% healing received")
+                }
+            }
+        };
+        texts.push((line, theme.fonts.size_md, theme.colors.text));
+    }
+    let lines: Vec<TooltipLine<'_>> = texts
+        .iter()
+        .map(|(s, sz, c)| TooltipLine {
+            text: s.as_str(),
+            size: *sz,
+            color: *c,
+        })
+        .collect();
+    Tooltip::new()
+        .header(def.name)
+        .header_color(header_col)
+        .min_width(180.0)
+        .pad(8.0)
+        .show(ui, pos, &lines);
 }
 
 /// Compute a 1-2 letter abbreviation from an ability name for

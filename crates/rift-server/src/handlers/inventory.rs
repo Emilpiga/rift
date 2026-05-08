@@ -6,7 +6,7 @@
 //! layout.
 
 use rift_net::{Channel, ClientId, NetId, ServerMsg};
-use rift_persistence::PersistedItem;
+use rift_persistence::{PersistedItem, PersistedStashTab};
 
 use super::item_to_blob;
 use crate::Server;
@@ -71,6 +71,7 @@ impl Server {
                     // the field's value here is ignored.
                     slot_index: 0,
                     anchored,
+                    tab_index: 0,
                 };
                 if !handle.append_inventory_item(rec.id, persisted) {
                     log::warn!("persistence: append_inventory_item dropped for {from:?}");
@@ -92,6 +93,7 @@ impl Server {
             return;
         }
         self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
         self.persist_inventory_state(from);
     }
 
@@ -106,6 +108,7 @@ impl Server {
             return;
         }
         self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
         self.persist_inventory_state(from);
     }
 
@@ -132,6 +135,79 @@ impl Server {
         );
     }
 
+    /// Compute the list of base-item indices currently equipped by
+    /// `who` whose `BaseItem::model_path` is `Some` — i.e. the
+    /// pieces that translate into a visible avatar attachment on
+    /// other clients. Items without a `model_path` are still
+    /// included; the receiving client filters them. Sending all
+    /// equipped base ids keeps the wire shape stable as art
+    /// catches up to gameplay.
+    pub(crate) fn current_visible_base_ids(&self, who: ClientId) -> Vec<u16> {
+        self.sim_for_client(who)
+            .player_equipment(who)
+            .iter()
+            .map(|(_, item)| {
+                rift_game::loot::BASE_ITEMS
+                    .iter()
+                    .position(|b| b.id == item.base.id)
+                    .map(|p| p as u16)
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Push `who`'s current visible-equipment list to every
+    /// other client sharing their world (instance or hub) so
+    /// remote avatars stay dressed in lockstep with server-side
+    /// equipment changes. The owning client doesn't need this
+    /// message — its own attachments are driven by the local
+    /// `EquipmentSync` flow.
+    pub(crate) fn broadcast_peer_equipment_visuals(&mut self, who: ClientId) {
+        let base_ids = self.current_visible_base_ids(who);
+        let recipients: Vec<ClientId> = self
+            .clients_in_world_with(who)
+            .into_iter()
+            .filter(|cid| *cid != who)
+            .collect();
+        if recipients.is_empty() {
+            return;
+        }
+        let msg = ServerMsg::PeerEquipmentVisuals {
+            client_id: who,
+            base_ids,
+        };
+        for cid in recipients {
+            self.send_to(cid, Channel::Control, &msg);
+        }
+    }
+
+    /// Catch `to` up on the visible equipment of every other
+    /// player currently sharing their world. Called whenever a
+    /// client joins a new world group (initial connect, or
+    /// crossing between hub and a rift instance) so their
+    /// remote-avatar attachments are dressed on first frame.
+    pub(crate) fn catch_up_peer_equipment_visuals(&mut self, to: ClientId) {
+        let peers: Vec<ClientId> = self
+            .clients_in_world_with(to)
+            .into_iter()
+            .filter(|cid| *cid != to)
+            .collect();
+        let payloads: Vec<(ClientId, Vec<u16>)> = peers
+            .into_iter()
+            .map(|cid| (cid, self.current_visible_base_ids(cid)))
+            .collect();
+        for (cid, base_ids) in payloads {
+            self.send_to(
+                to,
+                Channel::Control,
+                &ServerMsg::PeerEquipmentVisuals {
+                    client_id: cid,
+                    base_ids,
+                },
+            );
+        }
+    }
+
     /// Snapshot the picker's bag + equipment into a flat
     /// `Vec<PersistedItem>` and queue a `ResetCharacterInventory`
     /// so the database row set matches the post-swap layout.
@@ -155,6 +231,7 @@ impl Server {
                     equipped_slot: slot.map(|b| b as i16),
                     slot_index,
                     anchored,
+                    tab_index: 0,
                 }
             })
             .collect();
@@ -187,16 +264,22 @@ impl Server {
         self.hub.set_stash_open(from, false);
     }
 
-    /// Move the bag item at `inventory_index` into the stash and
-    /// re-broadcast both inventories. Persists both tables.
-    pub(crate) fn handle_deposit_to_stash(&mut self, from: ClientId, inventory_index: usize) {
+    /// Move the bag item at `inventory_index` into stash tab
+    /// `tab_index` and re-broadcast both inventories. Persists
+    /// both tables.
+    pub(crate) fn handle_deposit_to_stash(
+        &mut self,
+        from: ClientId,
+        inventory_index: usize,
+        tab_index: usize,
+    ) {
         if !self.hub.is_stash_open(from) {
             log::debug!("stash: deposit rejected for {from:?} stash not open");
             return;
         }
-        if !self.hub.deposit_to_stash(from, inventory_index) {
+        if !self.hub.deposit_to_stash(from, inventory_index, tab_index) {
             log::debug!(
-                "stash: deposit rejected for {from:?} idx={inventory_index}"
+                "stash: deposit rejected for {from:?} idx={inventory_index} tab={tab_index}"
             );
             return;
         }
@@ -206,16 +289,22 @@ impl Server {
         self.persist_stash_state(from);
     }
 
-    /// Move the stash item at `stash_index` back into the bag
-    /// and re-broadcast both inventories. Persists both tables.
-    pub(crate) fn handle_withdraw_from_stash(&mut self, from: ClientId, stash_index: usize) {
+    /// Move the stash item at `(tab_index, stash_index)` back
+    /// into the bag and re-broadcast both inventories. Persists
+    /// both tables.
+    pub(crate) fn handle_withdraw_from_stash(
+        &mut self,
+        from: ClientId,
+        tab_index: usize,
+        stash_index: usize,
+    ) {
         if !self.hub.is_stash_open(from) {
             log::debug!("stash: withdraw rejected for {from:?} stash not open");
             return;
         }
-        if !self.hub.withdraw_from_stash(from, stash_index) {
+        if !self.hub.withdraw_from_stash(from, tab_index, stash_index) {
             log::debug!(
-                "stash: withdraw rejected for {from:?} idx={stash_index}"
+                "stash: withdraw rejected for {from:?} tab={tab_index} idx={stash_index}"
             );
             return;
         }
@@ -230,6 +319,7 @@ impl Server {
         &mut self,
         from: ClientId,
         inventory_index: usize,
+        tab_index: usize,
         stash_index: usize,
     ) {
         if !self.hub.is_stash_open(from) {
@@ -238,11 +328,11 @@ impl Server {
         }
         if !self
             .hub
-            .deposit_to_stash_slot(from, inventory_index, stash_index)
+            .deposit_to_stash_slot(from, inventory_index, tab_index, stash_index)
         {
             log::debug!(
                 "stash: deposit-slot rejected for {from:?} inv={inventory_index} \
-                 stash={stash_index}"
+                 tab={tab_index} stash={stash_index}"
             );
             return;
         }
@@ -256,6 +346,7 @@ impl Server {
     pub(crate) fn handle_withdraw_from_stash_slot(
         &mut self,
         from: ClientId,
+        tab_index: usize,
         stash_index: usize,
         inventory_index: usize,
     ) {
@@ -265,11 +356,11 @@ impl Server {
         }
         if !self
             .hub
-            .withdraw_from_stash_slot(from, stash_index, inventory_index)
+            .withdraw_from_stash_slot(from, tab_index, stash_index, inventory_index)
         {
             log::debug!(
-                "stash: withdraw-slot rejected for {from:?} stash={stash_index} \
-                 inv={inventory_index}"
+                "stash: withdraw-slot rejected for {from:?} tab={tab_index} \
+                 stash={stash_index} inv={inventory_index}"
             );
             return;
         }
@@ -283,18 +374,21 @@ impl Server {
     /// current authoritative stash contents.
     pub(crate) fn send_stash_state(&mut self, to: ClientId) {
         let stash = self.hub.player_stash(to);
-        let blobs: Vec<Option<rift_net::messages::ItemBlob>> =
-            stash.iter().map(|s| s.as_ref().map(item_to_blob)).collect();
-        self.send_to(
-            to,
-            Channel::Control,
-            &ServerMsg::StashSync { items: blobs },
-        );
+        let tabs: Vec<rift_net::messages::StashTabBlob> = stash
+            .into_iter()
+            .map(|tab| rift_net::messages::StashTabBlob {
+                name: tab.name,
+                color: tab.color,
+                items: tab.items.iter().map(|s| s.as_ref().map(item_to_blob)).collect(),
+            })
+            .collect();
+        self.send_to(to, Channel::Control, &ServerMsg::StashSync { tabs });
     }
 
     /// Snapshot the picker's stash into a flat
-    /// `Vec<PersistedItem>` and queue a `ResetCharacterStash`
-    /// so the database row set matches the post-transfer layout.
+    /// `Vec<PersistedItem>` (one row per tab × slot) plus the
+    /// per-tab metadata, and queue a `ResetCharacterStash` so
+    /// the database row set matches the post-transfer layout.
     pub(crate) fn persist_stash_state(&mut self, from: ClientId) {
         let Some(handle) = &self.persistence else {
             return;
@@ -303,13 +397,18 @@ impl Server {
             return;
         };
         let stash = self.hub.dump_player_stash(from);
-        let rows: Vec<PersistedItem> = stash
-            .into_iter()
-            .enumerate()
-            .filter_map(|(slot_index, opt)| {
-                let item = opt?;
+        let mut tab_rows: Vec<PersistedStashTab> = Vec::with_capacity(stash.len());
+        let mut item_rows: Vec<PersistedItem> = Vec::new();
+        for (tab_index, tab) in stash.into_iter().enumerate() {
+            tab_rows.push(PersistedStashTab {
+                tab_index: tab_index as i16,
+                name: tab.name,
+                color: tab.color as i32,
+            });
+            for (slot_index, opt) in tab.items.into_iter().enumerate() {
+                let Some(item) = opt else { continue };
                 let (base_id, rarity, ilvl, affixes, anchored) = item.to_persisted();
-                Some(PersistedItem {
+                item_rows.push(PersistedItem {
                     base_id,
                     rarity: rarity as i16,
                     ilvl: ilvl as i32,
@@ -317,10 +416,11 @@ impl Server {
                     equipped_slot: None,
                     slot_index: slot_index as i32,
                     anchored,
-                })
-            })
-            .collect();
-        if !handle.reset_character_stash(rec_id, rows) {
+                    tab_index: tab_index as i16,
+                });
+            }
+        }
+        if !handle.reset_character_stash(rec_id, tab_rows, item_rows) {
             log::warn!("persistence: reset_character_stash dropped for {from:?}");
         }
     }
@@ -336,16 +436,82 @@ impl Server {
         self.persist_inventory_state(from);
     }
 
-    /// Reorder the stash: swap two slots. Either may be empty.
-    /// Requires an open stash session. Persists the stash on
-    /// success.
-    pub(crate) fn handle_swap_stash_slots(&mut self, from: ClientId, a: usize, b: usize) {
+    /// Reorder the stash: swap two slots within `tab_index`.
+    /// Either may be empty. Requires an open stash session.
+    /// Persists the stash on success.
+    pub(crate) fn handle_swap_stash_slots(
+        &mut self,
+        from: ClientId,
+        tab_index: usize,
+        a: usize,
+        b: usize,
+    ) {
         if !self.hub.is_stash_open(from) {
             log::debug!("stash: swap rejected for {from:?} stash not open");
             return;
         }
-        if !self.hub.swap_stash_slots(from, a, b) {
-            log::debug!("stash: swap rejected for {from:?} a={a} b={b}");
+        if !self.hub.swap_stash_slots(from, tab_index, a, b) {
+            log::debug!("stash: swap rejected for {from:?} tab={tab_index} a={a} b={b}");
+            return;
+        }
+        self.send_stash_state(from);
+        self.persist_stash_state(from);
+    }
+
+    /// Spend shards to add another stash tab. Replies with
+    /// fresh `StashSync` + `ShardsSync` on success and persists
+    /// both the tab list (via `persist_stash_state`) and the
+    /// new shard balance (via `persist_shards_for`).
+    pub(crate) fn handle_buy_stash_tab(&mut self, from: ClientId) {
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: buy-tab rejected for {from:?} stash not open");
+            return;
+        }
+        let Some((new_shards, new_count)) = self.hub.buy_stash_tab(from) else {
+            log::debug!("stash: buy-tab rejected for {from:?} insufficient or capped");
+            return;
+        };
+        log::info!("stash: {from:?} bought tab #{new_count} (shards={new_shards})");
+        self.send_stash_state(from);
+        self.send_to(from, Channel::Control, &ServerMsg::ShardsSync { amount: new_shards });
+        self.persist_stash_state(from);
+        self.persist_shards_for(from, new_shards);
+    }
+
+    /// Rename a stash tab. Empty / whitespace-only names are
+    /// dropped silently (the client should validate before
+    /// sending).
+    pub(crate) fn handle_rename_stash_tab(
+        &mut self,
+        from: ClientId,
+        tab_index: usize,
+        name: &str,
+    ) {
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: rename rejected for {from:?} stash not open");
+            return;
+        }
+        if !self.hub.rename_stash_tab(from, tab_index, name) {
+            log::debug!("stash: rename rejected for {from:?} tab={tab_index}");
+            return;
+        }
+        self.send_stash_state(from);
+        self.persist_stash_state(from);
+    }
+
+    /// Recolor a stash tab.
+    pub(crate) fn handle_recolor_stash_tab(
+        &mut self,
+        from: ClientId,
+        tab_index: usize,
+        color: u32,
+    ) {
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: recolor rejected for {from:?} stash not open");
+            return;
+        }
+        if !self.hub.recolor_stash_tab(from, tab_index, color) {
+            log::debug!("stash: recolor rejected for {from:?} tab={tab_index}");
             return;
         }
         self.send_stash_state(from);
@@ -372,6 +538,73 @@ impl Server {
         self.persist_inventory_state(from);
     }
 
+    /// Salvage the bag item at `inventory_index` for shards.
+    /// Sends back a fresh `InventorySync` (slot is gone) and a
+    /// `ShardsSync` (new total), and persists both the bag and
+    /// the new shard balance. Anchored items are rejected
+    /// server-side (see `Sim::salvage_inventory_item`) so the
+    /// client doesn't have to special-case them — a rejected
+    /// salvage just produces no broadcast.
+    pub(crate) fn handle_salvage_inventory_item(
+        &mut self,
+        from: ClientId,
+        inventory_index: usize,
+    ) {
+        let Some(new_total) = self
+            .sim_for_client_mut(from)
+            .salvage_inventory_item(from, inventory_index)
+        else {
+            log::debug!(
+                "inv: salvage rejected for {from:?} idx={inventory_index}"
+            );
+            return;
+        };
+        log::info!(
+            "inv: {from:?} salvaged idx={inventory_index} -> {new_total} shards"
+        );
+        self.broadcast_inventory_state(from);
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::ShardsSync { amount: new_total },
+        );
+        self.persist_inventory_state(from);
+        self.persist_shards_for(from, new_total);
+    }
+
+    /// Bulk-salvage every non-anchored bag item whose rarity is
+    /// at most `rarity_max`. Always emits an
+    /// `InventorySync` + `ShardsSync` even when nothing
+    /// matched, so the client UI can re-render and reset its
+    /// "confirm" state. Persists when at least one item was
+    /// actually salvaged.
+    pub(crate) fn handle_salvage_inventory_bulk(
+        &mut self,
+        from: ClientId,
+        rarity_max: u8,
+    ) {
+        let Some((count, new_total)) = self
+            .sim_for_client_mut(from)
+            .salvage_inventory_bulk(from, rarity_max)
+        else {
+            log::debug!("inv: bulk salvage rejected for {from:?}");
+            return;
+        };
+        log::info!(
+            "inv: {from:?} bulk-salvaged {count} items (rarity<={rarity_max}) -> {new_total} shards"
+        );
+        self.broadcast_inventory_state(from);
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::ShardsSync { amount: new_total },
+        );
+        if count > 0 {
+            self.persist_inventory_state(from);
+            self.persist_shards_for(from, new_total);
+        }
+    }
+
     /// Move whatever's currently in `slot` into the bag at
     /// `inventory_index` (drag-drop counterpart to
     /// `handle_unequip_item`).
@@ -389,6 +622,7 @@ impl Server {
             return;
         }
         self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
         self.persist_inventory_state(from);
     }
 }

@@ -117,6 +117,7 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                     use winit::keyboard::{Key, NamedKey};
                     match &event.logical_key {
                         Key::Named(NamedKey::Backspace) => self.input.on_backspace(),
+                        Key::Named(NamedKey::Delete) => self.input.on_delete(),
                         Key::Named(NamedKey::Enter) => self.input.on_enter(),
                         // Space arrives as a *named* key, not as
                         // `Character(" ")`, so route it into the
@@ -129,6 +130,31 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                             }
                         }
                         _ => {}
+                    }
+                    // Text-input widgets need every press *edge*
+                    // (auto-repeat included) for arrow / Home /
+                    // End / Delete navigation. The `keys_held`
+                    // set above only fires on the very first
+                    // physical press, so we forward physical
+                    // codes here separately. Modifier keys are
+                    // intentionally skipped — selection logic
+                    // reads their *held* state via
+                    // `is_key_held_raw`.
+                    if let PhysicalKey::Code(kc) = event.physical_key {
+                        use winit::keyboard::KeyCode as KC;
+                        if !matches!(
+                            kc,
+                            KC::ShiftLeft
+                                | KC::ShiftRight
+                                | KC::ControlLeft
+                                | KC::ControlRight
+                                | KC::AltLeft
+                                | KC::AltRight
+                                | KC::SuperLeft
+                                | KC::SuperRight
+                        ) {
+                            self.input.on_key_event(kc);
+                        }
                     }
                 }
             }

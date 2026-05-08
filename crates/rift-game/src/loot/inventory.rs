@@ -9,6 +9,7 @@ use crate::stats::StatBlock;
 /// All slots a character has, in stable display order.
 pub const ALL_SLOTS: &[EquipSlot] = &[
     EquipSlot::Weapon,
+    EquipSlot::Shoulders,
     EquipSlot::Helm,
     EquipSlot::Chest,
     EquipSlot::Legs,
@@ -23,6 +24,7 @@ pub const ALL_SLOTS: &[EquipSlot] = &[
 pub struct Loadout {
     weapon: Option<Item>,
     helm: Option<Item>,
+    shoulders: Option<Item>,
     chest: Option<Item>,
     legs: Option<Item>,
     hands: Option<Item>,
@@ -41,6 +43,7 @@ impl Loadout {
         match slot {
             EquipSlot::Weapon => self.weapon.as_ref(),
             EquipSlot::Helm => self.helm.as_ref(),
+            EquipSlot::Shoulders => self.shoulders.as_ref(),
             EquipSlot::Chest => self.chest.as_ref(),
             EquipSlot::Legs => self.legs.as_ref(),
             EquipSlot::Hands => self.hands.as_ref(),
@@ -57,6 +60,7 @@ impl Loadout {
         let dst: &mut Option<Item> = match slot {
             EquipSlot::Weapon => &mut self.weapon,
             EquipSlot::Helm => &mut self.helm,
+            EquipSlot::Shoulders => &mut self.shoulders,
             EquipSlot::Chest => &mut self.chest,
             EquipSlot::Legs => &mut self.legs,
             EquipSlot::Hands => &mut self.hands,

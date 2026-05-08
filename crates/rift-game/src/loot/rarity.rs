@@ -62,3 +62,20 @@ impl Rarity {
         (self as u8) >= (other as u8)
     }
 }
+
+/// Per-rarity base salvage yield, lightly scaled by ilvl. The
+/// curve `1 + ilvl/20` keeps early salvage meaningful (a level-1
+/// Common still mints 1 shard) while letting deep-floor drops be
+/// noticeably more valuable. Lives in `rift-game` so both the
+/// server (authoritative balance) and the client (tooltip
+/// preview, "Salvage Trash" totals) compute identical numbers.
+pub fn salvage_yield(rarity: Rarity, ilvl: u32) -> u32 {
+    let base = match rarity {
+        Rarity::Common => 1.0,
+        Rarity::Magic => 3.0,
+        Rarity::Rare => 8.0,
+        Rarity::Legendary => 25.0,
+    };
+    let scale = 1.0 + (ilvl as f32) / 20.0;
+    (base * scale).round().max(1.0) as u32
+}

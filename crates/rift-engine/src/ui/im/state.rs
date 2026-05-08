@@ -39,8 +39,40 @@ impl DragState {
     }
 }
 
-/// One entry on the modal stack. The top entry intercepts mouse
-/// + keyboard above its layer; everything below is greyed out.
+/// Editor state for whichever text field currently owns
+/// keyboard focus. Holds the selection range as byte offsets
+/// into the field's `&mut String`. `anchor == caret` means no
+/// active selection (just a caret); `anchor != caret` means a
+/// range is selected. Reset whenever focus moves to a different
+/// id so the new field starts with a fresh, end-anchored caret.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextSelection {
+    /// Byte offset where a click / Shift-anchor was placed.
+    pub anchor: usize,
+    /// Byte offset where the caret currently sits. Always lies
+    /// on a UTF-8 char boundary of the underlying string.
+    pub caret: usize,
+}
+
+impl TextSelection {
+    /// `true` iff `anchor != caret` — i.e. a non-empty span is
+    /// currently selected. Editing operations branch on this.
+    pub fn has_range(&self) -> bool {
+        self.anchor != self.caret
+    }
+
+    /// `(min, max)` byte range, ordered. Empty when `has_range`
+    /// is false.
+    pub fn range(&self) -> (usize, usize) {
+        if self.anchor <= self.caret {
+            (self.anchor, self.caret)
+        } else {
+            (self.caret, self.anchor)
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modal {
     pub id: Id,
@@ -53,6 +85,17 @@ pub struct UiState {
     /// Widget that currently owns keyboard focus (text field,
     /// pressed button about to fire on release, …).
     pub focus: Option<Id>,
+    /// Selection / caret state for the focused text field.
+    /// Reset to default whenever `focus` changes id (the
+    /// `TextField` widget detects the focus transition and
+    /// re-seeds this with caret-at-end on first focus). For
+    /// non-text-field focus owners (e.g. a button) it sits
+    /// idle.
+    pub text_selection: TextSelection,
+    /// `true` while the left mouse button is held *and* the
+    /// initial press happened inside the focused text field —
+    /// drives mouse-drag selection. Cleared on release.
+    pub text_drag: bool,
     /// Widget the cursor was over at the *end* of the previous
     /// frame. Read at the start of the next frame to decide
     /// whether widgets should render in their hover style.

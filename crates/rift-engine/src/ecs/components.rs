@@ -69,6 +69,18 @@ pub struct AttachmentPiece {
     /// gameplay code (e.g. equipment changes); when false, the skinning
     /// system collapses the renderer object so it disappears.
     pub visible: bool,
+    /// Opaque, gameplay-defined identifier for this piece. The engine
+    /// never inspects it; client code uses it to find and replace the
+    /// piece occupying a logical "slot" (e.g. equipment slot byte) so
+    /// re-equipping doesn't accumulate orphan attachments. Default 0.
+    pub tag: u32,
+    /// When true, the skinning system inflates this piece's vertices
+    /// outward along their normals to keep clothing from z-fighting
+    /// the base body. Set to false for cosmetic geometry whose shape
+    /// matters (eyeballs, hair-card strands) — those would otherwise
+    /// puff outward / split along card normals. Defaults to true so
+    /// existing equipment call sites keep their old behavior.
+    pub inflate: bool,
 }
 
 /// Set of outfit / armor pieces attached to a skinned character. All

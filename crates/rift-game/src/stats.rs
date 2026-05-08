@@ -52,6 +52,13 @@ pub enum Stat {
     Vitality,
     Armor,
     Evasion,
+    /// Maximum essence pool (flat). Authored on items as e.g.
+    /// `+12 Max Essence`. Stacks with class base + level.
+    MaxEssence,
+    /// Essence regen bonus, percent. Multiplies the class's
+    /// base regen rate the same way `Stat::Health` percent
+    /// channels work.
+    EssenceRegen,
     // Utility
     CooldownReduction,
     ResourceRegen,
@@ -85,6 +92,8 @@ impl Stat {
             Stat::Vitality => "Vitality",
             Stat::Armor => "Armor",
             Stat::Evasion => "Evasion",
+            Stat::MaxEssence => "Max Essence",
+            Stat::EssenceRegen => "Essence Regen",
             Stat::CooldownReduction => "Cooldown Reduction",
             Stat::ResourceRegen => "Resource Regen",
             Stat::MoveSpeed => "Move Speed",
@@ -112,6 +121,7 @@ impl Stat {
                 | Stat::AttackSpeed
                 | Stat::CooldownReduction
                 | Stat::ResourceRegen
+                | Stat::EssenceRegen
                 | Stat::MoveSpeed
                 | Stat::Evasion
                 | Stat::WeaponDamage
@@ -251,6 +261,14 @@ pub struct CharacterStats {
     /// Maximum hit points. Built from class HP + vitality + flat
     /// `Stat::Health` from gear.
     pub max_hp: f32,
+    /// Maximum essence pool (the universal ability resource).
+    /// Class base + per-level scaling + flat `Stat::MaxEssence`.
+    /// Drives [`Ability::resource_cost`] gating on the server
+    /// and the essence bar on the HUD.
+    pub max_essence: f32,
+    /// Essence per second restored while not actively spending.
+    /// Class base * (1 + `Stat::EssenceRegen`).
+    pub essence_regen: f32,
     /// Flat armor — mirrors `Stat::Armor`.
     pub armor: f32,
     /// Evasion chance, 0..1 — mirrors `Stat::Evasion`.
@@ -355,6 +373,12 @@ impl CharacterStats {
                 + flat(Stat::Health)
                 + flat(Stat::Vitality))
                 * pct(Stat::Health),
+            max_essence: (class.base_essence
+                + class.essence_per_level * level as f32
+                + flat(Stat::MaxEssence))
+                * pct(Stat::MaxEssence),
+            essence_regen: class.base_essence_regen
+                * (1.0 + flat(Stat::EssenceRegen)),
             armor: flat(Stat::Armor) * pct(Stat::Armor),
             evasion: flat(Stat::Evasion),
             defense: class.base_defense * attr_defense_mult,

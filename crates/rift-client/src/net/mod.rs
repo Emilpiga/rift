@@ -15,6 +15,7 @@ mod snapshot;
 mod world_sync;
 
 pub use snapshot::{PendingFloor, RemoteEntity, RemoteProfile};
+pub use world_sync::wire_gender_to_game;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -166,6 +167,15 @@ pub struct NetClient {
     /// reliable `Death` event may still need that position to drop
     /// a blood decal). Updated whenever we ingest a snapshot row.
     pub last_positions: HashMap<NetId, Vec3>,
+    /// NetIds the server has confirmed dead via reliable
+    /// `WorldEvent::Death`. Populated by the event handler and
+    /// consulted by the world-sync despawn pass to distinguish
+    /// "row vanished because it died" from "row vanished
+    /// because it left the view-cull radius" — the latter
+    /// must NOT play the soul-return VFX. Entries are removed
+    /// when the entity's despawn-cleanup actually runs (or on
+    /// floor change), so the set never accumulates indefinitely.
+    pub dead_net_ids: std::collections::HashSet<NetId>,
     /// Reliable world events received this tick. Drained by the
     /// binary each frame so it can spawn floating combat text /
     /// hit reactions / death animations off them.
@@ -192,11 +202,26 @@ pub struct NetClient {
     /// `None` means "no fresh sync this frame"; the binary
     /// applies whole-cloth replacements only.
     pending_equipment_sync: Option<Vec<(u8, rift_net::messages::ItemBlob)>>,
+    /// Per-peer visible-equipment lists waiting to be applied to
+    /// remote avatars. Each entry is `(client_id, base_ids)` —
+    /// see `ServerMsg::PeerEquipmentVisuals`. The latest entry
+    /// for a given client wins; older entries for the same
+    /// client are coalesced on push so we never apply stale
+    /// state. Drained by the binary once per frame.
+    pub(super) pending_peer_equipment_visuals: VecDeque<(ClientId, Vec<u16>)>,
+    /// Latest known visible-equipment base ids per peer client.
+    /// Populated on receive and consulted on remote-avatar spawn
+    /// so a freshly-spawned avatar gets dressed with whatever the
+    /// server last told us about that player, not just whatever
+    /// changes happen *after* the spawn.
+    pub(super) peer_visuals_mirror:
+        std::collections::HashMap<ClientId, Vec<u16>>,
     /// Full stash replication for the local player. Sent by the
     /// server in reply to `OpenStash` and after every server-
-    /// applied deposit / withdraw. Drained by the binary so it
-    /// can replace `LootClientState::stash_items` whole.
-    pending_stash_sync: Option<Vec<Option<rift_net::messages::ItemBlob>>>,
+    /// applied deposit / withdraw / tab edit. Drained by the
+    /// binary so it can replace `LootClientState::stash_tabs`
+    /// whole.
+    pending_stash_sync: Option<Vec<rift_net::messages::StashTabBlob>>,
     /// Latest authoritative XP / level snapshot for the local
     /// character, drained by the binary once per frame and
     /// pushed into `PlayerState::experience`.
@@ -206,6 +231,10 @@ pub struct NetClient {
     /// `PlayerState::loadout`, which re-materializes the runtime
     /// `AbilitySlot`.
     pending_loadout: Option<[u8; 6]>,
+    /// Latest authoritative shard balance from
+    /// [`ServerMsg::ShardsSync`]. Drained by the binary once
+    /// per frame and mirrored into `PlayerState::shards`.
+    pending_shards: Option<u32>,
     /// Latest authoritative rift-progress snapshot. Same
     /// shape as `ServerMsg::RiftProgress` (progress, required,
     /// boss_spawned, boss_killed, floor_complete). Drained by
@@ -349,14 +378,18 @@ impl NetClient {
             projectile_trails: HashMap::new(),
             projectile_render: HashMap::new(),
             last_positions: HashMap::new(),
+            dead_net_ids: std::collections::HashSet::new(),
             pending_events: VecDeque::new(),
             pending_loot_claims: VecDeque::new(),
             pending_pickup_rejections: VecDeque::new(),
             pending_inventory_sync: None,
             pending_equipment_sync: None,
+            pending_peer_equipment_visuals: VecDeque::new(),
+            peer_visuals_mirror: HashMap::new(),
             pending_stash_sync: None,
             pending_character_stats: None,
             pending_loadout: None,
+            pending_shards: None,
             pending_rift_progress: None,
             pending_exit_vote: None,
             pending_chats: VecDeque::new(),
@@ -639,6 +672,12 @@ impl NetClient {
                 // from the previous floor; drop them so the next
                 // floor's snapshot path starts from a clean map.
                 self.last_positions.clear();
+                // Same reason for `dead_net_ids` — a floor change
+                // recycles the entire id range, so any leftover
+                // "this id died" markers would mis-fire on a
+                // freshly spawned enemy that happens to reuse the
+                // same NetId.
+                self.dead_net_ids.clear();
                 // Drop the snapshot mirror too. Otherwise the last
                 // pre-respawn snapshot (which still has hp=0 / DEAD
                 // for the player who died) survives the LoadFloor
@@ -696,9 +735,26 @@ impl NetClient {
                 log::info!("net: EquipmentSync {} slot(s)", slots.len());
                 self.pending_equipment_sync = Some(slots);
             }
-            ServerMsg::StashSync { items } => {
-                log::info!("net: StashSync {} item(s)", items.len());
-                self.pending_stash_sync = Some(items);
+            ServerMsg::PeerEquipmentVisuals { client_id, base_ids } => {
+                log::debug!(
+                    "net: PeerEquipmentVisuals client={client_id:?} {} item(s)",
+                    base_ids.len(),
+                );
+                // Mirror the latest list for this peer so a
+                // future avatar spawn can pick it up even if
+                // the message arrives before the avatar exists.
+                self.peer_visuals_mirror
+                    .insert(client_id, base_ids.clone());
+                // Coalesce: drop any stale pending entry for the
+                // same peer so we only apply the freshest list.
+                self.pending_peer_equipment_visuals
+                    .retain(|(cid, _)| *cid != client_id);
+                self.pending_peer_equipment_visuals
+                    .push_back((client_id, base_ids));
+            }
+            ServerMsg::StashSync { tabs } => {
+                log::info!("net: StashSync {} tab(s)", tabs.len());
+                self.pending_stash_sync = Some(tabs);
             }
             ServerMsg::CharacterStats { level, xp, xp_to_next } => {
                 log::debug!(
@@ -709,6 +765,10 @@ impl NetClient {
             ServerMsg::Loadout { slots } => {
                 log::debug!("net: Loadout {slots:?}");
                 self.pending_loadout = Some(slots);
+            }
+            ServerMsg::ShardsSync { amount } => {
+                log::debug!("net: ShardsSync amount={amount}");
+                self.pending_shards = Some(amount);
             }
             ServerMsg::RiftProgress {
                 progress,
@@ -936,12 +996,45 @@ impl NetClient {
         self.pending_equipment_sync.take()
     }
 
+    /// Drain every `PeerEquipmentVisuals` payload received since
+    /// the last call. Returned in arrival order so the binary can
+    /// apply them in sequence; coalescing already happened on
+    /// receive so each peer appears at most once.
+    pub fn drain_peer_equipment_visuals(
+        &mut self,
+    ) -> Vec<(ClientId, Vec<u16>)> {
+        std::mem::take(&mut self.pending_peer_equipment_visuals)
+            .into_iter()
+            .collect()
+    }
+
+    /// Resolve a peer's `ClientId` to the `hecs::Entity` of their
+    /// remote-avatar in the local world, if one has been spawned.
+    /// Used by the equipment-visuals dispatcher to know which
+    /// avatar to dress when a `PeerEquipmentVisuals` arrives.
+    pub fn avatar_for_client(&self, client_id: ClientId) -> Option<hecs::Entity> {
+        let net_id = self
+            .profiles
+            .iter()
+            .find_map(|(nid, p)| (p.client_id == client_id).then_some(*nid))?;
+        self.avatar_entities.get(&net_id).copied()
+    }
+
+    /// Resolve a peer's `ClientId` to their cosmetic profile
+    /// (character name, class, gender, ...). Used by the
+    /// equipment-visuals dispatcher to pick the gendered model
+    /// path when dressing the remote avatar.
+    pub fn profile_for_client(&self, client_id: ClientId) -> Option<&RemoteProfile> {
+        self.profiles
+            .values()
+            .find(|p| p.client_id == client_id)
+    }
+
     /// Take the most recent `StashSync` if one has arrived
-    /// since the last call. Mirrors [`Self::drain_inventory_sync`]
-    /// in shape.
+    /// since the last call. Returns the dense `[0..n)` tab list.
     pub fn drain_stash_sync(
         &mut self,
-    ) -> Option<Vec<Option<rift_net::messages::ItemBlob>>> {
+    ) -> Option<Vec<rift_net::messages::StashTabBlob>> {
         self.pending_stash_sync.take()
     }
 
@@ -962,6 +1055,13 @@ impl NetClient {
     /// authoritative bar.
     pub fn drain_loadout(&mut self) -> Option<[u8; 6]> {
         self.pending_loadout.take()
+    }
+
+    /// Drain the latest authoritative shard balance, if one
+    /// has arrived since the last call. The binary mirrors
+    /// the result onto `PlayerState::shards` once per frame.
+    pub fn drain_shards(&mut self) -> Option<u32> {
+        self.pending_shards.take()
     }
 
     /// Take the most recent `RiftProgress` reply if one has
@@ -992,6 +1092,16 @@ impl NetClient {
     /// locally for input responsiveness.
     pub fn our_net_id(&self) -> Option<NetId> {
         self.our_net_id
+    }
+
+    /// Latest essence pool fraction (0..=1) the server reported
+    /// for the local player, or `1.0` before the first snapshot
+    /// with our row arrives. The HUD reads this every frame to
+    /// drive the essence bar; the canonical scalar is on the
+    /// server.
+    pub fn local_essence_pct(&self) -> f32 {
+        let Some(nid) = self.our_net_id else { return 1.0 };
+        self.remote.get(&nid).map(|r| r.essence_pct).unwrap_or(1.0)
     }
 
     /// Look up a remote player's display name by `NetId`. Returns

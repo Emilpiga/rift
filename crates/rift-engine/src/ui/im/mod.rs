@@ -35,7 +35,7 @@ pub use id::Id;
 pub use layer::Layer;
 pub use rect::{Pad, Pos2, Rect, Vec2};
 pub use response::Response;
-pub use state::{DragState, Modal, UiState};
+pub use state::{DragState, Modal, TextSelection, UiState};
 pub use theme::{Colors, Fonts, Spacing, Theme, DEFAULT_THEME};
 pub use ui::{DragSourceResponse, DroppedPayload, Ui, UiOutput};
 pub use widgets::{

@@ -329,6 +329,12 @@ pub struct Ability {
     pub cooldown: f32,
     /// Resource cost (if any).
     pub resource_cost: f32,
+    /// Per-second essence drain while a channel ability is held.
+    /// `0.0` for instant-cast abilities (which use
+    /// [`Self::resource_cost`] instead). The server drains this
+    /// every channel tick and ends the channel cleanly when the
+    /// caster runs out of essence.
+    pub channel_cost_per_sec: f32,
     /// Base damage per hit (or per AoE/channel tick), pre-scaling.
     /// The server scales this by the caster's gear/attribute
     /// multiplier on the way to applying damage.
@@ -729,6 +735,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("FireMage_12"),
         cooldown: 0.5,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 8.0,
         damage_mult: 1.0,
         projectile_count: 1,
@@ -773,6 +780,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("Hunter_18"),
         cooldown: 4.0,
         resource_cost: 15.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.7,
         damage_mult: 0.7,
         projectile_count: 3,
@@ -817,6 +825,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 8.0,
         resource_cost: 25.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.5,
         damage_mult: 0.5,
         projectile_count: 6,
@@ -861,6 +870,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("FireMage_35"),
         cooldown: 12.0,
         resource_cost: 35.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.4,
         damage_mult: 0.4,
         projectile_count: 12,
@@ -902,6 +912,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("Monk_27"),
         cooldown: 6.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
         projectile_count: 0,
@@ -932,6 +943,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 15.0,
         resource_cost: 20.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
         projectile_count: 0,
@@ -955,6 +967,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("FrostMage_7"),
         cooldown: 0.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 18.0,
         base_damage: 1.6,
         damage_mult: 0.2,
         projectile_count: 0,
@@ -1005,6 +1018,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 0.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 1.0,
         projectile_count: 1,
@@ -1055,6 +1069,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 0.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 1.0,
         projectile_count: 0,
@@ -1078,6 +1093,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("Barbarian_18"),
         cooldown: 9.0,
         resource_cost: 25.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 2.2,
         damage_mult: 0.275,
         projectile_count: 0,
@@ -1115,6 +1131,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("FireMage_30"),
         cooldown: 7.0,
         resource_cost: 30.0,
+        channel_cost_per_sec: 0.0,
         // HUD-only fields. Authoritative damage lives in
         // `ChannelEffect::AuraAroundCaster::damage_per_tick`.
         base_damage: 7.0,
@@ -1176,6 +1193,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("Druid_17"),
         cooldown: 8.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         // HUD-only: heal amount mirrored from the kind for
         // tooltips. Authoritative value lives on the kind.
         base_damage: 40.0,
@@ -1206,6 +1224,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: Some("Druid_16"),
         cooldown: 14.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 60.0,
         damage_mult: 1.0,
         projectile_count: 0,
@@ -1245,6 +1264,7 @@ pub static REGISTRY: &[Ability] = &[
         // value lives here so the AI can read it.
         cooldown: 2.4,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 9.0,
         damage_mult: 1.0,
         projectile_count: 1,
@@ -1290,6 +1310,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 5.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 9.0,
         damage_mult: 1.0,
         projectile_count: 5,
@@ -1334,6 +1355,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 4.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 28.0,
         damage_mult: 1.0,
         projectile_count: 0,
@@ -1365,6 +1387,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 12.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
         projectile_count: 0,
@@ -1405,6 +1428,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 0.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
         projectile_count: 0,
@@ -1431,6 +1455,7 @@ pub static REGISTRY: &[Ability] = &[
         icon: None,
         cooldown: 0.0,
         resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
         projectile_count: 0,

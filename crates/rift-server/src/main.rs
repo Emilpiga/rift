@@ -389,22 +389,32 @@ impl Server {
             }
             ClientMsg::OpenStash => self.handle_open_stash(from),
             ClientMsg::CloseStash => self.handle_close_stash(from),
-            ClientMsg::DepositToStash { inventory_index } => {
-                self.handle_deposit_to_stash(from, inventory_index as usize);
+            ClientMsg::DepositToStash { inventory_index, tab_index } => {
+                self.handle_deposit_to_stash(
+                    from,
+                    inventory_index as usize,
+                    tab_index as usize,
+                );
             }
-            ClientMsg::DepositToStashSlot { inventory_index, stash_index } => {
+            ClientMsg::DepositToStashSlot { inventory_index, tab_index, stash_index } => {
                 self.handle_deposit_to_stash_slot(
                     from,
                     inventory_index as usize,
+                    tab_index as usize,
                     stash_index as usize,
                 );
             }
-            ClientMsg::WithdrawFromStash { stash_index } => {
-                self.handle_withdraw_from_stash(from, stash_index as usize);
+            ClientMsg::WithdrawFromStash { tab_index, stash_index } => {
+                self.handle_withdraw_from_stash(
+                    from,
+                    tab_index as usize,
+                    stash_index as usize,
+                );
             }
-            ClientMsg::WithdrawFromStashSlot { stash_index, inventory_index } => {
+            ClientMsg::WithdrawFromStashSlot { tab_index, stash_index, inventory_index } => {
                 self.handle_withdraw_from_stash_slot(
                     from,
+                    tab_index as usize,
                     stash_index as usize,
                     inventory_index as usize,
                 );
@@ -412,14 +422,40 @@ impl Server {
             ClientMsg::SwapInventorySlots { a, b } => {
                 self.handle_swap_inventory_slots(from, a as usize, b as usize);
             }
-            ClientMsg::SwapStashSlots { a, b } => {
-                self.handle_swap_stash_slots(from, a as usize, b as usize);
+            ClientMsg::SwapStashSlots { tab_index, a, b } => {
+                self.handle_swap_stash_slots(
+                    from,
+                    tab_index as usize,
+                    a as usize,
+                    b as usize,
+                );
+            }
+            ClientMsg::BuyStashTab => {
+                self.handle_buy_stash_tab(from);
+            }
+            ClientMsg::RenameStashTab { tab_index, name } => {
+                self.handle_rename_stash_tab(from, tab_index as usize, &name);
+            }
+            ClientMsg::RecolorStashTab { tab_index, color } => {
+                self.handle_recolor_stash_tab(from, tab_index as usize, color);
             }
             ClientMsg::DropInventoryItem { inventory_index } => {
                 if self.sim_for_client(from).is_ghost(from) {
                     return;
                 }
                 self.handle_drop_inventory_item(from, inventory_index as usize);
+            }
+            ClientMsg::SalvageInventoryItem { inventory_index } => {
+                if self.sim_for_client(from).is_ghost(from) {
+                    return;
+                }
+                self.handle_salvage_inventory_item(from, inventory_index as usize);
+            }
+            ClientMsg::SalvageInventoryBulk { rarity_max } => {
+                if self.sim_for_client(from).is_ghost(from) {
+                    return;
+                }
+                self.handle_salvage_inventory_bulk(from, rarity_max);
             }
             ClientMsg::UnequipToBagSlot { slot, inventory_index } => {
                 self.handle_unequip_to_bag_slot(from, slot, inventory_index as usize);
@@ -710,6 +746,14 @@ impl Server {
             floor_idx,
             &format!("{name} entered floor {floor_idx}."),
         );
+        // Cross-world equipment-visual rendezvous: tell
+        // `cid` what the existing instance members are
+        // wearing, and the existing members what `cid` is
+        // wearing. Without this, a player crossing into a
+        // rift would see other party members undressed
+        // until those members changed equipment.
+        self.catch_up_peer_equipment_visuals(cid);
+        self.broadcast_peer_equipment_visuals(cid);
     }
 
     /// Move `cid` from whatever rift instance they're in back
@@ -739,6 +783,10 @@ impl Server {
             tick: self.tick,
         };
         self.send_to(cid, Channel::Control, &load);
+        // Same cross-world rendezvous as `move_client_to_instance`,
+        // mirrored for the hub side.
+        self.catch_up_peer_equipment_visuals(cid);
+        self.broadcast_peer_equipment_visuals(cid);
         if maybe_dissolve {
             self.instances.dissolve(instance_id);
         }

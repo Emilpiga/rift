@@ -152,7 +152,7 @@ impl RiftApp {
         let Some(net) = net.as_mut() else { return };
 
         net.sync_local_player(&mut state.world);
-        net.sync_avatars(&mut state.world, renderer, &mut state.anim_cache);
+        net.sync_avatars(&mut state.world, renderer, &mut state.anim_cache, &mut state.avatar_cosmetics_cache);
         net.sync_enemies(
             &mut state.world,
             renderer,
@@ -352,18 +352,67 @@ impl RiftApp {
     /// `NetClient.last_positions` which persists across
     /// snapshots.
     fn handle_death_event(&mut self, entity: rift_net::NetId, renderer: &mut Renderer) {
-        log::info!("net: Death entity={entity:?}");
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
-        if let Some(&pos) = net.last_positions.get(&entity) {
+        let pos_opt = net.last_positions.get(&entity).copied();
+        log::info!(
+            "net: Death entity={entity:?} have_pos={} ({:?})",
+            pos_opt.is_some(),
+            pos_opt
+        );
+        // Record the death authoritatively. The snapshot is
+        // view-culled, so the row may already have vanished from
+        // `self.remote` for cull reasons rather than death — the
+        // world-sync despawn pass needs this set to know which
+        // case it's in (and whether to spawn `enemy_soul_return`).
+        net.dead_net_ids.insert(entity);
+        if let Some(pos) = pos_opt {
             // Persistent floor stain.
             state.decals.spawn_blood(pos, &state.floor.wall_aabbs, renderer);
             // Big visceral burst on top of it. Anchored at
             // chest height so the upward cone reads as the kill
-            // shot rather than ground splatter.
-            renderer.vfx_system.spawn(
+            // shot rather than ground splatter. A tiny
+            // deterministic jitter (per-NetId) shifts overlapping
+            // bursts apart by ~10cm so two enemies dying on top
+            // of each other don't perfectly stack into a single
+            // visible blob — purely cosmetic, doesn't move the
+            // ground stain.
+            let nid = entity.0 as u32;
+            let jx = ((nid.wrapping_mul(0x9E37_79B9) >> 16) as f32 / 65535.0 - 0.5) * 0.2;
+            let jz = ((nid.wrapping_mul(0x85EB_CA6B) >> 16) as f32 / 65535.0 - 0.5) * 0.2;
+            let eid = renderer.vfx_system.spawn(
                 rift_engine::renderer::vfx::presets::blood_splatter(Vec3::Y),
-                pos + Vec3::new(0.0, 1.0, 0.0),
+                pos + Vec3::new(jx, 1.0, jz),
+            );
+            log::info!(
+                "vfx: spawned blood_splatter for entity={entity:?} \
+                 at {:?} eid={eid:?}",
+                pos
+            );
+            // The `enemy_soul_return` puff is intentionally NOT
+            // spawned here — it's spawned in the world-sync
+            // despawn pass (see `crates/rift-client/src/net/
+            // world_sync.rs`) at the moment the corpse actually
+            // drops out of snapshots (`DEATH_FADE_DUR` ≈ 1.6s
+            // after the kill). Firing it on the Death event
+            // would float the puff above a still-visible body
+            // and lose the "sucked back to hell as they vanish"
+            // read; deferring to despawn lines up the smoke
+            // with the actual disappearance.
+        } else {
+            // Diagnostic path: we missed a death-VFX because we
+            // never saw a snapshot row for `entity`. Most likely
+            // the kill happened inside the same server tick that
+            // first spawned the enemy, so the snapshot delivered
+            // alongside the Death event no longer included the
+            // row to insert into `last_positions`. Surface the
+            // miss instead of swallowing it silently — without
+            // this the bug presents as "enemies vanish without
+            // a splatter".
+            log::warn!(
+                "net: Death for unknown entity={entity:?} — \
+                 last_positions has {} entries; skipping VFX",
+                net.last_positions.len()
             );
         }
         // Remote player death: play the death clip on their
@@ -688,6 +737,12 @@ impl RiftApp {
                 EquipRequest::DropToWorld { inventory_index } => {
                     net.request_drop_inventory_item(inventory_index);
                 }
+                EquipRequest::Salvage { inventory_index } => {
+                    net.request_salvage_inventory_item(inventory_index);
+                }
+                EquipRequest::SalvageBulk { rarity_max } => {
+                    net.request_salvage_inventory_bulk(rarity_max);
+                }
                 EquipRequest::UnequipToSlot { slot, inventory_index } => {
                     net.request_unequip_to_bag_slot(slot, inventory_index);
                 }
@@ -812,26 +867,41 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             match req {
-                StashRequest::Deposit { inventory_index } => {
-                    net.request_deposit_to_stash(inventory_index);
+                StashRequest::Deposit { inventory_index, tab_index } => {
+                    net.request_deposit_to_stash(inventory_index, tab_index);
                 }
-                StashRequest::Withdraw { stash_index } => {
-                    net.request_withdraw_from_stash(stash_index);
+                StashRequest::Withdraw { tab_index, stash_index } => {
+                    net.request_withdraw_from_stash(tab_index, stash_index);
                 }
-                StashRequest::Swap { a, b } => {
-                    net.request_swap_stash_slots(a, b);
+                StashRequest::Swap { tab_index, a, b } => {
+                    net.request_swap_stash_slots(tab_index, a, b);
                 }
                 StashRequest::DepositToSlot {
                     inventory_index,
+                    tab_index,
                     stash_index,
                 } => {
-                    net.request_deposit_to_stash_slot(inventory_index, stash_index);
+                    net.request_deposit_to_stash_slot(
+                        inventory_index, tab_index, stash_index,
+                    );
                 }
                 StashRequest::WithdrawToSlot {
+                    tab_index,
                     stash_index,
                     inventory_index,
                 } => {
-                    net.request_withdraw_from_stash_slot(stash_index, inventory_index);
+                    net.request_withdraw_from_stash_slot(
+                        tab_index, stash_index, inventory_index,
+                    );
+                }
+                StashRequest::BuyTab => {
+                    net.request_buy_stash_tab();
+                }
+                StashRequest::RenameTab { tab_index, name } => {
+                    net.request_rename_stash_tab(tab_index, name);
+                }
+                StashRequest::RecolorTab { tab_index, color } => {
+                    net.request_recolor_stash_tab(tab_index, color);
                 }
             }
         }
@@ -908,23 +978,59 @@ impl RiftApp {
             log::info!("client: hydrated equipment with {} slot(s)", equip.count());
             state.loot.equipment = equip;
             state.player_state.recompute_stats(&state.loot.equipment);
+
+            // Refresh the local player's modular outfit attachments
+            // so anything with a `BaseItem::model_path` shows up
+            // (or disappears) on the avatar in lock-step with the
+            // server-authoritative equipment. The apply itself
+            // no-ops when the avatar entity hasn't been spawned
+            // yet (true on the very first sync, which lands
+            // during `EnteringWorld`), so we also flag the state
+            // dirty and let the frame loop retry once the avatar
+            // exists.
+            state.loot.equipment_visuals_dirty = true;
+            rift_client::game::equipment_visuals::apply_local_equipment_visuals(
+                state, renderer,
+            );
+            if rift_client::game::equipment_visuals::has_local_player(&state.world) {
+                state.loot.equipment_visuals_dirty = false;
+            }
         }
 
         // Authoritative stash mirror. Decoded the same way as
         // the bag — failed-to-decode rows are dropped and the
-        // next sync corrects.
-        if let Some(blobs) = net.drain_stash_sync() {
-            let items: Vec<Option<rift_game::loot::Item>> = blobs
+        // next sync corrects. One client tab per server tab.
+        if let Some(tab_blobs) = net.drain_stash_sync() {
+            use rift_client::game::states::sub_state::StashTabClient;
+            let mut total_items = 0usize;
+            let tabs: Vec<StashTabClient> = tab_blobs
                 .into_iter()
-                .map(|opt| {
-                    opt.and_then(|b| {
-                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored)
-                    })
+                .map(|tab| {
+                    let items: Vec<Option<rift_game::loot::Item>> = tab
+                        .items
+                        .into_iter()
+                        .map(|opt| {
+                            opt.and_then(|b| {
+                                rift_game::loot::Item::from_wire(
+                                    b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored,
+                                )
+                            })
+                        })
+                        .collect();
+                    total_items += items.iter().filter(|s| s.is_some()).count();
+                    StashTabClient {
+                        name: tab.name,
+                        color: tab.color,
+                        items,
+                    }
                 })
                 .collect();
-            let filled = items.iter().filter(|s| s.is_some()).count();
-            log::info!("client: hydrated stash with {} item(s)", filled);
-            state.loot.stash_items = items;
+            log::info!(
+                "client: hydrated stash with {} item(s) across {} tab(s)",
+                total_items,
+                tabs.len(),
+            );
+            state.loot.stash_tabs = tabs;
         }
 
         // Authoritative XP / level snapshots.
@@ -948,6 +1054,43 @@ impl RiftApp {
         if let Some(slots) = net.drain_loadout() {
             state.player_state.loadout = rift_game::loadout::Loadout::from_slots(slots);
             state.player_state.abilities = state.player_state.loadout.materialize();
+        }
+
+        // Authoritative shard balance. Pushed by the server on
+        // hello + after every salvage; mirror onto the local
+        // player state so the HUD readout updates the same
+        // frame the server confirms the change.
+        if let Some(amount) = net.drain_shards() {
+            state.player_state.shards = amount;
+        }
+
+        // Per-peer visible equipment. Each entry maps a peer
+        // `ClientId` to the base-item indices currently
+        // equipped by that player. We resolve to the avatar
+        // entity (skipping entries whose avatar hasn't been
+        // spawned yet — `world_sync` will re-queue when it
+        // does) and reconcile the attachment set in place.
+        for (client_id, base_ids) in net.drain_peer_equipment_visuals() {
+            let Some(entity) = net.avatar_for_client(client_id) else {
+                continue;
+            };
+            // The peer's avatar was spawned with their gender's
+            // base mesh; pick the matching gendered model from
+            // each item so attachments share the host skeleton.
+            let Some(profile) = net.profile_for_client(client_id) else {
+                continue;
+            };
+            let gender = rift_client::net::wire_gender_to_game(profile.gender);
+            let desired = rift_client::game::equipment_visuals::desired_visuals_for_base_ids(
+                &base_ids, gender,
+            );
+            rift_client::game::equipment_visuals::apply_equipment_visuals(
+                &mut state.world,
+                renderer,
+                &mut state.equipment_visual_cache,
+                entity,
+                &desired,
+            );
         }
 
         // Authoritative rift-progress snapshots.
@@ -978,6 +1121,28 @@ impl RiftApp {
         // reference to `NetClient`.
         state.net.our_net_id_cached = net.our_net_id();
         state.net.local_ghost_cached = net.is_local_ghost();
+
+        // Mirror authoritative essence pool fraction onto
+        // `PlayerState`. The HUD reads this every frame to drive
+        // the essence bar; the canonical scalar lives on the
+        // server and is round-tripped via the snapshot's
+        // `essence_pct` field.
+        state.player_state.essence_pct = net.local_essence_pct();
+
+        // Deferred local-equipment visual apply: the first
+        // `EquipmentSync` arrives before the local avatar has
+        // been spawned (during `EnteringWorld`), so the
+        // immediate-on-receive apply silently no-ops. Retry
+        // here every frame the flag is set until the avatar
+        // exists, then clear.
+        if state.loot.equipment_visuals_dirty
+            && rift_client::game::equipment_visuals::has_local_player(&state.world)
+        {
+            rift_client::game::equipment_visuals::apply_local_equipment_visuals(
+                state, renderer,
+            );
+            state.loot.equipment_visuals_dirty = false;
+        }
     }
 }
 

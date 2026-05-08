@@ -14,7 +14,7 @@ use std::time::Instant;
 use glam::{Mat4, Quat, Vec3};
 use rift_engine::ecs::components::{
     AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
-    Renderable, RemotePlayer, Transform, Velocity,
+    Renderable, RemotePlayer, SkinnedAttachments, Transform, Velocity,
 };
 use rift_engine::animation::Animator;
 use rift_engine::Renderer;
@@ -54,6 +54,7 @@ impl NetClient {
         world: &mut hecs::World,
         renderer: &mut Renderer,
         anim_cache: &mut AnimLibraryCache,
+        cosmetics: &mut crate::game::avatar_cosmetics::AvatarCosmeticsCache,
     ) {
         let Some(our_net_id) = self.our_net_id else {
             // Wait for Welcome before spawning any avatars: we need
@@ -103,6 +104,19 @@ impl NetClient {
                             renderer.objects[idx].model_matrix = Mat4::ZERO;
                         }
                     }
+                    // Also collapse every modular-equipment /
+                    // cosmetic attachment slot. Without this the
+                    // chest piece (and any other gear) the
+                    // disconnecting player was wearing keeps
+                    // rendering in place because its dynamic-mesh
+                    // slot still has a non-zero model matrix.
+                    if let Ok(atts) = world.get::<&SkinnedAttachments>(entity) {
+                        for piece in &atts.pieces {
+                            if piece.object_index < renderer.objects.len() {
+                                renderer.objects[piece.object_index].model_matrix = Mat4::ZERO;
+                            }
+                        }
+                    }
                     let _ = world.despawn(entity);
                 }
                 log::info!("net: despawned remote avatar {net_id:?}");
@@ -136,7 +150,7 @@ impl NetClient {
                 move_speed: rift_game::kinematic::PLAYER_SPEED,
                 max_hp: 100.0,
             };
-            let entity = match spawn_character_entity(world, renderer, anim_cache, cfg) {
+            let entity = match spawn_character_entity(world, renderer, anim_cache, cosmetics, cfg) {
                 Ok(e) => e,
                 Err(e) => {
                     log::warn!("net: failed to spawn remote avatar {net_id:?}: {e:?}");
@@ -155,6 +169,17 @@ impl NetClient {
                 profile.character_name,
                 profile.gender,
             );
+            // If we already learned this peer's visible
+            // equipment from a `PeerEquipmentVisuals` that
+            // arrived before the avatar existed, re-queue it
+            // now so the binary's apply pass dresses the
+            // avatar this frame.
+            if let Some(base_ids) = self.peer_visuals_mirror.get(&profile.client_id).cloned() {
+                self.pending_peer_equipment_visuals
+                    .retain(|(cid, _)| *cid != profile.client_id);
+                self.pending_peer_equipment_visuals
+                    .push_back((profile.client_id, base_ids));
+            }
         }
 
         // ─── Drive remote kinematics from snapshot ───────────────
@@ -321,6 +346,46 @@ impl NetClient {
             .collect();
         for net_id in stale {
             if let Some(entity) = self.enemy_entities.remove(&net_id) {
+                // Decide whether this despawn is a *real death*
+                // or just a view-cull. The snapshot is view-
+                // culled server-side (see
+                // `crates/rift-server/src/sim/snapshot.rs`), so
+                // an enemy walking out of the player's bubble
+                // also drops out of `self.remote` — without the
+                // explicit `dead_net_ids` set we'd happily play
+                // a soul-return puff for an enemy that's still
+                // very much alive 30m away.
+                //
+                // `dead_net_ids` is populated by the reliable
+                // `WorldEvent::Death` handler in `main.rs` the
+                // instant the kill lands, but we deliberately
+                // don't *spawn* the soul-return puff there —
+                // the server holds the corpse on snapshots for
+                // `DEATH_FADE_DUR` (~1.6s) playing the death
+                // clip, so the VFX needs to fire here, when the
+                // body actually drops, to read as "smoking back
+                // down to hell" instead of floating above a
+                // still-visible enemy.
+                let died = self.dead_net_ids.remove(&net_id);
+                let died_pos = if died {
+                    world
+                        .get::<&Transform>(entity)
+                        .ok()
+                        .map(|t| t.position)
+                        .or_else(|| self.last_positions.get(&net_id).copied())
+                } else {
+                    None
+                };
+                if let Some(pos) = died_pos {
+                    let eid = renderer.vfx_system.spawn(
+                        rift_engine::renderer::vfx::presets::enemy_soul_return(),
+                        pos + Vec3::new(0.0, 0.6, 0.0),
+                    );
+                    log::info!(
+                        "vfx: spawned enemy_soul_return at despawn \
+                         net_id={net_id:?} pos={pos:?} eid={eid:?}"
+                    );
+                }
                 if let Ok(r) = world.get::<&Renderable>(entity) {
                     let idx = r.object_index;
                     if idx < renderer.objects.len() {
@@ -668,6 +733,14 @@ fn gender_to_game(g: Gender) -> GameGender {
         Gender::Male => GameGender::Male,
         Gender::Female => GameGender::Female,
     }
+}
+
+/// Public re-export so other client modules (the main loop's
+/// equipment-visuals dispatcher in particular) can convert a
+/// peer's wire gender into the gameplay enum without touching
+/// the conversion glue here.
+pub fn wire_gender_to_game(g: Gender) -> GameGender {
+    gender_to_game(g)
 }
 
 /// Mirror a snapshot row's `effects` list into the entity's

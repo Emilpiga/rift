@@ -28,6 +28,11 @@ pub struct RemoteEntity {
     pub yaw: f32,
     pub velocity: Vec3,
     pub health_pct: f32,
+    /// Essence (universal ability resource) 0..=1. Meaningful
+    /// only on the local player's own row — server fills 1.0
+    /// for everyone else. HUD reads it via
+    /// `NetClient::take_essence_pct` once the local row arrives.
+    pub essence_pct: f32,
     pub airborne: bool,
     /// Latest full-body action id from the snapshot
     /// (`rift_game::kinematic::action`). Drives the dodge-roll
@@ -167,6 +172,7 @@ impl NetClient {
                     yaw,
                     velocity: Vec3::from_array(e.velocity),
                     health_pct: e.health_pct,
+                    essence_pct: e.essence_pct,
                     airborne: e.flags & rift_net::messages::entity_flags::AIRBORNE != 0,
                     action,
                     effects: e.effects,

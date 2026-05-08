@@ -53,6 +53,12 @@ pub struct CharacterProfile {
     pub name: String,
     pub gender: Gender,
     pub level: u32,
+    /// Indices into `crate::loot::BASE_ITEMS` for the items
+    /// this character currently has equipped, as advertised by
+    /// the server in `RosterEntry`. Used by the character-select
+    /// preview to dress the avatar before the player connects
+    /// as that character. Empty for fresh characters and SP.
+    pub equipped_base_ids: Vec<u16>,
 }
 
 impl CharacterProfile {
@@ -61,6 +67,7 @@ impl CharacterProfile {
             name,
             gender,
             level: 1,
+            equipped_base_ids: Vec::new(),
         }
     }
 }

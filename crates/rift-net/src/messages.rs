@@ -258,28 +258,34 @@ pub enum ClientMsg {
     /// a fresh `OpenStash` succeeds. Reliable on `Channel::Control`.
     CloseStash,
 
-    /// Move the bag item at `inventory_index` into the stash.
-    /// Server validates the index + that a stash session is open,
-    /// then replies with both a fresh `InventorySync` and a fresh
-    /// `StashSync`. Reliable on `Channel::Control`.
+    /// Move the bag item at `inventory_index` into stash tab
+    /// `tab_index` (server picks the first free slot in that
+    /// tab). Server validates the index + that a stash session
+    /// is open, then replies with both a fresh `InventorySync`
+    /// and a fresh `StashSync`. Reliable on `Channel::Control`.
     DepositToStash {
         inventory_index: u32,
+        tab_index: u8,
     },
 
     /// Like `DepositToStash` but moves the item into a specific
-    /// stash slot. If the slot is already occupied the two items
-    /// swap (the previous stash occupant is placed back into
-    /// `inventory_index`). Reliable on `Channel::Control`.
+    /// `(tab_index, stash_index)` slot. If the slot is already
+    /// occupied the two items swap (the previous stash occupant
+    /// is placed back into `inventory_index`). Reliable on
+    /// `Channel::Control`.
     DepositToStashSlot {
         inventory_index: u32,
+        tab_index: u8,
         stash_index: u32,
     },
 
-    /// Move the stash item at `stash_index` back into the bag.
-    /// Server validates the index + that a stash session is open,
-    /// then replies with both a fresh `InventorySync` and a fresh
-    /// `StashSync`. Reliable on `Channel::Control`.
+    /// Move the stash item at `(tab_index, stash_index)` back
+    /// into the bag. Server validates the indices + that a
+    /// stash session is open, then replies with both a fresh
+    /// `InventorySync` and a fresh `StashSync`. Reliable on
+    /// `Channel::Control`.
     WithdrawFromStash {
+        tab_index: u8,
         stash_index: u32,
     },
 
@@ -287,6 +293,7 @@ pub enum ClientMsg {
     /// specific bag slot. Same swap semantics as
     /// `DepositToStashSlot`. Reliable on `Channel::Control`.
     WithdrawFromStashSlot {
+        tab_index: u8,
         stash_index: u32,
         inventory_index: u32,
     },
@@ -300,12 +307,15 @@ pub enum ClientMsg {
         b: u32,
     },
 
-    /// Reorder the stash: swap the items at `a` and `b` (either
-    /// may be an empty slot, in which case the filled item moves
-    /// into the empty cell). Server validates a stash session is
+    /// Reorder the stash: swap the items at `a` and `b` within
+    /// `tab_index`. Either index may be empty (past the
+    /// current stash length); the stash tab is grown with
+    /// `None` placeholders to fit, then trimmed back to the
+    /// last filled slot. Server validates a stash session is
     /// open and replies with a fresh `StashSync`. Reliable on
     /// `Channel::Control`.
     SwapStashSlots {
+        tab_index: u8,
         a: u32,
         b: u32,
     },
@@ -318,6 +328,56 @@ pub enum ClientMsg {
     /// the picker. Reliable on `Channel::Control`.
     DropInventoryItem {
         inventory_index: u32,
+    },
+
+    /// Permanently destroy the bag item at `inventory_index` in
+    /// exchange for [shards](`ServerMsg::ShardsSync`). Yield is
+    /// computed by the server from the item's rarity and ilvl.
+    /// Anchored items (the special legendary trait) are
+    /// rejected so the player never accidentally salvages
+    /// their locked drops. Replies with both a fresh
+    /// `InventorySync` and `ShardsSync`. Reliable on
+    /// `Channel::Control`.
+    SalvageInventoryItem {
+        inventory_index: u32,
+    },
+
+    /// Bulk-salvage every non-anchored bag item whose rarity is
+    /// at most `rarity_max` (encoded the same as
+    /// `Rarity::to_u8`: 0 = Common, 1 = Magic, 2 = Rare, 3 =
+    /// Legendary). Convenience for clearing trash without
+    /// ctrl-clicking every slot. Replies with a single fresh
+    /// `InventorySync` and `ShardsSync`. Reliable on
+    /// `Channel::Control`.
+    SalvageInventoryBulk {
+        rarity_max: u8,
+    },
+
+    /// Spend shards to unlock another stash tab. Server picks
+    /// the price from the player's current tab count and
+    /// rejects the request if the player can't afford it or
+    /// already owns [`MAX_STASH_TABS`]. On success the new
+    /// tab is appended at the end with the default name
+    /// "Tab N" and a neutral color, and the server pushes
+    /// fresh `StashSync` + `ShardsSync`. Reliable on
+    /// `Channel::Control`.
+    BuyStashTab,
+
+    /// Rename `tab_index`. Server clamps the name to a small
+    /// length cap, replaces leading/trailing whitespace, and
+    /// rejects empty strings. On success: fresh `StashSync`.
+    /// Reliable on `Channel::Control`.
+    RenameStashTab {
+        tab_index: u8,
+        name: String,
+    },
+
+    /// Recolor `tab_index`. `color` is packed `0xRRGGBB` and is
+    /// applied verbatim. Server replies with a fresh
+    /// `StashSync`. Reliable on `Channel::Control`.
+    RecolorStashTab {
+        tab_index: u8,
+        color: u32,
     },
 
     /// Take whatever's currently in `slot` and place it into the
@@ -487,6 +547,15 @@ pub struct RosterEntry {
     /// the portal modal as the upper bound of the start-floor
     /// slider.
     pub deepest_cleared_floor: u32,
+    /// Indices into `rift_game::loot::BASE_ITEMS` for the items
+    /// this character currently has equipped. Empty for fresh
+    /// characters and for builds where persistence is disabled.
+    /// Lets the character-select preview render the avatar
+    /// already wearing its modular outfit pieces, before the
+    /// player has even committed to "Play". Forward-compatible:
+    /// older clients deserialise as the default empty `Vec`.
+    #[serde(default)]
+    pub equipped_base_ids: Vec<u16>,
 }
 
 /// One member of a party, used in [`ServerMsg::PartyState`]. Carries
@@ -637,15 +706,39 @@ pub enum ServerMsg {
         slots: Vec<(u8, ItemBlob)>,
     },
 
+    /// Visible-equipment replication for *peers*. Carries the set
+    /// of base-item indices currently equipped by some other
+    /// player so this client can dress that player's avatar with
+    /// modular outfit pieces. Slot is recovered on the receiving
+    /// side from `BaseItem::equip_slot`, so the wire shape stays
+    /// minimal. Sent:
+    ///   * once per existing peer right after the new client is
+    ///     handed its `Welcome` (so first-frame remote avatars
+    ///     spawn already dressed),
+    ///   * to every other client in the instance whenever a peer
+    ///     equips or unequips,
+    ///   * with an empty `base_ids` to clear visuals on unequip.
+    /// Reliable on `Channel::Control`.
+    PeerEquipmentVisuals {
+        client_id: ClientId,
+        base_ids: Vec<u16>,
+    },
+
     /// Full stash replication for the local player. Sent on the
     /// server's reply to [`ClientMsg::OpenStash`] (with the freshly
     /// loaded persisted rows) and again after every authoritative
-    /// deposit / withdraw. Reliable on `Channel::Control`. Items
-    /// are addressed to *this* client only — stashes are
-    /// per-character private storage. Sparse like
-    /// [`Self::InventorySync`].
+    /// deposit / withdraw / tab edit. Reliable on `Channel::Control`.
+    /// Stash is per-character private storage; tabs come back as
+    /// the dense `[0..n)` list the player owns.
     StashSync {
-        items: Vec<Option<ItemBlob>>,
+        tabs: Vec<StashTabBlob>,
+    },
+
+    /// Authoritative shard balance for this client. Sent at
+    /// hello time (post-hydration) and after every salvage /
+    /// stash-tab purchase. Reliable on `Channel::Control`.
+    ShardsSync {
+        amount: u32,
     },
 
     /// Floor transition. The client clears its local world and
@@ -994,6 +1087,15 @@ pub struct EntitySnapshot {
     /// Health 0..=1. Used for HP bars; the canonical HP value lives
     /// only on the server.
     pub health_pct: f32,
+    /// Essence (universal ability resource) 0..=1. Drives the
+    /// local player's essence bar; meaningful only for
+    /// [`EntityKind::Player`] rows owned by the receiving
+    /// client. Server fills `1.0` for every other entity kind so
+    /// non-player rows compress identically to before. Forward-
+    /// compatible: older clients deserialise as the default
+    /// `1.0`.
+    #[serde(default = "essence_pct_default")]
+    pub essence_pct: f32,
     /// State flags (airborne, dead, hidden, ...).
     pub flags: u8,
     /// Currently-active buffs / debuffs on this entity. Empty for
@@ -1002,6 +1104,14 @@ pub struct EntitySnapshot {
     /// client. See `rift_game::effects` for the id table.
     #[serde(default)]
     pub effects: Vec<ActiveEffect>,
+}
+
+/// Default for [`EntitySnapshot::essence_pct`] on older
+/// servers / older serialised blobs that predate the field.
+/// `1.0` reads as "full" so HUDs that infer the bar from the
+/// snapshot don't briefly draw an empty pool on first frame.
+fn essence_pct_default() -> f32 {
+    1.0
 }
 
 /// One active buff / debuff entry on a snapshot row. Replaces
@@ -1105,6 +1215,36 @@ pub struct ItemBlob {
     #[serde(default)]
     pub anchored: bool,
 }
+
+/// Wire shape of a single stash tab. The stash is now a
+/// dense `[0..n)` list of these — each tab is a named,
+/// color-coded page of [`STASH_TAB_SLOTS`] storage slots.
+/// Tabs beyond the first are purchased with shards (see
+/// [`ClientMsg::BuyStashTab`]); the server is authoritative
+/// for both the tab count and its metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StashTabBlob {
+    /// Player-chosen tab name (UTF-8, server-clamped).
+    pub name: String,
+    /// Packed `0xRRGGBB` (alpha is implicit, opaque). Used
+    /// to tint the tab strip header so the player can
+    /// quickly find their organised tabs.
+    pub color: u32,
+    /// Sparse like the bag: `None` is an empty slot the
+    /// player carved out, capped at [`STASH_TAB_SLOTS`].
+    pub items: Vec<Option<ItemBlob>>,
+}
+
+/// Number of slots per stash tab. Mirrored on the client UI
+/// as `STASH_COLS * STASH_ROWS`. The server enforces this on
+/// every deposit; the client mirrors it for the empty-slot
+/// indication.
+pub const STASH_TAB_SLOTS: usize = 36;
+
+/// Maximum number of stash tabs a single character can own.
+/// First tab is free; every additional tab costs shards (see
+/// [`ClientMsg::BuyStashTab`]).
+pub const MAX_STASH_TABS: usize = 8;
 
 /// One-shot reliable event broadcast to interested clients.
 #[derive(Clone, Debug, Serialize, Deserialize)]

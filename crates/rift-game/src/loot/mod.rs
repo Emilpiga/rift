@@ -68,4 +68,5 @@ pub use items::{
     tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, ItemSlot, WeaponKind, BASE_ITEMS,
 };
 pub use rarity::Rarity;
+pub use rarity::salvage_yield;
 pub use rng::LootRng;

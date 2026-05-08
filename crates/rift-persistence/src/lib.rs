@@ -48,6 +48,13 @@ pub struct CharacterRecord {
     /// the leader is capped to `min` of every party member's
     /// value so nobody is dragged past their cleared content.
     pub deepest_cleared_floor: i32,
+    /// Per-character salvage currency. Minted by salvaging
+    /// items in the bag (yield scales with rarity + ilvl) and
+    /// spent on stash expansion / future crafting. Stored as
+    /// `INTEGER NOT NULL DEFAULT 0` (see
+    /// `20260508000002_character_shards.sql`); legitimate
+    /// totals stay well under `i32::MAX`.
+    pub shards: i32,
 }
 
 /// One persisted inventory row. Keys items by *stable* string ids
@@ -78,6 +85,22 @@ pub struct PersistedItem {
     /// loot reset on the server. Legendary-only — the column
     /// is `false` for every other rarity.
     pub anchored: bool,
+    /// Stash-only: which tab this row belongs to. Ignored
+    /// (always `0`) for inventory rows. Tabs are dense
+    /// `[0..n)`; the count is implied by the highest index in
+    /// `stash_tabs` for the character.
+    pub tab_index: i16,
+}
+
+/// One persisted stash-tab metadata row. Items live in their
+/// own table (`stash_items`) and are joined by
+/// `(character_id, tab_index)`.
+#[derive(Clone, Debug)]
+pub struct PersistedStashTab {
+    pub tab_index: i16,
+    pub name: String,
+    /// Packed `0xRRGGBB`.
+    pub color: i32,
 }
 
 /// Internal JSONB representation of a single affix entry. Kept
@@ -172,22 +195,26 @@ pub enum PersistenceMsg {
     },
 
     /// Load every `stash_items` row belonging to `character_id`
-    /// in `acquired_at` order. Same response shape as
-    /// [`Self::LoadInventory`] — `equipped_slot` is always
-    /// `None` (the stash is pure storage). Used at Hello time.
+    /// in `acquired_at` order alongside the per-tab metadata
+    /// rows from `stash_tabs`. Tab list is dense `[0..n)`; if
+    /// the table is empty the server seeds a default tab 0.
+    /// Used at Hello time.
     LoadStash {
         character_id: Uuid,
-        reply: oneshot::Sender<Result<Vec<PersistedItem>, PersistenceError>>,
+        reply: oneshot::Sender<
+            Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError>,
+        >,
     },
 
-    /// Replace every `stash_items` row owned by `character_id`
-    /// with `items` in a single transaction. Mirrors
+    /// Replace every `stash_items` + `stash_tabs` row owned by
+    /// `character_id` with the given snapshot in a single
+    /// transaction. Mirrors
     /// [`Self::ResetCharacterInventory`] in shape and is used
-    /// by every deposit / withdraw event to keep the persisted
-    /// stash snapshot consistent with the in-memory list.
+    /// by every deposit / withdraw / tab-purchase event.
     /// Fire-and-forget.
     ResetCharacterStash {
         character_id: Uuid,
+        tabs: Vec<PersistedStashTab>,
         items: Vec<PersistedItem>,
     },
 }
@@ -301,7 +328,7 @@ impl PersistenceHandle {
     pub fn load_stash_blocking(
         &self,
         character_id: Uuid,
-    ) -> Result<Vec<PersistedItem>, PersistenceError> {
+    ) -> Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(PersistenceMsg::LoadStash { character_id, reply })
@@ -310,15 +337,16 @@ impl PersistenceHandle {
     }
 
     /// Queue a fire-and-forget stash rewrite. Replaces every
-    /// stash row owned by `character_id` with `items` in a
-    /// single transaction.
+    /// stash row + tab row owned by `character_id` in a single
+    /// transaction.
     pub fn reset_character_stash(
         &self,
         character_id: Uuid,
+        tabs: Vec<PersistedStashTab>,
         items: Vec<PersistedItem>,
     ) -> bool {
         self.tx
-            .send(PersistenceMsg::ResetCharacterStash { character_id, items })
+            .send(PersistenceMsg::ResetCharacterStash { character_id, tabs, items })
             .is_ok()
     }
 }
@@ -444,10 +472,10 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                     let _ = reply.send(res);
                 });
             }
-            PersistenceMsg::ResetCharacterStash { character_id, items } => {
+            PersistenceMsg::ResetCharacterStash { character_id, tabs, items } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = reset_character_stash(&pool, character_id, &items).await {
+                    if let Err(e) = reset_character_stash(&pool, character_id, &tabs, &items).await {
                         log::warn!(
                             "persistence: reset stash failed for {character_id}: {e}"
                         );
@@ -510,8 +538,8 @@ async fn load_or_create(
     let default_loadout: [i16; 6] = [0, 255, 255, 255, 255, 255];
     sqlx::query(
         "INSERT INTO characters \
-         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor) \
-         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0)",
+         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0, 0)",
     )
     .bind(character_id)
     .bind(account_id)
@@ -534,6 +562,7 @@ async fn load_or_create(
         xp: 0,
         loadout: default_loadout,
         deepest_cleared_floor: 0,
+        shards: 0,
     })
 }
 
@@ -562,8 +591,8 @@ async fn list_account_characters(
             id
         }
     };
-    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor \
+    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards \
          FROM characters WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(account_id)
@@ -573,7 +602,7 @@ async fn list_account_characters(
     let characters = rows
         .into_iter()
         .map(
-            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor)| {
+            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
                 CharacterRecord {
                     id,
                     account_id,
@@ -584,6 +613,7 @@ async fn list_account_characters(
                     xp,
                     loadout: loadout_from_vec(loadout),
                     deepest_cleared_floor,
+                    shards,
                 }
             },
         )
@@ -596,8 +626,8 @@ async fn fetch_by_account_and_name(
     account_id: Uuid,
     name: &str,
 ) -> Result<Option<CharacterRecord>, PersistenceError> {
-    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor \
+    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards \
          FROM characters WHERE account_id = $1 AND name = $2",
     )
     .bind(account_id)
@@ -606,7 +636,7 @@ async fn fetch_by_account_and_name(
     .await?;
     Ok(
         row.map(
-            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor)| {
+            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
                 CharacterRecord {
                     id,
                     account_id,
@@ -617,6 +647,7 @@ async fn fetch_by_account_and_name(
                     xp,
                     loadout: loadout_from_vec(loadout),
                     deepest_cleared_floor,
+                    shards,
                 }
             },
         ),
@@ -627,7 +658,7 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE characters SET \
             class_id = $2, gender = $3, level = $4, xp = $5, \
-            loadout = $6, deepest_cleared_floor = $7, updated_at = now() \
+            loadout = $6, deepest_cleared_floor = $7, shards = $8, updated_at = now() \
          WHERE id = $1",
     )
     .bind(rec.id)
@@ -637,6 +668,7 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     .bind(rec.xp)
     .bind(&rec.loadout[..])
     .bind(rec.deepest_cleared_floor)
+    .bind(rec.shards)
     .execute(pool)
     .await?;
     Ok(())
@@ -685,6 +717,7 @@ async fn load_inventory(
             equipped_slot,
             slot_index,
             anchored,
+            tab_index: 0,
         })
         .collect())
 }
@@ -771,25 +804,42 @@ async fn reset_character_inventory(
 
 /// Read every `stash_items` row belonging to `character_id`,
 /// oldest-first so the order in which the player deposited is
-/// preserved across sessions. Mirrors [`load_inventory`] but
-/// the persisted shape never includes an `equipped_slot`.
+/// preserved across sessions, plus the per-tab metadata rows
+/// from `stash_tabs`. Tabs come back in `tab_index` order;
+/// callers should treat the list as the dense `[0..n)` set of
+/// tabs the character owns. If the table has no rows the
+/// caller is expected to seed a default tab 0 client-side.
 async fn load_stash(
     pool: &PgPool,
     character_id: Uuid,
-) -> Result<Vec<PersistedItem>, PersistenceError> {
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32, bool)> =
+) -> Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError> {
+    let tab_rows: Vec<(i16, String, i32)> = sqlx::query_as(
+        "SELECT tab_index, name, color \
+         FROM stash_tabs \
+         WHERE character_id = $1 \
+         ORDER BY tab_index",
+    )
+    .bind(character_id)
+    .fetch_all(pool)
+    .await?;
+    let tabs: Vec<PersistedStashTab> = tab_rows
+        .into_iter()
+        .map(|(tab_index, name, color)| PersistedStashTab { tab_index, name, color })
+        .collect();
+
+    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32, bool, i16)> =
         sqlx::query_as(
-            "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored \
+            "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index \
              FROM stash_items \
              WHERE character_id = $1 \
-             ORDER BY slot_index, acquired_at, id",
+             ORDER BY tab_index, slot_index, acquired_at, id",
         )
         .bind(character_id)
         .fetch_all(pool)
         .await?;
-    Ok(rows
+    let items = rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes, slot_index, anchored)| PersistedItem {
+        .map(|(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index)| PersistedItem {
             base_id,
             rarity,
             ilvl,
@@ -797,17 +847,21 @@ async fn load_stash(
             equipped_slot: None,
             slot_index,
             anchored,
+            tab_index,
         })
-        .collect())
+        .collect();
+    Ok((tabs, items))
 }
 
-/// Replace every `stash_items` row owned by `character_id`
-/// with `items` in a single transaction. Mirrors
-/// [`reset_character_inventory`] without the `equipped_slot`
-/// column.
+/// Replace every `stash_items` + `stash_tabs` row owned by
+/// `character_id` with the given snapshot in a single
+/// transaction. Mirrors [`reset_character_inventory`] in shape;
+/// also rewrites tab metadata so name / color / tab count edits
+/// are durable.
 async fn reset_character_stash(
     pool: &PgPool,
     character_id: Uuid,
+    tabs: &[PersistedStashTab],
     items: &[PersistedItem],
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -815,6 +869,22 @@ async fn reset_character_stash(
         .bind(character_id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM stash_tabs WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    for tab in tabs {
+        sqlx::query(
+            "INSERT INTO stash_tabs (character_id, tab_index, name, color) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(character_id)
+        .bind(tab.tab_index)
+        .bind(&tab.name)
+        .bind(tab.color)
+        .execute(&mut *tx)
+        .await?;
+    }
     for item in items {
         let affixes_json: Vec<AffixJson> = item
             .affixes
@@ -823,8 +893,8 @@ async fn reset_character_stash(
             .collect();
         sqlx::query(
             "INSERT INTO stash_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -834,6 +904,7 @@ async fn reset_character_stash(
         .bind(sqlx::types::Json(affixes_json))
         .bind(item.slot_index)
         .bind(item.anchored)
+        .bind(item.tab_index)
         .execute(&mut *tx)
         .await?;
     }

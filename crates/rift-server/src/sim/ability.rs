@@ -296,6 +296,18 @@ pub fn submit(
             if cds[slot] > 0.0 {
                 return None;
             }
+            // Essence gate. Has to run after the cooldown
+            // check so a free-cast retry of an on-cooldown
+            // ability doesn't burn a different ability's
+            // resource. We re-borrow the player mutably for
+            // the deduct \u2014 the earlier `p_ref` snapshot
+            // borrow is already dropped by this point.
+            {
+                let mut p_mut = world.get::<&mut ServerPlayer>(entity).ok()?;
+                if !p_mut.try_spend_essence(ability.resource_cost) {
+                    return None;
+                }
+            }
             // Effective cooldown:
             //   base × affix_cd (per-ability `ReduceAbilityCooldown`)
             //         × (1 - stat_cdr) (gear-wide `CooldownReduction` stat)

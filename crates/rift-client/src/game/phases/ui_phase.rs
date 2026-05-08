@@ -51,6 +51,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut ui,
         &state.player_state.abilities,
         state.player_state.experience.level,
+        state.player_state.essence_pct
+            * state.player_state.stats().max_essence,
         // Highlight whichever slot is mid-targeting so the
         // player has a clear "you're aiming this one" cue.
         state
@@ -84,7 +86,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &state.loot.equipment,
         &mut state.loot.pending_equip_requests,
         state.loot.stash_session,
-        &state.loot.stash_items,
+        &state.loot.stash_tabs,
         &mut state.loot.pending_stash_requests,
         &state.player_state,
     );

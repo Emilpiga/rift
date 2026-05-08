@@ -100,6 +100,14 @@ pub struct GameState {
     /// Shared cache of bound player-skeleton animation sets, keyed by
     /// gender. Populated lazily on first spawn (local or remote).
     pub anim_cache: character_spawn::AnimLibraryCache,
+    /// Cache of remapped equipment-attachment meshes keyed by
+    /// (model path, host skeleton size). Populated lazily as items
+    /// with a `model_path` get equipped on any visible player.
+    pub equipment_visual_cache: super::equipment_visuals::EquipmentVisualCache,
+    /// Cache of remapped head-cosmetic meshes (eyes / eyebrows /
+    /// hair) keyed by (gltf path, sub-mesh name, host skeleton
+    /// size). Populated lazily on first avatar spawn per gender.
+    pub avatar_cosmetics_cache: super::avatar_cosmetics::AvatarCosmeticsCache,
 }
 
 /// Hub entry portal. Visual + interaction state for the glowing ring
@@ -150,6 +158,10 @@ impl GameState {
             app_state: AppState::CharacterSelect,
             character_select: character_select::CharacterSelect::new(),
             anim_cache: character_spawn::AnimLibraryCache::new(),
+            equipment_visual_cache:
+                super::equipment_visuals::EquipmentVisualCache::new(),
+            avatar_cosmetics_cache:
+                super::avatar_cosmetics::AvatarCosmeticsCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
             chat: super::chat::ChatUi::new(),
             party: super::party::PartyUi::new(),
@@ -257,12 +269,16 @@ impl GameState {
     }
     pub fn update(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
         // Suppress gameplay-style key polling whenever the
-        // chat HUD is open so Space / 1..6 / WASD don't leak
-        // into movement + abilities while the player types.
-        // The chat itself uses widget-facing accessors
-        // (chars_typed / enter_just_pressed), which the flag
-        // intentionally leaves alone.
-        input.set_text_capture(self.chat.is_typing());
+        // chat HUD is open *or* an inventory text widget (e.g.
+        // the stash-tab rename field) is active so Space /
+        // 1..6 / WASD / T don't leak into movement, hotbar or
+        // chat-open while the player types. The chat itself
+        // uses widget-facing accessors (chars_typed /
+        // enter_just_pressed), which the flag intentionally
+        // leaves alone.
+        input.set_text_capture(
+            self.chat.is_typing() || self.mp_inventory_ui.wants_text_input(),
+        );
         match self.app_state.clone() {
             AppState::CharacterSelect => {
                 crate::game::transition::update_character_select(self, renderer, input, dt);

@@ -335,6 +335,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         })
         .next();
     let local_active_ability = state.channel.active.map(|c| c.ability_id);
+    let our_net_id = state.net.our_net_id_cached;
 
     // Snapshot enemy positions for client-side beam-corridor
     // hit detection (so we can spawn impact particles on every
@@ -384,6 +385,24 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         // Hide-and-drop path: ending flag set by `clear_channel_visual`
         // or idle timeout exceeded.
         vis.idle += dt;
+        // Local-cast-just-released path: when our local channel
+        // stops, the server's `ChannelEnd` (which would set
+        // `vis.ending`) takes a network round-trip to arrive.
+        // Without this short-circuit, the in-between frames
+        // would lose `hand_override` (because `is_local` reads
+        // `local_active_ability` which is already `None`),
+        // re-anchor the beam to the chest fallback, and we'd
+        // see the beam visibly teleport to the torso for a
+        // frame before despawning. Detecting "this visual is
+        // ours but our local channel has already stopped"
+        // collapses that flicker into a clean immediate fade.
+        let local_release_pending = our_net_id
+            .map(|id| id == vis.caster)
+            .unwrap_or(false)
+            && local_active_ability != Some(vis.ability_id);
+        if local_release_pending {
+            vis.ending = true;
+        }
         let expired = vis.ending || vis.idle > IDLE_TIMEOUT;
 
         // Resolve the caster: prefer matching to a known

@@ -255,5 +255,14 @@ fn draw_effect_pips(
 ) {
     const PIP_SIZE: f32 = 28.0;
     let pips_y = anchor.y() - PIP_SIZE - 3.0;
-    draw_effect_pip_strip(wui.ui(), Pos2::new(anchor.x(), pips_y), effects);
+    // World-overlay pips ride above remote / enemy HP bars; we
+    // still want hover tooltips so the player can identify a
+    // friendly buff on a teammate at a glance.
+    draw_effect_pip_strip(
+        wui.ui(),
+        Pos2::new(anchor.x(), pips_y),
+        effects,
+        PIP_SIZE,
+        true,
+    );
 }

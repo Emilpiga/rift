@@ -505,43 +505,56 @@ fn tick_particles(
     spawning: bool,
     total_cap: usize,
 ) {
-    // 1) Spawn — only when the effect is still allowed to.
-    if spawning {
-        let to_spawn = match p.spec.emission {
-            EmissionMode::Continuous { rate } => {
+    // 1) Spawn. `Burst` emitters are one-shot and must fire
+    //    regardless of `spawning` — short-duration effects
+    //    (blood_splatter @ 0.05s) would otherwise be eaten on
+    //    the first tick whenever `dt >= duration` (a single
+    //    hitchy frame). The continuous half of an emission
+    //    still respects `spawning` so a finished effect doesn't
+    //    keep dribbling new particles forever.
+    let to_spawn = match p.spec.emission {
+        EmissionMode::Continuous { rate } => {
+            if spawning {
                 p.spawn_acc += rate * dt;
                 let n = p.spawn_acc.floor();
                 p.spawn_acc -= n;
                 n as u32
+            } else {
+                0
             }
-            EmissionMode::Burst { count } => {
-                if !p.burst_done {
-                    p.burst_done = true;
-                    count
-                } else {
-                    0
-                }
+        }
+        EmissionMode::Burst { count } => {
+            if !p.burst_done {
+                p.burst_done = true;
+                count
+            } else {
+                0
             }
-            EmissionMode::BurstAndContinuous { burst, rate } => {
-                let initial = if !p.burst_done {
-                    p.burst_done = true;
-                    burst
-                } else {
-                    0
-                };
+        }
+        EmissionMode::BurstAndContinuous { burst, rate } => {
+            let initial = if !p.burst_done {
+                p.burst_done = true;
+                burst
+            } else {
+                0
+            };
+            let cont = if spawning {
                 p.spawn_acc += rate * dt;
                 let n = p.spawn_acc.floor();
                 p.spawn_acc -= n;
-                initial + n as u32
-            }
-        };
-
-        for _ in 0..to_spawn {
-            if p.pool.len() >= total_cap.max(1) {
-                break;
-            }
-            p.pool.push(spawn_one(&p.spec, anchor, orientation, &mut p.rng_seed));
+                n as u32
+            } else {
+                0
+            };
+            initial + cont
         }
+    };
+
+    for _ in 0..to_spawn {
+        if p.pool.len() >= total_cap.max(1) {
+            break;
+        }
+        p.pool.push(spawn_one(&p.spec, anchor, orientation, &mut p.rng_seed));
     }
 
     // 2) Integrate.

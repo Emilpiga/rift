@@ -103,6 +103,8 @@ impl Server {
             self.hub.set_player_experience(from, level, xp);
             let loadout = super::loadout_to_u8(rec.loadout);
             self.hub.set_player_loadout(from, loadout);
+            let shards = rec.shards.max(0) as u32;
+            self.hub.set_player_shards(from, shards);
         }
 
         // Inventory: skipped when persistence is disabled (dev
@@ -166,9 +168,43 @@ impl Server {
         // back until the player opens the chest, which keeps
         // login lean.
         match handle.load_stash_blocking(rec_id) {
-            Ok(rows) => {
-                let mut stash_items: Vec<Option<rift_game::loot::Item>> = Vec::new();
-                for r in rows {
+            Ok((tab_rows, item_rows)) => {
+                use crate::sim::StashTab;
+                use crate::sim::player::DEFAULT_STASH_TAB_COLOR;
+                // Build the dense [0..n) tab list. If the
+                // database has no `stash_tabs` rows yet (fresh
+                // character or pre-migration save) we seed at
+                // least one default tab so the player always
+                // has somewhere to put items.
+                let mut tabs: Vec<StashTab> = if tab_rows.is_empty() {
+                    vec![StashTab::fresh(0)]
+                } else {
+                    let max_idx = tab_rows
+                        .iter()
+                        .map(|t| t.tab_index as usize)
+                        .max()
+                        .unwrap_or(0);
+                    let mut tabs: Vec<StashTab> = (0..=max_idx)
+                        .map(|i| StashTab::fresh(i))
+                        .collect();
+                    for row in &tab_rows {
+                        if let Some(t) = tabs.get_mut(row.tab_index as usize) {
+                            t.name = row.name.clone();
+                            t.color = (row.color as u32) & 0x00FF_FFFF;
+                        }
+                    }
+                    // If a row has a 0 color (e.g. legacy seed),
+                    // fall back to the default neutral color so
+                    // the tab strip stays readable.
+                    for t in tabs.iter_mut() {
+                        if t.color == 0 {
+                            t.color = DEFAULT_STASH_TAB_COLOR;
+                        }
+                    }
+                    tabs
+                };
+                let mut total_items = 0usize;
+                for r in item_rows {
                     let Some(item) = rift_game::loot::Item::from_persisted(
                         &r.base_id,
                         r.rarity as u8,
@@ -178,14 +214,16 @@ impl Server {
                     ) else {
                         continue;
                     };
-                    place_at_slot_index(&mut stash_items, r.slot_index, item);
+                    let tab_idx = (r.tab_index as usize).min(tabs.len().saturating_sub(1));
+                    place_at_slot_index(&mut tabs[tab_idx].items, r.slot_index, item);
+                    total_items += 1;
                 }
-                let stash_filled = stash_items.iter().filter(|s| s.is_some()).count();
                 log::info!(
-                    "persistence: loaded {} stash item(s) for {from:?}",
-                    stash_filled,
+                    "persistence: loaded {} stash item(s) across {} tab(s) for {from:?}",
+                    total_items,
+                    tabs.len(),
                 );
-                self.hub.set_player_stash(from, stash_items);
+                self.hub.set_player_stash(from, tabs);
             }
             Err(e) => log::warn!("persistence: load_stash failed for {from:?}: {e}"),
         }
@@ -266,6 +304,15 @@ impl Server {
                 &ServerMsg::Loadout { slots },
             );
         }
+        // Initial shard balance so the HUD readout is correct
+        // before the player salvages anything.
+        if let Some(shards) = self.hub.player_shards(from) {
+            self.send_to(
+                from,
+                Channel::Control,
+                &ServerMsg::ShardsSync { amount: shards },
+            );
+        }
         // Initial rift-progress snapshot: hub players see a
         // fresh / pristine bar regardless of the active rift's
         // state. They'll get the real numbers when they walk
@@ -338,6 +385,27 @@ impl Server {
         for msg in already_here {
             self.send_to(from, Channel::Control, &msg);
         }
+        // Catch the newcomer up on every existing player's
+        // current visible equipment so their avatars spawn
+        // already dressed instead of starting bare and popping
+        // their gear in on the next equip change.
+        let peer_visuals: Vec<(ClientId, Vec<u16>)> = self
+            .sessions
+            .iter()
+            .filter(|s| s.client_id != from)
+            .map(|s| s.client_id)
+            .map(|cid| (cid, self.current_visible_base_ids(cid)))
+            .collect();
+        for (cid, base_ids) in peer_visuals {
+            self.send_to(
+                from,
+                Channel::Control,
+                &ServerMsg::PeerEquipmentVisuals {
+                    client_id: cid,
+                    base_ids,
+                },
+            );
+        }
         let joined = ServerMsg::PlayerJoined {
             net_id,
             client_id: from,
@@ -346,6 +414,13 @@ impl Server {
             gender,
         };
         self.broadcast(Channel::Control, &joined);
+
+        // Tell every existing player about the newcomer's
+        // visible equipment too. Most of the time this is the
+        // empty default-loadout, but if the player has a
+        // persisted bag with equipped art-bearing items the
+        // others will see them dressed on first frame.
+        self.broadcast_peer_equipment_visuals(from);
 
         // Chat: replay the *prior* GLOBAL+SYSTEM history to
         // the joiner first, then announce the join. If we

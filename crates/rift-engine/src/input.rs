@@ -33,6 +33,16 @@ pub struct Input {
     chars_typed: Vec<char>,
     /// Backspace pressed this frame (key auto-repeat respected).
     backspace_pressed: u32,
+    /// Delete pressed this frame (key auto-repeat respected).
+    /// Mirrors `backspace_pressed` so text-edit widgets get a
+    /// matching forward-delete count without inventing their
+    /// own auto-repeat tracking.
+    delete_pressed: u32,
+    /// One entry per non-modifier key event this frame
+    /// (auto-repeat included). Lets text-input widgets respond
+    /// to held arrows / Home / End / Delete naturally rather
+    /// than once per physical press. Cleared in `end_frame`.
+    key_events: Vec<KeyCode>,
     /// Enter pressed this frame.
     enter_pressed: bool,
     /// When set, gameplay-style key polling
@@ -79,6 +89,8 @@ impl Default for Input {
             mouse_pos: (0.0, 0.0),
             chars_typed: Vec::new(),
             backspace_pressed: 0,
+            delete_pressed: 0,
+            key_events: Vec::new(),
             enter_pressed: false,
             text_capture: Cell::new(false),
             text_swallow: Cell::new(false),
@@ -136,6 +148,14 @@ impl Input {
         self.keys_held.contains(&key) && !self.prev_keys_held.contains(&key)
     }
 
+    /// Same as [`Self::is_key_held`] but ignores text-capture.
+    /// Widget-internal: text-input editing needs to read raw
+    /// modifier state (Ctrl, Shift) precisely while
+    /// text-capture is on.
+    pub fn is_key_held_raw(&self, key: KeyCode) -> bool {
+        self.keys_held.contains(&key)
+    }
+
     /// Set the text-capture flag. While `on`, gameplay-style
     /// key polling (`is_key_held` / `key_just_pressed`) is
     /// suppressed so typing into a chat / form field doesn't
@@ -153,9 +173,23 @@ impl Input {
         self.prev_keys_held = self.keys_held.clone();
         self.chars_typed.clear();
         self.backspace_pressed = 0;
+        self.delete_pressed = 0;
+        self.key_events.clear();
         self.enter_pressed = false;
         self.left_just_released = false;
         self.prev_left_mouse_down = self.left_mouse_down;
+        // Discard any unconsumed click events. `left_clicked` /
+        // `right_clicked` are "this frame only" rising-edge
+        // signals — without an explicit clear, a click that
+        // happens with no UI widget hovered (e.g. a basic-attack
+        // left click in gameplay) stays latched in the cell and
+        // will fire the next time *anything* hovered tries to
+        // consume it. That used to cause the rift-portal modal
+        // to auto-confirm: open it after attacking and the
+        // centred "Enter" button instantly absorbed the stale
+        // click on its first draw.
+        self.left_clicked.set(false);
+        self.right_clicked.set(false);
         self.text_swallow.set(false);
         self.scroll_delta = 0.0;
     }
@@ -171,6 +205,20 @@ impl Input {
     /// Notify the input system that backspace was pressed (auto-repeat counts).
     pub fn on_backspace(&mut self) {
         self.backspace_pressed = self.backspace_pressed.saturating_add(1);
+    }
+
+    /// Notify the input system that the forward-delete key was
+    /// pressed (auto-repeat counts).
+    pub fn on_delete(&mut self) {
+        self.delete_pressed = self.delete_pressed.saturating_add(1);
+    }
+
+    /// Record a non-character key edge (auto-repeat included).
+    /// Text-input widgets read these via [`Self::key_events`]
+    /// to drive caret movement / selection without needing
+    /// per-key fields.
+    pub fn on_key_event(&mut self, key: KeyCode) {
+        self.key_events.push(key);
     }
 
     /// Notify that Enter / Return was pressed this frame.
@@ -192,6 +240,26 @@ impl Input {
             return 0;
         }
         self.backspace_pressed
+    }
+
+    /// Number of forward-delete key presses this frame.
+    pub fn delete_count(&self) -> u32 {
+        if self.text_swallow.get() {
+            return 0;
+        }
+        self.delete_pressed
+    }
+
+    /// Non-character key edges fired this frame, in arrival
+    /// order. Auto-repeat presses are included so a held arrow
+    /// key produces multiple entries per frame at the OS
+    /// repeat rate. Text-input widgets walk this slice in
+    /// order to drive caret motion / selection.
+    pub fn key_events(&self) -> &[KeyCode] {
+        if self.text_swallow.get() {
+            return &[];
+        }
+        &self.key_events
     }
 
     pub fn enter_just_pressed(&self) -> bool {

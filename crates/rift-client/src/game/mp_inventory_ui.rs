@@ -29,8 +29,9 @@ use rift_game::loot::{Equipment, EquipSlot, Item};
 use rift_game::stats::Stat;
 use winit::keyboard::KeyCode;
 
-use super::sub_state::{EquipRequest, StashRequest};
+use super::sub_state::{EquipRequest, StashRequest, StashTabClient};
 use super::PlayerState;
+use std::time::Instant;
 
 // ─── Layout constants ────────────────────────────────────────────────
 //
@@ -63,9 +64,9 @@ const SLOT_GAP: f32 = 8.0;
 const COLS: usize = 6;
 const ROWS: usize = 5;
 /// Equipment slots laid out in a single row above the bag
-/// grid. There are 9 [`EquipSlot`] variants; the panel is
+/// grid. There are 10 [`EquipSlot`] variants; the panel is
 /// sized to fit all of them on one line.
-const EQUIP_COLS: usize = 9;
+const EQUIP_COLS: usize = 10;
 const PANEL_PAD: f32 = 22.0;
 const HEADER_H: f32 = 44.0;
 const FOOTER_H: f32 = 30.0;
@@ -233,11 +234,70 @@ pub struct MpInventoryUI {
     cached_bag: Rect,
     cached_stats: Rect,
     cached_stash: Rect,
+    /// Currently-selected stash tab index. Clamped against the
+    /// authoritative `tabs` slice every frame so a server-side
+    /// tab removal never leaves us pointing at thin air.
+    /// `0` is the default starter tab.
+    active_stash_tab: usize,
+    /// Tab index currently being renamed via the inline text
+    /// input, plus the in-progress edit buffer. `None` when
+    /// no rename is active.
+    rename_tab: Option<(usize, String)>,
+    /// Set once the rename `text_field` has reported `focused`
+    /// at least once. Used to detect a focus *transition* to
+    /// unfocused so we can commit on click-away — without it,
+    /// the very first frame (before the field has grabbed
+    /// focus) would look like "focus lost" and instantly
+    /// commit/cancel the rename before the player typed a
+    /// single character.
+    rename_seen_focus: bool,
+    /// First-click timestamp of the "Salvage Trash" button. The
+    /// button is a 2-stage commit: first click arms it (label
+    /// flips to "Confirm? Click again"), second click within
+    /// `SALVAGE_CONFIRM_WINDOW_S` actually fires the bulk
+    /// salvage. Auto-disarms after the window expires so a
+    /// stale arm can't surprise the player on a later open.
+    salvage_confirm_at: Option<f64>,
+    /// Bag slot whose press happened while Ctrl was held. The
+    /// slot's `clicked` only resolves on release; if the player
+    /// releases Ctrl before releasing the mouse, the naive
+    /// "is Ctrl held *right now*" check at click time misses
+    /// the intent and the click silently equips instead of
+    /// salvaging. Latching the slot at press time and consuming
+    /// it on the matching click closes that window so single
+    /// salvages feel reliable.
+    salvage_armed_bag_idx: Option<usize>,
+}
+
+/// Window (seconds) the "Salvage Trash" button stays armed
+/// after the first click. A second click within this window
+/// commits the bulk salvage; otherwise the button auto-disarms
+/// and the player has to click twice again.
+const SALVAGE_CONFIRM_WINDOW_S: f64 = 3.0;
+
+/// Process-wide monotonic epoch for confirmation timestamps.
+/// Lazily initialised on first call so we don't pay an
+/// `Instant::now()` cost during static init.
+fn ui_now() -> f64 {
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    Instant::now().duration_since(*epoch).as_secs_f64()
 }
 
 impl MpInventoryUI {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `true` while a text-input widget owned by the inventory
+    /// is active (currently: the inline stash-tab rename
+    /// field). Drives `Input::set_text_capture` from
+    /// `GameState::update` so typed letters like W / A / S / D
+    /// or T can't leak into world bindings before the rename
+    /// has even rendered for the frame.
+    pub fn wants_text_input(&self) -> bool {
+        self.rename_tab.is_some()
     }
 
     /// Run one frame of the inventory UI. Fuses input + draw
@@ -254,7 +314,7 @@ impl MpInventoryUI {
         equipment: &Equipment,
         pending: &mut Vec<EquipRequest>,
         stash_open: bool,
-        stash_items: &[Option<Item>],
+        stash_tabs: &[StashTabClient],
         stash_pending: &mut Vec<StashRequest>,
         player_state: &PlayerState,
     ) -> bool {
@@ -282,6 +342,11 @@ impl MpInventoryUI {
         self.cached_bag = layout.bag_panel;
         self.cached_stats = layout.stats_panel;
         self.cached_stash = layout.stash_panel;
+        // Active stash tab as a wire-ready u8. Bag and equip
+        // slots emit per-tab StashRequest variants when items
+        // shift-click into the stash, so we need this even when
+        // the stash panel itself isn't rendered.
+        let active_tab_u8 = self.active_stash_tab as u8;
 
         // ─── Bag + equipment panel ──────────────────────────────
         let panel_rect = layout.bag_panel;
@@ -292,6 +357,47 @@ impl MpInventoryUI {
         // both wastes a tooltip slab and reads as a duplicate
         // of the legendary line.
         let mut hovered_from_equip = false;
+        // True when `hovered_item` came from a bag slot. Drives
+        // the "Ctrl+click: Salvage for N shards" tooltip line —
+        // salvage only applies to bag items, so it would mis-
+        // lead on stash / equip hovers.
+        let mut hovered_from_bag = false;
+        // Pre-compute the bulk salvage preview so the button
+        // label can show the player exactly what they'd gain
+        // before they click. Mirrors the server's
+        // `salvage_inventory_bulk` filter (Common+Magic only,
+        // skip anchored).
+        let (bulk_count, bulk_yield) = {
+            let mut c: u32 = 0;
+            let mut y: u32 = 0;
+            for slot in items.iter() {
+                if let Some(it) = slot {
+                    if !it.anchored && (it.rarity as u8) <= rift_game::loot::Rarity::Magic as u8 {
+                        c += 1;
+                        y = y.saturating_add(rift_game::loot::salvage_yield(it.rarity, it.ilvl));
+                    }
+                }
+            }
+            (c, y)
+        };
+        // Auto-disarm a stale confirm so a second click days
+        // later doesn't surprise the player. Cheap to do every
+        // frame; the comparison is just two f64 ops.
+        if let Some(t) = self.salvage_confirm_at {
+            if ui_now() - t > SALVAGE_CONFIRM_WINDOW_S {
+                self.salvage_confirm_at = None;
+            }
+        }
+        let pressed_salvage_trash = std::cell::Cell::new(false);
+        // Press-time ctrl latch shared between the bag closure
+        // (which both reads it and updates it on press/click)
+        // and the post-closure logic that copies the final
+        // value back into `self`. Seed it with whatever is
+        // currently latched so an in-flight arm survives
+        // re-renders.
+        let armed_cell: std::cell::Cell<Option<usize>> =
+            std::cell::Cell::new(self.salvage_armed_bag_idx);
+        let armed_idx_set = &armed_cell;
         Frame::panel(&theme)
             .with_padding(Pad::all(layout.pad))
             .show(ui, panel_rect, |ui, body| {
@@ -357,6 +463,8 @@ impl MpInventoryUI {
                         r,
                         DropTarget::Equip(*slot),
                         stash_open,
+                        false,
+                        active_tab_u8,
                         pending,
                         stash_pending,
                     );
@@ -417,70 +525,390 @@ impl MpInventoryUI {
                         let payload = item.map(|_| DragSource::Bag(idx));
                         let r = build_item_slot(item).interact::<DragSource>(ui, rect, id, payload);
                         let hovered = r.response.hovered;
-                        route_slot(
-                            r,
-                            DropTarget::Bag(idx),
-                            stash_open,
-                            pending,
-                            stash_pending,
-                        );
+                        // Ctrl+click salvage path. Resolved
+                        // **before** `route_slot` because the
+                        // engine's drag-source starts a latent
+                        // drag on press; if the player jiggles
+                        // past the 6-px drag threshold the
+                        // release fires `drag_released` /
+                        // `dropped` instead of `clicked`, and
+                        // the no-op bag→same-bag drop swallows
+                        // the intent. Latching the slot at
+                        // press time and firing on **either**
+                        // `clicked` or `drag_released` makes
+                        // the click feel reliable regardless
+                        // of how steady the player's hand is.
+                        // Anchored items intentionally still
+                        // arm — the server rejects the salvage
+                        // and the latch clears the same way.
+                        if r.response.pressed && ui.ctrl_held() && item.is_some() {
+                            armed_idx_set.set(Some(idx));
+                        }
+                        let armed_for_this = armed_idx_set.get() == Some(idx);
+                        let ctrl_release = armed_for_this
+                            && (r.clicked || r.response.drag_released);
+                        if ctrl_release {
+                            // Fire the salvage and short-circuit
+                            // the regular slot routing so the
+                            // same release can't *also* be
+                            // interpreted as an equip / deposit.
+                            pending.push(EquipRequest::Salvage {
+                                inventory_index: idx as u32,
+                            });
+                            armed_idx_set.set(None);
+                        } else {
+                            route_slot(
+                                r,
+                                DropTarget::Bag(idx),
+                                stash_open,
+                                false,
+                                active_tab_u8,
+                                pending,
+                                stash_pending,
+                            );
+                        }
                         if let Some(it) = item {
                             if hovered {
                                 hovered_item = Some(it.clone());
+                                hovered_from_bag = true;
                             }
                         }
                     }
                 }
 
-                // Footer hint.
+                // Footer: divider, Salvage Trash button on the
+                // right, hint text on the left. Button has a
+                // 2-stage commit — first click arms it, second
+                // click within `SALVAGE_CONFIRM_WINDOW_S`
+                // commits the bulk salvage. Hidden when the bag
+                // has nothing to salvage so the inventory
+                // doesn't grow chrome it can't use.
                 let hint = if stash_open {
                     "F: close stash  \u{00B7}  drag bag\u{2194}stash"
                 } else {
-                    "TAB: close  \u{00B7}  drag to reorder/equip/drop  \u{00B7}  SHIFT: compare"
+                    "TAB: close  \u{00B7}  drag/equip/drop  \u{00B7}  CTRL+click: salvage  \u{00B7}  SHIFT: compare"
                 };
                 ui.draw_rect(
                     Rect::from_xywh(body.x(), body.max.y - layout.footer_h + 4.0, body.width(), 1.0),
                     theme.colors.border,
                 );
+                let armed = self.salvage_confirm_at.is_some();
+                let btn_lbl_text;
+                let btn_lbl: &str = if bulk_count == 0 {
+                    "No trash"
+                } else if armed {
+                    btn_lbl_text = format!("Confirm? {} items \u{2192} {} \u{25C6}", bulk_count, bulk_yield);
+                    btn_lbl_text.as_str()
+                } else {
+                    btn_lbl_text = format!("Salvage Trash ({} \u{2192} {} \u{25C6})", bulk_count, bulk_yield);
+                    btn_lbl_text.as_str()
+                };
+                let btn_size = theme.fonts.size_md;
+                let btn_w = ui.measure_text(btn_lbl, btn_size) + 16.0 * layout.fit;
+                let btn_h = layout.footer_h - 8.0 * layout.fit;
+                let btn_rect = Rect::from_xywh(
+                    body.max.x - btn_w,
+                    body.max.y - btn_h - 2.0 * layout.fit,
+                    btn_w,
+                    btn_h,
+                );
+                let enabled = bulk_count > 0;
+                let btn_id = Id::root("inv").child(("salvage_trash", armed as u32));
+                let btn_hov = enabled && ui.interact_hover(btn_id, btn_rect);
+                let btn_bg = if !enabled {
+                    Color::rgba(0.16, 0.16, 0.18, 0.5)
+                } else if armed {
+                    if btn_hov {
+                        Color::rgba(0.85, 0.32, 0.20, 0.95)
+                    } else {
+                        Color::rgba(0.65, 0.25, 0.15, 0.85)
+                    }
+                } else if btn_hov {
+                    Color::rgba(0.30, 0.30, 0.36, 0.95)
+                } else {
+                    Color::rgba(0.20, 0.20, 0.25, 0.80)
+                };
+                ui.draw_rect(btn_rect, btn_bg);
+                let lw = ui.measure_text(btn_lbl, btn_size);
+                ui.draw_text(
+                    Pos2::new(
+                        btn_rect.x() + (btn_rect.width() - lw) * 0.5,
+                        btn_rect.y() + (btn_rect.height() - btn_size) * 0.5,
+                    ),
+                    btn_lbl,
+                    btn_size,
+                    if enabled { theme.colors.text } else { theme.colors.text_dim },
+                );
+                if btn_hov && ui.input().left_clicked() {
+                    pressed_salvage_trash.set(true);
+                }
                 ui.draw_text_ellipsized(
                     Pos2::new(body.x(), body.max.y - theme.fonts.size_md),
                     hint,
                     theme.fonts.size_md,
-                    body.width(),
+                    (btn_rect.x() - body.x() - 8.0 * layout.fit).max(0.0),
                     theme.colors.text_dim,
                 );
             });
 
+        // Persist the press-time ctrl latch back into `self`
+        // for the next frame; the bag closure could only mutate
+        // the local cell.
+        self.salvage_armed_bag_idx = armed_cell.get();
+
+        // Resolve the Salvage Trash 2-stage button outside the
+        // panel closure (where we can mutate `self`). First
+        // click arms; second click within the window commits.
+        if pressed_salvage_trash.get() && bulk_count > 0 {
+            let now = ui_now();
+            match self.salvage_confirm_at {
+                Some(t) if now - t <= SALVAGE_CONFIRM_WINDOW_S => {
+                    pending.push(EquipRequest::SalvageBulk {
+                        rarity_max: rift_game::loot::Rarity::Magic as u8,
+                    });
+                    self.salvage_confirm_at = None;
+                }
+                _ => {
+                    self.salvage_confirm_at = Some(now);
+                }
+            }
+        }
+
         // ─── Stash panel ────────────────────────────────────────
         let mut stash_hovered: Option<Item> = None;
+        // Clamp the active tab against the authoritative tab
+        // list every frame — handles the rare case where the
+        // server-pushed tab list shrinks (e.g. character
+        // reset). Using `min` keeps us pointing at the last
+        // tab instead of crashing.
+        if !stash_tabs.is_empty() {
+            self.active_stash_tab = self.active_stash_tab.min(stash_tabs.len() - 1);
+        } else {
+            self.active_stash_tab = 0;
+        }
+        // Cancel any in-flight rename whose tab vanished.
+        if let Some((idx, _)) = &self.rename_tab {
+            if *idx >= stash_tabs.len() {
+                self.rename_tab = None;
+                self.rename_seen_focus = false;
+            }
+        }
         if stash_open {
             let stash_rect = layout.stash_panel;
+            let active_idx = self.active_stash_tab;
+            let active_items: &[Option<Item>] = stash_tabs
+                .get(active_idx)
+                .map(|t| t.items.as_slice())
+                .unwrap_or(&[]);
+            let owned_tabs = stash_tabs.len();
+            let next_tab_cost: u32 = (owned_tabs as u32).saturating_mul(100);
+            let can_buy_tab = owned_tabs < rift_net::messages::MAX_STASH_TABS
+                && player_state.shards >= next_tab_cost;
+            let pressed_buy_tab = std::cell::Cell::new(false);
+            let pressed_rename = std::cell::Cell::new(false);
+            let recolor_request: std::cell::Cell<Option<u8>> = std::cell::Cell::new(None);
+            let switch_to: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
             Frame::panel(&theme)
                 .with_padding(Pad::all(layout.pad))
                 .show(ui, stash_rect, |ui, body| {
+                    // ── Tab strip (top row) ───────────────────
+                    // Pills sized to fit the panel width so 8
+                    // tabs + a "+" button never overflow. Each
+                    // pill shows the tab name tinted by its
+                    // color; the active tab gets a brighter
+                    // accent border.
+                    let tab_h = 22.0 * layout.fit;
+                    let tab_gap = 4.0 * layout.fit;
+                    let plus_w = if owned_tabs < rift_net::messages::MAX_STASH_TABS {
+                        tab_h + 4.0 * layout.fit
+                    } else {
+                        0.0
+                    };
+                    let avail_w = body.width() - plus_w;
+                    let tab_w = ((avail_w - tab_gap * (owned_tabs as f32 - 1.0).max(0.0))
+                        / owned_tabs.max(1) as f32)
+                        .max(28.0 * layout.fit);
+                    for (i, tab) in stash_tabs.iter().enumerate() {
+                        let tx = body.x() + i as f32 * (tab_w + tab_gap);
+                        let trect = Rect::from_xywh(tx, body.y(), tab_w, tab_h);
+                        let id = Id::root("inv").child(("stash_tab", i));
+                        let resp = ui.interact_hover(id, trect);
+                        let hov = resp;
+                        let active = i == active_idx;
+                        // Pill background tinted by tab color;
+                        // dim non-active tabs so the active one
+                        // pops without losing the color cue.
+                        let r = ((tab.color >> 16) & 0xFF) as f32 / 255.0;
+                        let g = ((tab.color >> 8) & 0xFF) as f32 / 255.0;
+                        let b = (tab.color & 0xFF) as f32 / 255.0;
+                        let alpha = if active { 0.95 } else if hov { 0.65 } else { 0.45 };
+                        ui.draw_rect(trect, Color::rgba(r * 0.55, g * 0.55, b * 0.55, alpha));
+                        // Color stripe along the bottom edge.
+                        ui.draw_rect(
+                            Rect::from_xywh(trect.x(), trect.max.y - 2.0 * layout.fit, trect.width(), 2.0 * layout.fit),
+                            Color::rgba(r, g, b, 1.0),
+                        );
+                        if active {
+                            ui.draw_rect(
+                                Rect::from_xywh(trect.x(), trect.y(), trect.width(), 1.0 * layout.fit),
+                                Color::rgba(0.95, 0.95, 0.95, 0.8),
+                            );
+                        }
+                        // Tab name centered.
+                        let lbl_size = 12.0 * layout.fit;
+                        let lw = ui.measure_text(&tab.name, lbl_size);
+                        let lx = trect.x() + (trect.width() - lw).max(0.0) * 0.5;
+                        let ly = trect.y() + (trect.height() - lbl_size) * 0.5;
+                        ui.draw_text_ellipsized(
+                            Pos2::new(lx, ly),
+                            &tab.name,
+                            lbl_size,
+                            trect.width() - 4.0 * layout.fit,
+                            theme.colors.text,
+                        );
+                        // LMB → switch tabs. RMB → cycle color.
+                        if hov && ui.input().left_clicked() {
+                            switch_to.set(Some(i));
+                        } else if hov && ui.input().right_clicked() {
+                            recolor_request.set(Some(i as u8));
+                        }
+                    }
+                    // "+ Buy" button to the right of the last
+                    // pill. Disabled (greyed) when capped or
+                    // unaffordable; tooltip shows the cost.
+                    if owned_tabs < rift_net::messages::MAX_STASH_TABS {
+                        let bx = body.x() + owned_tabs as f32 * (tab_w + tab_gap);
+                        let brect = Rect::from_xywh(bx, body.y(), plus_w, tab_h);
+                        let id = Id::root("inv").child(("stash_tab_buy", owned_tabs));
+                        let resp = ui.interact_hover(id, brect);
+                        let bg = if !can_buy_tab {
+                            Color::rgba(0.18, 0.18, 0.20, 0.6)
+                        } else if resp {
+                            Color::rgba(0.30, 0.55, 0.85, 0.85)
+                        } else {
+                            Color::rgba(0.22, 0.40, 0.65, 0.8)
+                        };
+                        ui.draw_rect(brect, bg);
+                        let lbl = "+";
+                        let lbl_size = 14.0 * layout.fit;
+                        let lw = ui.measure_text(lbl, lbl_size);
+                        ui.draw_text(
+                            Pos2::new(brect.x() + (brect.width() - lw) * 0.5, brect.y() + (brect.height() - lbl_size) * 0.5),
+                            lbl,
+                            lbl_size,
+                            if can_buy_tab { theme.colors.text } else { theme.colors.text_dim },
+                        );
+                        if resp && ui.input().left_clicked() && can_buy_tab {
+                            pressed_buy_tab.set(true);
+                        }
+                        // Hover tooltip — shows the cost,
+                        // current shard balance, and a red
+                        // "Not enough shards" line when the
+                        // player can't afford the purchase.
+                        // Without this the "+" button is opaque:
+                        // greyed out for an unknown reason and
+                        // with no price quoted up front.
+                        if resp {
+                            let cost_str = format!("Cost: {next_tab_cost} shards");
+                            let have_str = format!("You have: {} shards", player_state.shards);
+                            let mut lines: Vec<TooltipLine<'_>> = Vec::with_capacity(3);
+                            lines.push(TooltipLine::new(
+                                &cost_str,
+                                theme.fonts.size_sm,
+                                theme.colors.text,
+                            ));
+                            lines.push(TooltipLine::new(
+                                &have_str,
+                                theme.fonts.size_sm,
+                                if can_buy_tab {
+                                    theme.colors.text_dim
+                                } else {
+                                    Color::rgba(0.95, 0.40, 0.35, 1.0)
+                                },
+                            ));
+                            let short_str;
+                            if !can_buy_tab && owned_tabs < rift_net::messages::MAX_STASH_TABS {
+                                let short = next_tab_cost.saturating_sub(player_state.shards);
+                                short_str = format!("Need {short} more");
+                                lines.push(TooltipLine::new(
+                                    &short_str,
+                                    theme.fonts.size_sm,
+                                    Color::rgba(0.95, 0.40, 0.35, 1.0),
+                                ));
+                            }
+                            Tooltip::new()
+                                .header("Buy stash tab")
+                                .min_width(160.0)
+                                .anchor_to(brect)
+                                .show(ui, Pos2::new(brect.max.x, brect.y()), &lines);
+                        }
+                    }
+
+                    // ── Header row (tab name + slot counts) ───
+                    let header_y = body.y() + tab_h + 6.0 * layout.fit;
+                    let active_name = stash_tabs
+                        .get(active_idx)
+                        .map(|t| t.name.as_str())
+                        .unwrap_or("STASH");
                     ui.draw_text(
-                        Pos2::new(body.x(), body.y()),
-                        "STASH",
+                        Pos2::new(body.x(), header_y),
+                        active_name,
                         theme.fonts.size_lg,
                         theme.colors.text,
                     );
                     let counts = format!(
                         "{}/{}",
-                        stash_items.iter().filter(|s| s.is_some()).count(),
-                        STASH_COLS * STASH_ROWS,
+                        active_items.iter().filter(|s| s.is_some()).count(),
+                        rift_net::messages::STASH_TAB_SLOTS,
                     );
                     let cw = ui.measure_text(&counts, theme.fonts.size_md);
+                    // "Rename" mini-button to the right of the
+                    // counts; opens an inline text field.
+                    let rename_lbl = "Rename";
+                    let rename_w = ui.measure_text(rename_lbl, theme.fonts.size_sm) + 12.0 * layout.fit;
+                    let rename_rect = Rect::from_xywh(
+                        body.max.x - cw - 14.0 * layout.fit - rename_w,
+                        header_y + 2.0 * layout.fit,
+                        rename_w,
+                        theme.fonts.size_md + 4.0 * layout.fit,
+                    );
+                    let rename_resp = ui.interact_hover(
+                        Id::root("inv").child(("stash_rename", active_idx)),
+                        rename_rect,
+                    );
+                    let rename_bg = if rename_resp {
+                        Color::rgba(0.30, 0.30, 0.35, 0.85)
+                    } else {
+                        Color::rgba(0.20, 0.20, 0.25, 0.7)
+                    };
+                    ui.draw_rect(rename_rect, rename_bg);
+                    let rl_w = ui.measure_text(rename_lbl, theme.fonts.size_sm);
                     ui.draw_text(
-                        Pos2::new(body.max.x - cw, body.y() + 4.0),
+                        Pos2::new(
+                            rename_rect.x() + (rename_rect.width() - rl_w) * 0.5,
+                            rename_rect.y() + (rename_rect.height() - theme.fonts.size_sm) * 0.5,
+                        ),
+                        rename_lbl,
+                        theme.fonts.size_sm,
+                        theme.colors.text,
+                    );
+                    if rename_resp && ui.input().left_clicked() {
+                        pressed_rename.set(true);
+                    }
+                    ui.draw_text(
+                        Pos2::new(body.max.x - cw, header_y + 4.0),
                         &counts,
                         theme.fonts.size_md,
                         theme.colors.text_dim,
                     );
+                    let div_y = header_y + theme.fonts.size_lg + 8.0;
                     ui.draw_rect(
-                        Rect::from_xywh(body.x(), body.y() + theme.fonts.size_lg + 8.0, body.width(), 1.0),
+                        Rect::from_xywh(body.x(), div_y, body.width(), 1.0),
                         theme.colors.border,
                     );
-                    let grid_y = body.y() + layout.header_h;
+
+                    // ── Slot grid ─────────────────────────────
+                    let grid_y = div_y + 8.0 * layout.fit;
                     for row in 0..STASH_ROWS {
                         for col in 0..STASH_COLS {
                             let idx = row * STASH_COLS + col;
@@ -488,9 +916,9 @@ impl MpInventoryUI {
                                 body.x() + col as f32 * (layout.slot + layout.gap),
                                 grid_y + row as f32 * (layout.slot + layout.gap),
                             );
-                            let id = Id::root("inv").child(("stash", idx));
+                            let id = Id::root("inv").child(("stash", active_idx, idx));
                             let rect = Rect::from_xywh(pos.x, pos.y, layout.slot, layout.slot);
-                            let item = stash_items.get(idx).and_then(|o| o.as_ref());
+                            let item = active_items.get(idx).and_then(|o| o.as_ref());
                             let payload = item.map(|_| DragSource::Stash(idx));
                             let r = build_item_slot(item)
                                 .interact::<DragSource>(ui, rect, id, payload);
@@ -499,6 +927,8 @@ impl MpInventoryUI {
                                 r,
                                 DropTarget::Stash(idx),
                                 stash_open,
+                                false,
+                                active_tab_u8,
                                 pending,
                                 stash_pending,
                             );
@@ -509,7 +939,108 @@ impl MpInventoryUI {
                             }
                         }
                     }
+
+                    // Inline rename text field (overlaid on
+                    // header). Active only when the player has
+                    // pressed the Rename button on this tab;
+                    // Enter commits, Escape (or click-away)
+                    // cancels.
+                    if let Some((idx, buf)) = self.rename_tab.as_mut() {
+                        if *idx == active_idx {
+                            let field_h = theme.fonts.size_md + 8.0 * layout.fit;
+                            let field_w = body.width().min(220.0 * layout.fit);
+                            let field_rect = Rect::from_xywh(
+                                body.x(),
+                                header_y - 2.0 * layout.fit,
+                                field_w,
+                                field_h,
+                            );
+                            // Tinted backdrop so the field
+                            // visually replaces the tab name.
+                            ui.draw_rect(field_rect, Color::rgba(0.10, 0.10, 0.13, 0.95));
+                            let resp = rift_engine::ui::im::widgets::text_field(
+                                ui,
+                                Id::root("inv").child(("stash_rename_input", active_idx)),
+                                field_rect,
+                                buf,
+                                "Tab name",
+                                18,
+                                player_state.experience.total_xp as f32 * 0.001,
+                            );
+                            // Drive commit/cancel. Both Enter
+                            // and Escape have to use the
+                            // text-input-aware accessors
+                            // (`enter_just_pressed` /
+                            // `key_just_pressed_raw`) because
+                            // `text_capture` is on while the
+                            // rename is active — the regular
+                            // `key_just_pressed` is suppressed
+                            // for typed-input safety and would
+                            // never fire here, leaving the
+                            // field with no way to commit.
+                            //
+                            // Click-away also commits: once the
+                            // field has been focused at least
+                            // once, a subsequent unfocused
+                            // frame means the player clicked
+                            // outside, which should save the
+                            // current buffer (matches the
+                            // muscle-memory of every other
+                            // inline-edit UI). Empty buffers
+                            // cancel instead of committing so
+                            // we don't blank the tab name by
+                            // accident.
+                            let enter = ui.input().enter_just_pressed();
+                            let escape = ui.input().key_just_pressed_raw(KeyCode::Escape);
+                            if resp.focused {
+                                self.rename_seen_focus = true;
+                            }
+                            let blurred = self.rename_seen_focus && !resp.focused;
+                            if enter || blurred {
+                                let name = buf.trim().to_string();
+                                if !name.is_empty() {
+                                    stash_pending.push(StashRequest::RenameTab {
+                                        tab_index: active_idx as u8,
+                                        name,
+                                    });
+                                }
+                                self.rename_tab = None;
+                                self.rename_seen_focus = false;
+                            } else if escape {
+                                self.rename_tab = None;
+                                self.rename_seen_focus = false;
+                            }
+                        }
+                    }
                 });
+            // Side-effects from the immediate-mode body run
+            // here so we don't need `&mut self` inside the
+            // closure.
+            if let Some(i) = switch_to.get() {
+                self.active_stash_tab = i;
+                self.rename_tab = None;
+                self.rename_seen_focus = false;
+            }
+            if let Some(i) = recolor_request.get() {
+                if let Some(tab) = stash_tabs.get(i as usize) {
+                    let next = next_tab_color(tab.color);
+                    stash_pending.push(StashRequest::RecolorTab {
+                        tab_index: i,
+                        color: next,
+                    });
+                }
+            }
+            if pressed_buy_tab.get() {
+                stash_pending.push(StashRequest::BuyTab);
+            }
+            if pressed_rename.get() {
+                let current = stash_tabs
+                    .get(self.active_stash_tab)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                self.rename_tab = Some((self.active_stash_tab, current));
+                self.rename_seen_focus = false;
+            }
         }
 
         // ─── Stats panel ───────────────────────────────────────
@@ -541,6 +1072,41 @@ impl MpInventoryUI {
                 primary_anchor,
                 Some(&player_state.loadout),
             );
+            // Ctrl-hover salvage hint. Drawn as a small banner
+            // beneath the primary tooltip so it doesn't push the
+            // compare panel sideways. Suppressed when the hover
+            // came from an equipment slot (you can't salvage
+            // equipped gear) or a stash slot (deposit/withdraw
+            // only — bulk salvage acts on bag items).
+            if hovered_from_bag && ui.ctrl_held() {
+                let hint = if item.anchored {
+                    "Anchored \u{2014} cannot be salvaged".to_string()
+                } else {
+                    let yld = rift_game::loot::salvage_yield(item.rarity, item.ilvl);
+                    format!("Ctrl+click \u{2192} Salvage for {} \u{25C6}", yld)
+                };
+                let hint_size = ui.theme().fonts.size_md;
+                let hw = ui.measure_text(&hint, hint_size);
+                let pad = ui.s(8.0);
+                let hint_rect = Rect::from_xywh(
+                    primary.x(),
+                    primary.max.y + ui.s(4.0),
+                    hw + pad * 2.0,
+                    hint_size + pad,
+                );
+                let bg = if item.anchored {
+                    Color::rgba(0.40, 0.20, 0.18, 0.92)
+                } else {
+                    Color::rgba(0.18, 0.30, 0.22, 0.92)
+                };
+                ui.draw_rect(hint_rect, bg);
+                ui.draw_text(
+                    Pos2::new(hint_rect.x() + pad, hint_rect.y() + pad * 0.5),
+                    &hint,
+                    hint_size,
+                    ui.theme().colors.text,
+                );
+            }
             // Compare side-by-side. Pick the side with more
             // remaining room so two- and three-pane tooltips
             // don't push past the screen edge on right-half
@@ -584,8 +1150,12 @@ impl MpInventoryUI {
         // DragGhost layer using the same builder as the
         // in-place slot, so what the player picks up is what
         // they see floating under the cursor.
+        let active_stash_items: &[Option<Item>] = stash_tabs
+            .get(self.active_stash_tab)
+            .map(|t| t.items.as_slice())
+            .unwrap_or(&[]);
         if let Some(payload) = ui.drag_payload::<DragSource>().copied() {
-            if let Some(item) = item_for_source(payload, items, equipment, stash_items) {
+            if let Some(item) = item_for_source(payload, items, equipment, active_stash_items) {
                 build_item_slot(Some(item)).show_ghost(ui);
             }
         }
@@ -658,11 +1228,19 @@ fn route_slot(
     r: SlotInteraction<DragSource>,
     target: DropTarget,
     stash_open: bool,
+    // `true` when the player is holding Ctrl this frame. A
+    // Ctrl+click on a Bag slot fires a Salvage request
+    // instead of the default Equip / Deposit.
+    ctrl: bool,
+    // Active stash tab. Threaded into every produced
+    // `StashRequest` variant so the server applies the action
+    // to the right page.
+    active_tab: u8,
     pending: &mut Vec<EquipRequest>,
     stash_pending: &mut Vec<StashRequest>,
 ) {
     if let Some(drop) = r.dropped {
-        handle_drop(drop.payload, target, stash_open, pending, stash_pending);
+        handle_drop(drop.payload, target, stash_open, active_tab, pending, stash_pending);
     }
     if r.clicked {
         // Source identity is implicit in the target rect (the
@@ -672,20 +1250,31 @@ fn route_slot(
             DropTarget::Equip(slot) => DragSource::Equip(slot),
             DropTarget::Stash(idx) => DragSource::Stash(idx),
         };
-        handle_click(src, stash_open, pending, stash_pending);
+        handle_click(src, stash_open, ctrl, active_tab, pending, stash_pending);
     }
 }
 
 fn handle_click(
     src: DragSource,
     stash_open: bool,
+    // Ctrl modifier; only meaningful for `Bag` clicks where it
+    // flips the action from "equip / deposit" to "salvage".
+    ctrl: bool,
+    // Active stash tab — destination for bag deposits and
+    // source for stash clicks while a stash session is open.
+    active_tab: u8,
     pending: &mut Vec<EquipRequest>,
     stash_pending: &mut Vec<StashRequest>,
 ) {
     match src {
         DragSource::Bag(idx) => {
-            if stash_open {
-                stash_pending.push(StashRequest::Deposit { inventory_index: idx as u32 });
+            if ctrl {
+                pending.push(EquipRequest::Salvage { inventory_index: idx as u32 });
+            } else if stash_open {
+                stash_pending.push(StashRequest::Deposit {
+                    inventory_index: idx as u32,
+                    tab_index: active_tab,
+                });
             } else {
                 pending.push(EquipRequest::Equip { inventory_index: idx as u32 });
             }
@@ -694,7 +1283,10 @@ fn handle_click(
             pending.push(EquipRequest::Unequip { slot: slot.to_u8() });
         }
         DragSource::Stash(idx) => {
-            stash_pending.push(StashRequest::Withdraw { stash_index: idx as u32 });
+            stash_pending.push(StashRequest::Withdraw {
+                tab_index: active_tab,
+                stash_index: idx as u32,
+            });
         }
     }
 }
@@ -703,6 +1295,7 @@ fn handle_drop(
     src: DragSource,
     target: DropTarget,
     stash_open: bool,
+    active_tab: u8,
     pending: &mut Vec<EquipRequest>,
     stash_pending: &mut Vec<StashRequest>,
 ) {
@@ -715,13 +1308,12 @@ fn handle_drop(
         (DragSource::Bag(idx), DropTarget::Equip(_)) => {
             pending.push(EquipRequest::Equip { inventory_index: idx as u32 });
         }
-        // Bag → Stash: deposit into the dropped-on slot if
-        // possible, otherwise fall back to the index-less
-        // "send to stash" op (DropTarget::Stash carries the
-        // hovered slot index when the cursor was over a slot).
+        // Bag → Stash: deposit into the dropped-on slot of the
+        // currently-active stash tab.
         (DragSource::Bag(a), DropTarget::Stash(b)) if stash_open => {
             stash_pending.push(StashRequest::DepositToSlot {
                 inventory_index: a as u32,
+                tab_index: active_tab,
                 stash_index: b as u32,
             });
         }
@@ -735,13 +1327,15 @@ fn handle_drop(
         // Stash → Bag(idx): withdraw to the dropped-on slot.
         (DragSource::Stash(a), DropTarget::Bag(b)) if stash_open => {
             stash_pending.push(StashRequest::WithdrawToSlot {
+                tab_index: active_tab,
                 stash_index: a as u32,
                 inventory_index: b as u32,
             });
         }
-        // Stash → Stash: reorder
+        // Stash → Stash: reorder within the active tab.
         (DragSource::Stash(a), DropTarget::Stash(b)) if stash_open && a != b => {
             stash_pending.push(StashRequest::Swap {
+                tab_index: active_tab,
                 a: a as u32,
                 b: b as u32,
             });
@@ -911,6 +1505,27 @@ fn item_for_source<'a>(
         DragSource::Equip(slot) => equipment.get(slot),
         DragSource::Stash(idx) => stash_items.get(idx).and_then(|o| o.as_ref()),
     }
+}
+
+/// Cycle through a small fixed palette so right-clicking a tab
+/// rotates its color. The first entry matches the default
+/// neutral grey returned by the server for fresh tabs; the
+/// rest are gentle, distinct hues that read clearly even when
+/// dimmed in the inactive state.
+fn next_tab_color(current: u32) -> u32 {
+    const PALETTE: &[u32] = &[
+        0x6E6E78, // neutral grey (default)
+        0xB95151, // muted red
+        0xC68A3F, // amber
+        0xC8B548, // yellow-gold
+        0x6FAE5C, // green
+        0x4DA0A8, // teal
+        0x4E78C8, // blue
+        0x9165B2, // violet
+    ];
+    let masked = current & 0x00FF_FFFF;
+    let i = PALETTE.iter().position(|c| *c == masked).unwrap_or(0);
+    PALETTE[(i + 1) % PALETTE.len()]
 }
 
 // ─── Layout helpers ──────────────────────────────────────────────────

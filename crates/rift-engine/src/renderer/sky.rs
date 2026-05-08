@@ -71,6 +71,22 @@ pub struct SkyConfig {
     /// Horizon-to-zenith falloff exponent. `1.0` = linear; higher
     /// = a tighter horizon band, deep colour overhead.
     pub horizon_falloff: f32,
+    /// Procedural storm-cloud coverage. `0.0` = clear sky;
+    /// `1.0` = dense storm wall. Driven by an animated fbm noise
+    /// in the sky shader; the only CPU cost is filling the push
+    /// constant. Coverage stretches denser toward the horizon
+    /// line so the dome reads as an oncoming storm rather than a
+    /// uniform overcast.
+    pub cloud_strength: f32,
+    /// Lightning-flash boost on the cloud body. `0.0` = calm;
+    /// values 1.0–3.0 brighten the cloud color toward
+    /// `cloud_flash_color` for the duration of a strike. Game
+    /// code (the `HubStorm` driver) modulates this each frame.
+    pub cloud_flash: f32,
+    /// RGB colour the cloud body lifts toward during a flash.
+    /// Cool-white-blue for normal sky lightning, warm amber for
+    /// the rare "hellfire" strikes.
+    pub cloud_flash_color: Vec3,
 }
 
 impl Default for SkyConfig {
@@ -88,6 +104,9 @@ impl Default for SkyConfig {
             sun_size: 1.0,
             sun_strength: 0.0,
             horizon_falloff: 2.0,
+            cloud_strength: 0.0,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
         }
     }
 }
@@ -105,6 +124,9 @@ impl SkyConfig {
             sun_size: 0.9990,
             sun_strength: 1.4,
             horizon_falloff: 2.5,
+            cloud_strength: 0.0,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
         }
     }
 
@@ -140,6 +162,47 @@ impl SkyConfig {
             // bruised dome overhead rather than washing the
             // whole sky red — keeps the gloom bias.
             horizon_falloff: 3.5,
+            cloud_strength: 0.0,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+        }
+    }
+
+    /// Hub preset: floating obsidian platform over an abyss with
+    /// a thunderstorm crimson sky. Brighter and more-saturated
+    /// than `rift()` (the rift floors want claustrophobic gloom;
+    /// the hub wants brooding-grandeur), and the horizon is
+    /// pushed *up* into a roiling crimson-orange band so distant
+    /// hellish mountains can silhouette against it.
+    pub fn abyss_hub() -> Self {
+        Self {
+            enabled: true,
+            // Charcoal-black overhead with a faint plum lift, so
+            // the dome doesn't look flat.
+            zenith: [0.025, 0.012, 0.030],
+            // Dim oxblood horizon — visible enough that the
+            // mountain ridge silhouettes against it, but dark
+            // enough that the sky doesn't wash the whole scene
+            // out. The fog color is tuned to match this band so
+            // the sky-to-mountain-base seam blends instead of
+            // banding.
+            horizon: [0.18, 0.05, 0.06],
+            // Ground band matches the fog so the player can
+            // look down past the platform edge without seeing
+            // a hard horizon-to-ground transition.
+            ground: [0.06, 0.025, 0.035],
+            sun_dir: Vec3::new(0.0, 1.0, 0.0),
+            sun_size: 1.0,
+            sun_strength: 0.0,
+            // Tight horizon band — the bright slice stays
+            // narrow so the dome overall reads as oppressively
+            // dark with just a smouldering rim.
+            horizon_falloff: 3.0,
+            // Heavy cloud cover — the abyss hub is meant to
+            // sit under a roiling thunderstorm.
+            cloud_strength: 0.95,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
         }
     }
 }
@@ -154,6 +217,8 @@ struct SkyPush {
     horizon_sun_size: [f32; 4],
     ground_sun_str: [f32; 4],
     sun_dir: [f32; 4],
+    cloud_params: [f32; 4],
+    cloud_flash_color: [f32; 4],
 }
 
 pub struct SkyRenderer {
@@ -286,6 +351,7 @@ impl SkyRenderer {
         view: Mat4,
         proj: Mat4,
         config: &SkyConfig,
+        time_secs: f32,
     ) {
         if !config.enabled {
             return;
@@ -317,6 +383,13 @@ impl SkyRenderer {
             ],
             sun_dir: [
                 config.sun_dir.x, config.sun_dir.y, config.sun_dir.z,
+                0.0,
+            ],
+            cloud_params: [time_secs, config.cloud_strength, config.cloud_flash, 0.0],
+            cloud_flash_color: [
+                config.cloud_flash_color.x,
+                config.cloud_flash_color.y,
+                config.cloud_flash_color.z,
                 0.0,
             ],
         };

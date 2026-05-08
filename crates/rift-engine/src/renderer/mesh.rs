@@ -518,7 +518,13 @@ impl Mesh {
     /// hard edge fades into the fog instead of cutting off in mid-air.
     /// UVs are world-space so a tiling grass / stone material maps
     /// continuously with the main dungeon floor.
-    pub fn ground_disc(center: Vec3, radius: f32, segments: u32, color: Vec3) -> Self {
+    /// Flat horizontal disc fan in the XZ plane centred at `center`.
+    /// `uv_scale` is multiplied into the world-space (x, z) UVs so
+    /// callers can choose how many world metres one texture tile
+    /// spans (e.g. `uv_scale = 1.0 / 12.0` means one tile covers
+    /// 12 m before the sampler wraps). Lower values reduce visible
+    /// repetition for large discs.
+    pub fn ground_disc(center: Vec3, radius: f32, segments: u32, color: Vec3, uv_scale: f32) -> Self {
         let segments = segments.max(8);
         let mut vertices = Vec::with_capacity((segments + 1) as usize);
         let mut indices = Vec::with_capacity((segments * 3) as usize);
@@ -528,7 +534,7 @@ impl Mesh {
             position: center,
             normal: Vec3::Y,
             color,
-            uv: Vec2::new(center.x, center.z),
+            uv: Vec2::new(center.x * uv_scale, center.z * uv_scale),
         });
         for i in 0..segments {
             let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
@@ -537,7 +543,7 @@ impl Mesh {
                 position: p,
                 normal: Vec3::Y,
                 color,
-                uv: Vec2::new(p.x, p.z),
+                uv: Vec2::new(p.x * uv_scale, p.z * uv_scale),
             });
         }
         for i in 0..segments {
@@ -545,6 +551,108 @@ impl Mesh {
             indices.extend_from_slice(&[0, 1 + next, 1 + i]);
         }
 
+        Self { vertices, indices }
+    }
+
+    /// Flat horizontal annulus (ring) in the XZ plane centred at
+    /// `center`. Used by the hub to draw a thin glowing rim along
+    /// the floating-platform edge so the silhouette of the island
+    /// reads against the dark sky / abyss. Vertex colors carry the
+    /// glow tint directly so callers don't need a material.
+    pub fn ring(center: Vec3, inner_radius: f32, outer_radius: f32, segments: u32, color: Vec3) -> Self {
+        let segments = segments.max(8);
+        let mut vertices = Vec::with_capacity((segments * 2) as usize);
+        let mut indices = Vec::with_capacity((segments * 6) as usize);
+        for i in 0..segments {
+            let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let (cos, sin) = (a.cos(), a.sin());
+            let inner = Vec3::new(center.x + cos * inner_radius, center.y, center.z + sin * inner_radius);
+            let outer = Vec3::new(center.x + cos * outer_radius, center.y, center.z + sin * outer_radius);
+            vertices.push(Vertex { position: inner, normal: Vec3::Y, color, uv: Vec2::new(inner.x, inner.z) });
+            vertices.push(Vertex { position: outer, normal: Vec3::Y, color, uv: Vec2::new(outer.x, outer.z) });
+        }
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            let i_in = i * 2;
+            let i_out = i * 2 + 1;
+            let n_in = next * 2;
+            let n_out = next * 2 + 1;
+            indices.extend_from_slice(&[i_in, i_out, n_out, i_in, n_out, n_in]);
+        }
+        Self { vertices, indices }
+    }
+
+    /// Procedural distant-mountain silhouette ring. Builds a
+    /// vertical strip wrapped into a circle of radius `radius`
+    /// around `center`, with each angular segment rising to a
+    /// pseudo-random height sampled from `[min_height, max_height]`
+    /// using a per-segment hash of `seed`. The base of every
+    /// segment is sunk to `base_y` so distance fog can swallow
+    /// the lower portion and the silhouette reads as bare peaks
+    /// rising out of the abyss.
+    ///
+    /// All faces point inward (toward `center`); the player is
+    /// always inside the ring so backfaces are culled invisibly.
+    /// Vertex colors carry `color` directly — no material needed.
+    pub fn mountain_ring(
+        center: Vec3,
+        radius: f32,
+        base_y: f32,
+        min_height: f32,
+        max_height: f32,
+        segments: u32,
+        seed: u64,
+        color: Vec3,
+    ) -> Self {
+        let segments = segments.max(16);
+        let mut vertices = Vec::with_capacity((segments * 2) as usize);
+        let mut indices = Vec::with_capacity((segments * 6) as usize);
+        // Cheap fbm-ish height: blend two hash octaves so the
+        // silhouette has both narrow spikes and wider massifs.
+        let hash = |i: u32, salt: u64| -> f32 {
+            let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(seed).wrapping_add(salt);
+            x ^= x >> 33;
+            x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+            x ^= x >> 33;
+            (x & 0xFFFF) as f32 / 65536.0
+        };
+        for i in 0..segments {
+            let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let (cos, sin) = (a.cos(), a.sin());
+            // Two-octave height: a slow ridge (low-freq hash on
+            // i/4) + a fine spike (per-segment hash). Keeps the
+            // silhouette varied without looking like white noise.
+            let coarse = hash(i / 4, 0xA);
+            let fine = hash(i, 0xB);
+            let h_norm = (coarse * 0.65 + fine * 0.35).clamp(0.0, 1.0);
+            let top_y = min_height + (max_height - min_height) * h_norm;
+            let bx = center.x + cos * radius;
+            let bz = center.z + sin * radius;
+            // Inward-facing normal so the inner side of the ring
+            // catches the key/fog correctly.
+            let n = Vec3::new(-cos, 0.0, -sin);
+            vertices.push(Vertex {
+                position: Vec3::new(bx, base_y, bz),
+                normal: n,
+                color,
+                uv: Vec2::new(i as f32, 0.0),
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(bx, top_y, bz),
+                normal: n,
+                color,
+                uv: Vec2::new(i as f32, 1.0),
+            });
+        }
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            let bi = i * 2;
+            let ti = i * 2 + 1;
+            let bn = next * 2;
+            let tn = next * 2 + 1;
+            // Wind so the inward face is front-facing.
+            indices.extend_from_slice(&[bi, tn, ti, bi, bn, tn]);
+        }
         Self { vertices, indices }
     }
 
@@ -1512,6 +1620,19 @@ impl SkinnedMesh {
     /// uses that skin are merged into one buffer in model space (i.e. skin
     /// space — the space referenced by inverseBindMatrices).
     pub fn from_gltf<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        Self::from_gltf_filtered(path, |_| true)
+    }
+
+    /// Same as [`from_gltf`], but only includes primitives whose owning
+    /// glTF mesh's `name` passes `mesh_name_filter`. Lets callers split a
+    /// multi-mesh authored asset (e.g. base-character `Eyes` / `Eyebrows`
+    /// / body siblings under one skin) into separate `SkinnedMesh`es so
+    /// each can be rendered as its own attachment with its own texture.
+    pub fn from_gltf_filtered<P, F>(path: P, mut mesh_name_filter: F) -> anyhow::Result<Self>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(&str) -> bool,
+    {
         let original = path.as_ref().to_path_buf();
         let candidates = [
             original.clone(),
@@ -1597,6 +1718,7 @@ impl SkinnedMesh {
             let Some(node_skin) = node.skin() else { continue };
             if node_skin.index() != target_skin_idx { continue }
             let Some(gmesh) = node.mesh() else { continue };
+            if !mesh_name_filter(gmesh.name().unwrap_or("")) { continue }
 
             for prim in gmesh.primitives() {
                 let reader = prim.reader(|b| Some(&buffers[b.index()]));
@@ -1694,6 +1816,17 @@ impl SkinnedMesh {
 
     /// Number of joints (palette size needed for rendering).
     pub fn joint_count(&self) -> usize { self.joints.len() }
+
+    /// Override every bind-vertex's `color` with `rgb`. Used by the
+    /// avatar-cosmetic pass to force the eye-ball mesh to render as
+    /// pure white regardless of whatever vertex-color/material tint
+    /// the base-character glTF baked in (the source asset bakes the
+    /// MI_Eyes baseColor into COLOR_0, which can read off-white).
+    pub fn override_vertex_colors(&mut self, rgb: glam::Vec3) {
+        for v in &mut self.bind_vertices {
+            v.color = rgb;
+        }
+    }
 
     /// Remap this mesh's `vertex_skin.joint_indices` to refer to the joint
     /// ordering of `target_names` (joint name → palette index in the

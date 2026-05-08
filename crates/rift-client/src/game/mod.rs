@@ -25,6 +25,8 @@ pub mod spellbook;
 pub mod chat;
 pub mod meters;
 pub mod party;
+pub mod equipment_visuals;
+pub mod avatar_cosmetics;
 
 // Flatten the systems / phases / states hierarchies back into
 // the `game` namespace so existing `crate::game::sub_state::*`,

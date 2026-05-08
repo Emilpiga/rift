@@ -30,6 +30,22 @@ impl Server {
         }
     }
 
+    /// Persist the latest shard balance for `client_id`. Mirrors
+    /// `persist_xp_for` — fire-and-forget; mutates the in-memory
+    /// `record` so the next periodic save carries the new value
+    /// even if this immediate save loses its race to a Save that
+    /// already had the older record cloned.
+    pub(crate) fn persist_shards_for(&mut self, client_id: ClientId, shards: u32) {
+        let Some(s) = self.sessions.get_mut(client_id) else {
+            return;
+        };
+        let Some(rec) = s.record.as_mut() else { return };
+        rec.shards = shards.min(i32::MAX as u32) as i32;
+        if let Some(handle) = &self.persistence {
+            let _ = handle.save(rec.clone());
+        }
+    }
+
     /// Raise the player's persistent "deepest cleared floor"
     /// watermark and notify the client. Called from the per-
     /// instance boss-kill detection in `simulate_one_tick`.
@@ -107,6 +123,7 @@ impl Server {
             // Shot is unlocked at level 1.
             loadout: [0, 255, 255, 255, 255, 255],
             deepest_cleared_floor: 0,
+            shards: 0,
         }
     }
 
@@ -120,13 +137,34 @@ impl Server {
         match handle.list_account_characters_blocking(account_name.to_string()) {
             Ok((_account_id, records)) => records
                 .into_iter()
-                .map(|r| RosterEntry {
-                    character_name: r.name,
-                    class_id: r.class_id,
-                    gender: gender_from_i16(r.gender),
-                    level: r.level.max(0) as u32,
-                    loadout: loadout_to_u8(r.loadout),
-                    deepest_cleared_floor: r.deepest_cleared_floor.max(0) as u32,
+                .map(|r| {
+                    // N+1 query — rosters are tiny (~3 chars) so
+                    // this is fine. Loads the persisted bag and
+                    // keeps only the rows tagged with an
+                    // `equipped_slot`, mapping their `base_id`s
+                    // into `BASE_ITEMS` indices the client can
+                    // resolve back to a `BaseItem`.
+                    let equipped_base_ids = handle
+                        .load_inventory_blocking(r.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|it| it.equipped_slot.is_some())
+                        .filter_map(|it| {
+                            rift_game::loot::BASE_ITEMS
+                                .iter()
+                                .position(|b| b.id == it.base_id)
+                                .map(|p| p as u16)
+                        })
+                        .collect();
+                    RosterEntry {
+                        character_name: r.name,
+                        class_id: r.class_id,
+                        gender: gender_from_i16(r.gender),
+                        level: r.level.max(0) as u32,
+                        loadout: loadout_to_u8(r.loadout),
+                        deepest_cleared_floor: r.deepest_cleared_floor.max(0) as u32,
+                        equipped_base_ids,
+                    }
                 })
                 .collect(),
             Err(e) => {

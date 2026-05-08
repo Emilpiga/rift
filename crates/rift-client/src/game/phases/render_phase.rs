@@ -71,6 +71,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     renderer.fog_origin = player_pos;
     // Push the 8 nearest wall-torch lights for this frame.
     state.floor_mgr.torches.update_lights(renderer, player_pos);
+    // Hub thunderstorm: when present, restores calm lighting
+    // and overlays any in-progress lightning flash. Owns the
+    // entire point-light vec while in the hub (no torches).
+    if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
+        storm.tick(renderer, dt);
+    }
     renderer.vfx_system.tick(dt);
     state.player_state.abilities.tick_all(dt);
 

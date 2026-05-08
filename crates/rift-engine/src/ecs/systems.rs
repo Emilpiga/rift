@@ -439,7 +439,11 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
                     continue;
                 }
                 renderer.objects[piece.object_index].model_matrix = host_xform;
-                piece.mesh.skin_to_inflated(&palette, OUTFIT_INFLATE, &mut piece.scratch);
+                if piece.inflate {
+                    piece.mesh.skin_to_inflated(&palette, OUTFIT_INFLATE, &mut piece.scratch);
+                } else {
+                    piece.mesh.skin_to(&palette, &mut piece.scratch);
+                }
                 renderer.update_dynamic_vertices(piece.object_index, &piece.scratch);
             }
         }
