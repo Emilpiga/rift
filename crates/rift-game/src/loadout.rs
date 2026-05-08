@@ -51,11 +51,19 @@ pub struct Loadout {
 
 impl Loadout {
     /// Build a loadout from raw wire ids. Unknown ids are kept
-    /// verbatim — they'll materialize to an empty slot. No
-    /// validation is done here; call [`Self::is_valid`] to
-    /// check.
-    pub const fn from_slots(slots: [u8; SLOT_COUNT]) -> Self {
-        Self { slots }
+    /// verbatim — they'll materialize to an empty slot.
+    /// Duplicate non-sentinel ids are normalized so only the
+    /// last occurrence wins (mirrors the
+    /// last-write-wins semantics of [`Self::set_slot`]) — this
+    /// is the load-time defense for a persisted row that
+    /// somehow ended up with the same ability in two slots
+    /// (older builds didn't dedupe before saving). Call
+    /// [`Self::is_valid`] to additionally check that every
+    /// non-sentinel id resolves to a player-castable ability.
+    pub fn from_slots(slots: [u8; SLOT_COUNT]) -> Self {
+        let mut s = Self { slots };
+        s.normalize();
+        s
     }
 
     /// Default starter loadout — only Fireball in slot 0,
@@ -76,11 +84,28 @@ impl Loadout {
     }
 
     /// `true` if every populated slot resolves to a player-castable
-    /// ability in [`REGISTRY`]. Empty slots are always valid.
+    /// ability in [`REGISTRY`] **and** no non-sentinel id appears
+    /// twice. Empty slots are always valid.
     pub fn is_valid(&self) -> bool {
-        self.slots
+        if !self
+            .slots
             .iter()
             .all(|&id| id == EMPTY_SLOT || is_player_ability(id))
+        {
+            return false;
+        }
+        // O(N^2) is fine — `SLOT_COUNT` is 6.
+        for i in 0..SLOT_COUNT {
+            if self.slots[i] == EMPTY_SLOT {
+                continue;
+            }
+            for j in (i + 1)..SLOT_COUNT {
+                if self.slots[i] == self.slots[j] {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// `true` if `wire_id` is one of the six slotted abilities.
@@ -104,12 +129,51 @@ impl Loadout {
     }
 
     /// Replace one slot with a new wire id (or [`EMPTY_SLOT`] to
-    /// clear it). No-op when `index` is out of range. Caller is
-    /// responsible for re-materializing the [`AbilitySlot`]
-    /// afterwards (cooldowns reset on swap).
+    /// clear it). No-op when `index` is out of range.
+    ///
+    /// Each ability lives in **at most one** action-bar slot. If
+    /// `wire_id` is already in another slot, that other slot is
+    /// cleared as part of the assignment — the action bar can't
+    /// duplicate-stack the same ability across slots, which
+    /// would otherwise let the player parallelize cooldowns by
+    /// equipping the same spell N times. Setting a slot to
+    /// [`EMPTY_SLOT`] never dedupes (multiple empty slots are
+    /// expected). Caller is responsible for re-materializing
+    /// the [`AbilitySlot`] afterwards (cooldowns reset on
+    /// swap).
     pub fn set_slot(&mut self, index: usize, wire_id: u8) {
-        if index < SLOT_COUNT {
-            self.slots[index] = wire_id;
+        if index >= SLOT_COUNT {
+            return;
+        }
+        if wire_id != EMPTY_SLOT {
+            for (i, slot) in self.slots.iter_mut().enumerate() {
+                if i != index && *slot == wire_id {
+                    *slot = EMPTY_SLOT;
+                }
+            }
+        }
+        self.slots[index] = wire_id;
+    }
+
+    /// Collapse duplicate non-sentinel ids in-place so each
+    /// ability appears in at most one slot. Later occurrences
+    /// win (matches [`Self::set_slot`] semantics: a fresh
+    /// assignment displaces the prior one). Used by
+    /// [`Self::from_slots`] / persisted-row loaders to
+    /// defensively repair rows that pre-date the dedup
+    /// invariant.
+    pub fn normalize(&mut self) {
+        for i in 0..SLOT_COUNT {
+            let id = self.slots[i];
+            if id == EMPTY_SLOT {
+                continue;
+            }
+            for j in (i + 1)..SLOT_COUNT {
+                if self.slots[j] == id {
+                    self.slots[i] = EMPTY_SLOT;
+                    break;
+                }
+            }
         }
     }
 }
@@ -142,4 +206,46 @@ pub fn is_ability_unlocked(wire_id: u8, player_level: u32) -> bool {
 /// pickable pool.
 pub fn player_abilities() -> impl Iterator<Item = &'static Ability> {
     REGISTRY.iter().filter(|a| a.wire_id < 64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abilities::id;
+
+    #[test]
+    fn set_slot_dedupes_when_same_ability_assigned_elsewhere() {
+        let mut l = Loadout::from_slots([id::FIRE_BALL, id::FROST_RAY, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        l.set_slot(2, id::FIRE_BALL);
+        // Slot 0 cleared, slot 2 now holds the ability.
+        assert_eq!(l.slots[0], EMPTY_SLOT);
+        assert_eq!(l.slots[2], id::FIRE_BALL);
+        assert_eq!(l.slots[1], id::FROST_RAY);
+        assert!(l.is_valid());
+    }
+
+    #[test]
+    fn set_slot_to_empty_does_not_clear_other_empties() {
+        let mut l = Loadout::from_slots([id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        l.set_slot(0, EMPTY_SLOT);
+        assert_eq!(l.slots, [EMPTY_SLOT; SLOT_COUNT]);
+    }
+
+    #[test]
+    fn from_slots_normalizes_persisted_duplicates() {
+        // Pretend a buggy older row stored the same ability twice.
+        let l = Loadout::from_slots([id::FIRE_BALL, id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        assert!(l.is_valid());
+        // Only one slot retained the ability.
+        let count = l.slots.iter().filter(|&&s| s == id::FIRE_BALL).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn is_valid_rejects_duplicates() {
+        // Construct directly (skipping `from_slots`' normalize)
+        // to verify the validator catches the bad state.
+        let l = Loadout { slots: [id::FIRE_BALL, id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT] };
+        assert!(!l.is_valid());
+    }
 }

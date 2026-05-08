@@ -147,9 +147,12 @@ pub fn tick(
             // the target.
             let mut landed = hit_landed;
             if !landed && dist <= spec.attack_range_for_hit {
-                outcome
-                    .melee_damage
-                    .push((target_entity, spec.dash_damage * damage_mult));
+                outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
+                    target: target_entity,
+                    attacker_kind: en.role.to_wire_byte(),
+                    ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                    amount: spec.dash_damage * damage_mult,
+                });
                 landed = true;
             }
             if next <= 0.0 {

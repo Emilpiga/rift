@@ -157,9 +157,12 @@ pub fn tick(
     if matches!(en.ai_phase, AiPhase::Windup { kind: WindupKind::BruteMelee, .. }) {
         if let Some(WindupKind::BruteMelee) = tick_windup(en, dt) {
             if dist <= spec.attack_range * 1.15 {
-                outcome
-                    .melee_damage
-                    .push((target_entity, spec.attack_damage * damage_mult));
+                outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
+                    target: target_entity,
+                    attacker_kind: en.role.to_wire_byte(),
+                    ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                    amount: spec.attack_damage * damage_mult,
+                });
                 if (en.elite_mods & elite_mod::VAMPIRIC) != 0 {
                     outcome.vampiric_heals.push((
                         target_entity,

@@ -115,4 +115,20 @@ impl Equipment {
         }
         out
     }
+
+    /// Aggregate every equipped item's affix-driven ability mods
+    /// (Amplify / Modify / Transform / Trigger / per-ability
+    /// damage / cooldown). The combat layer caches the result on
+    /// the player and rebuilds it on equip / unequip — see
+    /// `ServerPlayer::recompute_stats`. Pure / allocates a small
+    /// number of `HashMap` entries.
+    pub fn ability_mods(&self) -> super::AbilityMods {
+        let mut mods = super::AbilityMods::new();
+        for (_, item) in self.iter() {
+            for affix in &item.affixes {
+                mods.apply(affix);
+            }
+        }
+        mods
+    }
 }

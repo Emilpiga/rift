@@ -50,7 +50,7 @@ pub struct CombatCtx<'a> {
     /// queue used by enemy melee + cast resolves so the
     /// death-on-thorns path runs through one chokepoint. Empty
     /// for hits on non-thorns enemies.
-    pub player_damage_back: &'a mut Vec<(Entity, f32)>,
+    pub player_damage_back: &'a mut Vec<PlayerHit>,
     /// Combat-meter sink. Damage subsystems push one
     /// [`MeterEvent`] per attributable hit so [`super::Sim::step`]
     /// can fold them into the per-instance `Meters` table after
@@ -113,4 +113,29 @@ pub enum MeterEvent {
 pub struct KillInfo {
     /// Role of the slain enemy.
     pub role: rift_game::monsters::MonsterRole,
+}
+
+/// One queued enemy-→-player damage row. Threaded through every
+/// hostile damage source (melee swings, projectiles, AoE
+/// pulses, channel beams, debuff DoT ticks, thorns reflect)
+/// so [`super::Sim::apply_player_damage`] can credit the
+/// receiving player's two-level meter breakdown
+/// (`attacker_kind` → `ability_id` → amount).
+///
+/// `ability_id` is the wire-stable u8 from
+/// `rift_game::abilities::id::*`, or
+/// [`super::meters::ABILITY_ID_OTHER`] (`255`) for sources we
+/// can't attribute to one (thorns reflect, environmental,
+/// anonymous DoTs).
+///
+/// `attacker_kind` is `MonsterRole::to_wire_byte()` for hits
+/// produced by a known enemy, or
+/// [`super::meters::ATTACKER_KIND_OTHER`] (`255`) for sources
+/// without an enemy origin (thorns reflect / environmental).
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerHit {
+    pub target: Entity,
+    pub attacker_kind: u8,
+    pub ability_id: u8,
+    pub amount: f32,
 }

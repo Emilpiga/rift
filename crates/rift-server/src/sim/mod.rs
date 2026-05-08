@@ -34,6 +34,8 @@ pub mod projectile;
 pub mod shrine;
 pub mod snapshot;
 pub mod vote;
+pub mod procs;
+pub mod transforms;
 
 pub use player::ServerPlayer;
 pub use projectile::ServerAoeZone;
@@ -285,7 +287,85 @@ impl Sim {
             sim.floor_index,
             &mut sim.next_enemy_net_id,
         );
+        // TEMP: drop two anchored legendaries at hub spawn so
+        // the legendary affix pipeline (ExtraProjectiles +
+        // TransformAbility) can be exercised end-to-end without
+        // a debug command. Remove once a proper test path is
+        // wired (vendor / debug seed / etc.).
+        if floor_index == 0 {
+            sim.spawn_legendary_test_items();
+        }
         sim
+    }
+
+    /// Spawn two hard-coded anchored legendaries near the hub
+    /// spawn carrying the two flagship legendary affixes. Used
+    /// only by the temporary hub-init seeding above.
+    fn spawn_legendary_test_items(&mut self) {
+        use rift_game::loot::{
+            affixes as af, AffixEffect, BaseItem, Item, LootRng, Rarity,
+            RolledAffix, BASE_ITEMS,
+        };
+        let find_base = |id: &str| -> Option<&'static BaseItem> {
+            BASE_ITEMS.iter().find(|b| b.id == id)
+        };
+        // Build a legendary item shape (name + signature
+        // affixes + ilvl) by rolling normally, then replace
+        // its legendary slot with the affix we actually want.
+        // Avoids having to reconstruct the signature block by
+        // hand (and the tooltip's "first N affixes are
+        // signatures" invariant).
+        let make = |base: &'static BaseItem,
+                    affix_id: &str,
+                    rng_seed: u64|
+         -> Option<Item> {
+            let def = af::lookup(affix_id)?;
+            let mut rng = LootRng::new(rng_seed);
+            let mut item = Item::roll(base, Rarity::Legendary, 20, &mut rng);
+            let value = match def.effect {
+                AffixEffect::ExtraProjectiles(_) => def.roll.0.max(1.0),
+                AffixEffect::TransformAbility(_, _) => 0.0,
+                _ => def.roll.0,
+            };
+            // Replace the existing legendary affix in-place if
+            // present (`Item::roll` always trails the legendary
+            // line at the end on Legendary rolls). If the roll
+            // didn't produce one for some reason, append.
+            let new_affix = RolledAffix { def, value };
+            if let Some(slot) = item
+                .affixes
+                .iter()
+                .position(|a| af::is_legendary_effect(&a.def.effect))
+            {
+                item.affixes[slot] = new_affix;
+            } else {
+                item.affixes.push(new_affix);
+            }
+            item.anchored = true;
+            Some(item)
+        };
+        let spawn = glam::Vec3::new(
+            self.floor.spawn_pos.x,
+            0.0,
+            self.floor.spawn_pos.z,
+        );
+        // Fireball extra projectiles → SPEED-tagged base
+        // (light boots is the canonical SPEED bag-slot).
+        if let Some(item) = find_base("light_boots")
+            .and_then(|b| make(b, "mod_fire_ball_extra_proj", 0xA11CE_5EED))
+        {
+            self.spawn_dropped_loot(item, spawn + glam::Vec3::new(1.5, 0.0, 0.0));
+        }
+        // Frost Ray shatter → ICE|CASTER-tagged base
+        // (amulet_basic is wildcard ALL, so it accepts).
+        if let Some(item) = find_base("amulet_basic")
+            .and_then(|b| make(b, "transform_frost_ray_shatter", 0xB0B_F00D))
+        {
+            self.spawn_dropped_loot(
+                item,
+                spawn + glam::Vec3::new(-1.5, 0.0, 0.0),
+            );
+        }
     }
 
     /// Switch to a different floor. Wipes all combat state and
@@ -559,7 +639,7 @@ impl Sim {
         // player-damage rows, but the kernel sinks need valid
         // references regardless.
         let mut summons: Vec<(Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
-        let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+        let mut player_damage: Vec<combat_ctx::PlayerHit> = Vec::new();
         let mut player_heals: Vec<(Entity, f32)> = Vec::new();
         let no_targets: [(Entity, Vec3); 0] = [];
         let mut sinks = ability::DispatchSinks {
@@ -635,6 +715,7 @@ impl Sim {
             entity,
             ability_id,
             &mut self.pending_events,
+            &mut self.next_projectile_net_id,
         );
     }
 
@@ -1382,7 +1463,7 @@ impl Sim {
         //     Summons go through a local queue so net-id
         //     allocation stays owned by Sim.
         let mut summon_queue: Vec<(glam::Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
-        let mut melee_from_resolves: Vec<(hecs::Entity, f32)> = Vec::new();
+        let mut melee_from_resolves: Vec<combat_ctx::PlayerHit> = Vec::new();
         // Stand-in tables for the AI submit gate — AI casts
         // don't read sessions / cooldowns but the kernel
         // signature is uniform.
@@ -1409,6 +1490,7 @@ impl Sim {
                 }
                 enemies::EnemyCast::Resolve {
                     owner,
+                    attacker_kind,
                     ability_id,
                     origin,
                     aim,
@@ -1419,6 +1501,7 @@ impl Sim {
                 } => {
                     let intent = ability::CombatIntent::Ai {
                         caster: owner,
+                        attacker_kind,
                         ability_id,
                         origin,
                         aim,
@@ -1511,7 +1594,7 @@ impl Sim {
         // bolt damage. `death_aoe_zones` are appended to
         // `self.aoe_zones` so the next tick of `tick_aoe`
         // picks them up.
-        let mut thorns_back: Vec<(hecs::Entity, f32)> = Vec::new();
+        let mut thorns_back: Vec<combat_ctx::PlayerHit> = Vec::new();
         let mut death_aoe_zones: Vec<projectile::ServerAoeZone> = Vec::new();
         let mut meter_events: Vec<combat_ctx::MeterEvent> = Vec::new();
         let mut ctx = combat_ctx::CombatCtx {
@@ -1671,6 +1754,9 @@ impl Sim {
         //     watching the avatar pop out of existence.
         let mut risen: Vec<(NetId, [f32; 3])> = Vec::new();
         for (_e, p) in self.world.query_mut::<&mut player::ServerPlayer>() {
+            // Tick legendary-transform internal cooldowns
+            // (e.g. `FrostRayShatter`). Cheap fixed-size pass.
+            p.transform_cds.tick(dt);
             if let Some(t) = p.ghost_rise_timer.as_mut() {
                 *t -= dt;
                 if *t <= 0.0 {
@@ -2224,9 +2310,10 @@ fn apply_player_damage(
     events: &mut Vec<WorldEvent>,
     deaths: &mut Vec<(ClientId, NetId)>,
     meters: &mut meters::Meters,
-    pending: Vec<(Entity, f32)>,
+    pending: Vec<combat_ctx::PlayerHit>,
 ) {
-    for (player_entity, amount) in pending {
+    for hit in pending {
+        let combat_ctx::PlayerHit { target: player_entity, attacker_kind, ability_id, amount } = hit;
         if let Ok(mut p) = world.get::<&mut ServerPlayer>(player_entity) {
             // Already dead: ignore further hits so the death
             // event only fires once and we don't spam damage
@@ -2247,7 +2334,11 @@ fn apply_player_damage(
             drop(p);
             // Credit the meter row before emitting the wire
             // event so the broadcast picks up the same hit.
-            meters.entry(client_id).damage_taken += amount;
+            // Per-ability `damage_taken` rolls into the
+            // top-line total inside `add_damage_taken` so the
+            // TAKEN tab can drill from attacker → ability the
+            // same way the DMG / HPS tabs drill into ability.
+            meters.entry(client_id).add_damage_taken(attacker_kind, ability_id, amount);
             events.push(WorldEvent::Damage {
                 target: net_id,
                 amount,

@@ -115,6 +115,7 @@ pub fn tick(
         if let Some(WindupKind::CasterBolt) = tick_windup(en, dt) {
             outcome.casts.push(EnemyCast::Resolve {
                 owner: en.net_id,
+                attacker_kind: en.role.to_wire_byte(),
                 ability_id: spec.ability_id,
                 origin: en.k.position,
                 aim: dir_to,

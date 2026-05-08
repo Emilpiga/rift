@@ -32,6 +32,12 @@ pub struct ServerProjectile {
     pub ability_id: u8,
     pub owner: NetId,
     pub team: Team,
+    /// Attacker kind for the TAKEN-tab breakdown. For
+    /// `Team::Enemy` projectiles this is the casting enemy's
+    /// `MonsterRole::to_wire_byte()`; for `Team::Player`
+    /// (where the field is unused) we just leave it at
+    /// [`super::meters::ATTACKER_KIND_OTHER`].
+    pub attacker_kind: u8,
     pub position: Vec3,
     pub velocity: Vec3,
     pub ttl: f32,
@@ -63,6 +69,13 @@ pub struct ServerAoeZone {
     /// `255` ("Other") for zones spawned by enemy deaths
     /// (EXPLODER), since enemies don't carry an ability id.
     pub ability_id: u8,
+    /// Attacker kind for the TAKEN-tab breakdown. Mirrors
+    /// [`ServerProjectile::attacker_kind`] — set from the
+    /// owning enemy's `MonsterRole` for `Team::Enemy` zones,
+    /// unused (and left at
+    /// [`super::meters::ATTACKER_KIND_OTHER`]) for
+    /// `Team::Player` zones.
+    pub attacker_kind: u8,
     /// Which side the zone damages. `Player`-team zones hit
     /// enemies; `Enemy`-team zones hit players.
     pub team: Team,
@@ -179,10 +192,10 @@ pub fn tick(
     players: &[(Entity, Vec3)],
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
-) -> Vec<(Entity, f32)> {
+) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
-    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, u8)> = Vec::new();
+    let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, u8, u8)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
     for (pe, proj) in world.query_mut::<&mut ServerProjectile>() {
         proj.position += proj.velocity * dt;
@@ -266,13 +279,18 @@ pub fn tick(
                         } else {
                             1.0
                         };
-                        player_damage
-                            .push((*player_entity, proj.damage * crit_mult));
+                        player_damage.push(super::combat_ctx::PlayerHit {
+                            target: *player_entity,
+                            attacker_kind: proj.attacker_kind,
+                            ability_id: proj.ability_id,
+                            amount: proj.damage * crit_mult,
+                        });
                         if let Some(debuff_id) = proj.apply_debuff {
                             player_debuffs.push((
                                 *player_entity,
                                 debuff_id,
                                 proj.ability_id,
+                                proj.attacker_kind,
                             ));
                         }
                         consumed = true;
@@ -293,13 +311,15 @@ pub fn tick(
     // borrow ends so we can mutably grab each player's
     // `EffectStack` row without aliasing the projectile query.
     // `caster: None` because enemy projectile owners are
-    // tracked by NetId, not Entity, and the meter doesn't
-    // credit enemy DoT ticks today (see TODO.md).
-    for (player_entity, debuff_id, ability_id) in player_debuffs {
+    // tracked by NetId, not Entity, and the per-tick DoT
+    // damage credits the *receiving* player's TAKEN bucket
+    // via `attacker_kind` instead of mirroring back to a
+    // remote source meter.
+    for (player_entity, debuff_id, ability_id, attacker_kind) in player_debuffs {
         if let Ok(mut stack) =
             world.get::<&mut super::effect::EffectStack>(player_entity)
         {
-            stack.apply(debuff_id, None, None, ability_id);
+            stack.apply(debuff_id, None, None, ability_id, attacker_kind);
         }
     }
     player_damage
@@ -318,10 +338,10 @@ pub fn tick_aoe(
     players: &[(Entity, Vec3)],
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
-) -> Vec<(Entity, f32)> {
+) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
-    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, u8)> = Vec::new();
+    let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, u8, u8)> = Vec::new();
     let mut idx = 0;
     while idx < zones.len() {
         let zone = &mut zones[idx];
@@ -392,13 +412,18 @@ pub fn tick_aoe(
                             } else {
                                 1.0
                             };
-                            player_damage
-                                .push((*player_entity, zone_dmg * crit_mult));
+                            player_damage.push(super::combat_ctx::PlayerHit {
+                                target: *player_entity,
+                                attacker_kind: zone.attacker_kind,
+                                ability_id: zone.ability_id,
+                                amount: zone_dmg * crit_mult,
+                            });
                             if let Some(debuff_id) = zone.apply_debuff {
                                 player_debuffs.push((
                                     *player_entity,
                                     debuff_id,
                                     zone.ability_id,
+                                    zone.attacker_kind,
                                 ));
                             }
                         }
@@ -413,14 +438,15 @@ pub fn tick_aoe(
         }
     }
     apply_hits_to_enemies(world, hits, ctx);
-    for (player_entity, debuff_id, ability_id) in player_debuffs {
+    for (player_entity, debuff_id, ability_id, attacker_kind) in player_debuffs {
         if let Ok(mut stack) =
             world.get::<&mut super::effect::EffectStack>(player_entity)
         {
             // Enemy AoE: caster Entity isn't tracked through
-            // the zone struct (zones outlive their spawner).
-            // The meter doesn't credit enemy DoT today anyway.
-            stack.apply(debuff_id, None, None, ability_id);
+            // the zone struct (zones outlive their spawner),
+            // but the zone's `attacker_kind` snapshot is enough
+            // for the receiving player's TAKEN-tab attribution.
+            stack.apply(debuff_id, None, None, ability_id, attacker_kind);
         }
     }
     player_damage
@@ -550,7 +576,16 @@ pub(super) fn apply_hits_to_enemies(
                 if let Ok(mut stack) =
                     world.get::<&mut super::effect::EffectStack>(hit.enemy)
                 {
-                    stack.apply(debuff_id, None, attacker_entity, hit.ability_id);
+                    // Enemy target: `attacker_kind` is unused
+                    // (TAKEN tab tracks players only) so the
+                    // OTHER sentinel is fine.
+                    stack.apply(
+                        debuff_id,
+                        None,
+                        attacker_entity,
+                        hit.ability_id,
+                        super::meters::ATTACKER_KIND_OTHER,
+                    );
                 }
             }
             // Thorns reflect: drain a fraction of `scaled` back
@@ -562,7 +597,12 @@ pub(super) fn apply_hits_to_enemies(
                 if let Some(ae) = attacker_entity {
                     let reflect = scaled * super::enemies::ELITE_THORNS_FRAC;
                     if reflect > 0.0 {
-                        ctx.player_damage_back.push((ae, reflect));
+                        ctx.player_damage_back.push(super::combat_ctx::PlayerHit {
+                            target: ae,
+                            attacker_kind: super::meters::ATTACKER_KIND_OTHER,
+                            ability_id: super::meters::ABILITY_ID_OTHER,
+                            amount: reflect,
+                        });
                     }
                 }
             }

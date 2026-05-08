@@ -302,7 +302,18 @@ impl Item {
         // headline stat is the topmost line of the stat block.
         let sig_n = super::affixes::signature_count(self.base.equip_slot)
             .min(self.affixes.len());
-        let (signatures, rest) = self.affixes.split_at(sig_n);
+        let (raw_signatures, rest) = self.affixes.split_at(sig_n);
+        // Defensive filter: skip any legendary effect that
+        // somehow lands in the first N positions (older
+        // persisted items + future hand-built test items can
+        // both end up that way). The dedicated legendary block
+        // at the bottom owns rendering for those — letting one
+        // slip into the signature slice would print the same
+        // line twice (white in signatures, gold in legendary).
+        let signatures: Vec<&RolledAffix> = raw_signatures
+            .iter()
+            .filter(|a| !super::affixes::is_legendary_effect(&a.def.effect))
+            .collect();
 
         // Find the Vitality entry inside the signature slice.
         // Other signatures keep their authored order; primary is

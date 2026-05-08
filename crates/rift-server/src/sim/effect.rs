@@ -45,6 +45,14 @@ pub struct EffectInstance {
     /// ticks credit the caster. `255` (`ABILITY_ID_OTHER`) when
     /// the source can't be attributed to a specific ability.
     pub ability_id: u8,
+    /// Attacker kind for the TAKEN-tab breakdown when this
+    /// instance is sitting on a player and ticks damage.
+    /// `MonsterRole::to_wire_byte()` for known enemy casters,
+    /// or [`super::meters::ATTACKER_KIND_OTHER`] when the
+    /// applier wasn't an enemy (e.g. self-applied debuff,
+    /// environmental). Refreshes overwrite this alongside
+    /// `caster` / `ability_id`.
+    pub attacker_kind: u8,
 }
 
 /// Per-entity stack of active debuffs. Tiny by construction —
@@ -61,6 +69,7 @@ impl EffectStack {
         duration_override: Option<f32>,
         caster: Option<Entity>,
         ability_id: u8,
+        attacker_kind: u8,
     ) {
         let Some(def) = lookup(debuff_id) else { return };
         let dur = duration_override.unwrap_or(def.default_duration);
@@ -73,6 +82,7 @@ impl EffectStack {
             // common WoW-style meters use.
             existing.caster = caster;
             existing.ability_id = ability_id;
+            existing.attacker_kind = attacker_kind;
         } else {
             self.active.push(EffectInstance {
                 id: debuff_id,
@@ -81,6 +91,7 @@ impl EffectStack {
                 dot_acc: 0.0,
                 caster,
                 ability_id,
+                attacker_kind,
             });
         }
     }
@@ -163,6 +174,10 @@ struct DotHit {
     /// Wire ability id of the source. Bucketed in the meter's
     /// per-ability breakdown.
     ability_id: u8,
+    /// Attacker kind for the TAKEN-tab breakdown (player
+    /// targets only). Carried over from
+    /// [`EffectInstance::attacker_kind`].
+    attacker_kind: u8,
 }
 
 /// One queued heal-over-time tick from `tick`. Player-only (no
@@ -190,7 +205,7 @@ pub fn tick(
     world: &mut hecs::World,
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
     dt: f32,
-) -> Vec<(Entity, f32)> {
+) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<DotHit> = Vec::new();
     let mut dead: Vec<(Entity, NetId)> = Vec::new();
     for (entity, (en, stack)) in world.query_mut::<(&mut ServerEnemy, &mut EffectStack)>() {
@@ -251,7 +266,7 @@ pub fn tick(
     // caller pipes them through `apply_player_damage` — same
     // path enemy-projectile rows go through, so death /
     // respawn / party-wipe stays single-source.
-    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
+    let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
     let mut heals: Vec<HotHit> = Vec::new();
     for (entity, (p, stack)) in world.query_mut::<(&mut ServerPlayer, &mut EffectStack)>() {
         if p.hp <= 0.0 {
@@ -274,7 +289,12 @@ pub fn tick(
             }
         }
         for hit in hits.drain(..).filter(|h| h.target == entity) {
-            player_damage.push((entity, hit.damage));
+            player_damage.push(super::combat_ctx::PlayerHit {
+                target: entity,
+                attacker_kind: hit.attacker_kind,
+                ability_id: hit.ability_id,
+                amount: hit.damage,
+            });
         }
         // Apply HoT in-place — we already hold `&mut p`.
         // Emitting the wire event from inside the query borrow
@@ -343,6 +363,7 @@ fn accumulate_dot(
                     damage: dps * interval,
                     caster: instance.caster,
                     ability_id: instance.ability_id,
+                    attacker_kind: instance.attacker_kind,
                 });
             }
         }

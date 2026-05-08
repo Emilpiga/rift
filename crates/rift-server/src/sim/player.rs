@@ -80,6 +80,17 @@ pub struct ServerPlayer {
     /// by the cast / projectile / channel pipelines so client
     /// and server agree on the formulas.
     pub stats: CharacterStats,
+    /// Cached aggregated ability mods (Amplify / Modify /
+    /// Transform / Trigger) from the currently-equipped gear.
+    /// Built once per equipment change and consulted at cast
+    /// time so the dispatch hot path doesn't re-walk every
+    /// equipped item per cast. Mirrors how `stats` is treated.
+    pub ability_mods: rift_game::loot::AbilityMods,
+    /// Per-variant internal cooldowns for legendary
+    /// `TransformAbility` finishers (see
+    /// [`super::transforms::TransformCds`]). Ticked from
+    /// `Sim::step`; read+set by the transform dispatcher.
+    pub transform_cds: super::transforms::TransformCds,
     /// Authoritative ability bar. Casts are gated against this so
     /// a client can't fire an ability they haven't slotted.
     /// Persisted via the `characters.loadout` column; mutated
@@ -117,6 +128,7 @@ impl ServerPlayer {
             &equipment.active_affix_sum(),
             &rift_game::stats::StatModifiers::new(),
         );
+        let ability_mods = equipment.ability_mods();
         let hp_max = stats.max_hp;
         Self {
             client_id,
@@ -141,6 +153,8 @@ impl ServerPlayer {
             level: DEFAULT_LEVEL,
             attrs,
             stats,
+            ability_mods,
+            transform_cds: super::transforms::TransformCds::default(),
             experience: Experience::new(),
             loadout: Loadout::default_hero(),
             is_ghost: false,
@@ -172,6 +186,11 @@ impl ServerPlayer {
         self.hp_max = new_stats.max_hp;
         self.hp = new_stats.max_hp * hp_pct;
         self.stats = new_stats;
+        // Equipment changes also rotate the affix-driven
+        // gameplay-changing mods (extra projectiles, transforms,
+        // procs, per-ability damage). Recompute alongside stats
+        // so equip / unequip is one consistent edge.
+        self.ability_mods = self.equipment.ability_mods();
     }
 
     /// Per-cast damage scalar — `stats.damage / class.base_damage`.

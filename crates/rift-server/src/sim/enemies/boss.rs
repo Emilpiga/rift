@@ -189,6 +189,7 @@ pub fn tick(
         if next <= 0.0 {
             outcome.casts.push(EnemyCast::Resolve {
                 owner: en.net_id,
+                attacker_kind: en.role.to_wire_byte(),
                 ability_id,
                 origin: en.k.position,
                 aim,
@@ -327,9 +328,12 @@ pub fn tick(
         if en.attack_cooldown <= 0.0 {
             en.attack_cooldown = melee.attack_cooldown;
             en.attack_anim_remaining = ATTACK_ANIM_DUR;
-            outcome
-                .melee_damage
-                .push((target_entity, melee.attack_damage * damage_mult));
+            outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
+                target: target_entity,
+                attacker_kind: en.role.to_wire_byte(),
+                ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                amount: melee.attack_damage * damage_mult,
+            });
         }
     }
 }

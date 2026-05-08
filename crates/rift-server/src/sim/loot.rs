@@ -78,6 +78,7 @@ pub fn finalise_kills(
                 ctx.death_aoe_zones.push(super::projectile::ServerAoeZone {
                     owner: zone_net_id,
                     ability_id: super::meters::ABILITY_ID_OTHER,
+                    attacker_kind: role.to_wire_byte(),
                     team: super::projectile::Team::Enemy,
                     position: pos,
                     radius: super::enemies::ELITE_EXPLODER_RADIUS,

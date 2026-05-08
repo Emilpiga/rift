@@ -903,21 +903,28 @@ pub struct MeterEntry {
     /// enemy at capture time. Recomputed each snapshot rather
     /// than accumulated, so it tracks the live aggro picture.
     pub threat: f32,
-    /// Per-ability contribution rows. The HUD shows these
-    /// as a click-through breakdown so players can see which
-    /// ability did what. Empty for buckets we can't attribute
-    /// (e.g. damage-taken from enemies). Ability ids are the
-    /// wire-stable u8 from `rift_game::abilities::id::*`; the
-    /// special id `255` means "Other / unattributed" (DoTs
-    /// from unknown casters, basic melee, environmental).
+    /// Per-ability contribution rows. Used by the DMG and
+    /// HPS tabs in the HUD: clicking a player row drills
+    /// down to which ability did what. Ability ids are the
+    /// wire-stable u8 from `rift_game::abilities::id::*`;
+    /// the special id `255` means "Other / unattributed".
+    /// Empty for the TAKEN slice (see `taken_attackers`).
     pub abilities: Vec<MeterAbilityBreakdown>,
+    /// Two-level breakdown of `damage_taken`: outer rows are
+    /// the attacking enemy *kind* (MonsterRole wire byte, or
+    /// `255` for "Other" / thorns / unknown), inner rows are
+    /// the abilities each kind hit you with. Used by the
+    /// TAKEN tab so players can drill from "this much damage"
+    /// → "from brutes" → "from their melee swing". Sorted
+    /// descending by total contribution.
+    pub taken_attackers: Vec<MeterTakenAttackerBreakdown>,
 }
 
 /// Per-ability slice of a player's meter row. One entry per
-/// (player, metric, ability) triple — values for metrics that
-/// don't apply (e.g. healing on a damage-only ability) are
-/// `0.0`. Sorted server-side descending by total contribution
-/// so the client can render directly without resorting.
+/// (player, metric, ability) pair, sorted server-side
+/// descending by total contribution. Used for the DMG and
+/// HPS tab breakdowns; the TAKEN tab uses
+/// [`MeterTakenAttackerBreakdown`] for its two-level grouping.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeterAbilityBreakdown {
     /// Wire id from `rift_game::abilities::id::*`, or `255`
@@ -928,6 +935,32 @@ pub struct MeterAbilityBreakdown {
     /// Healing done by this ability (direct + HoT, where HoT
     /// caster is known).
     pub healing_done: f32,
+}
+
+/// Outer (attacker) row of the TAKEN-tab breakdown. Groups
+/// every hit a player took by the *kind* of attacker that
+/// produced it (Brute / Stalker / Caster / Elite / Boss /
+/// Other), then drills down to the ability used by that kind.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeterTakenAttackerBreakdown {
+    /// `MonsterRole::to_wire_byte()` for known enemies, or
+    /// `255` for "Other / Unknown" (thorns reflect, anonymous
+    /// DoT ticks, environmental damage).
+    pub attacker_kind: u8,
+    /// Total damage this attacker kind dealt to the player —
+    /// equals the sum of `abilities[*].damage_taken`. Sent
+    /// pre-summed so the client doesn't have to recompute.
+    pub damage_taken: f32,
+    /// Per-ability slice for this attacker kind. Sorted
+    /// descending by `damage_taken`.
+    pub abilities: Vec<MeterTakenAbility>,
+}
+
+/// Inner (ability) row of the TAKEN-tab breakdown.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeterTakenAbility {
+    pub ability_id: u8,
+    pub damage_taken: f32,
 }
 
 /// Per-tick snapshot. Phase 1 ships the *full* state every tick — we

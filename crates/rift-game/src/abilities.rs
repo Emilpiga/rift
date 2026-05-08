@@ -507,6 +507,23 @@ pub mod id {
     pub const FIRE_WAVE: u8 = 8;
     pub const HEAL_TARGET: u8 = 9;
     pub const HEAL_OVER_TIME_TARGET: u8 = 10;
+    /// Synthetic ability fired by the `FrostRayShatter`
+    /// legendary transform: shards spawned at the beam
+    /// terminus when a player ends a Frost Ray channel.
+    /// Not on the loadout bar — the player never casts it
+    /// directly. Has its own wire id so the client renders
+    /// the shards as visible projectiles (Frost Ray itself
+    /// is a `Beam` and has no projectile visuals).
+    pub const FROST_SHATTER_SHARD: u8 = 11;
+
+    /// Generic enemy basic-attack — the bare melee swing /
+    /// dash hit that doesn't have its own dedicated registry
+    /// entry. Used as the meter-attribution id for brute &
+    /// boss basic swings and stalker dash hits so the TAKEN
+    /// tab can roll those up under one row instead of
+    /// dumping them all into "Other". Not on any loadout bar
+    /// — the player never casts it directly.
+    pub const MELEE_ATTACK: u8 = 12;
 
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
@@ -697,6 +714,8 @@ pub const WHIRLWIND: AbilityId = AbilityId("whirlwind");
 pub const FIRE_WAVE: AbilityId = AbilityId("fire_wave");
 pub const HEAL_TARGET: AbilityId = AbilityId("heal_target");
 pub const HEAL_OVER_TIME_TARGET: AbilityId = AbilityId("heal_over_time_target");
+pub const FROST_SHATTER_SHARD: AbilityId = AbilityId("frost_shatter_shard");
+pub const MELEE_ATTACK: AbilityId = AbilityId("melee_attack");
 
 /// Master ability table. Server cast dispatch and client cooldown
 /// UI both read from here. Order is purely cosmetic — `lookup`
@@ -941,7 +960,7 @@ pub static REGISTRY: &[Ability] = &[
         projectile_count: 0,
         spread_angle: 0.0,
         range: 9.0,
-        unlock_level: 6,
+        unlock_level: 1,
         element: Element::Ice,
         archetype: Archetype::Beam,
         scaling: Scaling::Spell,
@@ -968,6 +987,87 @@ pub static REGISTRY: &[Ability] = &[
                 hand_offset: 1.25,
             },
         },
+        effects: &[],
+    },
+    // Synthetic ability — never on the player's loadout bar.
+    // Fired by the `FrostRayShatter` legendary transform when
+    // a Frost Ray channel ends; carries its own projectile
+    // visuals so the shards are visible (Frost Ray itself
+    // declares `ShapeVisuals::Beam`, which the client
+    // projectile-spawn path skips). Reuses the ArcaneBolt
+    // mesh / VFX as a stand-in until a frost-tinted preset
+    // ships — the gameplay hook stays valid either way.
+    Ability {
+        id: FROST_SHATTER_SHARD,
+        wire_id: id::FROST_SHATTER_SHARD,
+        name: "Frost Shard",
+        description: "Shatter shard from Frost Ray's terminus.",
+        icon: None,
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        base_damage: 0.0,
+        damage_mult: 1.0,
+        projectile_count: 1,
+        spread_angle: 0.0,
+        range: 0.0,
+        unlock_level: 1,
+        element: Element::Ice,
+        archetype: Archetype::Projectile,
+        scaling: Scaling::Spell,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        // Server constructs the projectile rows directly in
+        // `transforms::on_channel_end`; the registry shape
+        // is here only so client projectile rendering and
+        // meter attribution have a real ability row to read.
+        kind: AbilityKind::Projectiles {
+            count: 1,
+            spread: 0.0,
+            speed: 14.0,
+            ttl: 0.45,
+            pierce: 1,
+            apply_debuff: None,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::Projectile {
+                mesh: MeshKind::ArcaneBolt,
+                trail: VfxKind::ArcaneBoltTrail,
+                impact: VfxKind::ArcaneBoltImpact,
+                scale: 0.5,
+            },
+        },
+        effects: &[],
+    },
+    // Synthetic ability — never on a player loadout, never
+    // cast through the dispatch pipeline. Exists purely as an
+    // attribution row so brute / boss melee swings and
+    // stalker dash hits credit the meter to a single
+    // "Melee Attack" bucket on the receiving player's TAKEN
+    // tab. All numeric fields are zero / no-op; the kind is
+    // `ClientOnly` so submit / dispatch reject it if anything
+    // ever does try to cast it.
+    Ability {
+        id: MELEE_ATTACK,
+        wire_id: id::MELEE_ATTACK,
+        name: "Melee",
+        description: "Generic enemy melee attack.",
+        icon: None,
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        base_damage: 0.0,
+        damage_mult: 1.0,
+        projectile_count: 0,
+        spread_angle: 0.0,
+        range: 0.0,
+        unlock_level: 1,
+        element: Element::Physical,
+        archetype: Archetype::Melee,
+        scaling: Scaling::Weapon,
+        duration: 0.0,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::ClientOnly,
+        visuals: AbilityVisuals::NONE,
         effects: &[],
     },
     Ability {

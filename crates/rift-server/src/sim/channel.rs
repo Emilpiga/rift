@@ -23,6 +23,8 @@ use rift_net::{messages::WorldEvent, NetId, NetTick};
 use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADIUS};
+use super::transforms::{self, ChannelEndSnapshot};
+use rift_game::loot::AbilityVariant;
 
 /// Component added to a player or enemy entity while a channel
 /// is active. `team` drives the target list and the damage
@@ -32,7 +34,19 @@ use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADI
 pub struct ServerChannel {
     pub ability_id: u8,
     pub team: Team,
+    /// Attacker kind for the TAKEN-tab breakdown. Mirrors
+    /// [`super::projectile::ServerProjectile::attacker_kind`]
+    /// — set from the casting enemy's `MonsterRole` for
+    /// `Team::Enemy` channels, unused for `Team::Player`.
+    pub attacker_kind: u8,
     pub remaining: f32,
+    /// Wall-clock seconds the channel has been live. Counted up
+    /// each tick so transform finishers (e.g. `FrostRayShatter`)
+    /// can require a minimum hold time before firing — the
+    /// `remaining` field can't substitute because abilities like
+    /// Frost Ray have an effectively infinite duration, so
+    /// `original - remaining` doesn't yield a usable elapsed.
+    pub elapsed: f32,
     pub tick_interval: f32,
     pub tick_acc: f32,
     pub effect: ChannelEffect,
@@ -49,6 +63,13 @@ pub struct ServerChannel {
     /// If `true`, any horizontal movement input cancels the
     /// channel. Mirrors the ability's flag.
     pub cancel_on_move: bool,
+    /// Active legendary transform (e.g. `FrostRayShatter`)
+    /// the caster's gear contributed at submit time. Read by
+    /// the channel-end branch to fire any
+    /// transform-specific finisher (shatter shards, AoE
+    /// detonation, etc.). `None` for casts without a
+    /// matching equipped legendary.
+    pub transform: Option<AbilityVariant>,
 }
 
 /// Tick every active channel and queue damage / debuff
@@ -73,22 +94,41 @@ pub fn tick(
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
     tick_now: NetTick,
     dt: f32,
-) -> Vec<(Entity, f32)> {
+) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
-    let mut player_damage: Vec<(Entity, f32)> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, Option<Entity>, u8)> = Vec::new();
+    let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, Option<Entity>, u8, u8)> = Vec::new();
     let mut to_strip: Vec<Entity> = Vec::new();
+    // Snapshots of channels that ended this tick, for the
+    // transform finisher pass that runs after all world
+    // borrows release. Keeps the borrow checker happy and
+    // keeps transform behavior in one place
+    // (`super::transforms`).
+    let mut ended: Vec<ChannelEndSnapshot> = Vec::new();
 
     // 1. Player-attached channels.
     for (entity, (player, channel)) in
         world.query_mut::<(&ServerPlayer, &mut ServerChannel)>()
     {
+        // Death / ghost transition ends the channel
+        // immediately. Without this the channel keeps ticking
+        // (and emitting `ChannelTick` events) on a corpse —
+        // observed as a Frost Ray beam VFX that survives the
+        // player into respawn at the hub. We also strip the
+        // transform first so death doesn't fire a "free"
+        // finisher (e.g. a `FrostRayShatter` burst on the
+        // tick the player was killed).
+        if player.is_dead_or_ghosting() {
+            channel.transform = None;
+            channel.remaining = 0.0;
+        }
         if channel.cancel_on_move
             && player.k.velocity.length_squared() > 0.05 * 0.05
         {
             channel.remaining = 0.0;
         }
         channel.remaining -= dt;
+        channel.elapsed += dt;
         channel.tick_acc += dt;
         let yaw = player.k.aim_yaw;
         channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
@@ -122,6 +162,17 @@ pub fn tick(
                 caster: caster_net_id,
                 ability: channel.ability_id as u16,
             });
+            // Snapshot for the transform finisher pass.
+            // Cheap (POD copy) so we do it unconditionally
+            // — the dispatch in `transforms::on_channel_end`
+            // is the place that filters by
+            // `channel.transform`.
+            ended.push(ChannelEndSnapshot::from_channel(
+                channel,
+                entity,
+                caster_pos,
+                caster_net_id,
+            ));
         }
     }
 
@@ -143,6 +194,7 @@ pub fn tick(
             channel.remaining = 0.0;
         }
         channel.remaining -= dt;
+        channel.elapsed += dt;
         channel.tick_acc += dt;
         let yaw = en.k.aim_yaw;
         channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
@@ -184,17 +236,29 @@ pub fn tick(
 
     // 4. Apply queued player-side debuffs (rare path; flag-gated
     //    on `apply_debuff = Some(_)` per channel).
-    for (player_entity, debuff_id, caster, ability_id) in player_debuffs {
+    for (player_entity, debuff_id, caster, ability_id, attacker_kind) in player_debuffs {
         if let Ok(mut stack) =
             world.get::<&mut super::effect::EffectStack>(player_entity)
         {
-            stack.apply(debuff_id, None, caster, ability_id);
+            stack.apply(debuff_id, None, caster, ability_id, attacker_kind);
         }
     }
 
     // 5. Strip expired channels.
     for entity in to_strip {
         let _ = world.remove_one::<ServerChannel>(entity);
+    }
+
+    // 6. Fire any transform finishers queued during the
+    //    channel-end branches. Behavior lives in
+    //    `super::transforms`; this site is just the dispatch.
+    for snap in ended {
+        transforms::on_channel_end(
+            world,
+            ctx.events,
+            ctx.next_projectile_net_id,
+            &snap,
+        );
     }
 
     player_damage
@@ -214,8 +278,8 @@ fn collect_hits_for_effect(
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
     hits: &mut Vec<Hit>,
-    player_damage: &mut Vec<(Entity, f32)>,
-    player_debuffs: &mut Vec<(Entity, u8, Option<Entity>, u8)>,
+    player_damage: &mut Vec<super::combat_ctx::PlayerHit>,
+    player_debuffs: &mut Vec<(Entity, u8, Option<Entity>, u8, u8)>,
 ) {
     let crit_chance = channel.crit_chance;
     let crit_damage = channel.crit_damage;
@@ -274,13 +338,19 @@ fn collect_hits_for_effect(
                         let dz = ppos.z - caster_pos.z;
                         if dx * dx + dz * dz <= r2 {
                             let mult = roll_crit_mult(seed_for(pe.id() as u64));
-                            player_damage.push((*pe, damage_per_tick * mult));
+                            player_damage.push(super::combat_ctx::PlayerHit {
+                                target: *pe,
+                                attacker_kind: channel.attacker_kind,
+                                ability_id: channel.ability_id,
+                                amount: damage_per_tick * mult,
+                            });
                             if let Some(id) = channel.apply_debuff {
                                 player_debuffs.push((
                                     *pe,
                                     id,
                                     caster_entity,
                                     channel.ability_id,
+                                    channel.attacker_kind,
                                 ));
                             }
                         }
@@ -361,13 +431,19 @@ fn collect_hits_for_effect(
                     });
                     for (_along, pe) in candidates.into_iter().take(cap) {
                         let mult = roll_crit_mult(seed_for(pe.id() as u64));
-                        player_damage.push((pe, damage_per_tick * mult));
+                        player_damage.push(super::combat_ctx::PlayerHit {
+                            target: pe,
+                            attacker_kind: channel.attacker_kind,
+                            ability_id: channel.ability_id,
+                            amount: damage_per_tick * mult,
+                        });
                         if let Some(id) = channel.apply_debuff {
                             player_debuffs.push((
                                 pe,
                                 id,
                                 caster_entity,
                                 channel.ability_id,
+                                channel.attacker_kind,
                             ));
                         }
                     }
@@ -392,32 +468,40 @@ pub fn clear_all(world: &mut hecs::World) {
 
 /// Cancel one player's currently-active channel (if it matches
 /// `ability_id`). Emits a `ChannelEnd` event so clients tear
-/// their visual down immediately.
+/// their visual down immediately. Also dispatches any
+/// channel-end transform (e.g. `FrostRayShatter`) so a
+/// transform fires on key-release / explicit cancel paths,
+/// not just natural expiry.
 pub fn cancel(
     world: &mut hecs::World,
     entity: Entity,
     ability_id: u8,
     events: &mut Vec<WorldEvent>,
+    next_projectile_net_id: &mut u32,
 ) {
-    let active = world
-        .get::<&ServerChannel>(entity)
-        .ok()
-        .map(|c| (c.ability_id, c.ability_id == ability_id));
-    if let Some((_existing_id, matches)) = active {
-        if matches {
-            // Pull caster's net id for the ChannelEnd event before
-            // dropping the component.
-            let caster_net_id = world
-                .get::<&ServerPlayer>(entity)
-                .ok()
-                .map(|p| p.net_id);
-            let _ = world.remove_one::<ServerChannel>(entity);
-            if let Some(nid) = caster_net_id {
-                events.push(WorldEvent::ChannelEnd {
-                    caster: nid,
-                    ability: ability_id as u16,
-                });
-            }
+    // Snapshot the channel + caster *before* removing the row
+    // so the transform finisher can read both. We bail out
+    // (without removing) if the channel id doesn't match —
+    // duplicate release packets shouldn't punish a legit
+    // ongoing cast.
+    let snap = {
+        let Ok(c) = world.get::<&ServerChannel>(entity) else {
+            return;
+        };
+        if c.ability_id != ability_id {
+            return;
         }
-    }
+        let (caster_pos, caster_net_id) = world
+            .get::<&ServerPlayer>(entity)
+            .ok()
+            .map(|p| (p.k.position, p.net_id))
+            .unwrap_or((Vec3::ZERO, NetId(0)));
+        ChannelEndSnapshot::from_channel(&*c, entity, caster_pos, caster_net_id)
+    };
+    let _ = world.remove_one::<ServerChannel>(entity);
+    events.push(WorldEvent::ChannelEnd {
+        caster: snap.caster_net_id,
+        ability: ability_id as u16,
+    });
+    transforms::on_channel_end(world, events, next_projectile_net_id, &snap);
 }

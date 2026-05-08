@@ -97,6 +97,11 @@ pub enum CombatIntent {
     /// dispatch in [`dispatch`].
     Ai {
         caster: NetId,
+        /// Casting enemy's `MonsterRole::to_wire_byte()`,
+        /// snapshot here so dispatch can stamp it on any
+        /// projectile / zone / channel it spawns. Drives the
+        /// receiving player's TAKEN-tab attribution.
+        attacker_kind: u8,
         ability_id: u8,
         origin: Vec3,
         aim: Vec3,
@@ -118,6 +123,11 @@ pub enum CombatIntent {
 #[derive(Clone, Copy, Debug)]
 pub struct AcceptedCast {
     pub caster: NetId,
+    /// Casting enemy's kind for the TAKEN-tab attribution.
+    /// `MonsterRole::to_wire_byte()` for AI casts; left at
+    /// [`super::meters::ATTACKER_KIND_OTHER`] for player
+    /// casts (the field is unused there).
+    pub attacker_kind: u8,
     /// Caster's ECS entity, when known. Player casts always
     /// have one (used for Channel attachment + Evasive Roll).
     /// AI casts pass `None` — enemies don't currently target
@@ -168,6 +178,18 @@ pub struct AcceptedCast {
     /// floating green number anchors on the right body even
     /// if the target moves between submit and dispatch.
     pub target_position: Option<Vec3>,
+    /// Extra projectile count contributed by gear affixes
+    /// (e.g. legendary `+N projectiles to Fireball`). Stacks
+    /// additively with the registry-authored `count` inside
+    /// the `AbilityKind::Projectiles` dispatch arm. `0` for
+    /// AI casts and players without a matching mod.
+    pub extra_projectiles: u32,
+    /// Active ability transform (e.g. `FrostRayShatter`)
+    /// contributed by a legendary affix. Dispatch arms that
+    /// recognise the variant alter their behaviour
+    /// accordingly; everyone else ignores it. `None` when no
+    /// transform is equipped or for AI casts.
+    pub transform: Option<rift_game::loot::AbilityVariant>,
 }
 
 /// Validate a [`CombatIntent`] and produce an
@@ -217,6 +239,18 @@ pub fn submit(
             let crit_chance = p_ref.stats.crit_chance;
             let crit_damage = p_ref.stats.crit_damage;
             let ability_mult = p_ref.stats.ability_damage_mult(ability);
+            // Per-ability affix mods. Fold the
+            // `AmplifyAbilityDamage` factor into the damage
+            // scalar so dispatch stays mod-agnostic, and pull
+            // out the count / transform overrides for
+            // dispatch-time consumption.
+            let affix_dmg = p_ref.ability_mods.damage_for(ability.id);
+            let affix_cd = p_ref.ability_mods.cooldown_for(ability.id);
+            let stat_cdr = p_ref.stats.cooldown_reduction;
+            let extra_projectiles = p_ref
+                .ability_mods
+                .extra_projectiles_for(ability.id);
+            let transform = p_ref.ability_mods.transform_for(ability.id);
             drop(p_ref);
 
             // Friendly entity-target validation. For abilities
@@ -262,7 +296,16 @@ pub fn submit(
             if cds[slot] > 0.0 {
                 return None;
             }
-            cds[slot] = ability.cooldown;
+            // Effective cooldown:
+            //   base × affix_cd (per-ability `ReduceAbilityCooldown`)
+            //         × (1 - stat_cdr) (gear-wide `CooldownReduction` stat)
+            // Floor at 0.05 s so a stack of cdr can't burn the
+            // server in a tight cast loop.
+            let effective_cd = (ability.cooldown
+                * affix_cd
+                * (1.0 - stat_cdr).max(0.0))
+            .max(0.05);
+            cds[slot] = effective_cd;
 
             // Trust the client's hand-position origin within a
             // sanity radius of the simulated body (~2 m). This
@@ -282,6 +325,7 @@ pub fn submit(
 
             Some(AcceptedCast {
                 caster: net_id,
+                attacker_kind: super::meters::ATTACKER_KIND_OTHER,
                 caster_entity: Some(entity),
                 ability_id,
                 origin: body,
@@ -291,7 +335,7 @@ pub fn submit(
                 // Pre-bake gear / attribute / element /
                 // archetype scaling. Dispatch only knows
                 // `ability.base_damage * damage_scalar`.
-                damage_scalar: dmg_scalar * ability_mult,
+                damage_scalar: dmg_scalar * ability_mult * affix_dmg,
                 crit_chance,
                 crit_damage,
                 team: Team::Player,
@@ -304,10 +348,13 @@ pub fn submit(
                     target_net_id.unwrap_or(net_id)
                 }),
                 target_position,
+                extra_projectiles,
+                transform,
             })
         }
         CombatIntent::Ai {
             caster,
+            attacker_kind,
             ability_id,
             origin,
             aim,
@@ -326,6 +373,7 @@ pub fn submit(
             let spawn_origin = origin + Vec3::Y * 1.1 + aim * 0.4;
             Some(AcceptedCast {
                 caster,
+                attacker_kind,
                 caster_entity: None,
                 ability_id,
                 origin,
@@ -340,6 +388,8 @@ pub fn submit(
                 target_entity: None,
                 target_net_id: None,
                 target_position: None,
+                extra_projectiles: 0,
+                transform: None,
             })
         }
     }
@@ -355,7 +405,7 @@ pub struct DispatchSinks<'a> {
     pub events: &'a mut Vec<WorldEvent>,
     pub next_projectile_net_id: &'a mut u32,
     /// Damage rows targeted at players (used by `DelayedAoe`).
-    pub player_damage: &'a mut Vec<(Entity, f32)>,
+    pub player_damage: &'a mut Vec<super::combat_ctx::PlayerHit>,
     /// Healing rows targeted at players. Drained by the caller
     /// after dispatch the same way `player_damage` is — keeps
     /// dispatch from poking `ServerPlayer.hp` directly while
@@ -393,10 +443,28 @@ pub fn dispatch(
         AbilityKind::Projectiles {
             count, spread, speed, ttl, pierce, apply_debuff,
         } => {
-            for i in 0..count {
-                let angle_offset = if count > 1 {
-                    let t = i as f32 / (count - 1) as f32 - 0.5;
-                    t * spread
+            // Affix-driven extra projectiles (legendary
+            // `+N projectiles to <ability>`) stack on top of
+            // the registry-authored count. The original
+            // `spread` is reused as the *total* fan width so a
+            // single-shot ability that picks up `+2 projectiles`
+            // becomes a tight 3-shot fan rather than firing
+            // straight overlapping bolts; pre-fanned abilities
+            // (Multi Shot etc.) widen proportionally.
+            let total_count = count.saturating_add(accepted.extra_projectiles);
+            // Default fan width when the registry left the base
+            // ability single-shot but an affix added projectiles.
+            // ~22° matches the existing Multi Shot feel without
+            // making `extra_projectiles == 1` overlap visually.
+            let effective_spread = if count <= 1 && total_count > 1 {
+                0.4 // ~23°
+            } else {
+                spread
+            };
+            for i in 0..total_count {
+                let angle_offset = if total_count > 1 {
+                    let t = i as f32 / (total_count - 1) as f32 - 0.5;
+                    t * effective_spread
                 } else {
                     0.0
                 };
@@ -411,6 +479,7 @@ pub fn dispatch(
                     ability_id: accepted.ability_id,
                     owner: accepted.caster,
                     team: accepted.team,
+                    attacker_kind: accepted.attacker_kind,
                     position: accepted.spawn_origin,
                     velocity: dir * speed,
                     ttl,
@@ -432,6 +501,7 @@ pub fn dispatch(
             sinks.aoe_zones.push(ServerAoeZone {
                 owner: accepted.caster,
                 ability_id: accepted.ability_id,
+                attacker_kind: accepted.attacker_kind,
                 team: accepted.team,
                 position: Vec3::new(pos.x, 0.0, pos.z),
                 radius,
@@ -459,7 +529,9 @@ pub fn dispatch(
                     super::channel::ServerChannel {
                         ability_id: accepted.ability_id,
                         team: accepted.team,
+                        attacker_kind: accepted.attacker_kind,
                         remaining: duration,
+                        elapsed: 0.0,
                         tick_interval,
                         tick_acc: 0.0,
                         effect,
@@ -468,6 +540,7 @@ pub fn dispatch(
                         apply_debuff,
                         aim: accepted.aim,
                         cancel_on_move,
+                        transform: accepted.transform,
                     },
                 );
             }
@@ -510,6 +583,7 @@ pub fn dispatch(
                     ability_id: accepted.ability_id,
                     owner: accepted.caster,
                     team: accepted.team,
+                    attacker_kind: accepted.attacker_kind,
                     position: accepted.spawn_origin,
                     velocity: dir * speed,
                     ttl,
@@ -536,7 +610,12 @@ pub fn dispatch(
                 let dx = pp.x - accepted.origin.x;
                 let dz = pp.z - accepted.origin.z;
                 if dx * dx + dz * dz <= r2 {
-                    sinks.player_damage.push((*pe, scaled_damage));
+                    sinks.player_damage.push(super::combat_ctx::PlayerHit {
+                        target: *pe,
+                        attacker_kind: accepted.attacker_kind,
+                        ability_id: accepted.ability_id,
+                        amount: scaled_damage,
+                    });
                 }
             }
             // Paired impact visual — sustained ground ring
@@ -603,6 +682,7 @@ pub fn dispatch(
                     None,
                     accepted.caster_entity,
                     accepted.ability_id,
+                    super::meters::ATTACKER_KIND_OTHER,
                 );
             }
         }

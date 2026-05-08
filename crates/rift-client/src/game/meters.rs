@@ -28,7 +28,10 @@
 
 use rift_engine::ui::im::{Color, Pos2, Rect, Ui};
 use rift_game::abilities;
-use rift_net::messages::{MeterAbilityBreakdown, MeterEntry};
+use rift_game::monsters::MonsterRole;
+use rift_net::messages::{
+    MeterAbilityBreakdown, MeterEntry, MeterTakenAttackerBreakdown,
+};
 use rift_net::NetId;
 
 use crate::net::NetClient;
@@ -70,11 +73,13 @@ struct MeterRow {
     damage_taken: f32,
     healing_done: f32,
     threat: f32,
-    /// Per-ability breakdown, sorted descending by total
-    /// contribution server-side. Used to render the inline
-    /// expanded sub-rows when the user clicks a player row on
-    /// a tab that supports breakdown (DMG / HPS).
+    /// Per-ability breakdown for the DMG and HPS tabs, sorted
+    /// descending by total contribution server-side.
     abilities: Vec<MeterAbilityBreakdown>,
+    /// Two-level breakdown for the TAKEN tab: outer rows are
+    /// the attacker kind, inner rows are the abilities each
+    /// kind hit you with. Sorted server-side descending.
+    taken_attackers: Vec<MeterTakenAttackerBreakdown>,
 }
 
 /// Aggregate state for the combat-meter HUD. One per
@@ -91,9 +96,15 @@ pub struct MeterUi {
     /// `Some(net_id)` when a player row has been clicked open
     /// to show its per-ability sub-rows. Cleared by clicking
     /// the same row again, switching to a tab that doesn't
-    /// support breakdown (TAKEN / THREAT today), or losing the
+    /// support breakdown (THREAT today), or losing the
     /// row from a fresh snapshot.
     expanded: Option<NetId>,
+    /// Second-level expansion for the TAKEN tab: when an
+    /// attacker-kind row is open, this holds its wire byte so
+    /// the per-ability rows beneath it render. Reset whenever
+    /// the parent player row collapses or the tab changes off
+    /// TAKEN.
+    expanded_attacker: Option<u8>,
     /// Vertical scroll offset, in pixels (pre-scaled). Clamped
     /// each frame to `[0, max_scroll]` so it never goes out of
     /// bounds when the row count shrinks. Mutated by the
@@ -140,6 +151,7 @@ impl MeterUi {
                     healing_done: e.healing_done,
                     threat: e.threat,
                     abilities: e.abilities,
+                    taken_attackers: e.taken_attackers,
                 }
             })
             .collect();
@@ -148,6 +160,7 @@ impl MeterUi {
         if let Some(open) = self.expanded {
             if !self.rows.iter().any(|r| r.net_id == open) {
                 self.expanded = None;
+                self.expanded_attacker = None;
             }
         }
     }
@@ -298,11 +311,11 @@ impl MeterUi {
             }
         }
 
-        // Some tabs (TAKEN, THREAT) don't carry per-ability
-        // breakdown yet — clear any stale expansion when the
-        // user navigates away from a tab that did. See TODO.md
-        // for the plan to plumb enemy ability ids through.
-        let supports_breakdown = matches!(self.tab, MeterTab::Dmg | MeterTab::Hps);
+        // DMG / HPS / TAKEN all carry per-ability breakdown
+        // rows now (TAKEN is credited at the receiving player
+        // by `apply_player_damage`). THREAT is still a single
+        // instantaneous number with no per-ability slice.
+        let supports_breakdown = matches!(self.tab, MeterTab::Dmg | MeterTab::Hps | MeterTab::Taken);
         if !supports_breakdown {
             self.expanded = None;
         }
@@ -339,12 +352,12 @@ impl MeterUi {
         let mut total_rows_h = (self.rows.len() as f32) * row_h;
         if let Some(open) = self.expanded {
             if let Some(open_row) = self.rows.iter().find(|r| r.net_id == open) {
-                let visible_subs = open_row
-                    .abilities
-                    .iter()
-                    .filter(|a| ability_value(self.tab, a) > 0.0)
-                    .count();
-                total_rows_h += (visible_subs as f32) * sub_row_h;
+                total_rows_h += taken_or_ability_sub_count(
+                    self.tab,
+                    open_row,
+                    self.expanded_attacker,
+                ) as f32
+                    * sub_row_h;
             }
         }
         let max_scroll = (total_rows_h - body_h).max(0.0);
@@ -371,6 +384,7 @@ impl MeterUi {
         // scroll.
         let mut cursor_y = body_top - self.scroll;
         let mut click_target: Option<NetId> = None;
+        let mut attacker_click_target: Option<u8> = None;
         for (idx, value) in indexed.into_iter() {
             let y = cursor_y;
             // Skip drawing rows entirely outside the visible
@@ -450,92 +464,46 @@ impl MeterUi {
             cursor_y += row_h;
 
             // Inline sub-rows for the expanded player on the
-            // current breakdown-capable tab.
+            // current breakdown-capable tab. The TAKEN tab
+            // gets its own two-level renderer (attacker →
+            // ability); DMG / HPS use the flat per-ability
+            // breakdown.
             let row = &self.rows[idx];
             if supports_breakdown && self.expanded == Some(row.net_id) {
-                // Top contribution drives the sub-row bar
-                // scale so the leader's bar is full-width.
-                let sub_top = row
-                    .abilities
-                    .iter()
-                    .map(|a| ability_value(self.tab, a))
-                    .fold(0.0_f32, f32::max);
-                for ab in &row.abilities {
-                    let v = ability_value(self.tab, ab);
-                    // Skip abilities that don't contribute to
-                    // the active tab — don't reserve a slot,
-                    // don't advance the cursor. Otherwise the
-                    // HPS tab would render empty rows wherever
-                    // a damage-only ability sits in the
-                    // ordered list.
-                    if v <= 0.0 {
-                        continue;
-                    }
-                    let sy = cursor_y;
-                    let sub_visible = sy + sub_row_h > body_top && sy < body_bottom;
-                    if sub_visible {
-                        // Indented + thinner bar to read as a
-                        // child of the player row above.
-                        let indent = 16.0 * s;
-                        let sub_bar = Rect::from_xywh(
-                            row_x + indent,
-                            sy + 2.0 * s,
-                            row_w - indent,
-                            sub_row_h - 6.0 * s,
-                        );
-                        let frac = if sub_top > 0.0 {
-                            (v / sub_top).clamp(0.0, 1.0)
-                        } else {
-                            0.0
-                        };
-                        draw_meter_bar(
-                            ui,
-                            sub_bar,
-                            frac,
-                            bar_color(self.tab),
-                            0.55,
-                        );
-                        let name = ability_name(ab.ability_id);
-                        let _ = ui.draw_text(
-                            Pos2::new(row_x + indent + 4.0 * s, sy + 3.0 * s),
-                            name,
-                            theme.fonts.size_sm,
-                            theme.colors.text_dim,
-                        );
-                        let total_text = format_short(v);
-                        let total_w = ui.measure_text(&total_text, theme.fonts.size_sm);
-                        let rate_col_w = 80.0 * s;
-                        let col_gap = 6.0 * s;
-                        if per_second && secs > 0.0 {
-                            let rate_text = format!("{}/s", format_short(v / secs));
-                            let rate_w = ui.measure_text(&rate_text, theme.fonts.size_sm);
-                            let rate_x = row_x + row_w - 6.0 * s - rate_w;
-                            let _ = ui.draw_text(
-                                Pos2::new(rate_x, sy + 3.0 * s),
-                                &rate_text,
-                                theme.fonts.size_sm,
-                                theme.colors.text_dim,
-                            );
-                            let total_col_right =
-                                row_x + row_w - 6.0 * s - rate_col_w - col_gap;
-                            let total_x = total_col_right - total_w;
-                            let _ = ui.draw_text(
-                                Pos2::new(total_x, sy + 3.0 * s),
-                                &total_text,
-                                theme.fonts.size_sm,
-                                theme.colors.text_dim,
-                            );
-                        } else {
-                            let total_x = row_x + row_w - 6.0 * s - total_w;
-                            let _ = ui.draw_text(
-                                Pos2::new(total_x, sy + 3.0 * s),
-                                &total_text,
-                                theme.fonts.size_sm,
-                                theme.colors.text_dim,
-                            );
-                        }
-                    }
-                    cursor_y += sub_row_h;
+                if matches!(self.tab, MeterTab::Taken) {
+                    draw_taken_breakdown(
+                        ui,
+                        theme,
+                        row,
+                        row_x,
+                        row_w,
+                        sub_row_h,
+                        body_top,
+                        body_bottom,
+                        s,
+                        secs,
+                        per_second,
+                        self.expanded_attacker,
+                        &mut cursor_y,
+                        mouse,
+                        &mut attacker_click_target,
+                    );
+                } else {
+                    draw_ability_breakdown(
+                        ui,
+                        theme,
+                        row,
+                        self.tab,
+                        row_x,
+                        row_w,
+                        sub_row_h,
+                        body_top,
+                        body_bottom,
+                        s,
+                        secs,
+                        per_second,
+                        &mut cursor_y,
+                    );
                 }
             }
         }
@@ -548,6 +516,18 @@ impl MeterUi {
                     None
                 } else {
                     Some(target)
+                };
+                // Switching player rows resets the inner
+                // attacker expansion so the TAKEN tab opens
+                // collapsed again.
+                self.expanded_attacker = None;
+            }
+        } else if let Some(kind) = attacker_click_target {
+            if ui.input().left_clicked() {
+                self.expanded_attacker = if self.expanded_attacker == Some(kind) {
+                    None
+                } else {
+                    Some(kind)
                 };
             }
         }
@@ -583,8 +563,9 @@ fn value_for(tab: MeterTab, r: &MeterRow) -> f32 {
 }
 
 /// Per-tab metric extractor for the per-ability breakdown
-/// rows. Only DMG / HPS are meaningful here today; TAKEN and
-/// THREAT collapse to 0 since the breakdown isn't plumbed yet.
+/// rows. Used by the DMG and HPS sub-row pass; the TAKEN tab
+/// has its own two-level renderer (attacker → ability) and
+/// doesn't go through this.
 fn ability_value(tab: MeterTab, a: &MeterAbilityBreakdown) -> f32 {
     match tab {
         MeterTab::Dmg => a.damage_dealt,
@@ -597,6 +578,16 @@ fn ability_value(tab: MeterTab, a: &MeterAbilityBreakdown) -> f32 {
 /// "Other" for the unattributed sentinel and unknown ids.
 fn ability_name(id: u8) -> &'static str {
     abilities::from_wire_id(id).map(|a| a.name).unwrap_or("Other")
+}
+
+/// Resolve an attacker-kind wire byte to a display name.
+/// Unknown bytes (and the `255` "Other" sentinel) collapse
+/// to `"Other"` so future server roles don't crash old
+/// clients.
+fn attacker_name(kind: u8) -> &'static str {
+    MonsterRole::from_wire_byte(kind)
+        .map(|r| r.display_name())
+        .unwrap_or("Other")
 }
 
 /// Draw one meter bar with consistent rounding regardless of
@@ -664,5 +655,274 @@ fn format_short(v: f32) -> String {
         format!("{v:.0}")
     } else {
         format!("{v:.1}")
+    }
+}
+
+/// Count the visible sub-rows for an expanded player row on
+/// the active tab. Used by the scroll-height pre-pass so
+/// scrolling doesn't leave phantom slots when the inner row
+/// list is sparse. For TAKEN, also counts the inner ability
+/// rows beneath an expanded attacker.
+fn taken_or_ability_sub_count(
+    tab: MeterTab,
+    row: &MeterRow,
+    expanded_attacker: Option<u8>,
+) -> usize {
+    match tab {
+        MeterTab::Taken => {
+            let mut n = row.taken_attackers.len();
+            if let Some(kind) = expanded_attacker {
+                if let Some(att) = row
+                    .taken_attackers
+                    .iter()
+                    .find(|a| a.attacker_kind == kind)
+                {
+                    n += att.abilities.len();
+                }
+            }
+            n
+        }
+        MeterTab::Dmg | MeterTab::Hps => row
+            .abilities
+            .iter()
+            .filter(|a| ability_value(tab, a) > 0.0)
+            .count(),
+        MeterTab::Threat => 0,
+    }
+}
+
+/// Render the expanded TAKEN-tab breakdown for one player row:
+/// outer rows are attacker kinds, inner rows (under an open
+/// attacker) are the abilities that kind hit you with.
+#[allow(clippy::too_many_arguments)]
+fn draw_taken_breakdown(
+    ui: &mut Ui<'_>,
+    theme: rift_engine::ui::im::Theme,
+    row: &MeterRow,
+    row_x: f32,
+    row_w: f32,
+    sub_row_h: f32,
+    body_top: f32,
+    body_bottom: f32,
+    s: f32,
+    secs: f32,
+    per_second: bool,
+    expanded_attacker: Option<u8>,
+    cursor_y: &mut f32,
+    mouse: Pos2,
+    attacker_click_target: &mut Option<u8>,
+) {
+    let outer_top = row
+        .taken_attackers
+        .iter()
+        .map(|a| a.damage_taken)
+        .fold(0.0_f32, f32::max);
+    for att in &row.taken_attackers {
+        let v = att.damage_taken;
+        if v <= 0.0 {
+            continue;
+        }
+        let sy = *cursor_y;
+        let visible = sy + sub_row_h > body_top && sy < body_bottom;
+        let is_open = expanded_attacker == Some(att.attacker_kind);
+        if visible {
+            let indent = 16.0 * s;
+            let bar = Rect::from_xywh(
+                row_x + indent,
+                sy + 2.0 * s,
+                row_w - indent,
+                sub_row_h - 6.0 * s,
+            );
+            let frac = if outer_top > 0.0 {
+                (v / outer_top).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            draw_meter_bar(ui, bar, frac, bar_color(MeterTab::Taken), 0.55);
+            let caret = if is_open { "v " } else { "> " };
+            let label = format!("{caret}{}", attacker_name(att.attacker_kind));
+            let _ = ui.draw_text(
+                Pos2::new(row_x + indent + 4.0 * s, sy + 3.0 * s),
+                &label,
+                theme.fonts.size_sm,
+                theme.colors.text_dim,
+            );
+            draw_value_columns(
+                ui,
+                &theme,
+                row_x,
+                row_w,
+                sy,
+                s,
+                v,
+                secs,
+                per_second,
+            );
+            if bar.contains(mouse) {
+                *attacker_click_target = Some(att.attacker_kind);
+            }
+        }
+        *cursor_y += sub_row_h;
+        if is_open {
+            let inner_top = att
+                .abilities
+                .iter()
+                .map(|a| a.damage_taken)
+                .fold(0.0_f32, f32::max);
+            for ab in &att.abilities {
+                let av = ab.damage_taken;
+                if av <= 0.0 {
+                    continue;
+                }
+                let isy = *cursor_y;
+                let iv = isy + sub_row_h > body_top && isy < body_bottom;
+                if iv {
+                    let indent = 32.0 * s;
+                    let bar = Rect::from_xywh(
+                        row_x + indent,
+                        isy + 2.0 * s,
+                        row_w - indent,
+                        sub_row_h - 6.0 * s,
+                    );
+                    let frac = if inner_top > 0.0 {
+                        (av / inner_top).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    draw_meter_bar(ui, bar, frac, bar_color(MeterTab::Taken), 0.40);
+                    let _ = ui.draw_text(
+                        Pos2::new(row_x + indent + 4.0 * s, isy + 3.0 * s),
+                        ability_name(ab.ability_id),
+                        theme.fonts.size_sm,
+                        theme.colors.text_dim,
+                    );
+                    draw_value_columns(
+                        ui,
+                        &theme,
+                        row_x,
+                        row_w,
+                        isy,
+                        s,
+                        av,
+                        secs,
+                        per_second,
+                    );
+                }
+                *cursor_y += sub_row_h;
+            }
+        }
+    }
+}
+
+/// Render the expanded DMG / HPS sub-rows for one player row.
+#[allow(clippy::too_many_arguments)]
+fn draw_ability_breakdown(
+    ui: &mut Ui<'_>,
+    theme: rift_engine::ui::im::Theme,
+    row: &MeterRow,
+    tab: MeterTab,
+    row_x: f32,
+    row_w: f32,
+    sub_row_h: f32,
+    body_top: f32,
+    body_bottom: f32,
+    s: f32,
+    secs: f32,
+    per_second: bool,
+    cursor_y: &mut f32,
+) {
+    let sub_top = row
+        .abilities
+        .iter()
+        .map(|a| ability_value(tab, a))
+        .fold(0.0_f32, f32::max);
+    for ab in &row.abilities {
+        let v = ability_value(tab, ab);
+        if v <= 0.0 {
+            continue;
+        }
+        let sy = *cursor_y;
+        let visible = sy + sub_row_h > body_top && sy < body_bottom;
+        if visible {
+            let indent = 16.0 * s;
+            let bar = Rect::from_xywh(
+                row_x + indent,
+                sy + 2.0 * s,
+                row_w - indent,
+                sub_row_h - 6.0 * s,
+            );
+            let frac = if sub_top > 0.0 {
+                (v / sub_top).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            draw_meter_bar(ui, bar, frac, bar_color(tab), 0.55);
+            let _ = ui.draw_text(
+                Pos2::new(row_x + indent + 4.0 * s, sy + 3.0 * s),
+                ability_name(ab.ability_id),
+                theme.fonts.size_sm,
+                theme.colors.text_dim,
+            );
+            draw_value_columns(
+                ui,
+                &theme,
+                row_x,
+                row_w,
+                sy,
+                s,
+                v,
+                secs,
+                per_second,
+            );
+        }
+        *cursor_y += sub_row_h;
+    }
+}
+
+/// Shared right-aligned `total | rate/s` column renderer used
+/// by every sub-row (DMG / HPS abilities, TAKEN attackers,
+/// TAKEN abilities).
+#[allow(clippy::too_many_arguments)]
+fn draw_value_columns(
+    ui: &mut Ui<'_>,
+    theme: &rift_engine::ui::im::Theme,
+    row_x: f32,
+    row_w: f32,
+    y: f32,
+    s: f32,
+    v: f32,
+    secs: f32,
+    per_second: bool,
+) {
+    let total_text = format_short(v);
+    let total_w = ui.measure_text(&total_text, theme.fonts.size_sm);
+    let rate_col_w = 80.0 * s;
+    let col_gap = 6.0 * s;
+    if per_second && secs > 0.0 {
+        let rate_text = format!("{}/s", format_short(v / secs));
+        let rate_w = ui.measure_text(&rate_text, theme.fonts.size_sm);
+        let rate_x = row_x + row_w - 6.0 * s - rate_w;
+        let _ = ui.draw_text(
+            Pos2::new(rate_x, y + 3.0 * s),
+            &rate_text,
+            theme.fonts.size_sm,
+            theme.colors.text_dim,
+        );
+        let total_col_right = row_x + row_w - 6.0 * s - rate_col_w - col_gap;
+        let total_x = total_col_right - total_w;
+        let _ = ui.draw_text(
+            Pos2::new(total_x, y + 3.0 * s),
+            &total_text,
+            theme.fonts.size_sm,
+            theme.colors.text_dim,
+        );
+    } else {
+        let total_x = row_x + row_w - 6.0 * s - total_w;
+        let _ = ui.draw_text(
+            Pos2::new(total_x, y + 3.0 * s),
+            &total_text,
+            theme.fonts.size_sm,
+            theme.colors.text_dim,
+        );
     }
 }

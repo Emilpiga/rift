@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 
 use hecs::Entity;
-use rift_net::messages::{MeterAbilityBreakdown, MeterEntry, ServerMsg};
+use rift_net::messages::{
+    MeterAbilityBreakdown, MeterEntry, MeterTakenAbility, MeterTakenAttackerBreakdown,
+    ServerMsg,
+};
 use rift_net::ClientId;
 
 use super::enemies::ServerEnemy;
@@ -24,13 +27,30 @@ use super::player::ServerPlayer;
 /// understood by the client UI.
 pub const ABILITY_ID_OTHER: u8 = 255;
 
-/// Per-ability slice of one player's totals. We only break out
-/// the metrics we can meaningfully attribute (DMG / HPS); TAKEN
-/// and THREAT roll into the top-level numbers.
+/// Reserved attacker-kind id for the TAKEN-tab breakdown when
+/// we can't (or don't care to) attribute the source to a
+/// `MonsterRole`: thorns reflect, anonymous DoTs, environmental
+/// damage. Sits in the same `u8` namespace as
+/// [`rift_game::monsters::MonsterRole::to_wire_byte`] but stays
+/// out of the way of any real role.
+pub const ATTACKER_KIND_OTHER: u8 = 255;
+
+/// Per-ability slice of one player's damage / healing rows
+/// (the DMG and HPS tabs in the HUD). The TAKEN tab uses the
+/// separate two-level [`MeterAccum::taken_by_attacker`] map
+/// instead.
 #[derive(Default, Clone, Debug)]
 pub struct AbilityAccum {
     pub damage_dealt: f32,
     pub healing_done: f32,
+}
+
+/// Outer bucket of the TAKEN-tab accumulator: total damage taken
+/// from one attacker kind, plus a per-ability inner map.
+#[derive(Default, Clone, Debug)]
+pub struct AttackerAccum {
+    pub damage_taken: f32,
+    pub by_ability: HashMap<u8, f32>,
 }
 
 /// Per-client cumulative counters. Numbers are HP units.
@@ -39,9 +59,15 @@ pub struct MeterAccum {
     pub damage_dealt: f32,
     pub damage_taken: f32,
     pub healing_done: f32,
-    /// Per-ability slice. Keyed by wire-stable u8 id from
+    /// Per-ability slice for damage dealt + healing done.
+    /// Keyed by wire-stable u8 id from
     /// `rift_game::abilities::id::*`, or [`ABILITY_ID_OTHER`].
     pub by_ability: HashMap<u8, AbilityAccum>,
+    /// Two-level breakdown for damage *taken*: outer key is
+    /// the attacker kind (`MonsterRole::to_wire_byte()` or
+    /// [`ATTACKER_KIND_OTHER`]), inner is per-ability damage.
+    /// Drives the TAKEN-tab nested expansion in the HUD.
+    pub taken_by_attacker: HashMap<u8, AttackerAccum>,
 }
 
 impl MeterAccum {
@@ -56,6 +82,22 @@ impl MeterAccum {
     pub fn add_healing(&mut self, ability_id: u8, amount: f32) {
         self.healing_done += amount;
         self.by_ability.entry(ability_id).or_default().healing_done += amount;
+    }
+
+    /// Credit `amount` damage *taken* from a specific source.
+    /// `attacker_kind` is `MonsterRole::to_wire_byte()` for
+    /// known enemies or [`ATTACKER_KIND_OTHER`] for sources
+    /// without an enemy origin (thorns reflect, environmental).
+    /// `ability_id` is the wire-stable u8 of the source
+    /// ability or [`ABILITY_ID_OTHER`]. Updates the top-line
+    /// `damage_taken` total *and* both axes of the
+    /// `taken_by_attacker` two-level map so the TAKEN tab can
+    /// drill from attacker → ability.
+    pub fn add_damage_taken(&mut self, attacker_kind: u8, ability_id: u8, amount: f32) {
+        self.damage_taken += amount;
+        let bucket = self.taken_by_attacker.entry(attacker_kind).or_default();
+        bucket.damage_taken += amount;
+        *bucket.by_ability.entry(ability_id).or_default() += amount;
     }
 }
 
@@ -121,6 +163,39 @@ impl Meters {
                 let kb = b.damage_dealt + b.healing_done;
                 kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
             });
+            // Two-level breakdown for the TAKEN tab. Inner
+            // ability rows are sorted descending by damage so
+            // the client can render them top-down; outer
+            // attacker rows are sorted the same way by total.
+            let mut taken_attackers: Vec<MeterTakenAttackerBreakdown> = accum
+                .taken_by_attacker
+                .iter()
+                .map(|(kind, ack)| {
+                    let mut abilities: Vec<MeterTakenAbility> = ack
+                        .by_ability
+                        .iter()
+                        .map(|(id, amt)| MeterTakenAbility {
+                            ability_id: *id,
+                            damage_taken: *amt,
+                        })
+                        .collect();
+                    abilities.sort_by(|a, b| {
+                        b.damage_taken
+                            .partial_cmp(&a.damage_taken)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    MeterTakenAttackerBreakdown {
+                        attacker_kind: *kind,
+                        damage_taken: ack.damage_taken,
+                        abilities,
+                    }
+                })
+                .collect();
+            taken_attackers.sort_by(|a, b| {
+                b.damage_taken
+                    .partial_cmp(&a.damage_taken)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             entries.push(MeterEntry {
                 net_id,
                 damage_dealt: accum.damage_dealt,
@@ -128,6 +203,7 @@ impl Meters {
                 healing_done: accum.healing_done,
                 threat,
                 abilities,
+                taken_attackers,
             });
         }
 

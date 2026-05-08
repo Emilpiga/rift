@@ -286,6 +286,12 @@ impl MpInventoryUI {
         // ─── Bag + equipment panel ──────────────────────────────
         let panel_rect = layout.bag_panel;
         let mut hovered_item: Option<Item> = None;
+        // True when `hovered_item` came from an equipment slot
+        // (not a bag / stash slot). The compare-side panel
+        // would otherwise compare the item to itself, which
+        // both wastes a tooltip slab and reads as a duplicate
+        // of the legendary line.
+        let mut hovered_from_equip = false;
         Frame::panel(&theme)
             .with_padding(Pad::all(layout.pad))
             .show(ui, panel_rect, |ui, body| {
@@ -357,6 +363,7 @@ impl MpInventoryUI {
                     if let Some(it) = item {
                         if hovered {
                             hovered_item = Some(it.clone());
+                            hovered_from_equip = true;
                         }
                     } else {
                         // Empty equip slot: overlay the slot
@@ -539,8 +546,11 @@ impl MpInventoryUI {
             // don't push past the screen edge on right-half
             // hovers. SHIFT additionally surfaces a per-stat
             // delta column so the player can see exactly what
-            // they'd gain or lose.
-            if let Some(equipped) = compare_target(equipment, item) {
+            // they'd gain or lose. Skip the compare when the
+            // hover originated from an equipment slot —
+            // comparing an equipped item to itself is noise.
+            if !hovered_from_equip {
+                if let Some(equipped) = compare_target(equipment, item) {
                 let stack_right = primary.max.x + ui.s(8.0) + 200.0 < screen_w;
                 let eq_anchor = if stack_right {
                     Pos2::new(primary.max.x + ui.s(8.0), primary.y())
@@ -564,6 +574,7 @@ impl MpInventoryUI {
                         Pos2::new(eq_rect.x() - ui.s(8.0) - 200.0, eq_rect.y())
                     };
                     render_compare_delta(ui, item, equipped, delta_anchor);
+                }
                 }
             }
         }

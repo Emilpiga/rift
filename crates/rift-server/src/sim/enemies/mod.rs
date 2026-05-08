@@ -379,6 +379,11 @@ pub enum EnemyCast {
     /// projectiles / damage / summon).
     Resolve {
         owner: NetId,
+        /// Casting enemy's `MonsterRole::to_wire_byte()`.
+        /// Threaded through dispatch so spawned projectiles /
+        /// zones / channels carry the kind for the receiving
+        /// player's TAKEN-tab attribution.
+        attacker_kind: u8,
         ability_id: u8,
         origin: Vec3,
         aim: Vec3,
@@ -404,7 +409,7 @@ pub enum EnemyCast {
 /// to apply once the world borrow ends.
 #[derive(Default)]
 pub struct AiOutcome {
-    pub melee_damage: Vec<(Entity, f32)>,
+    pub melee_damage: Vec<super::combat_ctx::PlayerHit>,
     /// Ability cast events (start-of-windup + resolve). Lifted
     /// into `WorldEvent::AbilityCast` and / or dispatched
     /// through the kernel pipeline by `Sim::step`.

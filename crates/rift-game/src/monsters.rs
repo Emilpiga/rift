@@ -71,6 +71,19 @@ impl MonsterRole {
             _ => return None,
         })
     }
+
+    /// Human-readable name for HUD display (combat meter
+    /// breakdown rows, etc.). Kept short so it fits in the
+    /// meter column without truncation.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            MonsterRole::Brute => "Brute",
+            MonsterRole::Stalker => "Stalker",
+            MonsterRole::Caster => "Caster",
+            MonsterRole::Elite => "Elite",
+            MonsterRole::Boss => "Boss",
+        }
+    }
 }
 
 pub const ALL_ROLES: [MonsterRole; 5] = [
