@@ -1175,199 +1175,111 @@ impl Mesh {
         )
     }
 
-    /// Portal whose inner disc bakes the destination biome's
-    /// sky palette into a fisheye-style radial gradient. The
-    /// caller passes the destination's
-    /// [`SkyConfig`](crate::renderer::sky::SkyConfig) `zenith`,
-    /// `horizon`, and `ground` colours; we map them onto the
-    /// disc as if the player were peering "up" through the
-    /// portal at the other side's sky:
+    /// Dimensional rift portal — a torn hole in reality.
     ///
-    /// ```text
-    ///                  ┌── center  = zenith (looking up)
-    ///                  │
-    ///                  │       ┌── mid     = horizon
-    ///                  │       │
-    ///                  ▼       ▼   ┌── edge = ground/dark
-    ///   inner disc:  [ Z ─ M ─ E ]
-    /// ```
+    /// Geometry intentionally provides only **polar UVs** and a
+    /// **wobbly silhouette**; all the visual content (swirling
+    /// depth, chromatic veins, edge tendrils) is generated in
+    /// [`shadeRift`](file://assets/shaders/triangle.frag) at
+    /// fragment time. The mesh's job is to:
     ///
-    /// The forward shader applies lighting + fog + bloom, and
-    /// HDR-boosting the input colours pushes them through the
-    /// bloom pass so the disc reads as a tinted, glowing
-    /// fisheye view of the other biome rather than a flat
-    /// painted plate. Combined with the orbiting fire ring
-    /// from
-    /// [`portal_vortex`](crate::renderer::vfx::presets::portal_vortex)
-    /// the eye reads the whole assembly as "burning portal
-    /// opening onto the other place".
+    ///   * present an unstable, *non-circular* contour (per-
+    ///     vertex angular noise on the outermost ring) so the
+    ///     shader's procedural silhouette wobble has an
+    ///     irregular base to work against,
+    ///   * bake polar coordinates into UVs (`uv.x = radial
+    ///     0..1`, `uv.y = angle / TAU`) so the fragment shader
+    ///     can layer rotating noise fields without needing a
+    ///     model-inverse matrix,
+    ///   * fill the disc with enough subdivisions that the
+    ///     procedural detail (veins, tendrils, parallax swirls)
+    ///     reads smoothly across the surface.
     ///
-    /// `zenith` / `horizon` / `ground` are passed in linear LDR
-    /// (typical 0..1 range from `SkyConfig`); we boost them
-    /// internally for the bloom hit.
-    pub fn portal_with_palette(zenith: Vec3, horizon: Vec3, ground: Vec3) -> Self {
+    /// **No frame torus.** The original gold-ring frame read as
+    /// "fantasy MMO loot portal"; the rift look pushes the
+    /// boundary into the disc's own shader-driven tendrils and
+    /// chromatic edge-bleed. The thin bright aperture is
+    /// reconstituted at fragment time by the rim ember band in
+    /// `shadeRift`.
+    ///
+    /// **Vertex colors are intentionally zero.** The portal
+    /// shading branch ignores `fragColor` and computes its own
+    /// HDR emissive output from the polar UVs + time uniform.
+    /// The `_zenith` / `_horizon` / `_ground` palette inputs
+    /// from the legacy signature are kept for callsite
+    /// compatibility but no longer used.
+    pub fn portal_with_palette(_zenith: Vec3, _horizon: Vec3, _ground: Vec3) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let segments: u32 = 64;
-        let ring_radius = 1.15_f32;
-        // Slimmer than the old cyan version — Strange portals
-        // read as a thin burning ring, not a chunky stargate.
-        let tube_radius = 0.085_f32;
         let height = 2.1_f32;
         let cy_offset = height * 0.5;
+        let disc_segments: u32 = 96;
+        let disc_r = 1.20_f32;
 
-        // Frame palette: gold/copper rim is constant — the rim
-        // is the "magic burning aperture" and shouldn't shift
-        // with the destination. The destination's biome only
-        // shows through the *inner disc*.
-        let frame_color = Vec3::new(2.4, 1.0, 0.20);   // molten copper
-        let rim_color   = Vec3::new(3.6, 2.4, 0.80);   // white-hot gold
-
-        // Inner-disc palette — destination biome, HDR-boosted so
-        // the bloom pass picks them up. Multipliers tuned by eye
-        // against the existing sky presets:
-        //
-        //   * Zenith ×3.5: hottest, sells the "infinite sky"
-        //     bright spot at the disc centre.
-        //   * Horizon ×2.0: still hot enough to bloom but cooler
-        //     than the centre, so the gradient reads as depth.
-        //   * Ground ×0.6: slightly *darken* the rim so the disc
-        //     edge fades into the burning gold ring without
-        //     fighting it for brightness.
-        let core_color = zenith  * 3.5;
-        let mid_color  = horizon * 2.0;
-        let edge_color = ground  * 0.6;
-
-        // Helper: emit a torus ring with the given radii and colour.
-        let push_torus = |vertices: &mut Vec<Vertex>,
-                              indices: &mut Vec<u32>,
-                              big_r: f32,
-                              tube_r: f32,
-                              color: Vec3| {
-            for i in 0..segments {
-                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-
-                let (sx0, sy0) = (a0.cos() * big_r, a0.sin() * (height * 0.5) + cy_offset);
-                let (sx1, sy1) = (a1.cos() * big_r, a1.sin() * (height * 0.5) + cy_offset);
-                let n0 = Vec3::new(a0.cos(), a0.sin(), 0.0).normalize();
-                let n1 = Vec3::new(a1.cos(), a1.sin(), 0.0).normalize();
-                let base = vertices.len() as u32;
-
-                // 4 verts per segment: front-outer, front-inner-z (+z), back-outer, back-inner (-z).
-                vertices.push(Vertex { position: Vec3::new(sx0 + n0.x * tube_r, sy0 + n0.y * tube_r, tube_r), normal: n0, color, uv: Vec2::new(0.5, 0.5) });
-                vertices.push(Vertex { position: Vec3::new(sx0 - n0.x * tube_r, sy0 - n0.y * tube_r, -tube_r), normal: n0, color, uv: Vec2::new(0.5, 0.5) });
-                vertices.push(Vertex { position: Vec3::new(sx1 - n1.x * tube_r, sy1 - n1.y * tube_r, -tube_r), normal: n1, color, uv: Vec2::new(0.5, 0.5) });
-                vertices.push(Vertex { position: Vec3::new(sx1 + n1.x * tube_r, sy1 + n1.y * tube_r, tube_r), normal: n1, color, uv: Vec2::new(0.5, 0.5) });
-
-                indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
-                // Mirror winding so the rim ribbon is visible
-                // from the back side too. The renderer doesn't
-                // cull back faces, but lighting (and any future
-                // single-sided shader pass) keys off the
-                // triangle winding — without these reversed
-                // tris the outer ring vanishes when viewed from
-                // -Z (i.e. from behind the portal disc).
-                indices.extend_from_slice(&[base, base + 2, base + 1, base + 2, base, base + 3]);
-            }
+        // Per-angle silhouette wobble. Sum of three low-freq
+        // sines with prime-ish multipliers and irrational phase
+        // offsets gives a non-repeating, organic "torn paper"
+        // contour. Magnitude tuned so the outermost ring breaks
+        // its perfect-circle shape by ~6–10% radius without
+        // becoming spiky. The shader layers an additional
+        // *animated* wobble on top of this static baseline; the
+        // combination reads as a contour under tension.
+        let wobble = |a: f32| -> f32 {
+            0.045 * (a * 3.0 + 1.7).sin()
+                + 0.030 * (a * 5.0 - 0.9).sin()
+                + 0.020 * (a * 11.0 + 2.4).sin()
         };
 
-        // Outer frame torus.
-        push_torus(&mut vertices, &mut indices, ring_radius, tube_radius, frame_color);
-        // Bright inner rim torus, sitting just inside the frame.
-        push_torus(&mut vertices, &mut indices, ring_radius * 0.92, tube_radius * 0.55, rim_color);
+        // Ring radii (as a fraction of `disc_r`). Inner rings
+        // are *not* wobbled — only the outermost contour
+        // distorts, otherwise the inner rings would clip
+        // through the silhouette and produce visible seams.
+        let ring_ts: [f32; 6] = [0.0, 0.18, 0.40, 0.62, 0.82, 1.0];
 
-        // Multi-ring inner disc with a radial colour gradient.
-        // Five concentric rings: r = 0 (core/zenith), 0.30, 0.60
-        // (mid/horizon band), 0.85, 1.0 (edge/ground). Five
-        // rings give the gradient enough samples to read as a
-        // smooth fisheye projection rather than two
-        // hard-edged colour bands. Each pair of adjacent
-        // rings is interpolated at bake time so the final
-        // colours are smooth even though Vulkan's flat per-
-        // vertex interpolation is the only thing happening at
-        // draw time.
-        let disc_segments: u32 = 64;
-        let disc_r = ring_radius * 0.88;
-
-        // Smooth-stepped gradient evaluator: t in [0, 1] →
-        // zenith → horizon → ground. Quadratic ease keeps the
-        // bright zenith centre wide and crushes most of the
-        // fade into the outer half, mimicking how a real
-        // fisheye projection compresses the horizon line.
-        let sample = |t: f32| -> Vec3 {
-            let t = t.clamp(0.0, 1.0);
-            // 0.0..0.5 fades core → mid; 0.5..1.0 fades mid → edge.
-            // Smoothstep on each half.
-            if t < 0.5 {
-                let u = t * 2.0;
-                let u = u * u * (3.0 - 2.0 * u);
-                core_color.lerp(mid_color, u)
-            } else {
-                let u = (t - 0.5) * 2.0;
-                let u = u * u * (3.0 - 2.0 * u);
-                mid_color.lerp(edge_color, u)
-            }
-        };
-
-        // Ring radii (as a fraction of `disc_r`).
-        let ring_ts: [f32; 5] = [0.0, 0.30, 0.60, 0.85, 1.0];
-
-        // Centre vertex (degenerate ring at t = 0 = zenith).
+        // Centre vertex — uv = (0, 0) so the shader maps it to
+        // the deepest "core" of the rift.
         let center_idx = vertices.len() as u32;
         vertices.push(Vertex {
             position: Vec3::new(0.0, cy_offset, 0.0),
             normal: Vec3::Z,
-            color: sample(0.0),
-            uv: Vec2::new(0.5, 0.5),
+            color: Vec3::ZERO,
+            uv: Vec2::new(0.0, 0.0),
         });
 
-        let push_ring =
-            |vertices: &mut Vec<Vertex>, t: f32, color: Vec3, normal: Vec3| -> u32 {
-                let r_xz = disc_r * t;
-                let r_y = height * 0.45 * t;
-                let start = vertices.len() as u32;
-                for i in 0..disc_segments {
-                    let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
-                    // Per-vertex hash → ±20% brightness mod.
-                    // Without this the smooth radial fade reads
-                    // as a flat painted disc; angular noise
-                    // baked into vertex colours gives the GPU's
-                    // flat interpolation something to chew on
-                    // and the disc reads as having structure
-                    // (stipple, sparkle) without any extra draw
-                    // cost. Hash from segment index + ring t so
-                    // the same vertex is stable across frames
-                    // (no flicker) and adjacent rings get
-                    // independent jitter.
-                    let h = {
-                        let k = (i as u32)
-                            .wrapping_mul(0x9E37_79B9)
-                            .wrapping_add((t * 1024.0) as u32)
-                            .wrapping_mul(0x85EB_CA6B);
-                        // Map to [-1, 1).
-                        let f = (k >> 8) as f32 / ((1u32 << 24) as f32);
-                        f * 2.0 - 1.0
-                    };
-                    let mod_color = color * (1.0 + h * 0.20);
-                    vertices.push(Vertex {
-                        position: Vec3::new(a.cos() * r_xz, a.sin() * r_y + cy_offset, 0.0),
-                        normal,
-                        color: mod_color,
-                        uv: Vec2::new(0.5, 0.5),
-                    });
-                }
-                start
-            };
+        // Push a ring of vertices at radial fraction `t`. UVs
+        // carry polar coords for the fragment shader: `uv.x` =
+        // radial fraction (0 at core, 1 at silhouette), `uv.y`
+        // = angle / TAU (0..1 around the ring).
+        let push_ring = |vertices: &mut Vec<Vertex>, t: f32, normal: Vec3| -> u32 {
+            let r_base = disc_r * t;
+            let r_y_base = height * 0.45 * t;
+            let start = vertices.len() as u32;
+            for i in 0..disc_segments {
+                let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
+                // Wobble only on the outermost ring so inner
+                // rings don't clip the contour.
+                let w = if (t - 1.0).abs() < 1e-3 { wobble(a) } else { 0.0 };
+                let scale = 1.0 + w;
+                let r_xz = r_base * scale;
+                let r_y = r_y_base * scale;
+                vertices.push(Vertex {
+                    position: Vec3::new(a.cos() * r_xz, a.sin() * r_y + cy_offset, 0.0),
+                    normal,
+                    color: Vec3::ZERO,
+                    uv: Vec2::new(t, i as f32 / disc_segments as f32),
+                });
+            }
+            start
+        };
 
-        // Front-face rings (skip ring_ts[0] — that's the centre vertex).
-        let mut front_starts: [u32; 4] = [0; 4];
+        // Front face rings (skip ring_ts[0] — that's the centre).
+        let mut front_starts: [u32; 5] = [0; 5];
         for (i, &t) in ring_ts[1..].iter().enumerate() {
-            front_starts[i] = push_ring(&mut vertices, t, sample(t), Vec3::Z);
+            front_starts[i] = push_ring(&mut vertices, t, Vec3::Z);
         }
 
-        // Core fan: centre vertex → first ring.
+        // Core fan: centre → first ring.
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
             indices.extend_from_slice(&[
@@ -1376,7 +1288,7 @@ impl Mesh {
                 front_starts[0] + next,
             ]);
         }
-        // Outer bands: ring[k] → ring[k+1] quads, two tris each.
+        // Outer bands: ring[k] → ring[k+1] quads.
         for k in 0..(front_starts.len() - 1) {
             let inner = front_starts[k];
             let outer = front_starts[k + 1];
@@ -1393,21 +1305,18 @@ impl Mesh {
             }
         }
 
-        // Back-face mirror so the portal reads from behind too.
+        // Back face mirror so the rift reads from behind too.
         let back_center = vertices.len() as u32;
         vertices.push(Vertex {
             position: Vec3::new(0.0, cy_offset, 0.0),
             normal: -Vec3::Z,
-            color: sample(0.0),
-            uv: Vec2::new(0.5, 0.5),
+            color: Vec3::ZERO,
+            uv: Vec2::new(0.0, 0.0),
         });
-        let mut back_starts: [u32; 4] = [0; 4];
+        let mut back_starts: [u32; 5] = [0; 5];
         for (i, &t) in ring_ts[1..].iter().enumerate() {
-            back_starts[i] = push_ring(&mut vertices, t, sample(t), -Vec3::Z);
+            back_starts[i] = push_ring(&mut vertices, t, -Vec3::Z);
         }
-        // Back-face winding is reversed so the back tris face
-        // the right way (we don't cull, but lighting picks the
-        // closer normal).
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
             indices.extend_from_slice(&[

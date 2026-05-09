@@ -1286,7 +1286,18 @@ pub enum WorldEvent {
 
     /// Entity died. Clients trigger the death animation if applicable
     /// and start the despawn fade.
-    Death { entity: NetId, killer: Option<NetId> },
+    ///
+    /// `hit_dir` is the world-space impulse vector that produced the
+    /// killing blow (projectile velocity for ranged, radial-outward
+    /// for AoE / aura, attacker→victim for melee). `[0, 0, 0]` when
+    /// no direction is known (DoT ticks, environmental damage); the
+    /// client's blood VFX falls back to the entity's last-frame
+    /// velocity in that case.
+    Death {
+        entity: NetId,
+        killer: Option<NetId>,
+        hit_dir: [f32; 3],
+    },
 
     /// Entity was hit (non-fatal). Used to start the hit-react clip
     /// without waiting for the next snapshot.

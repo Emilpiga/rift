@@ -23,6 +23,7 @@ pub fn allocate_command_buffers(
     Ok(buffers)
 }
 
+#[derive(Clone)]
 pub struct DrawCommand {
     pub vertex_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
@@ -32,6 +33,12 @@ pub struct DrawCommand {
     /// uniform set.
     pub material_set: vk::DescriptorSet,
     pub model_matrix: Mat4,
+    /// World-space bounding-sphere radius copied from the source
+    /// `RenderObject` after frustum culling. Carried through here
+    /// so the shadow passes (which iterate `&draws` rather than
+    /// `&objects`) can run their own per-light spatial cull
+    /// without having to look anything up on the renderer.
+    pub bounds_radius: f32,
     /// RGBA tint pushed at offset 64 in the vertex push-constant
     /// range. RGB multiplies the lit fragment colour, A is the
     /// output alpha. `[1.0; 4]` is the default no-op opaque

@@ -205,6 +205,55 @@ impl SkyConfig {
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
         }
     }
+
+    /// Sandstorm hub preset: airborne dust everywhere. The
+    /// dome is a warm tan gradient (no sun disc — the sun is
+    /// fully veiled by dust) and the cloud layer is repurposed
+    /// as drifting dust streaks that thicken toward the
+    /// horizon. Pairs with a tight warm-tan fog on the
+    /// renderer side to limit visibility to ~25 m.
+    pub fn sandstorm_hub() -> Self {
+        Self {
+            enabled: true,
+            // Warm overhead — pale dust-orange where the sun
+            // is supposed to be, never quite blue.
+            zenith: [0.42, 0.30, 0.18],
+            // Saturated tan band on the horizon — the dust
+            // wall.
+            horizon: [0.78, 0.55, 0.30],
+            // Ground band matches the fog so looking down off
+            // the platform edge fades smoothly into haze.
+            ground: [0.58, 0.40, 0.24],
+            // Low-angle sun: heavy on +X/+Z, light on Y, so
+            // god rays rake across the platform near
+            // grazing and the shadow direction matches the
+            // long, dramatic shadows the hub point light
+            // throws at the same axis.
+            sun_dir: Vec3::new(0.70, 0.32, 0.65).normalize(),
+            // Small disc — the sun is mostly veiled by dust
+            // so we only want a hot point that pokes through
+            // the gaps the cloud-gap mask carves.
+            sun_size: 0.9990,
+            // Disc strength is dialled low because the
+            // god-ray bloom in the sky shader does most of
+            // the visual work; this is just the hot core.
+            sun_strength: 1.4,
+            // Wide, soft horizon — the dust band fills most of
+            // the lower hemisphere.
+            horizon_falloff: 1.5,
+            // No cloud / dust-streak layer in the sandstorm
+            // hub. The procedural FBM band reads as random
+            // multi-coloured ribbons rather than dust at the
+            // viewing distances the hub camera uses; a flat
+            // tan dome with the sun's god-ray bloom is more
+            // legible. The visible drama still comes from
+            // the warm horizon band and the sun's bloom — no
+            // streaks needed.
+            cloud_strength: 0.0,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+        }
+    }
 }
 
 /// Push-constant struct sent to `sky.frag`. Matches the layout in

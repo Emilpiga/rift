@@ -125,6 +125,15 @@ pub(super) struct Hit {
     /// replay, so server determinism is preserved.
     pub crit_seed: u64,
     pub apply_debuff: Option<u8>,
+    /// Horizontal world-space impulse direction at the moment
+    /// of impact. Projectile hits use the bolt's velocity;
+    /// AoE / aura sources use the radial-outward vector from
+    /// the source to the victim. Zero for hits that have no
+    /// meaningful direction (DoT ticks). Plumbed into the
+    /// killing-blow `WorldEvent::Death` so the client's blood
+    /// VFX can orient the splash along the actual impulse axis
+    /// rather than the victim's pre-death walk velocity.
+    pub hit_dir: Vec3,
 }
 
 /// Despawn every `ServerProjectile` in the world. Called on floor
@@ -239,6 +248,12 @@ pub fn tick(
                                 proj.net_id.0 as u64,
                             ),
                             apply_debuff: proj.apply_debuff,
+                            // Bolt velocity — the impulse the
+                            // projectile carried at impact. Used
+                            // by the client's blood splatter so
+                            // a fireball kill throws the splash
+                            // along the bolt's flight path.
+                            hit_dir: proj.velocity,
                         });
                         if proj.pierce_remaining > 0 {
                             proj.pierce_remaining -= 1;
@@ -383,6 +398,14 @@ pub fn tick_aoe(
                                     (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
                                 ),
                                 apply_debuff: zone.apply_debuff,
+                                // Radial-outward from zone
+                                // centre — reads as the blast
+                                // pushing the victim outward.
+                                hit_dir: Vec3::new(
+                                    en_pos.x - zone_pos.x,
+                                    0.0,
+                                    en_pos.z - zone_pos.z,
+                                ),
                             });
                         }
                     }
@@ -489,7 +512,7 @@ pub(super) fn apply_hits_to_enemies(
         .map(|(e, p)| (p.net_id, e))
         .collect();
 
-    let mut dead: Vec<(Entity, NetId)> = Vec::new();
+    let mut dead: Vec<(Entity, NetId, Vec3)> = Vec::new();
     let mut aggro_alerts: Vec<(Entity, Entity)> = Vec::new();
     for hit in hits {
         // Read the incoming-damage multiplier off the target's
@@ -607,7 +630,7 @@ pub(super) fn apply_hits_to_enemies(
                 }
             }
             if died {
-                dead.push((hit.enemy, hit.enemy_net_id));
+                dead.push((hit.enemy, hit.enemy_net_id, hit.hit_dir));
             } else {
                 // Live victim — queue an aggro notify so it
                 // (and nearby packmates) lock onto the

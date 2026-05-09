@@ -207,7 +207,7 @@ pub fn tick(
     dt: f32,
 ) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<DotHit> = Vec::new();
-    let mut dead: Vec<(Entity, NetId)> = Vec::new();
+    let mut dead: Vec<(Entity, NetId, glam::Vec3)> = Vec::new();
     for (entity, (en, stack)) in world.query_mut::<(&mut ServerEnemy, &mut EffectStack)>() {
         if en.is_dying() {
             continue;
@@ -255,7 +255,7 @@ pub fn tick(
                 );
             }
             if en.hp <= 0.0 {
-                dead.push((hit.target, hit.target_net_id));
+                dead.push((hit.target, hit.target_net_id, glam::Vec3::ZERO));
                 break;
             }
         }

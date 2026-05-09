@@ -179,6 +179,13 @@ impl NetClient {
                 },
             );
             self.last_positions.insert(net_id, position);
+            // Stash velocity alongside position so the death-event
+            // handler can reconstruct an impact direction even
+            // when the row has already been culled by the time
+            // the reliable Death packet arrives. Used by the
+            // layered blood decal system to orient the corpse
+            // pool / spray fan / wall arc along the kill axis.
+            self.last_velocities.insert(net_id, Vec3::from_array(e.velocity));
             // Skip our own row — we own the local player's transform
             // through prediction, not through the interp buffer.
             if Some(net_id) == our_id_for_interp {
@@ -193,10 +200,57 @@ impl NetClient {
             self.interp
                 .entry(net_id)
                 .and_modify(|b| {
-                    // Shift current → previous, slot the new one in
-                    // as current. `curr_arrival = now` resets the
-                    // ramp so the next frame starts at alpha=0.
-                    b.prev = b.curr;
+                    // When a new snapshot lands, what we display
+                    // *right now* is the Hermite interp from
+                    // `b.prev → b.curr` plus possibly some dead-
+                    // reckoning past `b.curr`. The naive update
+                    // (`prev = b.curr`) discards that extrapolation,
+                    // which at dash speed pops the model backward
+                    // ~0.1–0.2 m every snapshot boundary. Carry
+                    // the currently-displayed sample forward as the
+                    // new `prev` so the next interp window starts
+                    // exactly where this frame's render ends.
+                    let snapshot_period =
+                        1.0 / rift_net::SNAPSHOT_HZ as f32;
+                    let elapsed = now
+                        .saturating_duration_since(b.curr_arrival)
+                        .as_secs_f32();
+                    let alpha =
+                        (elapsed / snapshot_period.max(1e-4)).clamp(0.0, 1.0);
+                    let mut display_pos = hermite_position(
+                        b.prev.position,
+                        b.curr.position,
+                        b.prev.velocity,
+                        b.curr.velocity,
+                        alpha,
+                        snapshot_period,
+                    );
+                    if elapsed > snapshot_period {
+                        let extrap = (elapsed - snapshot_period)
+                            .min(snapshot_period * 4.0);
+                        display_pos += b.curr.velocity * extrap;
+                    }
+                    let q_prev = Quat::from_rotation_y(b.prev.yaw);
+                    let q_curr = Quat::from_rotation_y(b.curr.yaw);
+                    let (display_yaw, _, _) = q_prev
+                        .slerp(q_curr, alpha)
+                        .to_euler(glam::EulerRot::YXZ);
+                    let qa_prev = Quat::from_rotation_y(b.prev.aim_yaw);
+                    let qa_curr = Quat::from_rotation_y(b.curr.aim_yaw);
+                    let (display_aim_yaw, _, _) = qa_prev
+                        .slerp(qa_curr, alpha)
+                        .to_euler(glam::EulerRot::YXZ);
+                    b.prev = InterpSample {
+                        position: display_pos,
+                        yaw: display_yaw,
+                        aim_yaw: display_aim_yaw,
+                        // Use the previous snapshot's velocity as
+                        // the prev-tangent. Mixing the displayed
+                        // position with the old endpoint velocity
+                        // keeps Hermite's first derivative
+                        // continuous across the boundary.
+                        velocity: b.curr.velocity,
+                    };
                     b.curr = new_sample;
                     b.curr_arrival = now;
                 })
@@ -296,9 +350,26 @@ impl NetClient {
         let snapshot_period = Duration::from_secs_f32(1.0 / rift_net::SNAPSHOT_HZ as f32);
         let elapsed = now.saturating_duration_since(b.curr_arrival).as_secs_f32();
         let period = snapshot_period.as_secs_f32().max(1e-4);
-        // Interp window first: blend prev → curr over one period.
+        // Hermite cubic interpolation over the prev → curr window.
+        // Linear `lerp` produces a constant visual velocity inside
+        // each window, which then flips abruptly to the dead-
+        // reckoning velocity (`curr.velocity`) at alpha = 1.0. For
+        // slow-moving entities that bump is invisible, but at
+        // 4.5× base speed (stalker dash) it shows up as choppy
+        // staccato motion at the snapshot boundaries. Hermite
+        // matches both endpoint velocities, so the visual derivative
+        // stays C¹ across the boundary into the dead-reckon segment
+        // — motion reads as one smooth curve instead of a chain
+        // of straight chords.
         let alpha = (elapsed / period).clamp(0.0, 1.0);
-        let mut position = b.prev.position.lerp(b.curr.position, alpha);
+        let mut position = hermite_position(
+            b.prev.position,
+            b.curr.position,
+            b.prev.velocity,
+            b.curr.velocity,
+            alpha,
+            period,
+        );
         // If we've already consumed the whole interp window and the
         // next snapshot still hasn't landed, dead-reckon forward at
         // the last known velocity. Capped at 4 snapshot periods
@@ -320,4 +391,27 @@ impl NetClient {
         let (aim_yaw, _, _) = qa.to_euler(glam::EulerRot::YXZ);
         Some(DisplaySample { position, yaw, aim_yaw })
     }
+}
+
+/// Cubic Hermite interpolation between two position samples with
+/// matching endpoint velocities. `period` is the snapshot interval
+/// in seconds — used to convert m/s velocities into per-window
+/// tangent vectors. At `t = 0` returns `p0` with derivative `v0`,
+/// at `t = 1` returns `p1` with derivative `v1`.
+#[inline]
+fn hermite_position(
+    p0: Vec3,
+    p1: Vec3,
+    v0: Vec3,
+    v1: Vec3,
+    t: f32,
+    period: f32,
+) -> Vec3 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    p0 * h00 + (v0 * period) * h10 + p1 * h01 + (v1 * period) * h11
 }

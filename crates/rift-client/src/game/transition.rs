@@ -254,7 +254,7 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
         EnterPhase::AttachOutfits => ("Preparing outfits…", Some(EnterPhase::LoadOutfits)),
         EnterPhase::LoadOutfits => ("Loading outfits…", Some(EnterPhase::RebuildWalls)),
         EnterPhase::RebuildWalls => {
-            rebuild_wall_caches(state);
+            rebuild_wall_caches(state, renderer);
             ("Finalizing…", None)
         }
     };
@@ -367,7 +367,7 @@ pub fn tick_net_entering(
             )
         }
         NetEnterPhase::RebuildWalls => {
-            rebuild_wall_caches(state);
+            rebuild_wall_caches(state, renderer);
             state.frame.transition_fade = 1.0;
             ("Finalizing…", 0.90, Some(NetEnterPhase::FadeIn))
         }
@@ -398,7 +398,6 @@ pub fn reset_for_regeneration(state: &mut GameState, renderer: &mut Renderer) {
     // we land on a fresh floor (cooldown wipe → dirty flag
     // → broadcast), and the floor transition itself cancels
     // any in-flight vote on the server side.
-    state.decals.clear();
     state.combat_text.clear();
     // Wipe every live particle / ribbon emitter so loot beams,
     // frost trails, channel ribbons, and any other long-lived
@@ -420,7 +419,13 @@ pub fn reset_for_regeneration(state: &mut GameState, renderer: &mut Renderer) {
 /// Rebuild the wall collider + AABB caches from current
 /// `Transform + Collider + Static` ECS rows. Called after every
 /// floor regen + at the end of the in-game transition.
-pub fn rebuild_wall_caches(state: &mut GameState) {
+///
+/// Also re-binds the renderer's per-floor blood field to the
+/// freshly computed XZ extent so kill splats from this floor
+/// don't leak across into the next, and so the field's
+/// world\u2192UV transform is correct for sampling in the forward
+/// shader. The hub disables the field outright (no kills there).
+pub fn rebuild_wall_caches(state: &mut GameState, renderer: &mut Renderer) {
     state.floor.wall_colliders = state
         .world
         .query::<(&Transform, &Collider, &Static)>()
@@ -434,4 +439,26 @@ pub fn rebuild_wall_caches(state: &mut GameState) {
         .iter()
         .map(|(pos, col)| Aabb::from_center(*pos, col.half_extents))
         .collect();
+
+    if state.floor.in_hub || state.floor.wall_aabbs.is_empty() {
+        renderer.unbind_blood_field();
+    } else {
+        let mut min = glam::Vec2::splat(f32::INFINITY);
+        let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
+        let mut floor_y = f32::INFINITY;
+        for aabb in &state.floor.wall_aabbs {
+            min.x = min.x.min(aabb.min.x);
+            min.y = min.y.min(aabb.min.z);
+            max.x = max.x.max(aabb.max.x);
+            max.y = max.y.max(aabb.max.z);
+            // Floor Y is the lowest wall-base in the level; walls
+            // sit on the floor, so their min.y matches the floor
+            // plane.
+            floor_y = floor_y.min(aabb.min.y);
+        }
+        if !floor_y.is_finite() {
+            floor_y = 0.0;
+        }
+        renderer.recreate_blood_field(min, max, floor_y);
+    }
 }

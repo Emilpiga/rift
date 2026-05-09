@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::hot_reload::{self, HotReloader};
 use crate::renderer::camera::Camera;
 use crate::renderer::depth::DepthBuffer;
+use crate::renderer::blood;
 use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex};
 use crate::renderer::shadow::{self, ShadowMap};
@@ -84,6 +85,16 @@ pub struct Renderer {
     post: PostProcessing,
     depth_buffer: DepthBuffer,
     default_texture: Texture,
+    /// 1×1 R16G16_SFLOAT zero-valued texture bound at set 0,
+    /// binding 4 as the placeholder blood field. Replaced by a
+    /// floor-sized field when a floor is built; kept around for
+    /// scenes (hub, menus) that don't have one.
+    default_blood_field: Texture,
+    /// Per-floor blood field. Owns the splat render pass, pipeline,
+    /// mask atlas, and the actual `R16G16_SFLOAT` accumulation image.
+    /// Inactive at startup; activated when a floor calls
+    /// [`Renderer::recreate_blood_field`].
+    pub blood_field: blood::BloodField,
     material_pool: MaterialPool,
     shadow_map: ShadowMap,
     point_shadow_atlas: PointShadowAtlas,
@@ -117,6 +128,26 @@ pub struct Renderer {
     pub vfx_particle_renderer: ParticleVfxRenderer,
     // Deferred deletion queue for GPU buffers
     deletion_queue: Vec<(u64, GpuBuffer)>,
+    /// Per-frame visible-draw scratch buffer. Reused across
+    /// frames (cleared in place) so the main render loop
+    /// doesn't allocate a fresh `Vec` of length `objects.len()`
+    /// every tick.
+    draw_scratch: Vec<DrawCommand>,
+    /// Per-light visible-draw scratch buffer for the point
+    /// shadow pass. The point-shadow pass renders the same
+    /// culled list into 6 cube faces per light, so we cull
+    /// once per light into this buffer and reuse it across
+    /// the six render-pass invocations. Reused across frames.
+    point_shadow_draw_scratch: Vec<DrawCommand>,
+    /// Shadow-caster scratch buffer. Same layout as
+    /// `draw_scratch` but populated *without* the camera
+    /// frustum cull — shadows must include casters that are
+    /// outside the camera frustum (e.g. behind the player)
+    /// because their projected shadows can still fall onto
+    /// visible geometry. Used for both the directional
+    /// shadow pass and as the input list for per-light point
+    /// shadow culling.
+    shadow_draw_scratch: Vec<DrawCommand>,
     // Ambient clear color (themed per floor)
     pub clear_color: [f32; 4],
     // Fog parameters
@@ -195,6 +226,24 @@ impl KeyLight {
         direction: Vec3::new(0.2, 0.7, 0.5),
         color: Vec3::new(0.65, 0.30, 0.28),
         ambient: 0.18,
+    };
+
+    /// Diffuse warm sandstorm light. A single strong sun-like
+    /// directional aimed to match the sandstorm sky's hot
+    /// spot, low ambient so shadows pop, and the warm tan tint
+    /// pre-bakes the dust scattering into the directional
+    /// contribution. Combined with a sky-anchored point light
+    /// in the hub, this gives the platform a dramatic
+    /// "sunbeam through the dust" key/fill split rather than
+    /// the flat overcast a high-ambient sandstorm would
+    /// otherwise produce.
+    pub const SANDSTORM: Self = Self {
+        // Matches `SkyConfig::sandstorm_hub`'s `sun_dir`
+        // (normalised) so the shadow map lays the platform's
+        // shadow opposite the visible sun in the sky.
+        direction: Vec3::new(0.70, 0.32, 0.65),
+        color: Vec3::new(1.10, 0.78, 0.45),
+        ambient: 0.10,
     };
 }
 
@@ -278,6 +327,27 @@ impl Renderer {
         )?;
         uniforms.bind_texture(&device.device, default_texture.view, default_texture.sampler);
 
+        // 1×1 zero-valued R16G16_SFLOAT texture bound at set 0 / binding 4
+        // as the default blood field. Two 16-bit floats encoded as zero =
+        // four zero bytes → (wet=0, age=0). The forward shader's
+        // wet*intensity term collapses to zero so this contributes nothing
+        // until a real floor field is bound.
+        let default_blood_field = Texture::from_rgba_with_format(
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool_init,
+            1,
+            1,
+            &[0u8; 4],
+            vk::Format::R16G16_SFLOAT,
+        )?;
+        uniforms.bind_blood_field(
+            &device.device,
+            default_blood_field.view,
+            default_blood_field.sampler,
+        );
+
         // Per-object material pool (set=1 for the forward pipeline). The
         // pool's default white texture is uploaded via the same init command
         // pool so it's ready before we destroy the pool below.
@@ -287,6 +357,21 @@ impl Renderer {
             device.graphics_queue,
             command_pool_init,
         )?;
+
+        // Per-floor blood field. At startup it owns its own image,
+        // render pass, splat pipeline and procgen mask atlas, but is
+        // marked inactive (`world_xform = 0`) so the splat pass is a
+        // no-op until a floor calls `recreate_blood_field`. The main
+        // descriptor set 0 / binding 4 keeps pointing at the 1×1
+        // placeholder until the first floor binds.
+        let blood_field = blood::BloodField::new(
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool_init,
+            &shader_dir,
+        )?;
+
         unsafe { device.device.destroy_command_pool(command_pool_init, None); }
 
         let (pipeline_handle, pipeline_layout) = Self::compile_pipeline_from_disk(
@@ -386,6 +471,8 @@ impl Renderer {
             current_frame: 0,
             depth_buffer,
             default_texture,
+            default_blood_field,
+            blood_field,
             material_pool,
             shadow_map,
             point_shadow_atlas,
@@ -404,6 +491,9 @@ impl Renderer {
             vfx_ribbon_renderer,
             vfx_particle_renderer,
             deletion_queue: Vec::new(),
+            draw_scratch: Vec::new(),
+            point_shadow_draw_scratch: Vec::new(),
+            shadow_draw_scratch: Vec::new(),
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
             fog_start: 5.0,
@@ -504,6 +594,49 @@ impl Renderer {
 
     pub fn window_extent(&self) -> [u32; 2] {
         self.window_extent
+    }
+
+    /// Bind a new per-floor blood field that covers the world-space
+    /// XZ box from `min` to `max`. Wipes any pending splats and
+    /// rebinds the field texture to set 0 / binding 4 so the forward
+    /// shader samples this floor's accumulation image rather than
+    /// the placeholder. Call once at floor build time after walls
+    /// are populated.
+    pub fn recreate_blood_field(&mut self, min_xz: glam::Vec2, max_xz: glam::Vec2, floor_y: f32) {
+        // The descriptor set at binding 4 is referenced by the
+        // forward pipeline's command buffers. Without
+        // VK_EXT_descriptor_indexing's UPDATE_AFTER_BIND /
+        // UPDATE_UNUSED_WHILE_PENDING flags on this binding,
+        // calling vkUpdateDescriptorSets while the previous
+        // frame's command buffer is still in the pending state
+        // is a validation error. Floor transitions are rare
+        // and already pay GPU stalls elsewhere (texture
+        // uploads, mesh creation), so wait for idle here.
+        unsafe { self.device.device.device_wait_idle().ok(); }
+        self.blood_field.bind_floor(min_xz, max_xz, floor_y);
+        self.uniforms.bind_blood_field(
+            &self.device.device,
+            self.blood_field.field_view,
+            self.blood_field.field_sampler,
+        );
+    }
+
+    /// Unbind the per-floor blood field (e.g. on hub entry). The
+    /// shader sampler points back at the 1\u00d71 placeholder so the
+    /// composite contributes nothing.
+    pub fn unbind_blood_field(&mut self) {
+        // See `recreate_blood_field`: rebinding binding 4 while
+        // a previous frame still holds the descriptor set in
+        // its command buffer is a validation error without
+        // descriptor-indexing's UPDATE_AFTER_BIND. Stall once
+        // — hub entry is rare.
+        unsafe { self.device.device.device_wait_idle().ok(); }
+        self.blood_field.unbind();
+        self.uniforms.bind_blood_field(
+            &self.device.device,
+            self.default_blood_field.view,
+            self.default_blood_field.sampler,
+        );
     }
 
     pub fn add_mesh(&mut self, mesh: &Mesh, model_matrix: Mat4) -> Result<()> {
@@ -1333,9 +1466,19 @@ impl Renderer {
             0.0,
         );
         let light_dir_normalized = light_dir_world.normalize();
-        // Snap shadow focus to camera position projected to ground (y=0). The
-        // shadow module further snaps to texel size.
-        let shadow_focus = Vec3::new(self.camera.position.x, 0.0, self.camera.position.z);
+        // Snap the shadow focus to the camera *target* (the
+        // player / look-at point) projected onto y=0 — NOT the
+        // camera position. The camera sits behind+above the
+        // player, so anchoring the 28 m ortho box on the camera
+        // makes the shadow frustum extend mostly behind the
+        // player; the in-front cutoff lands only a few metres
+        // past the player and reads as a square that tracks
+        // the camera. Using `target` re-centres the box on the
+        // player so the cutoff is symmetric and far enough out
+        // in every direction that the edge feather in
+        // `sampleShadow` hides it. The shadow module further
+        // snaps to texel size to suppress shimmering.
+        let shadow_focus = Vec3::new(self.camera.target.x, 0.0, self.camera.target.z);
         let light_vp = shadow::light_view_proj(
             shadow_focus,
             Vec3::new(light_dir_normalized.x, light_dir_normalized.y, light_dir_normalized.z),
@@ -1387,13 +1530,28 @@ impl Renderer {
             light_vp,
             point_shadow_face_vp,
             point_shadow_meta: Vec4::new(point_shadow_count as f32, 0.0, 0.0, 0.0),
+            // Time + blood-field transform. The transform is all-zero
+            // until a floor binds a real field; the shader treats that as
+            // "no field" and skips the blood composite.
+            time: Vec4::new(self.start_time.elapsed().as_secs_f32(), self.blood_field.floor_y, 0.0, 0.0),
+            blood_field_xform: self.blood_field.world_xform,
         };
         self.uniforms.update(frame, &ubo);
 
-        // Build draw commands with frustum culling + fog distance culling
+        // Build draw commands with frustum culling + fog distance culling.
+        // Reuses the per-renderer `draw_scratch` Vec so the main render
+        // loop allocates zero heap memory per frame for cull bookkeeping.
+        // We `mem::take` the Vec out of `self` for the duration of this
+        // function so subsequent code can hold immutable borrows like
+        // `&self.shadow_map` alongside `&draws` without the borrow
+        // checker rejecting them. The Vec is restored at the end of
+        // the frame; on a panic the renderer is destroyed anyway.
         let frustum = self.camera.frustum_planes();
         let fog_cull_dist = self.fog_end + 2.0; // small margin beyond fog end
-        let mut draws = Vec::with_capacity(self.objects.len());
+        let mut draws = std::mem::take(&mut self.draw_scratch);
+        let mut shadow_draws = std::mem::take(&mut self.shadow_draw_scratch);
+        draws.clear();
+        shadow_draws.clear();
         for obj in &self.objects {
             // Skip hidden objects (dead entities set matrix to zero)
             if obj.model_matrix == Mat4::ZERO {
@@ -1410,24 +1568,35 @@ impl Renderer {
             if dist_to_fog_origin - obj.bounds_radius > fog_cull_dist {
                 continue;
             }
-            if !self.camera.sphere_in_frustum(&frustum, center, obj.bounds_radius + 1.0) {
-                continue;
-            }
             // Pick the per-frame dynamic VB if present, else the static one.
             let vb = match obj.dynamic_vertex_buffers.as_ref() {
                 Some(bufs) => bufs[frame].buffer,
                 None => obj.vertex_buffer.buffer,
             };
-            draws.push(DrawCommand {
+            let cmd = DrawCommand {
                 vertex_buffer: vb,
                 index_buffer: obj.index_buffer.buffer,
                 index_count: obj.index_count,
                 descriptor_set: self.uniforms.descriptor_sets[frame],
                 material_set: obj.material_set,
                 model_matrix: obj.model_matrix,
+                bounds_radius: obj.bounds_radius,
                 tint: obj.tint,
                 material_params: obj.material_params,
-            });
+            };
+            // Shadow casters must include geometry outside the
+            // camera frustum: a wall / prop behind the camera
+            // can still project a shadow that falls on visible
+            // floor in front of the camera. Cull only by the
+            // player-anchored fog distance for the shadow list.
+            shadow_draws.push(cmd.clone());
+            // Visible-draw list: also gate on the camera
+            // frustum so we don't rasterise off-screen geometry
+            // into the forward pass.
+            if !self.camera.sphere_in_frustum(&frustum, center, obj.bounds_radius + 1.0) {
+                continue;
+            }
+            draws.push(cmd);
         }
 
         // Upload overlay batch
@@ -1477,17 +1646,24 @@ impl Renderer {
                 .clear_values(&shadow_clear);
             device.cmd_begin_render_pass(cmd, &shadow_rp_begin, vk::SubpassContents::INLINE);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.shadow_map.pipeline);
-            for draw in &draws {
-                device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
-                device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
+            // The shadow pipeline reads only the global UBO (set 0),
+            // and every draw uses the same per-frame descriptor set.
+            // Bind it once for the whole pass instead of once per
+            // draw — saves ~draws.len() command buffer entries with
+            // no behavioural change.
+            if let Some(first) = shadow_draws.first() {
                 device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.shadow_map.pipeline_layout,
                     0,
-                    &[draw.descriptor_set],
+                    &[first.descriptor_set],
                     &[],
                 );
+            }
+            for draw in shadow_draws.iter() {
+                device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
+                device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
                 let model_bytes: &[u8] = bytemuck::bytes_of(&draw.model_matrix);
                 device.cmd_push_constants(
                     cmd,
@@ -1513,6 +1689,51 @@ impl Renderer {
             // cost to ~1 ms even with the full mesh count, since
             // most static geometry is well outside any one torch's
             // illumination volume.
+            //
+            // Defined-layout pre-pass: any cube face slot we
+            // *don't* render into this frame stays in
+            // VK_IMAGE_LAYOUT_UNDEFINED, but the main
+            // fragment shader still samples those layers via
+            // the cube-array view (the conditional is in the
+            // shader, not in descriptor binding). Vulkan
+            // requires every subresource the descriptor
+            // covers to be in SHADER_READ_ONLY_OPTIMAL at
+            // submit time, so we transition the unused slots
+            // here. UNDEFINED → SHADER_READ_ONLY_OPTIMAL is a
+            // discard-and-set, so it's safe to issue every
+            // frame: the render pass that follows will
+            // implicitly transition any used slot back to
+            // SHADER_READ_ONLY_OPTIMAL via its own attachment
+            // descriptions.
+            if point_shadow_count < shadow_point::MAX_POINT_SHADOWS {
+                let unused_base = (point_shadow_count * 6) as u32;
+                let unused_count =
+                    (shadow_point::MAX_POINT_SHADOWS * 6) as u32 - unused_base;
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.point_shadow_atlas.color_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: unused_base,
+                        layer_count: unused_count,
+                    });
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
             if point_shadow_count > 0 {
                 let psh_clear = [
                     vk::ClearValue {
@@ -1535,10 +1756,34 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.point_shadow_atlas.pipeline,
                 );
+                // Take the per-light scratch list out of `self`
+                // (mirrors the trick used for `draws` above) so
+                // we can hold a `&self.point_shadow_atlas` borrow
+                // and mutate the scratch Vec in the same scope.
+                let mut light_draws =
+                    std::mem::take(&mut self.point_shadow_draw_scratch);
                 for light_idx in 0..point_shadow_count {
                     let pl = &self.point_lights[light_idx];
                     let lpos = pl.position;
                     let lrad = pl.radius.max(0.1);
+                    // Cull once per light against the per-draw
+                    // bounding sphere. Reused for all 6 cube faces
+                    // so a light that touches `K` draws does
+                    // `K` sphere tests + `6*K` draws instead of
+                    // `6*K` sphere tests + `6*K` draws as before.
+                    light_draws.clear();
+                    for draw in shadow_draws.iter() {
+                        let center = draw.model_matrix.w_axis.truncate();
+                        if (center - lpos).length()
+                            > lrad + draw.bounds_radius
+                        {
+                            continue;
+                        }
+                        light_draws.push(draw.clone());
+                    }
+                    if light_draws.is_empty() {
+                        continue;
+                    }
                     for face_idx in 0..6 {
                         let face_slot = light_idx * 6 + face_idx;
                         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -1557,21 +1802,18 @@ impl Renderer {
                             &rp_begin,
                             vk::SubpassContents::INLINE,
                         );
-                        for draw in &draws {
-                            // Cull draws whose bounding sphere can't
-                            // reach into this light's radius. Cheap
-                            // sphere-sphere test on the draw's
-                            // already-extracted world-space center.
-                            let center = draw.model_matrix.w_axis.truncate();
-                            // We don't have bounds_radius on
-                            // DrawCommand; conservatively use a 4 m
-                            // padding which is larger than any single
-                            // hub prop. Refine later if profiling
-                            // shows this pass is hot.
-                            let approx_bounds = 4.0_f32;
-                            if (center - lpos).length() > lrad + approx_bounds {
-                                continue;
-                            }
+                        // Bind the global descriptor set once per
+                        // face — every draw in this face shares
+                        // the same set 0.
+                        device.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.point_shadow_atlas.pipeline_layout,
+                            0,
+                            &[light_draws[0].descriptor_set],
+                            &[],
+                        );
+                        for draw in light_draws.iter() {
                             device.cmd_bind_vertex_buffers(
                                 cmd,
                                 0,
@@ -1584,38 +1826,51 @@ impl Renderer {
                                 0,
                                 vk::IndexType::UINT32,
                             );
-                            device.cmd_bind_descriptor_sets(
-                                cmd,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                self.point_shadow_atlas.pipeline_layout,
-                                0,
-                                &[draw.descriptor_set],
-                                &[],
-                            );
-                            // Push: model matrix (64 B) + indices
-                            // (16 B). `face_slot` indexes the per-
-                            // face VP array in the UBO; `light_idx`
-                            // indexes the point light's pos/radius
-                            // for the fragment-side distance calc.
-                            let model_bytes: &[u8] =
-                                bytemuck::bytes_of(&draw.model_matrix);
+                            // Push the model + indices payload as
+                            // a single 80-byte block. The vert
+                            // shader reads `mat4 model` at offset
+                            // 0; the frag reads `uvec4 indices`
+                            // at offset 64. One push call instead
+                            // of two saves a command-buffer entry
+                            // per draw.
+                            #[repr(C)]
+                            #[derive(Copy, Clone)]
+                            struct ShadowPointPush {
+                                model: Mat4,
+                                indices: [u32; 4],
+                            }
+                            // SAFETY: `ShadowPointPush` is `Copy`
+                            // and contains only `Mat4` (16 floats)
+                            // and `[u32; 4]` — both are `Pod`-
+                            // compatible, but we don't have a
+                            // `Pod` impl. Use a manual byte cast
+                            // via `bytes_of` on the inner fields
+                            // would force two pushes; instead we
+                            // copy into a `[u8; 80]` staging
+                            // buffer.
+                            let push = ShadowPointPush {
+                                model: draw.model_matrix,
+                                indices: [
+                                    face_slot as u32,
+                                    light_idx as u32,
+                                    0,
+                                    0,
+                                ],
+                            };
+                            let mut bytes = [0u8; 80];
+                            bytes[..64].copy_from_slice(bytemuck::bytes_of(
+                                &push.model,
+                            ));
+                            bytes[64..].copy_from_slice(bytemuck::bytes_of(
+                                &push.indices,
+                            ));
                             device.cmd_push_constants(
                                 cmd,
                                 self.point_shadow_atlas.pipeline_layout,
                                 vk::ShaderStageFlags::VERTEX
                                     | vk::ShaderStageFlags::FRAGMENT,
                                 0,
-                                model_bytes,
-                            );
-                            let indices: [u32; 4] =
-                                [face_slot as u32, light_idx as u32, 0, 0];
-                            device.cmd_push_constants(
-                                cmd,
-                                self.point_shadow_atlas.pipeline_layout,
-                                vk::ShaderStageFlags::VERTEX
-                                    | vk::ShaderStageFlags::FRAGMENT,
-                                64,
-                                bytemuck::bytes_of(&indices),
+                                &bytes,
                             );
                             device.cmd_draw_indexed(
                                 cmd,
@@ -1629,7 +1884,17 @@ impl Renderer {
                         device.cmd_end_render_pass(cmd);
                     }
                 }
+                // Restore for next frame.
+                self.point_shadow_draw_scratch = light_draws;
             }
+
+            // ---- Blood-field splat pass ----
+            // Drains any kill splats queued during the gameplay frame
+            // into this frame's instance buffer and renders them into
+            // the per-floor blood field. The pass also handles the
+            // initial clear when a new floor is bound. No-op when no
+            // floor is active or no splats are pending.
+            self.blood_field.record(device, cmd, frame);
 
             // ---- Main pass (HDR scene) ----
             // Renders into the post-process HDR colour target,
@@ -1739,7 +2004,22 @@ impl Renderer {
                     extent: self.swapchain.extent,
                 });
             device.cmd_begin_render_pass(cmd, &composite_begin, vk::SubpassContents::INLINE);
-            self.post.record_composite(device, cmd, image_index, &self.bloom, self.ghost_mix);
+            // Inverse projection matrix is needed by the inline
+            // SSAO in the composite shader to reconstruct view-
+            // space positions from sampled depth. Inverting on
+            // CPU once per frame is essentially free vs. doing it
+            // per pixel.
+            let inv_proj = self.camera.projection_matrix().inverse().to_cols_array_2d();
+            // SSAO strength baked at moderate level. The post
+            // composite already applies AO multiplicatively to
+            // the tonemapped HDR (rather than only to the
+            // ambient term) so we keep this gentle to avoid
+            // crushing direct-lit pixels in deep crevices.
+            let ssao_strength = 0.7;
+            self.post.record_composite(
+                device, cmd, image_index, &self.bloom, self.ghost_mix,
+                inv_proj, ssao_strength,
+            );
 
             // Overlay (HUD)
             self.overlay.record(frame, device, cmd);
@@ -1792,8 +2072,16 @@ impl Renderer {
         if self.framebuffer_resized {
             self.framebuffer_resized = false;
             self.recreate_swapchain(self.window_extent[0], self.window_extent[1])?;
+            self.draw_scratch = draws;
+            self.shadow_draw_scratch = shadow_draws;
             return Ok(());
         }
+
+        // Restore the per-frame draw scratch buffer so next frame
+        // reuses the same allocation. Same for the per-light point-
+        // shadow scratch buffer below.
+        self.draw_scratch = draws;
+        self.shadow_draw_scratch = shadow_draws;
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         Ok(())
@@ -1926,6 +2214,8 @@ impl Drop for Renderer {
 
         self.uniforms.cleanup(&self.device.device, &self.allocator);
         self.default_texture.cleanup(&self.device.device, &self.allocator);
+        self.default_blood_field.cleanup(&self.device.device, &self.allocator);
+        self.blood_field.cleanup(&self.device.device, &self.allocator);
         self.material_pool.cleanup(&self.device.device, &self.allocator);
         self.shadow_map.cleanup(&self.device.device, &self.allocator);
         self.point_shadow_atlas

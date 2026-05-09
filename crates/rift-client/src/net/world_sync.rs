@@ -536,7 +536,7 @@ impl NetClient {
             if let Some(visual) = self.projectile_render.remove(&net_id) {
                 // Stored at spawn, so no per-ability branch here.
                 let burst = rift_engine::combat::effect_for_vfx(visual.impact);
-                renderer.vfx_system.spawn(burst, visual.render_pos);
+                renderer.vfx_system.spawn_bundle(burst, visual.render_pos);
             }
         }
 
@@ -576,7 +576,7 @@ impl NetClient {
                 self.projectile_objects.insert(net_id, idx);
                 let trail_id = renderer
                     .vfx_system
-                    .spawn(rift_engine::combat::effect_for_vfx(trail), pos);
+                    .spawn_bundle(rift_engine::combat::effect_for_vfx(trail), pos);
                 self.projectile_trails.insert(net_id, trail_id);
                 self.projectile_render.insert(
                     net_id,

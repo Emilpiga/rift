@@ -260,8 +260,8 @@ impl RiftApp {
             WorldEvent::Damage { target, amount, crit, position } => {
                 self.handle_damage_event(target, amount, crit, position, renderer);
             }
-            WorldEvent::Death { entity, .. } => {
-                self.handle_death_event(entity, renderer);
+            WorldEvent::Death { entity, hit_dir, .. } => {
+                self.handle_death_event(entity, hit_dir, renderer);
             }
             WorldEvent::AbilityCast { caster, ability, dir, target, origin, .. } => {
                 self.handle_ability_cast_event(caster, ability, dir, target, origin, renderer);
@@ -354,7 +354,12 @@ impl RiftApp {
     /// the time the reliable Death event arrives, so we rely on
     /// `NetClient.last_positions` which persists across
     /// snapshots.
-    fn handle_death_event(&mut self, entity: rift_net::NetId, renderer: &mut Renderer) {
+    fn handle_death_event(
+        &mut self,
+        entity: rift_net::NetId,
+        hit_dir: [f32; 3],
+        renderer: &mut Renderer,
+    ) {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
         let pos_opt = net.last_positions.get(&entity).copied();
@@ -370,8 +375,38 @@ impl RiftApp {
         // case it's in (and whether to spawn `enemy_soul_return`).
         net.dead_net_ids.insert(entity);
         if let Some(pos) = pos_opt {
-            // Persistent floor stain.
-            state.decals.spawn_blood(pos, &state.floor.wall_aabbs, renderer);
+            // Reconstruct the impact direction. The server
+            // attaches the killing-blow impulse to the Death
+            // event (projectile velocity, AoE radial-outward,
+            // etc.) so a fireball kill throws the splatter
+            // along the bolt's flight path even when the
+            // victim was standing still. Falls back to the
+            // entity's last-frame velocity for paths that
+            // don't carry direction (DoT ticks); falls back
+            // again to a position-hashed angle inside the
+            // blood system if both are zero.
+            let event_dir = Vec3::from_array(hit_dir);
+            let kill_dir = if event_dir.length_squared() > 1e-4 {
+                event_dir
+            } else {
+                net.last_velocities.get(&entity).copied().unwrap_or(Vec3::ZERO)
+            };
+            // Approximate "how violent was this kill?" from the
+            // square-magnitude of the impulse. Trash mobs cap
+            // around 3–4 m/s; bosses / boss melees push 8+ m/s.
+            // The decal system clamps to 0..=1 internally.
+            let speed_sq = kill_dir.length_squared();
+            let power = (speed_sq / 64.0).clamp(0.0, 1.0);
+            let ctx = rift_engine::renderer::blood::KillContext {
+                pos,
+                dir: kill_dir,
+                power,
+            };
+            // Persistent floor blood: written into the per-floor
+            // accumulation texture by the splat pass and sampled
+            // by the forward shader as a real wet/dry material.
+            let now = renderer.elapsed_secs();
+            renderer.blood_field.splat_for_kill(ctx, now, &state.floor.wall_aabbs);
             // Big visceral burst on top of it. Anchored at
             // chest height so the upward cone reads as the kill
             // shot rather than ground splatter. A tiny

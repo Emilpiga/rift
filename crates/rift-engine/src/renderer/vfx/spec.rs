@@ -36,6 +36,112 @@ pub struct Effect {
     pub layers: Vec<Layer>,
 }
 
+/// Optional dynamic point light attached to an effect.
+///
+/// The runtime evaluates this every frame at the effect's
+/// current anchor position and pushes a [`PointLight`][crate::
+/// renderer::PointLight] for the renderer to consume. Used by
+/// projectile trails (fireball glows on the corridor walls as
+/// it flies past), impact bursts (a bright flash that decays
+/// over the explosion's life), and any other effect that
+/// should illuminate its surroundings.
+#[derive(Clone, Debug)]
+pub struct EffectLight {
+    /// HDR linear RGB. Encode brightness here — values >1.0
+    /// produce hot bloom-able highlights, the renderer's
+    /// per-pixel lighting clamps via the tonemap.
+    pub color: Vec3,
+    /// Falloff radius in metres. Past this distance the light
+    /// contributes nothing.
+    pub radius: f32,
+    /// Base intensity multiplier. Combined with `intensity_curve`
+    /// (if any) and `flicker_amp` to produce the per-frame value.
+    pub intensity: f32,
+    /// Optional intensity envelope sampled over normalised
+    /// effect life (`elapsed / duration`). For persistent
+    /// effects (`duration == 0`) this is sampled at `t = 0`
+    /// every frame so the curve is effectively unused — set
+    /// `flicker_amp` instead to add variation.
+    pub intensity_curve: Option<Curve>,
+    /// Sinusoidal flicker amplitude as a fraction of intensity
+    /// (`0.0 = steady`, `0.15 = ±15%`). Two octaves at slightly
+    /// detuned frequencies are summed for an organic feel.
+    pub flicker_amp: f32,
+    /// Base flicker frequency in Hz. Most projectile trails want
+    /// 8..14 Hz for a nervous flame quality.
+    pub flicker_hz: f32,
+    /// World-space offset added to the effect's anchor before
+    /// the light position is computed. Useful when the effect's
+    /// emitter is at the projectile's centre but you want the
+    /// light slightly above it (or behind it for a trail glow).
+    pub offset: Vec3,
+}
+
+impl EffectLight {
+    /// Steady (non-pulsing) light at the effect's anchor.
+    pub fn steady(color: Vec3, radius: f32, intensity: f32) -> Self {
+        Self {
+            color,
+            radius,
+            intensity,
+            intensity_curve: None,
+            flicker_amp: 0.0,
+            flicker_hz: 0.0,
+            offset: Vec3::ZERO,
+        }
+    }
+}
+
+/// An [`Effect`] plus optional engine-side enhancements that
+/// don't fit into the pure-data spec without breaking every
+/// preset's struct literal.
+///
+/// New presets that want any of these enhancements (light,
+/// velocity inheritance) should return `EffectBundle`. Old
+/// presets continue to return `Effect` and convert via
+/// `Into<EffectBundle>` automatically.
+#[derive(Clone, Debug)]
+pub struct EffectBundle {
+    pub effect: Effect,
+    /// Dynamic point light that follows the effect's anchor.
+    pub light: Option<EffectLight>,
+    /// Fraction of the *anchor's* per-frame velocity inherited
+    /// by every particle at spawn time. `0.0` (default) keeps
+    /// the legacy behaviour: particles spawn with only the
+    /// velocity their `SpawnShape` and `forces` give them.
+    /// `1.0` makes new particles fly with the projectile they
+    /// trail behind, so the trail visibly streaks along the
+    /// flight path instead of clumping at the projectile.
+    /// Typical values 0.5..0.9 for projectile trails.
+    pub inherit_velocity: f32,
+}
+
+impl From<Effect> for EffectBundle {
+    fn from(effect: Effect) -> Self {
+        Self {
+            effect,
+            light: None,
+            inherit_velocity: 0.0,
+        }
+    }
+}
+
+impl EffectBundle {
+    pub fn new(effect: Effect) -> Self {
+        Self::from(effect)
+    }
+
+    pub fn with_light(mut self, light: EffectLight) -> Self {
+        self.light = Some(light);
+        self
+    }
+
+    pub fn with_inherit_velocity(mut self, f: f32) -> Self {
+        self.inherit_velocity = f.clamp(0.0, 1.0);
+        self
+    }
+}
+
 /// One renderable layer in an [`Effect`].
 #[derive(Clone, Debug)]
 pub enum Layer {
@@ -374,6 +480,13 @@ pub enum SpriteShape {
     Shard = 3,
     /// Filled ring (hollow centre) — shockwaves, AoE rings.
     Ring = 4,
+    /// Anisotropic motion line oriented along the particle's
+    /// velocity vector. Reads as a crisp streak even at low
+    /// speeds (unlike `Spark` which falls back to a dot when
+    /// the screen-space velocity is small). Use for falling
+    /// embers, dust trails, anything that should always read
+    /// as motion.
+    Streak = 5,
 }
 
 impl Default for SpriteShape {

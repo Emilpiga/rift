@@ -1,6 +1,5 @@
 // Ability / TargetingMode types are referenced through `super::combat_system`.
 use rift_engine::ui::CombatTextSystem;
-use rift_engine::renderer::decals::DecalSystem;
 use rift_engine::{Input, LoadStatus, Renderer};
 
 use rift_game::monsters;
@@ -41,7 +40,6 @@ pub struct GameState {
     /// transparently. Landing 1 is scaffolding-only; subsequent
     /// landings migrate the bespoke panels onto it.
     pub ui_state: rift_engine::ui::im::UiState,
-    pub decals: DecalSystem,
     pub(super) needs_new_floor: bool,
     /// Per-floor state: walls, portals, hub flag. Rebuilt on
     /// every floor regen.
@@ -149,7 +147,6 @@ impl GameState {
             mp_inventory_ui: inventory::MpInventoryUI::new(),
             combat_text: CombatTextSystem::new(),
             ui_state: rift_engine::ui::im::UiState::new(),
-            decals: DecalSystem::new(),
             needs_new_floor: false,
             floor: super::floor_state::FloorState::default(),
             frame: super::frame_state::FrameState::default(),

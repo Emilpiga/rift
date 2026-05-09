@@ -356,11 +356,14 @@ pub fn render_ability_bar(
         } else if let Some(state) = slot {
             let remaining = 1.0 - state.cooldown_progress();
             sb = sb.cooldown(remaining);
-            // Dim slots the player can't afford right now. Cost
-            // 0 abilities (Melee, Evasive Roll, free triggers)
-            // are always affordable.
+            // Tint slots the player can't afford red. Cost-0
+            // abilities (Melee, Evasive Roll, free triggers)
+            // are always affordable. The slot stays clickable
+            // — gameplay code in `tick_ability_keybinds`
+            // refuses the actual cast and the server is the
+            // final authority.
             if state.ability.resource_cost > current_essence + 1e-3 {
-                sb = sb.enabled(false);
+                sb = sb.unaffordable(true);
             }
             if let Some(name) = state.ability.icon {
                 sb = sb.icon(name);

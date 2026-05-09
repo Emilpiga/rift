@@ -344,6 +344,14 @@ fn collect_hits_for_effect(
                                 crit_damage,
                                 crit_seed: seed_for(nid.0 as u64),
                                 apply_debuff: channel.apply_debuff,
+                                // Caster→victim radial direction
+                                // — reads as the aura pushing the
+                                // victim outward from the caster.
+                                hit_dir: glam::Vec3::new(
+                                    en_pos.x - caster_pos.x,
+                                    0.0,
+                                    en_pos.z - caster_pos.z,
+                                ),
                             });
                         }
                     }
@@ -413,6 +421,7 @@ fn collect_hits_for_effect(
                                 crit_damage,
                                 crit_seed: seed_for(nid.0 as u64),
                                 apply_debuff: channel.apply_debuff,
+                                hit_dir: aim, // Beam direction is the hit direction.
                             },
                         ));
                     }

@@ -119,6 +119,71 @@ pub struct HubPortal {
     pub age: f32,
 }
 
+/// Push a hot-crimson point light at every active portal so the
+/// rift's emissive disc actually paints the surrounding sand,
+/// chest, and player. Called every frame *after* the torch
+/// system has rebuilt `point_lights`, so the portal lights
+/// always survive that vec's per-frame clear.
+///
+/// Light parameters:
+///
+///   * **Position**: portal centre (`portal.position + Y * PORTAL_CENTRE_Y`).
+///     Lifted to disc-centre height so the falloff illuminates
+///     the floor *around* the portal pillar rather than only
+///     directly underneath it.
+///   * **Color**: deep crimson with a hint of orange, HDR-
+///     boosted so bloom amplifies it. Matches the rift's
+///     emissive palette so light spilling onto the chest /
+///     player reads as "lit by the rift" rather than a
+///     decorative sconce.
+///   * **Radius**: 9 m. Reaches the chest (~2 m away) and the
+///     player when standing nearby (~3 m), but falls off well
+///     before any nearby torch's pool — the rift owns its
+///     immediate environment, not the whole room.
+///   * **Intensity**: synced with the shader's breathing pulse
+///     and intermittent destabilisation spasm so the light
+///     visibly throbs in lock-step with the visible disc. The
+///     rate constants (`0.85` breathing, `0.14` spasm phase,
+///     `0.37` tremor phase) mirror the same values inside
+///     `assets/shaders/triangle.frag::shadeRift`.
+///
+/// The 8-light renderer cap means this function is the only
+/// place that should push portal lights — having two portals
+/// active (e.g. exit + hub-return) costs 2 of the 8 slots.
+pub fn push_lights(
+    renderer: &mut Renderer,
+    portals: &[Option<&HubPortal>],
+    elapsed: f32,
+) {
+    use rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
+
+    let t = elapsed;
+    // Mirror the shader's pulse maths so light + visuals throb together.
+    let breathe = 0.88 + 0.12 * (t * 0.85).sin();
+    let spasm_phase = (t * 0.14).fract();
+    let spasm = ((spasm_phase / 0.08).clamp(0.0, 1.0))
+        .min(1.0 - ((spasm_phase - 0.18) / 0.10).clamp(0.0, 1.0))
+        .max(0.0);
+    let tremor_phase = (t * 0.37 + 0.21).fract();
+    let tremor = ((tremor_phase / 0.05).clamp(0.0, 1.0))
+        .min(1.0 - ((tremor_phase - 0.10) / 0.06).clamp(0.0, 1.0))
+        .max(0.0);
+    let pulse = breathe + spasm * 0.40 + tremor * 0.15;
+
+    for portal in portals.iter().copied().flatten() {
+        let pos = portal.position + Vec3::Y * PORTAL_CENTRE_Y;
+        renderer.point_lights.push(rift_engine::PointLight {
+            position: pos,
+            // Saturated crimson with a touch of orange. R is
+            // pushed past 1.0 so HDR bloom amplifies the
+            // ground spill into the surrounding pixels.
+            color: Vec3::new(2.40, 0.30, 0.12),
+            radius: 9.0,
+            intensity: 4.5 * pulse,
+        });
+    }
+}
+
 /// Spawn the hub entry portal mesh + vortex emitter at `pos`.
 /// Records the render slots in `*hub_portal` so we can spin the
 /// mesh and check the interaction radius each frame.
@@ -191,6 +256,15 @@ fn spawn(
         return;
     }
     let obj_idx = renderer.objects.len() - 1;
+    // Flag the portal object as a "rift" surface (bit 1 of
+    // material_params.z). The forward shader's `shadeRift`
+    // branch synthesises the entire dimensional-tear look
+    // procedurally from polar UVs + time, so vertex colors
+    // and lighting are bypassed for portal pixels. See
+    // `assets/shaders/triangle.frag` and
+    // `Mesh::portal_with_palette` for the full contract.
+    let rift_flags = f32::from_bits(2u32);
+    renderer.set_object_material_params(obj_idx, [1.0, 0.0, rift_flags, 0.0]);
     // Anchor the VFX at the *centre* of the mesh ring, not at
     // floor level — the Strange-style halo orbits a vertical
     // axis, so the emitter has to sit where the visible ring

@@ -276,11 +276,14 @@ impl ParticleVfxRenderer {
         //   sprite:   u32  @ 36
         //   blend:    u32  @ 40
         //   _pad:     u32  @ 44
+        //   velocity: vec3 @ 48
+        //   spin:     f32  @ 60
         //
         // Vertex attributes pack `(position, size)` into a single
         // vec4 at offset 0 (location 1), `color` as vec4 at 16
-        // (location 2), and `(seed, sprite, blend, _pad)` as
-        // vec4 at offset 32 (location 3). The fragment shader
+        // (location 2), `(seed, sprite, blend, _pad)` as vec4
+        // at offset 32 (location 3), and `(velocity, spin)` as
+        // vec4 at offset 48 (location 4). The fragment shader
         // reads sprite via floatBitsToUint — the bytes are u32
         // verbatim regardless of the SFLOAT format.
         let attrs = [
@@ -307,6 +310,12 @@ impl ParticleVfxRenderer {
                 location: 3,
                 format: vk::Format::R32G32B32A32_SFLOAT,
                 offset: 32, // seed.x + sprite.y(u32) + blend.z(u32) + pad.w
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 4,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 48, // velocity.xyz + spin.w
             },
         ];
 

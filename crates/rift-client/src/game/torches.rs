@@ -1,11 +1,11 @@
 //! Wall-mounted torch placement and lighting.
 //!
-//! Torches are pure VFX (no model assets exist). Each torch is a
-//! looping `wall_torch` flame effect anchored to a sconce-height
-//! point a short way out from a wall, paired with a warm
-//! [`PointLight`] to push interactive illumination onto nearby
-//! geometry. Because the renderer is hard-capped at 8 point
-//! lights ([`crate::game::torches::TorchSystem::update_lights`]),
+//! Each torch is a candlestick-stand prop placed against a wall,
+//! a looping `wall_torch` flame VFX anchored to the top of the
+//! candle, and a warm [`PointLight`] to push interactive
+//! illumination onto nearby geometry. Because the renderer is
+//! hard-capped at 8 point lights
+//! ([`crate::game::torches::TorchSystem::update_lights`]),
 //! lights are re-selected each frame as the nearest 8 to the
 //! local player.
 
@@ -15,6 +15,9 @@ use rift_engine::{PointLight, Renderer};
 use rift_engine::dungeon::Floor;
 
 use super::props::placement::{collect_floor_tiles, tile_centre, SmallRng};
+use super::props::{
+    fantasy::CANDLESTICK_STAND, Props,
+};
 
 /// One placed torch: the warm point light it casts and the live
 /// VFX effect id, kept around so we can despawn it on floor change.
@@ -22,6 +25,10 @@ use super::props::placement::{collect_floor_tiles, tile_centre, SmallRng};
 pub struct Torch {
     pub light: PointLight,
     pub vfx: EffectId,
+    /// Random phase offset in seconds, used to decorrelate
+    /// flicker between torches so a corridor lined with sconces
+    /// doesn't pulse in unison.
+    pub flicker_phase: f32,
 }
 
 /// Owns every torch on the active floor. Stored on `FloorManager`.
@@ -36,13 +43,20 @@ impl TorchSystem {
     }
 
     /// Walk the floor, place torches on a sparse subset of
-    /// wall-adjacent tiles, and spawn a flame VFX + warm point
-    /// light at each one.
+    /// wall-adjacent tiles, and spawn a candlestick prop +
+    /// flame VFX + warm point light at each one.
     ///
     /// `seed` is folded with a fixed salt so torch placement is
     /// stable for a given floor seed but doesn't collide with
     /// other prop scatterers.
-    pub fn place(&mut self, floor: &Floor, renderer: &mut Renderer, seed: u64) {
+    pub fn place(
+        &mut self,
+        floor: &Floor,
+        renderer: &mut Renderer,
+        props: &mut Props,
+        world: &mut hecs::World,
+        seed: u64,
+    ) {
         // Clear any prior placement (caller should also have
         // despawned the VFX — see `clear`).
         self.torches.clear();
@@ -76,17 +90,35 @@ impl TorchSystem {
 
         for idx in order {
             let (tx, tz, (ox, oz)) = border[idx];
-            // Sconce position: at the wall face, at a typical
-            // torch-bracket height of ~1.7 m. Push the flame
-            // ~0.42 m off the floor-tile centre toward the
-            // wall (wall tile is at +1 in the `(ox,oz)`
-            // direction, so 0.42 puts the flame near the wall
-            // surface but still inside the floor tile).
             let centre = tile_centre(tx, tz);
+
+            // Probe the candlestick mesh height so the flame can
+            // sit on top of the actual model rather than a magic
+            // 1.7 m. `mesh_bounds` returns the gltf-local AABB;
+            // we apply the asset's scale to get world height.
+            // Falls back to a sensible default if the mesh fails
+            // to load (e.g. on first frame before the asset
+            // server has resolved it).
+            let candle_top = props
+                .assets()
+                .mesh_bounds(CANDLESTICK_STAND.gltf)
+                .map(|(mn, mx)| (mx.y - mn.y) * CANDLESTICK_STAND.scale)
+                .unwrap_or(1.05);
+
+            // Flame position: directly above the candle's top.
+            // Push the prop slightly toward the wall (the prop
+            // spawner's WallAligned hint snaps it the rest of
+            // the way) and lift the flame ~5 cm above the
+            // candle's wax for the wick.
+            let prop_anchor = Vec3::new(
+                centre.x + ox as f32 * 0.30,
+                0.0,
+                centre.z + oz as f32 * 0.30,
+            );
             let flame_pos = Vec3::new(
-                centre.x + ox as f32 * 0.42,
-                1.70,
-                centre.z + oz as f32 * 0.42,
+                prop_anchor.x,
+                candle_top + 0.05,
+                prop_anchor.z,
             );
 
             // Spacing check against already-placed torches.
@@ -96,6 +128,23 @@ impl TorchSystem {
             if too_close {
                 continue;
             }
+
+            // Spawn the candlestick model. Yaw faces the candle
+            // away from the wall (toward the room) so the wick
+            // and any sculpted detail reads at viewer angle.
+            // `WallAligned` placement in the asset table snaps
+            // the back face to the wall; we just supply the
+            // wall direction.
+            let yaw = (ox as f32).atan2(oz as f32);
+            let _ = props.spawn(
+                world,
+                renderer,
+                &CANDLESTICK_STAND,
+                prop_anchor,
+                yaw,
+                (ox, oz),
+                None,
+            );
 
             let vfx = renderer.vfx_system.spawn(presets::wall_torch(), flame_pos);
 
@@ -110,7 +159,14 @@ impl TorchSystem {
                 radius: 11.0,
                 intensity: 1.55,
             };
-            self.torches.push(Torch { light, vfx });
+            self.torches.push(Torch {
+                light,
+                vfx,
+                // Spread phases over a wide range so the
+                // flicker sum-of-sines (with periods 0.7..3.1 s)
+                // is fully decorrelated across torches.
+                flicker_phase: rng.frange(0.0, 100.0),
+            });
         }
     }
 
@@ -118,38 +174,48 @@ impl TorchSystem {
     /// nearest torches to `player_pos`, soft-faded so swap-overs
     /// at the renderer's hard 8-light cap are imperceptible.
     ///
-    /// Two fades run together:
+    /// Three fades run together:
     ///
-    /// 1. **Distance fade** — every selected light is faded
-    ///    smoothly to zero between `MAX_DIST - FADE_BAND` and
-    ///    `MAX_DIST`. Means a torch that's about to leave the
-    ///    visible set has already mostly dimmed.
+    /// 1. **Fog-aligned distance fade** — every selected light
+    ///    is faded in over the fog band so that a torch which
+    ///    is fully fog-veiled has zero contribution and the
+    ///    light grows in as the fog clears, matching what the
+    ///    player perceives. The fade starts at `fog_start` and
+    ///    reaches zero at `fog_end`, matching the shader's own
+    ///    fog falloff. This eliminates the "POOF — corridor
+    ///    lights up" pop when the player walks past a hard
+    ///    cutoff distance.
     /// 2. **Rank fade** — the bottom-most ranks (7th and 8th
     ///    closest of those selected) are scaled by a smoothstep
     ///    from 1.0 at the top of the active set down to 0.0
     ///    just past the cap. When the 8th is displaced by a new
     ///    closer torch, *both* are near zero intensity at the
     ///    moment of the swap, so the change is invisible.
+    /// 3. **Flicker** — per-torch random phase + amplitude on
+    ///    a fast/slow sine combo, applied last.
     ///
-    /// Without the rank fade you'd see pops in dense rooms
-    /// where 9+ torches sit inside the distance cutoff: the
-    /// 8th and 9th would swap based purely on distance ordering
-    /// and the swapping light would jump straight to its full
-    /// distance-faded value.
-    pub fn update_lights(&self, renderer: &mut Renderer, player_pos: Vec3) {
+    /// `fog_start` / `fog_end` should match the renderer's
+    /// active fog parameters; pass the same values the shader
+    /// receives so the perceptual fade lines up.
+    pub fn update_lights(
+        &self,
+        renderer: &mut Renderer,
+        player_pos: Vec3,
+        time: f32,
+        fog_start: f32,
+        fog_end: f32,
+    ) {
         renderer.point_lights.clear();
         if self.torches.is_empty() {
             return;
         }
 
-        // Generous reach: torches keep contributing well past
-        // their own `radius` in distance terms — the shader's
-        // own attenuation handles per-fragment falloff, this
-        // value just controls when we *stop uploading* the
-        // light.
-        const MAX_DIST: f32 = 26.0;
-        const FADE_BAND: f32 = 10.0;
-        let max_d2 = MAX_DIST * MAX_DIST;
+        // Reach matches the fog wall plus a small margin so the
+        // last sliver of fade can complete before the geometry
+        // gets culled. Anything past `cutoff` is invisible to
+        // the player anyway, so skipping the upload is free.
+        let cutoff = fog_end + 2.0;
+        let max_d2 = cutoff * cutoff;
 
         // Number of candidates to consider; we'll rank-fade
         // anything above `RANK_FULL` and drop everything past
@@ -157,20 +223,25 @@ impl TorchSystem {
         const RANK_CAP: usize = 8;
         const RANK_FULL: usize = 6;
 
-        let mut scored: Vec<(f32, PointLight)> = self
+        let mut scored: Vec<(f32, PointLight, f32)> = self
             .torches
             .iter()
-            .map(|t| (t.light.position.distance_squared(player_pos), t.light))
-            .filter(|(d2, _)| *d2 <= max_d2)
+            .map(|t| (t.light.position.distance_squared(player_pos), t.light, t.flicker_phase))
+            .filter(|(d2, _, _)| *d2 <= max_d2)
             .collect();
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        for (rank, (d2, mut light)) in scored.into_iter().take(RANK_CAP).enumerate() {
-            // Distance fade.
+        for (rank, (d2, mut light, phase)) in scored.into_iter().take(RANK_CAP).enumerate() {
+            // Fog-aligned distance fade. `dist_s` runs from 1.0
+            // when the torch is at or inside `fog_start` to 0.0
+            // at `fog_end`. The smoothstep curve matches the
+            // forward shader's `fogFactor * fogFactor` quadratic
+            // so the light's perceived intensity tracks the
+            // fog's perceived opacity for the same source.
             let d = d2.sqrt();
-            let fade_start = MAX_DIST - FADE_BAND;
-            let dt = ((MAX_DIST - d) / FADE_BAND).clamp(0.0, 1.0);
-            let dist_s = if d <= fade_start { 1.0 } else { rift_math::smoothstep(dt) };
+            let fog_range = (fog_end - fog_start).max(0.001);
+            let raw = ((fog_end - d) / fog_range).clamp(0.0, 1.0);
+            let dist_s = rift_math::smoothstep(raw);
 
             // Rank fade — full intensity for the closest
             // RANK_FULL lights, smoothly fading the remaining
@@ -187,6 +258,36 @@ impl TorchSystem {
             };
 
             light.intensity *= dist_s * rank_s;
+
+            // Flicker: a fast layer (high-freq jitter —
+            // burst-style flame turbulence) summed with a
+            // slow layer (1–2 Hz envelope — the lazy bob of a
+            // settled flame). Each torch carries its own
+            // phase offset so a row of sconces flickers
+            // independently. Also pull the colour very
+            // slightly toward red on dim moments so the
+            // light reads as cooling embers between flares.
+            let t = time + phase;
+            let fast = (t * 11.3).sin() * 0.5
+                + (t * 17.7 + 1.3).sin() * 0.3
+                + (t * 23.1 + 2.7).sin() * 0.2;
+            let slow = (t * 1.9).sin() * 0.5
+                + (t * 3.1 + 0.7).sin() * 0.5;
+            // Combined modulation in roughly [-1, 1]; scale
+            // to ±15% intensity so the flicker is obviously
+            // alive without strobing into the next slot's
+            // visibility.
+            let flicker = fast * 0.10 + slow * 0.05;
+            light.intensity *= (1.0 + flicker).max(0.0);
+            // Warm-cool dip: when the flame is dim (negative
+            // flicker), nudge the colour slightly redder by
+            // pulling green/blue down. When it flares
+            // brighter, leave the warm amber alone.
+            if flicker < 0.0 {
+                let dim = (-flicker).min(0.15);
+                light.color.y *= 1.0 - dim * 0.6;
+                light.color.z *= 1.0 - dim * 0.9;
+            }
             // Skip uploading lights that round to invisible —
             // saves a slot for any genuinely-bright torch.
             if light.intensity > 0.005 {

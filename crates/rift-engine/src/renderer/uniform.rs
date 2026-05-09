@@ -37,6 +37,15 @@ pub struct UniformData {
     /// (0..=MAX_POINT_SHADOWS). The main fragment shader iterates over
     /// just this many entries when computing point-light occlusion.
     pub point_shadow_meta: Vec4,
+    /// x = seconds since renderer start (used for blood-field aging
+    /// and any future time-driven shader effects). yzw reserved.
+    pub time: Vec4,
+    /// Blood-field world-to-UV transform. xy = world-space origin
+    /// (min XZ corner of the floor AABB), zw = inverse extent so that
+    /// `uv = (worldXZ - origin) * invExtent` lands in [0, 1] across
+    /// the field. All-zero when no blood field is active (the default
+    /// 1×1 placeholder texture is bound and produces no contribution).
+    pub blood_field_xform: Vec4,
 }
 
 pub struct UniformBuffers {
@@ -69,7 +78,10 @@ impl UniformBuffers {
 
         // Descriptor set layout: binding 0 = UBO, binding 1 = legacy texture sampler,
         // binding 2 = directional shadow map (sampler2DShadow in the fragment shader),
-        // binding 3 = point-light cube shadow atlas (samplerCubeArray).
+        // binding 3 = point-light cube shadow atlas (samplerCubeArray),
+        // binding 4 = per-floor blood field (R16G16_SFLOAT: R = wet intensity,
+        // G = spawn time in seconds; sampled by the forward shader to composite
+        // wet/dry blood onto floor fragments).
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -91,6 +103,11 @@ impl UniformBuffers {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -107,9 +124,9 @@ impl UniformBuffers {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                // 3 image samplers per set: legacy + directional shadow +
-                // point-shadow cube atlas.
-                descriptor_count: 3 * MAX_FRAMES_IN_FLIGHT as u32,
+                // 4 image samplers per set: legacy + directional shadow +
+                // point-shadow cube atlas + blood field.
+                descriptor_count: 4 * MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
 
@@ -208,6 +225,31 @@ impl UniformBuffers {
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info));
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+    }
+
+    /// Bind the blood-field texture (R16G16_SFLOAT) to all descriptor
+    /// sets at binding 4. The renderer first installs a 1×1 zero
+    /// placeholder at startup (so the descriptor is always valid), and
+    /// re-binds a floor-sized field whenever a new floor is built.
+    pub fn bind_blood_field(
+        &self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) {
+        for &set in &self.descriptor_sets {
+            let image_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&image_info));
             unsafe { device.update_descriptor_sets(&[write], &[]) };

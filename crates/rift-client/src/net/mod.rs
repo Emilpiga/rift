@@ -167,6 +167,16 @@ pub struct NetClient {
     /// reliable `Death` event may still need that position to drop
     /// a blood decal). Updated whenever we ingest a snapshot row.
     pub last_positions: HashMap<NetId, Vec3>,
+    /// Last known world-space velocity of every replicated entity.
+    /// Parallels `last_positions` and is updated from the same
+    /// snapshot row. Primary consumer is the death-event handler:
+    /// the moment an enemy dies, its velocity vector encodes the
+    /// impact / impulse direction that the layered blood decal
+    /// system uses to orient the corpse pool, spray fan, and
+    /// wall arc. Survives row culls so a delayed Death packet
+    /// can still recover direction even after the snapshot row
+    /// has vanished.
+    pub last_velocities: HashMap<NetId, Vec3>,
     /// NetIds the server has confirmed dead via reliable
     /// `WorldEvent::Death`. Populated by the event handler and
     /// consulted by the world-sync despawn pass to distinguish
@@ -378,6 +388,7 @@ impl NetClient {
             projectile_trails: HashMap::new(),
             projectile_render: HashMap::new(),
             last_positions: HashMap::new(),
+            last_velocities: HashMap::new(),
             dead_net_ids: std::collections::HashSet::new(),
             pending_events: VecDeque::new(),
             pending_loot_claims: VecDeque::new(),
@@ -681,6 +692,7 @@ impl NetClient {
                 // from the previous floor; drop them so the next
                 // floor's snapshot path starts from a clean map.
                 self.last_positions.clear();
+                self.last_velocities.clear();
                 // Same reason for `dead_net_ids` — a floor change
                 // recycles the entire id range, so any leftover
                 // "this id died" markers would mis-fire on a

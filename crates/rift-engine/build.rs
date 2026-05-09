@@ -25,6 +25,22 @@ fn main() {
         shaderc::ShaderKind::Fragment,
     );
 
+    compile_shader(
+        &compiler,
+        &options,
+        shader_dir.join("blood_splat.vert"),
+        out_dir.join("blood_splat.vert.spv"),
+        shaderc::ShaderKind::Vertex,
+    );
+
+    compile_shader(
+        &compiler,
+        &options,
+        shader_dir.join("blood_splat.frag"),
+        out_dir.join("blood_splat.frag.spv"),
+        shaderc::ShaderKind::Fragment,
+    );
+
     println!("cargo::rerun-if-changed=../../assets/shaders/");
 }
 

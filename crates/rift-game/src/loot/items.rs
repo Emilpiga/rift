@@ -282,16 +282,19 @@ pub const BASE_ITEMS: &[BaseItem] = &[
     // Each base picks one EquipSlot. New bases (different art / name /
     // implicit) can target the same slot to give players choice.
     BaseItem {
-        id: "heavy_helm",
-        name: "Plated Helm",
-        slot: ItemSlot::Armor(ArmorKind::Heavy),
+        id: "light_helm",
+        name: "Leather Helm",
+        slot: ItemSlot::Armor(ArmorKind::Light),
         equip_slot: EquipSlot::Helm,
         allowed_tags: DEFENSE | MELEE | CRIT | UTILITY,
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 12.0), (Stat::Health, 15.0)],
         min_ilvl: 1,
         icon: "loot/Helmets/Helmet_1",
-        models: None,
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/helm/armor_helm_leather_01_female.glb"),
+            male: Some("assets/models/loot/helm/armor_helm_leather_01_male.glb")
+        }),
     },
     BaseItem {
         id: "light_shoulders",

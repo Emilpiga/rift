@@ -45,6 +45,13 @@ pub struct ItemSlot<'a> {
     cooldown: f32,
     selected: bool,
     enabled: bool,
+    /// `true` to render the slot in an "insufficient resource"
+    /// state: icon is tinted red and a translucent red wash
+    /// overlays the inset. The slot stays interactive (still
+    /// clickable / hoverable for tooltips) so the player can
+    /// inspect it; gameplay code is responsible for refusing
+    /// the cast.
+    unaffordable: bool,
     /// `true` for items carrying the rare "Anchored" trait.
     /// Renders a distinctive gold outer outline so the trait
     /// is recognisable at a glance even when the rarity tint
@@ -64,6 +71,7 @@ impl<'a> ItemSlot<'a> {
             cooldown: 0.0,
             selected: false,
             enabled: true,
+            unaffordable: false,
             anchored: false,
         }
     }
@@ -110,6 +118,14 @@ impl<'a> ItemSlot<'a> {
 
     pub fn enabled(mut self, on: bool) -> Self {
         self.enabled = on;
+        self
+    }
+
+    /// Mark this slot as unaffordable (player lacks the
+    /// resource to use the action). Tints the icon and inset
+    /// red but keeps the slot interactive.
+    pub fn unaffordable(mut self, on: bool) -> Self {
+        self.unaffordable = on;
         self
     }
 
@@ -246,10 +262,15 @@ impl<'a> ItemSlot<'a> {
 
         // Icon or fallback.
         if let Some(name) = self.icon {
-            let tint = if self.enabled {
-                Color::rgba(1.0, 1.0, 1.0, 1.0)
-            } else {
+            let tint = if !self.enabled {
                 Color::rgba(0.45, 0.50, 0.60, 1.0)
+            } else if self.unaffordable {
+                // Saturated red tint signals "not enough
+                // essence". Stays bright enough to read the
+                // icon outline through the wash.
+                Color::rgba(1.0, 0.45, 0.40, 1.0)
+            } else {
+                Color::rgba(1.0, 1.0, 1.0, 1.0)
             };
             ui.draw_icon(inner, name, tint);
         } else if let Some(ch) = self.fallback_glyph {
@@ -257,10 +278,15 @@ impl<'a> ItemSlot<'a> {
             let s: &str = ch.encode_utf8(&mut buf);
             let glyph_size = (rect.height() * 0.45).max(12.0);
             let tw = ui.measure_text(s, glyph_size);
-            let color = self
+            let base = self
                 .fallback_color
                 .or(self.rarity_tint)
                 .unwrap_or(theme.colors.text);
+            let color = if self.unaffordable {
+                Color::rgba(1.0, 0.40, 0.35, base.0[3])
+            } else {
+                base
+            };
             ui.draw_text(
                 Pos2::new(
                     rect.x() + (rect.width() - tw) * 0.5,
@@ -270,6 +296,14 @@ impl<'a> ItemSlot<'a> {
                 glyph_size,
                 color,
             );
+        }
+
+        // Unaffordable wash: translucent red overlay on the
+        // inset so even a slot with no icon (just a glyph)
+        // reads as "locked out by resource". Drawn after the
+        // icon so it tints whatever was painted.
+        if self.unaffordable && self.enabled {
+            ui.draw_rect(inner, Color::rgba(0.85, 0.10, 0.10, 0.28));
         }
 
         // Cooldown drain overlay (top-down).

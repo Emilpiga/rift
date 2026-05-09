@@ -448,6 +448,28 @@ fn tick_ability_keybinds(
         if !pressed {
             continue;
         }
+        // Resource gate: refuse the cast locally if the
+        // player can't afford the ability's `resource_cost`.
+        // The server runs the same check authoritatively
+        // (`ServerPlayer::try_spend_resource` in
+        // `crates/rift-server/src/sim/ability.rs`); blocking
+        // on the client too prevents a wasted RTT and keeps
+        // the cooldown / cast animation from playing for an
+        // input that will be rejected. Channel costs (per-sec
+        // drain) are not gated here — they're enforced by
+        // the channel tick on the server.
+        if let Some(Some(slot_state)) =
+            state.player_state.abilities.slots.get(i)
+        {
+            let cost = slot_state.ability.resource_cost;
+            if cost > 0.0 {
+                let current_essence = state.player_state.resource_pct
+                    * state.player_state.stats().max_resource;
+                if cost > current_essence + 1e-3 {
+                    continue;
+                }
+            }
+        }
         let Some(ability) = state.player_state.abilities.try_use(i) else {
             continue;
         };

@@ -4,42 +4,42 @@ use glam::Vec3;
 
 use crate::renderer::vfx::spec::*;
 
-/// Doctor-Strange-style portal halo. The mesh
-/// ([`crate::renderer::mesh::Mesh::portal`]) provides a thin
-/// gold ring with a near-black inner; this preset provides the
-/// burning fire-circle that defines the look.
+/// Particle accompaniment for the dimensional rift mesh.
 ///
-/// The portal mesh stands in the XY plane (axis = +Z), so the
-/// halo layers spawn on a vertical [`SpawnShape::RingAxis`] with
-/// `axis = +Z` and orbit around the same axis. Sparks therefore
-/// circle the *visible* mesh ring rather than orbiting on the
-/// floor at its base.
+/// The mesh ([`crate::renderer::mesh::Mesh::portal_with_palette`])
+/// + the `shadeRift` shader branch already do the heavy lifting
+/// (wobbling silhouette, layered swirl, chromatic edge, dark-red
+/// veins, ember tendrils). This preset's job is to extend the
+/// rift's *physical presence* outward into the world: ash and
+/// dust caught in its gravitational pull, embers torn off the
+/// edge, dark debris tumbling along the rim, and a ring of
+/// inward-falling motes that visibly accelerate as they near
+/// the silhouette and vanish at the rim. **No bright gold
+/// sparkle.** The rift wants to read as a wound in reality.
 ///
-/// **Anchor:** The emitter is expected to be spawned at the
-/// portal mesh's *centre* (i.e. `pos + Vec3::Y * PORTAL_CENTRE_Y`),
-/// not at floor level. See [`PORTAL_CENTRE_Y`] and the spawn
-/// helpers in `portal_system`.
+/// Four layers, all additive:
 ///
-/// Three layers, all additive:
+///   1. **Inward suction** — particles spawned on a wide outer
+///      ring with *negative* radial speed (inward kick) plus a
+///      tangential orbit, drag, and curl. Reads as the
+///      surrounding air being consumed.
+///   2. **Inward-falling ash** — pale-grey/charcoal motes drift
+///      *toward* the rift centre and vanish near the rim.
+///      Slower and finer than the suction layer; adds ambient
+///      haze without monopolising attention.
+///   3. **Ember spit-off** — sparse hot ember sparks born on the
+///      rim with a slight outward kick, immediately yanked back
+///      tangentially.
+///   4. **Edge tendrils** — short-lived violent tendril flecks
+///      with high curl-noise displacement; the silhouette
+///      "tears" outward in flicker-bursts.
 ///
-///   1. **Outer halo (CCW)** — dense bright gold sparks orbiting
-///      the rim along the ring's tangent, lifetime tuned so each
-///      spark traces a bright arc before fading. Reads as a
-///      fast continuous fire-ring.
-///   2. **Counter-orbit halo (CW)** — sparser, slightly inside
-///      the main halo, spinning the opposite way. Adds the
-///      mandala/woven feel without making the silhouette messy.
-///   3. **Outward flame licks** — sparks born on the rim with
-///      enough outward speed to flick a few decimetres off the
-///      ring before drag pulls them back. Curl noise smears
-///      them into flame tongues.
+/// **Anchor:** Spawned at `pos + Vec3::Y * PORTAL_CENTRE_Y`
+/// (mesh centre), same as before — see [`PORTAL_CENTRE_Y`].
 
 /// Y-offset (in metres) from the portal entity's anchor to the
 /// centre of the mesh ring. Mirrors the `cy_offset = height / 2`
-/// constant inside [`crate::renderer::mesh::Mesh::portal`]. Used
-/// by the spawn helpers in `portal_system` to anchor the VFX at
-/// mesh centre instead of floor level so halo particles orbit
-/// the *visible* ring.
+/// constant inside [`crate::renderer::mesh::Mesh::portal_with_palette`].
 pub const PORTAL_CENTRE_Y: f32 = 1.05;
 
 pub fn portal_vortex() -> Effect {
@@ -48,123 +48,231 @@ pub fn portal_vortex() -> Effect {
     Effect {
         duration: 0.0,
         layers: vec![
-            // 1. Outer halo — bright gold, orbiting CCW around
-            //    +Z. Heavy drag + small lifetime keeps each
-            //    spark tightly tracking the rim instead of
-            //    spiraling in or out.
+            // 1. Inward suction. Particles spawn on a wide
+            //    *outer* ring (radius 2.2 m, well past the
+            //    rift's silhouette) with a NEGATIVE radial
+            //    speed — the spawn shape's outward direction
+            //    is multiplied by a negative scalar, so each
+            //    particle launches *inward* toward the rim.
+            //    A weak tangential orbit curves the path into
+            //    a spiral, drag tapers velocity as the
+            //    particle approaches the rim, and an opacity
+            //    curve fades the particle to nothing right
+            //    when it would reach the silhouette. Reads as
+            //    the surrounding air being inhaled.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::RingAxis {
-                    radius: 1.15,
-                    thickness: 0.04,
-                    axis: ring_axis,
-                },
-                emission: EmissionMode::BurstAndContinuous {
-                    burst: 64,
-                    rate: 220.0,
-                },
-                speed: (0.2, 0.5),
-                lifetime: (0.45, 0.8),
-                forces: vec![
-                    // Fast tangential pull around the ring axis —
-                    // this is what turns the spawn ring into a
-                    // moving halo of light.
-                    ForceField::Orbit {
-                        axis: ring_axis,
-                        speed: 11.0,
-                    },
-                    // Strong drag prevents radial drift, so
-                    // sparks stay glued to the rim.
-                    ForceField::Drag { coefficient: 3.5 },
-                    // Tiny curl jitter for liveliness.
-                    ForceField::Curl {
-                        frequency: 2.4,
-                        strength: 0.4,
-                    },
-                ],
-                // Born hot, taper to a fine point.
-                size: Curve::from_stops([(0.0, 0.10), (0.4, 0.07), (1.0, 0.015)]),
-                color: Gradient::from_stops([
-                    (0.0, [3.6, 2.6, 0.9, 1.0]),   // white-hot gold
-                    (0.4, [3.0, 1.6, 0.3, 0.95]),  // molten copper
-                    (1.0, [1.4, 0.4, 0.05, 0.0]),  // dying ember
-                ]),
-                sprite: SpriteShape::Spark,
-                blend: BlendMode::Additive,
-                opacity: 1.0,
-            }),
-            // 2. Counter-orbit halo — sparser, slightly inside,
-            //    spinning the opposite way. Gives the mandala
-            //    weave without doubling spark count.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::RingAxis {
-                    radius: 1.05,
-                    thickness: 0.03,
+                    radius: 2.20,
+                    thickness: 0.80,
                     axis: ring_axis,
                 },
                 emission: EmissionMode::BurstAndContinuous {
                     burst: 24,
-                    rate: 90.0,
+                    rate: 70.0,
                 },
-                speed: (0.15, 0.35),
-                lifetime: (0.5, 0.9),
+                // Negative range = inward initial velocity.
+                speed: (-0.55, -0.25),
+                lifetime: (1.4, 2.2),
                 forces: vec![
-                    // Negative speed = CW.
+                    // Tangential pull around the rift axis —
+                    // bends straight inward paths into spirals,
+                    // which reads more clearly as gravitational
+                    // capture than radial fall.
                     ForceField::Orbit {
                         axis: ring_axis,
-                        speed: -8.0,
+                        speed: 2.6,
                     },
-                    ForceField::Drag { coefficient: 3.0 },
+                    // Light drag — the particle should *speed
+                    // up* (visually) as the orbit tightens, so
+                    // we keep drag low enough not to kill the
+                    // motion before the particle reaches the
+                    // rim.
+                    ForceField::Drag { coefficient: 0.4 },
+                    // Curl jitter so suction streams aren't
+                    // perfectly clean spirals.
+                    ForceField::Curl {
+                        frequency: 1.4,
+                        strength: 0.7,
+                    },
                 ],
-                size: Curve::from_stops([(0.0, 0.08), (1.0, 0.012)]),
+                // Born small (mote-sized), grow slightly as
+                // they accelerate, then collapse to a point
+                // right when they're consumed.
+                size: Curve::from_stops([
+                    (0.0, 0.03),
+                    (0.6, 0.06),
+                    (0.95, 0.05),
+                    (1.0, 0.005),
+                ]),
+                // Cool ash → warm crimson as the particle
+                // approaches the rim's heat. Alpha ramps up
+                // mid-life and snaps to 0 at end-of-life so
+                // particles visibly "vanish into blackness"
+                // rather than fading politely.
                 color: Gradient::from_stops([
-                    (0.0, [3.0, 2.0, 0.6, 0.9]),
-                    (1.0, [1.0, 0.25, 0.03, 0.0]),
+                    (0.0,  [0.45, 0.40, 0.36, 0.0]),
+                    (0.25, [0.55, 0.42, 0.32, 0.40]),
+                    (0.70, [1.10, 0.45, 0.18, 0.55]),
+                    (0.95, [1.80, 0.35, 0.10, 0.35]),
+                    (1.0,  [0.0,  0.0,  0.0,  0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 2. Inward-falling ash. Born on a slightly larger
+            //    ring than the rift's silhouette and pulled
+            //    tangentially+inward; lifetime long enough to
+            //    streak across the disc before fading. Curl
+            //    gives each particle a wobbly, drifting path
+            //    rather than a clean radial line.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::RingAxis {
+                    radius: 1.55,
+                    thickness: 0.50,
+                    axis: ring_axis,
+                },
+                emission: EmissionMode::BurstAndContinuous {
+                    burst: 32,
+                    rate: 90.0,
+                },
+                speed: (0.05, 0.20),
+                lifetime: (1.6, 2.6),
+                forces: vec![
+                    // Slow CCW orbit — gives the ash a lazy
+                    // gravitational swirl rather than a clean
+                    // radial fall.
+                    ForceField::Orbit {
+                        axis: ring_axis,
+                        speed: 1.4,
+                    },
+                    // Light drag so the curl noise dominates
+                    // the trajectory shape.
+                    ForceField::Drag { coefficient: 0.6 },
+                    // Curl jitter — the dust looks like it's
+                    // caught in turbulence.
+                    ForceField::Curl {
+                        frequency: 1.2,
+                        strength: 0.8,
+                    },
+                ],
+                // Fade in (born small, peak in mid-life, dim
+                // out) — feels less like emitter-vomited
+                // particles and more like ambient haze.
+                size: Curve::from_stops([
+                    (0.0, 0.04),
+                    (0.5, 0.09),
+                    (1.0, 0.02),
+                ]),
+                // Cool charcoal/ash palette; very low alpha so
+                // the layer reads as drifting haze, not bright
+                // pixels. Slight warm tint at end-of-life as
+                // the ash falls into the rift's heat.
+                color: Gradient::from_stops([
+                    (0.0, [0.35, 0.32, 0.30, 0.0]),
+                    (0.3, [0.45, 0.38, 0.35, 0.30]),
+                    (0.7, [0.55, 0.30, 0.20, 0.22]),
+                    (1.0, [0.60, 0.10, 0.05, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 2. Ember spit-off. Born on the rift's rim with a
+            //    small outward kick and yanked tangentially by
+            //    a fast orbit. Drag is heavy so each ember
+            //    only travels a few centimetres before fading
+            //    — the visual is "the rift is shedding sparks
+            //    every direction", not "fire-ring".
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::RingAxis {
+                    radius: 1.18,
+                    thickness: 0.05,
+                    axis: ring_axis,
+                },
+                emission: EmissionMode::BurstAndContinuous {
+                    burst: 12,
+                    rate: 60.0,
+                },
+                speed: (0.10, 0.35),
+                lifetime: (0.35, 0.75),
+                forces: vec![
+                    // Random direction per ember (some CW,
+                    // some CCW) — the orbit force always points
+                    // the same way around the axis, so we use a
+                    // moderate value and let curl/drag decide
+                    // the rest.
+                    ForceField::Orbit {
+                        axis: ring_axis,
+                        speed: 4.0,
+                    },
+                    ForceField::Drag { coefficient: 4.0 },
+                    ForceField::Curl {
+                        frequency: 2.0,
+                        strength: 0.6,
+                    },
+                ],
+                size: Curve::from_stops([(0.0, 0.07), (1.0, 0.012)]),
+                // Hot crimson-orange embers; not gold. HDR-
+                // boosted so bloom catches them.
+                color: Gradient::from_stops([
+                    (0.0, [3.20, 1.10, 0.30, 0.95]),
+                    (0.4, [2.00, 0.45, 0.10, 0.70]),
+                    (1.0, [0.50, 0.04, 0.02, 0.0]),
                 ]),
                 sprite: SpriteShape::Spark,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
-            // 3. Outward flame licks — sparks born on the rim
-            //    with a small radial-out kick, smeared by curl
-            //    noise into licking flame tongues. Drag pulls
-            //    them back so the silhouette stays a tight ring.
+            // 3. Edge tendrils. Sparse, large, fast curl-noise
+            //    fragments born just outside the rim with an
+            //    outward radial kick — they reach a few
+            //    decimetres past the silhouette before drag
+            //    and gravity pull them down. Reads as the
+            //    rift "tearing" the air around it.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::RingAxis {
-                    radius: 1.18,
-                    thickness: 0.02,
+                    radius: 1.22,
+                    thickness: 0.04,
                     axis: ring_axis,
                 },
                 emission: EmissionMode::BurstAndContinuous {
                     burst: 0,
-                    rate: 70.0,
+                    rate: 22.0,
                 },
-                // Speed multiplies the spawn shape's outward
-                // normal; for `RingAxis` that's the radial
-                // vector in the ring's plane, so this is the
-                // flame-lick reach.
-                speed: (0.6, 1.4),
-                lifetime: (0.35, 0.7),
+                // Outward radial kick (RingAxis spawn dir =
+                // radial), strong enough that tendrils flick
+                // 0.3–0.5 m past the rim before curl smears
+                // them.
+                speed: (0.8, 1.6),
+                lifetime: (0.40, 0.85),
                 forces: vec![
-                    ForceField::Drag { coefficient: 2.5 },
-                    // Curl makes each lick wobble instead of
-                    // shooting straight out, reading as fire
-                    // rather than radial sparks.
+                    ForceField::Drag { coefficient: 2.8 },
+                    // Strong curl makes tendrils whip and
+                    // wobble instead of flying straight,
+                    // selling the "wound under tension" feel.
                     ForceField::Curl {
-                        frequency: 1.8,
-                        strength: 1.6,
+                        frequency: 1.6,
+                        strength: 2.2,
                     },
-                    // Slight upward bias so flame tongues
-                    // curl up before fading.
+                    // Slight downward bias — tendrils drift
+                    // and fall instead of floating up like
+                    // flame, reinforcing the gravitational /
+                    // wound feel rather than fire.
                     ForceField::Gravity {
-                        axis: Vec3::Y,
-                        strength: 1.2,
+                        axis: -Vec3::Y,
+                        strength: 0.6,
                     },
                 ],
-                size: Curve::from_stops([(0.0, 0.16), (1.0, 0.04)]),
+                size: Curve::from_stops([(0.0, 0.18), (1.0, 0.05)]),
+                // Dark blood-red into deep crimson — wound
+                // matter, not bright flame. The final stop
+                // fades to near-black so the tendrils read as
+                // dissipating, not extinguishing.
                 color: Gradient::from_stops([
-                    (0.0, [3.4, 1.8, 0.4, 0.85]),
-                    (0.6, [2.0, 0.6, 0.05, 0.5]),
-                    (1.0, [0.4, 0.05, 0.01, 0.0]),
+                    (0.0, [2.20, 0.30, 0.10, 0.85]),
+                    (0.5, [1.40, 0.10, 0.05, 0.55]),
+                    (1.0, [0.20, 0.02, 0.01, 0.0]),
                 ]),
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,

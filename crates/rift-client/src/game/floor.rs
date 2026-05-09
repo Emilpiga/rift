@@ -414,12 +414,12 @@ impl FloorManager {
         // Done before enemies spawn so the same seed picks consistent positions.
         props::fantasy::decorate_dungeon(&mut self.props, world, renderer, &floor, seed);
 
-        // Wall torches: looping flame VFX (HDR additive → blooms)
-        // + a warm point light at each sconce. The renderer caps
-        // active lights at 8, but `TorchSystem::update_lights` is
-        // called every frame to keep the nearest 8 to the player
-        // active.
-        self.torches.place(&floor, renderer, seed);
+        // Wall torches: candlestick prop + looping flame VFX
+        // (HDR additive → blooms) + a warm point light at each
+        // sconce. The renderer caps active lights at 8, but
+        // `TorchSystem::update_lights` is called every frame to
+        // keep the nearest 8 to the player active.
+        self.torches.place(&floor, renderer, &mut self.props, world, seed);
 
         // Player — spawned via shared helper so the hub generator can
         // reuse the same skinned-character + animation-set bring-up.
@@ -460,43 +460,37 @@ impl FloorManager {
         self.portal_anchors = None;
         self.nav_grid = NavGrid::from_floor(&floor);
 
-        // Brooding "floating obsidian platform over an abyss"
+        // Brooding "floating obsidian platform in a sandstorm"
         // ambience. The platform is dark stone, the sky is a
-        // crimson thunderstorm, and the fog is a dark crimson-
-        // grey haze (NOT pure black) so it reads as a *visible*
-        // wall of mist that swallows the mountain bases and
-        // platform underside, instead of blending invisibly
-        // into the abyss.
-        renderer.clear_color = [0.02, 0.01, 0.02, 1.0];
-        // Fog color is matched to the sky's `ground` band so
-        // the seam where mountain bases meet the horizon
-        // blends seamlessly — no visible cutoff line where
-        // geometry ends and sky begins. Keep this in sync with
-        // `SkyConfig::abyss_hub`'s `ground` value.
-        renderer.fog_color = [0.06, 0.025, 0.035];
-        // Fog: starts close enough to grip the platform edge
-        // and ends well past the back of the mountain ring so
-        // the full silhouette of the massif is legible against
-        // the storm sky. The previous `fog_end = 50` clipped
-        // the back half of the ring into solid haze before the
-        // peaks even read.
-        renderer.fog_start = 18.0;
-        renderer.fog_end = 140.0;
-        // The default camera far plane (100 m) cuts the back
-        // of the mountain ring (mid-radius ~70 m + player
-        // offset 42 m → up to ~110 m). Push it out so the
-        // entire ring is inside the frustum; fog still
-        // dissolves the far flanks long before they reach
-        // the new far plane.
-        renderer.camera.far = 260.0;
+        // tan dust dome, and the fog is a warm dust haze
+        // tight enough to limit visibility to ~25 m so the
+        // play area reads as enclosed by airborne sand
+        // rather than open desert.
+        renderer.clear_color = [0.30, 0.20, 0.12, 1.0];
+        // Fog colour: matches the sky's horizon band so the
+        // foggy platform edge fades smoothly into the dust
+        // horizon instead of showing a darker rust-coloured
+        // ring against a lighter sky.
+        renderer.fog_color = [0.78, 0.55, 0.30];
+        // Tight fog limits the player's view: the dust
+        // wall closes in within ~18 m so the platform reads
+        // as a small island in a roaring storm rather than
+        // a wide-open arena. Past the wall is fully veiled.
+        renderer.fog_start = 4.0;
+        renderer.fog_end = 18.0;
+        // Default camera far plane is fine — fog swallows
+        // everything past 28 m, so geometry past that won't
+        // contribute even if it existed.
+        renderer.camera.far = 80.0;
 
-        // Crimson stormy sky. Brooding overhead, fire-orange
-        // band on the horizon so the silhouettes of the
-        // distant mountains read as cut-outs against flame.
-        renderer.sky = rift_engine::SkyConfig::abyss_hub();
-        // Dim crimson key light + low warm ambient — the only
-        // source of light is the distant horizon storm.
-        renderer.key_light = rift_engine::KeyLight::STORMLIT;
+        // Sandstorm sky preset. Warm tan dome, no sun disc
+        // (fully veiled by dust), drifting dust streaks
+        // overhead.
+        renderer.sky = rift_engine::SkyConfig::sandstorm_hub();
+        // Diffuse warm fill — in a sandstorm the dust scatters
+        // skylight uniformly so the directional contribution
+        // is soft and the ambient does most of the work.
+        renderer.key_light = rift_engine::KeyLight::SANDSTORM;
 
         // Hub floor: a single dark obsidian platform disc.
         // Slightly oversized vs. the playable square so the
@@ -513,20 +507,22 @@ impl FloorManager {
             0.02,
             (floor.depth / 2) as f32,
         );
-        const PLATFORM_RADIUS: f32 = 42.0;
+        const PLATFORM_RADIUS: f32 = 16.0;
         let platform = Mesh::ground_disc(
             hub_centre,
             PLATFORM_RADIUS,
             96,
             // White vertex color so the lava-rocks texture
             // shows through unmodulated. Mesh `uv_scale` of
-            // `1.0/8.0` means one tile of the 2k texture spans
-            // 8 m of world space — large enough that the eye
-            // doesn't latch on to the repeat across the
-            // platform, small enough that surface detail
-            // (cracks, embers) still reads at walking range.
+            // `1.0/2.0` means one tile of the 2k texture
+            // spans 2 m of world space — fine enough that
+            // grain detail (sand specks, pebbles) reads
+            // clearly at walking range, while the new
+            // tightened fog (28 m) and the underlying
+            // pseudo-random tile-rotation in the cel path
+            // hide the repeat across the platform.
             Vec3::splat(1.0),
-            1.0 / 8.0,
+            1.0 / 2.0,
         );
         renderer.add_mesh(&platform, Mat4::IDENTITY)?;
         let platform_obj_idx = renderer.objects.len() - 1;
@@ -554,11 +550,11 @@ impl FloorManager {
             renderer.set_object_shared_material(platform_obj_idx, set);
             // Enable the PBR shading path now that the disc is
             // bound to a full sand PBR pack. uvScale stays at
-            // the platform mesh's baked `1/8` so one tile of
-            // the 2 k sand maps spans 8 m of world space (the
+            // the platform mesh's baked `1/2` so one tile of
+            // the 2 k sand maps spans 2 m of world space (the
             // mesh emits world-space UVs pre-multiplied by
             // that factor, so passing `1.0` here yields the
-            // intended 8 m / tile coverage). Parallax stays
+            // intended 2 m / tile coverage). Parallax stays
             // off — the disc is viewed nearly top-down at the
             // hub camera angle, where parallax detail isn't
             // visible and would just burn fragment shader
@@ -593,120 +589,96 @@ impl FloorManager {
         // with the fog wall, so we just let the disc cast a
         // hard silhouette and let the fog do the rest.
 
-        // Distant procedural mountain *terrain*. The ring is
-        // a polar heightfield generated by rift-math: per-
-        // vertex elevations come from fBm + ridged-multifractal
-        // noise, normals are computed by central differences,
-        // and the radial taper pinches the band to flush at
-        // the play-area boundary and the fog horizon. The
-        // result has actual sloped flanks, recognisable peaks
-        // and valleys, and accepts a tiling PBR material —
-        // the old silhouette strip was just two verts per
-        // segment and read flat from any oblique angle.
-        //
-        // Inner radius is just past the platform so the
-        // mountains' lower flanks sweep down to the abyss
-        // immediately around the disc. Outer radius reaches
-        // far enough that distance fog fully swallows the
-        // back side. Seed is fixed so the skyline is stable
-        // across hub returns.
-        let mountain_params = rift_math::terrain::MountainRingParams {
-            // Inner edge sits just past the platform rim so
-            // the lower flanks meet the disc edge cleanly.
-            inner_radius: 44.0,
-            // Outer edge well within the bumped fog range so
-            // the back of the massif fades smoothly into
-            // distance haze rather than getting clipped by
-            // the camera far plane.
-            outer_radius: 95.0,
-            // Base just below the platform level. The radial
-            // taper drops the inner ring to this height, so
-            // setting it slightly below the disc top hides
-            // the mesh seam under the platform's rim glow
-            // without making the whole massif sink into the
-            // abyss the way `-40` did. Peaks now rise to
-            // `base_y + peak_height = ~30 m` above the
-            // platform — clearly visible against the sky
-            // instead of being entirely buried below the
-            // floor.
-            base_y: -3.0,
-            peak_height: 32.0,
-            angular_segments: 256,
-            radial_segments: 24,
-            noise_frequency: 0.090,
-            ridged_blend: 0.72,
-            seed: 0xA855_E575_FACE_BEEF,
-        };
-        let mountains = Mesh::mountain_terrain(
-            &mountain_params,
-            hub_centre,
-            // White vertex tint lets the cliff_rocks basecolor
-            // through unmodulated. If the PBR material fails
-            // to bind below we fall back to vertex-tint
-            // shading and a near-fog colour keeps the
-            // silhouette plausible.
-            Vec3::ONE,
-            // World metres per texture tile. 4 m gives clearly
-            // readable rock detail at the inner flanks
-            // without obvious tile repeats at silhouette
-            // distance.
-            4.0,
-        );
-        renderer.add_mesh(&mountains, Mat4::IDENTITY)?;
-        let mountains_obj_idx = renderer.objects.len() - 1;
-        // Bind the authored cliff-rocks PBR pack. Mountains
-        // benefit strongly from PBR: the rim light at the
-        // peak silhouette has real bite from the normal map,
-        // AO darkens the crevasses, and a small parallax
-        // value sells depth on the closer flanks. uvScale at
-        // 1.0 because the mesh already bakes the world-metre
-        // tiling described above.
-        self.env.ensure_cliff_rocks(renderer);
-        if let Some(set) = self.env.cliff_rocks_set {
-            renderer.set_object_shared_material(mountains_obj_idx, set);
-            let pbr_flags = f32::from_bits(1u32);
-            renderer.set_object_material_params(
-                mountains_obj_idx,
-                [1.0, 0.015, pbr_flags, 0.0],
-            );
-        }
+        // No distant skyline. The sandstorm replaces the old
+        // mountain ring: the warm-tan fog wall starts at 6 m
+        // and saturates by 28 m, so anything that would sit
+        // outside the platform is invisible anyway. Removing
+        // the geometry also means we no longer pay for the
+        // 256×24 vertex heightfield, the cliff-rocks PBR
+        // pack upload, or the per-frame draw call.
 
-        // Lightning strike anchors. The cloud cover itself is
-        // now drawn procedurally by the sky shader (see
-        // `SkyConfig::cloud_strength`), so we no longer need
-        // any cloud meshes — but the storm driver still wants
-        // a handful of world-space points to rim-light the
-        // platform from when a strike fires. Spread them in a
-        // ring high overhead so the per-strike point light
-        // hits the platform from a believable cloud direction.
-        const CLOUD_COUNT: usize = 7;
-        const CLOUD_RADIUS: f32 = 38.0;
-        const CLOUD_HEIGHT: f32 = 22.0;
-        let mut cloud_anchors: Vec<Vec3> = Vec::with_capacity(CLOUD_COUNT);
-        let mut cloud_rng = super::props::placement::SmallRng::new(0xC10D_5EED_BAAD_F00D);
-        for i in 0..CLOUD_COUNT {
-            let a = (i as f32 / CLOUD_COUNT as f32) * std::f32::consts::TAU
-                + cloud_rng.frange(-0.18, 0.18);
-            let r = CLOUD_RADIUS + cloud_rng.frange(-4.0, 4.0);
-            let h = CLOUD_HEIGHT + cloud_rng.frange(-4.0, 6.0);
-            cloud_anchors.push(hub_centre + Vec3::new(a.cos() * r, h, a.sin() * r));
-        }
-
-        // Defensive: drop any previous hub storm before we
-        // replace it (e.g. hub-to-hub regenerate during a
-        // debug teleport).
+        // No storm driver in the sandstorm hub — a sandstorm
+        // doesn't fork lightning. We drop any pre-existing
+        // driver (in case of hub-to-hub regenerate) and skip
+        // creating a new one; `tick_hub_storm` is a no-op
+        // when `hub_storm` is `None`.
         self.hub_storm = None;
 
-        // Hand cloud anchors to the storm driver. Capture
-        // calm-state lighting so each frame's flash is purely
-        // additive on top of the restored base.
-        self.hub_storm = Some(HubStorm {
-            base_key_color: renderer.key_light.color,
-            base_key_ambient: renderer.key_light.ambient,
-            base_fog_color: renderer.fog_color,
-            cloud_anchors,
-            state: StormState::Idle { cooldown: 1.5 },
-            rng: super::props::placement::SmallRng::new(0x57AC_C170_BEAD_5EED),
+        // Sky-anchored point light: a single warm sun-source.
+        // The dungeon's dramatic shadows come from two
+        // separate properties of the torch lights:
+        //
+        //   1. They sit *low* relative to the caster, so
+        //      rays rake across the floor at a shallow angle
+        //      and project shadows several metres long.
+        //   2. They have a tight radius (~11 m), so the
+        //      shadow look is only visible while the caster
+        //      is within range.
+        //
+        // Property (1) is what produces the dramatic look;
+        // property (2) is just a consequence of dungeon
+        // geometry. For the hub we keep (1) — the anchor
+        // sits low and well to the side — and *drop* (2):
+        // the radius is bumped to fully cover the playable
+        // disc so the player gets the same effect anywhere
+        // on the platform, not just within 11 m of one
+        // fixture. The cube-shadow pass produces equally
+        // crisp shadows at any radius (the PCF kernel is in
+        // normalised direction space, so softness is
+        // constant); larger radius only means the cube's far
+        // plane = radius, which still gives plenty of depth
+        // precision for the small-scale casters here.
+        renderer.point_lights.clear();
+        // Low-angle sun: a horizontal-heavy axis (small Y)
+        // so the shadow rays sweep ACROSS the platform
+        // rather than punching down through it.
+        let sun_axis = Vec3::new(0.70, 0.32, 0.65).normalize();
+        let sun_anchor = hub_centre + sun_axis * 32.0;
+        renderer.point_lights.push(rift_engine::PointLight {
+            position: sun_anchor,
+            color: Vec3::new(1.50, 1.00, 0.55),
+            // Covers the full 16 m disc — player worst-case
+            // distance from the sun anchor is ~16 m + 32 m =
+            // 48 m, well inside.
+            radius: 60.0,
+            intensity: 4.0,
+        });
+
+        // Portal point light: the rift portal is a hot red
+        // emissive ring, so we anchor a saturated crimson
+        // light at its centre. Two jobs:
+        //   1. Throw a red rim onto the platform stones so
+        //      the disc catches the portal's glow as the
+        //      player approaches — it reads as a heat
+        //      source in the haze, not just a sticker.
+        //   2. Cast cube-mapped shadows: anything between
+        //      the portal and the camera (the player, the
+        //      stash chest, dropped loot) silhouettes
+        //      against the red light. Combined with the
+        //      warm sun light's shadows from the opposite
+        //      side this gives every prop a two-tone rim.
+        // Position is at the portal centre (`first_room_center`
+        // matches the `portal_pos` returned at the bottom of
+        // this function) lifted to disc height (~1 m), so the
+        // light sits in the middle of the visible ring. The
+        // bloom pass picks up the saturated red core and the
+        // portal's own emissive vertices for a strong glow.
+        let portal_centre_xz = floor.first_room_center();
+        let portal_light_pos =
+            portal_centre_xz + Vec3::new(0.0, 1.55, 0.0);
+        renderer.point_lights.push(rift_engine::PointLight {
+            position: portal_light_pos,
+            // Strong saturated red — push past 1.0 on the
+            // red channel so HDR bloom catches it cleanly
+            // even when the warm sun light is washing the
+            // platform.
+            color: Vec3::new(2.50, 0.20, 0.10),
+            // Tight radius so the falloff is steep and the
+            // red glow only paints a clear pool around the
+            // portal disc; outside ~6 m it fades to nothing
+            // and the warm sun light dominates again.
+            radius: 7.0,
+            intensity: 8.0,
         });
 
         // Wall colliders only — no wall mesh. Instead of the

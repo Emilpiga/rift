@@ -56,6 +56,15 @@ const fn small_prop(gltf: &'static str, mat: &'static str, weight: u32, solid: b
     }
 }
 
+/// Candlestick stand — used by the wall-torch system to give
+/// every torch a physical model to anchor its flame VFX to.
+/// Exported separately from `ASSETS` so the torch placer can
+/// reference it without adding it to the random scatter pool.
+pub const CANDLESTICK_STAND: PropAsset = metal(
+    "assets/models/fantasy-props/Exports/glTF/CandleStick_Stand.gltf",
+    1, true, false,
+);
+
 /// Curated subset of the fantasy-props pack.
 pub const ASSETS: &[PropAsset] = &[
     furniture_wall("assets/models/fantasy-props/Exports/glTF/Barrel.gltf",          6, true),
@@ -74,7 +83,9 @@ pub const ASSETS: &[PropAsset] = &[
     metal("assets/models/fantasy-props/Exports/glTF/Bucket_Metal.gltf",       2, true,  true),
     metal("assets/models/fantasy-props/Exports/glTF/Cage_Small.gltf",         1, true,  true),
     metal("assets/models/fantasy-props/Exports/glTF/CandleStick_Triple.gltf", 2, false, false),
-    metal("assets/models/fantasy-props/Exports/glTF/CandleStick_Stand.gltf",  2, true,  false),
+    // Note: `CandleStick_Stand` is *not* in the scatter pool — it
+    // is placed deterministically by the wall-torch system so
+    // every torch gets a physical candle to anchor its flame.
     metal("assets/models/fantasy-props/Exports/glTF/Chain_Coil.gltf",         1, true,  false),
 
     cloth_wall("assets/models/fantasy-props/Exports/glTF/Bag.gltf",      2),

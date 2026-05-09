@@ -25,11 +25,14 @@ pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const SHADOW_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// Half-extent (in world units) of the orthographic light frustum. Larger
-/// values cover more area but reduce shadow resolution per texel. The 14 m
-/// half-extent below produces a 28×28 m projection, which at 2048² gives
-/// ~73 texels/m — sharp enough that small props (chests, loot pillars)
-/// cast crisp, recognisable shadows under the wide PCF kernel.
-pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 14.0;
+/// values cover more area but reduce shadow resolution per texel. The 20 m
+/// half-extent below produces a 40×40 m projection, which at 2048² gives
+/// ~51 texels/m — sharp enough that small props (chests, loot pillars)
+/// cast crisp, recognisable shadows under the wide PCF kernel, while
+/// extending far enough past the player that the edge feather in
+/// `triangle.frag::sampleShadow` lands well inside the fog band and
+/// shadow despawn is invisible at any camera angle.
+pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 20.0;
 /// Distance behind the focus point at which to place the light camera.
 pub const SHADOW_BACK_DISTANCE: f32 = 30.0;
 /// Near/far planes of the orthographic light frustum.

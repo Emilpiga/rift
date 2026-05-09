@@ -17,28 +17,31 @@ use crate::ecs::components::{
     AnimationSet, LocalPlayer, Player, SpellCast, SpellPhase, Transform, Velocity,
 };
 use crate::renderer::mesh::Mesh;
-use crate::renderer::vfx::{presets as vfx_presets, spec::Effect};
+use crate::renderer::vfx::{presets as vfx_presets, spec::{Effect, EffectBundle}};
 use crate::renderer::Renderer;
 
-/// Map a declarative [`VfxKind`] to a concrete VFX [`Effect`].
+/// Map a declarative [`VfxKind`] to a concrete VFX [`EffectBundle`].
 /// Single source of truth — every ability visual the renderer
-/// spawns goes through this function.
-pub fn effect_for_vfx(kind: VfxKind) -> Effect {
+/// spawns goes through this function. Returns an `EffectBundle`
+/// so the preset can opt into engine-side enhancements
+/// (attached point light, per-spawn velocity inheritance) the
+/// pure-data [`Effect`] doesn't carry.
+pub fn effect_for_vfx(kind: VfxKind) -> EffectBundle {
     match kind {
-        VfxKind::DodgePuff => vfx_presets::dodge_puff(),
-        VfxKind::RainOfFire => vfx_presets::rain_of_fire(),
-        VfxKind::CastSpark { rgb } => vfx_presets::cast_spark(rgb),
+        VfxKind::DodgePuff => vfx_presets::dodge_puff().into(),
+        VfxKind::RainOfFire => vfx_presets::rain_of_fire().into(),
+        VfxKind::CastSpark { rgb } => vfx_presets::cast_spark(rgb).into(),
         VfxKind::FireballTrail => vfx_presets::fireball_trail(),
         VfxKind::FireballImpact => vfx_presets::fireball_explosion(),
-        VfxKind::ArcaneBoltTrail => vfx_presets::arcane_bolt_trail(),
-        VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact(),
-        VfxKind::FrostRay => vfx_presets::frost_ray(),
-        VfxKind::FireWave => vfx_presets::fire_wave(),
-        VfxKind::HealBurst => vfx_presets::heal_burst(),
-        VfxKind::HealOverTimeAura => vfx_presets::heal_over_time_aura(),
+        VfxKind::ArcaneBoltTrail => vfx_presets::arcane_bolt_trail().into(),
+        VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact().into(),
+        VfxKind::FrostRay => vfx_presets::frost_ray().into(),
+        VfxKind::FireWave => vfx_presets::fire_wave().into(),
+        VfxKind::HealBurst => vfx_presets::heal_burst().into(),
+        VfxKind::HealOverTimeAura => vfx_presets::heal_over_time_aura().into(),
         // Empty effect — caller can guard `VfxKind::None` to skip
         // the spawn call entirely.
-        VfxKind::None => Effect { duration: 0.0, layers: Vec::new() },
+        VfxKind::None => Effect { duration: 0.0, layers: Vec::new() }.into(),
     }
 }
 
@@ -80,7 +83,7 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
                     let pos = ctx.placed_position();
                     ctx.renderer
                         .vfx_system
-                        .spawn(effect_for_vfx(*p), pos + Vec3::new(0.0, *visual_y, 0.0));
+                        .spawn_bundle(effect_for_vfx(*p), pos + Vec3::new(0.0, *visual_y, 0.0));
                 }
             }
             AbilityEffect::SetPlayerAction {
@@ -94,7 +97,7 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
                 set_player_action(*action, *duration, clip, *movement, *cancel_cast, *emitter, ctx);
             }
             AbilityEffect::SpawnEmitterAtCaster { visual, height } => {
-                ctx.renderer.vfx_system.spawn(
+                ctx.renderer.vfx_system.spawn_bundle(
                     effect_for_vfx(*visual),
                     ctx.origin + Vec3::new(0.0, *height, 0.0),
                 );
@@ -126,7 +129,7 @@ fn set_player_action(
     if let Some(p) = emitter {
         ctx.renderer
             .vfx_system
-            .spawn(effect_for_vfx(p), position + Vec3::new(0.0, 0.5, 0.0));
+            .spawn_bundle(effect_for_vfx(p), position + Vec3::new(0.0, 0.5, 0.0));
     }
 
     let body_dir = {

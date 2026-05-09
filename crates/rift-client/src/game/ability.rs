@@ -161,7 +161,7 @@ pub fn on_remote_ability_cast(
             // caster origin.
             let pos = target.unwrap_or(cast_origin + aim * 5.0)
                 + Vec3::new(0.0, *visual_y, 0.0);
-            renderer.vfx_system.spawn(effect_for_vfx(*preset), pos);
+            renderer.vfx_system.spawn_bundle(effect_for_vfx(*preset), pos);
         }
     }
 
@@ -179,7 +179,7 @@ pub fn on_remote_ability_cast(
             height,
         } = effect
         {
-            renderer.vfx_system.spawn(
+            renderer.vfx_system.spawn_bundle(
                 effect_for_vfx(*visual),
                 cast_origin + Vec3::new(0.0, *height, 0.0),
             );
@@ -510,7 +510,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         if vis.vfx_id.is_none() {
             let id = renderer
                 .vfx_system
-                .spawn(rift_engine::combat::effect_for_vfx(beam_vfx), origin);
+                .spawn_bundle(rift_engine::combat::effect_for_vfx(beam_vfx), origin);
             vis.vfx_id = Some(id);
         }
         // Suppress unused warning when the variant is `None`

@@ -37,9 +37,9 @@ use super::player::ServerPlayer;
 pub fn finalise_kills(
     world: &mut hecs::World,
     ctx: &mut CombatCtx<'_>,
-    dead: Vec<(Entity, NetId)>,
+    dead: Vec<(Entity, NetId, Vec3)>,
 ) {
-    for (entity, net_id) in dead {
+    for (entity, net_id, hit_dir) in dead {
         // Snapshot the corpse before flipping it into dying mode \u2014
         // the loot drop needs role + position. Pull `elite_mods`
         // too so the death-effect pass can read EXPLODER without
@@ -51,6 +51,7 @@ pub fn finalise_kills(
         ctx.events.push(WorldEvent::Death {
             entity: net_id,
             killer: None,
+            hit_dir: hit_dir.to_array(),
         });
         if let Some((role, pos, elite_mods)) = info {
             ctx.kills.push(KillInfo { role });

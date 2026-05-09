@@ -120,7 +120,14 @@ struct CompositePush {
     /// luma + cool cyan tint + radial vignette). Driven by the
     /// client when the local player is in ghost mode.
     ghost_mix: f32,
-    _pad1: f32,
+    /// SSAO strength multiplier in `[0, 1]`. 0 disables the
+    /// effect; 1 applies the full computed occlusion. Useful as
+    /// a graphics-quality knob.
+    ssao_strength: f32,
+    /// Inverse projection matrix used by the inline SSAO pass to
+    /// reconstruct view-space positions from the sampled depth
+    /// buffer.
+    inv_proj: [[f32; 4]; 4],
 }
 unsafe impl bytemuck::Pod for CompositePush {}
 unsafe impl bytemuck::Zeroable for CompositePush {}
@@ -219,6 +226,13 @@ pub struct PostProcessing {
     pub composite_framebuffers: Vec<vk::Framebuffer>,
 
     sampler: vk::Sampler,
+    /// Nearest-neighbour sampler for the depth buffer used by
+    /// the inline SSAO in the composite pass.
+    depth_sampler: vk::Sampler,
+    /// Cached depth view bound to every composite descriptor
+    /// set. Single shared depth attachment, so one view is
+    /// correct for every set.
+    depth_view: vk::ImageView,
 
     // Descriptor plumbing. Two layouts: a single combined-image-
     // sampler layout (used by bright + both blur passes), and a
@@ -302,6 +316,22 @@ impl PostProcessing {
             .border_color(vk::BorderColor::FLOAT_OPAQUE_BLACK);
         let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
+        // Nearest-neighbour clamp sampler for depth. Linear
+        // filtering across depth edges would corrupt the SSAO
+        // position reconstruction.
+        let depth_sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .anisotropy_enable(false)
+            .max_lod(0.0)
+            .min_lod(0.0)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_BLACK);
+        let depth_sampler = unsafe { device.create_sampler(&depth_sampler_info, None)? };
+
         // ---- Descriptor layouts + pool + sets ----
         let single_binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -325,6 +355,12 @@ impl PostProcessing {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            // Depth buffer — sampled by inline SSAO.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let composite_set_layout = unsafe {
             device.create_descriptor_set_layout(
@@ -337,8 +373,8 @@ impl PostProcessing {
         let max_sets = (image_count * 4) as u32;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            // 3 * 1 (single) + 1 * 2 (composite) = 5 per image
-            descriptor_count: (image_count * 5) as u32,
+            // 3 * 1 (single) + 1 * 3 (composite: hdr+bloom+depth) = 6 per image
+            descriptor_count: (image_count * 6) as u32,
         }];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
@@ -392,6 +428,7 @@ impl PostProcessing {
             write_combined(device, blur_v_in_sets[i], 0, bloom_b[i].view, sampler);
             write_combined(device, composite_in_sets[i], 0, hdr[i].view, sampler);
             write_combined(device, composite_in_sets[i], 1, bloom_a[i].view, sampler);
+            write_combined(device, composite_in_sets[i], 2, depth_view, depth_sampler);
         }
 
         // ---- Pipelines ----
@@ -415,6 +452,8 @@ impl PostProcessing {
             scene_framebuffers, bright_framebuffers, blur_h_framebuffers,
             blur_v_framebuffers, composite_framebuffers,
             sampler,
+            depth_sampler,
+            depth_view,
             descriptor_pool, single_set_layout, composite_set_layout,
             bright_in_sets, blur_h_in_sets, blur_v_in_sets, composite_in_sets,
             bright_pipeline, bright_layout,
@@ -479,6 +518,10 @@ impl PostProcessing {
         // Match the constructor: full-res bloom for crisp
         // particles. See `new` for rationale.
         self.bloom_extent = self.extent;
+        // Cache the new depth view — the depth attachment is
+        // recreated when the swapchain is, so the SSAO sampler
+        // binding has to point at the new image.
+        self.depth_view = depth_view;
         let image_count = swapchain.image_views.len();
 
         for _ in 0..image_count {
@@ -526,6 +569,7 @@ impl PostProcessing {
             write_combined(device, self.blur_v_in_sets[i], 0, self.bloom_b[i].view, self.sampler);
             write_combined(device, self.composite_in_sets[i], 0, self.hdr[i].view, self.sampler);
             write_combined(device, self.composite_in_sets[i], 1, self.bloom_a[i].view, self.sampler);
+            write_combined(device, self.composite_in_sets[i], 2, self.depth_view, self.depth_sampler);
         }
         Ok(())
     }
@@ -634,6 +678,14 @@ impl PostProcessing {
     /// `ghost_mix` in `[0.0, 1.0]` blends in the ghost-view
     /// post effect (desaturate-to-luma + cool tint + radial
     /// vignette). `0.0` is the default no-op.
+    ///
+    /// `inv_proj` is the inverse of the camera projection matrix
+    /// (NOT the view-projection — SSAO works in view space). It
+    /// is uploaded as a push constant so the composite shader can
+    /// reconstruct view-space positions from sampled depth.
+    ///
+    /// `ssao_strength` in `[0.0, 1.0]` scales the inline SSAO
+    /// contribution. 0 disables it.
     pub fn record_composite(
         &self,
         device: &ash::Device,
@@ -641,6 +693,8 @@ impl PostProcessing {
         image_index: u32,
         config: &BloomConfig,
         ghost_mix: f32,
+        inv_proj: [[f32; 4]; 4],
+        ssao_strength: f32,
     ) {
         let i = image_index as usize;
         let viewport = vk::Viewport {
@@ -662,7 +716,8 @@ impl PostProcessing {
                 bloom_intensity: config.intensity,
                 exposure: config.exposure,
                 ghost_mix: ghost_mix.clamp(0.0, 1.0),
-                _pad1: 0.0,
+                ssao_strength: ssao_strength.clamp(0.0, 1.0),
+                inv_proj,
             };
             device.cmd_push_constants(cmd, self.composite_layout,
                 vk::ShaderStageFlags::FRAGMENT, 0, bytemuck::bytes_of(&push));
@@ -683,6 +738,7 @@ impl PostProcessing {
             device.destroy_descriptor_set_layout(self.single_set_layout, None);
             device.destroy_descriptor_set_layout(self.composite_set_layout, None);
             device.destroy_sampler(self.sampler, None);
+            device.destroy_sampler(self.depth_sampler, None);
             device.destroy_render_pass(self.scene_pass, None);
             device.destroy_render_pass(self.bloom_pass, None);
             device.destroy_render_pass(self.composite_pass, None);
@@ -765,16 +821,18 @@ fn create_scene_pass(device: &ash::Device) -> Result<vk::RenderPass> {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             // Hand-off to the bright-pass which samples this image.
             .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-        // Depth
+        // Depth. Stored + transitioned to SHADER_READ_ONLY_OPTIMAL
+        // at the end of the pass so the post composite can
+        // sample it for screen-space ambient occlusion.
         vk::AttachmentDescription::default()
             .format(DEPTH_FORMAT)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
     ];
     let color_ref = vk::AttachmentReference {
         attachment: 0,
@@ -811,12 +869,21 @@ fn create_scene_pass(device: &ash::Device) -> Result<vk::RenderPass> {
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             ),
         // Make scene writes visible to the bright pass that
-        // samples the HDR image.
+        // samples the HDR image AND to the composite pass that
+        // samples depth for SSAO. Includes both COLOR_ATTACHMENT
+        // (HDR write) and LATE_FRAGMENT_TESTS (depth write +
+        // implicit layout transition to SHADER_READ_ONLY_OPTIMAL).
         vk::SubpassDependency::default()
             .src_subpass(0)
             .dst_subpass(vk::SUBPASS_EXTERNAL)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
             .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
             .dst_access_mask(vk::AccessFlags::SHADER_READ),
     ];

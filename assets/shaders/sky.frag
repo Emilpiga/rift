@@ -133,13 +133,20 @@ void main() {
         vec2 plane = dir.xz / ph;
 
         float t = pc.cloud_params.x;
-        // Slow lower deck — the brooding mass.
-        vec2 q1 = plane * 0.55 + vec2( 0.012, 0.005) * t;
+        // Frequency multipliers control puff size on the cloud
+        // sheet. The previous 0.55 / 1.10 produced a single
+        // huge fbm cell across the visible dome — the sky read
+        // as one slow blob, not "clouds". Bumping these to
+        // 4.0 / 9.0 puts ~tens of recognisable puffs across
+        // the field of view at typical camera angles. Slow
+        // lower deck — the brooding mass.
+        vec2 q1 = plane * 4.0 + vec2( 0.012, 0.005) * t;
         float n1 = fbm2(q1);
         // Faster upper wisps — a second layer that drags
-        // perpendicularly across the lower deck so the silhouette
-        // looks like it's churning rather than scrolling.
-        vec2 q2 = plane * 1.10 + vec2(-0.025, 0.018) * t;
+        // perpendicularly across the lower deck so the
+        // silhouette looks like it's churning rather than
+        // scrolling.
+        vec2 q2 = plane * 9.0 + vec2(-0.025, 0.018) * t;
         float n2 = fbm2(q2);
         float cloud_n = n1 * 0.65 + n2 * 0.35;
 
@@ -147,18 +154,68 @@ void main() {
         // and densify near the horizon line so the band feels
         // like an oncoming storm wall. `pow(h, …)` softly fades
         // the layer out at the zenith.
-        float horizon_density = mix(1.0, 0.45, smoothstep(0.0, 0.85, h));
-        float density = clamp(cloud_n * horizon_density - 0.30, 0.0, 1.0);
-        // Soft remap so values past ~0.6 fully saturate to opaque
-        // cloud, and values below ~0.15 read as clear sky.
-        float coverage = smoothstep(0.05, 0.55, density) * cloud_strength;
+        float horizon_density = mix(1.0, 0.55, smoothstep(0.0, 0.95, h));
+        // Lower the bias so 50%-ish noise actually reads as cloud
+        // rather than barely-visible static. The previous −0.30
+        // bias combined with the dark cloud body made the layer
+        // visually disappear against the already-dark abyss
+        // horizon.
+        float density = clamp(cloud_n * horizon_density - 0.18, 0.0, 1.0);
+        // Soft remap so values past ~0.45 fully saturate to opaque
+        // cloud, and values below ~0.05 read as clear sky.
+        float coverage = smoothstep(0.04, 0.45, density) * cloud_strength;
 
-        // Cloud body colour: dark slate that brightens at the
-        // top of each puff (hash of `n1` doubles as a fake
-        // top-light direction). Stays dark + brooding overall.
-        vec3 cloud_dark   = vec3(0.030, 0.018, 0.025);
-        vec3 cloud_lit    = vec3(0.110, 0.080, 0.095);
-        vec3 cloud_color  = mix(cloud_dark, cloud_lit, n1);
+        // ── God rays through cloud gaps ────────────────────
+        // Where the line of sight passes near the sun
+        // direction *and* cloud coverage is thin at that
+        // point, lift the sky brightness toward the sun
+        // colour so the dome reads as having a hot light
+        // source punching through gaps in the cover. Cheap
+        // approximation — we don't ray-march; we just use
+        // the same fbm sample (which is constant along the
+        // sun direction, but the coverage falloff via the
+        // dot product against `sun_dir` does most of the
+        // visual work).
+        float sunAlign = max(0.0, cos_sun);
+        // Tight cone around the sun — readable bloom only
+        // within ~25° of sun direction.
+        float rayCone = pow(sunAlign, 28.0);
+        // Gate by inverse coverage so the bloom only fires
+        // in cloud gaps. A heavily-covered sun reads as
+        // overcast; a thinly-covered sun reads as a god-ray
+        // burst.
+        float gapMask = 1.0 - smoothstep(0.20, 0.80, coverage);
+        // Warm bloom colour — biased toward the horizon /
+        // dust palette so it ties into the dome without
+        // looking like a separate spotlight overlay.
+        vec3 bloom = pc.horizon_sun_size.rgb * 1.6
+                   + vec3(0.40, 0.20, 0.05);
+        sky += bloom * rayCone * gapMask * 0.85;
+
+        // Cloud body colour: a dark/bright pair derived from
+        // the biome's `horizon` and `zenith` colours so the
+        // cloud layer always tints to the dome it sits in.
+        // For a crimson storm sky this gives slate-with-warm-
+        // rim cumulonimbus; for a sandstorm dome it gives the
+        // tan dust streaks the rest of the palette demands —
+        // no per-biome shader branch needed.
+        //
+        // Dark side: a dim shadowed mix of the two band
+        // colours, biased toward the zenith so the underside
+        // of the cloud reads like sky behind it.
+        // Lit side: a saturated lift of the horizon colour
+        // so the puff tops catch the dominant biome warmth.
+        vec3 cloud_dark = mix(pc.zenith_falloff.rgb,
+                              pc.horizon_sun_size.rgb, 0.30) * 0.55;
+        vec3 cloud_lit  = pc.horizon_sun_size.rgb * 1.25
+                        + pc.zenith_falloff.rgb * 0.10;
+        // Sun-side rim on the cloud puff tops — clouds in
+        // the sun's angular vicinity get a brighter lit side
+        // so the cover reads as front-lit by the sun rather
+        // than uniformly self-illuminated.
+        vec3 cloud_color = mix(cloud_dark, cloud_lit,
+                               smoothstep(0.30, 0.85, n1));
+        cloud_color += pc.horizon_sun_size.rgb * rayCone * 0.40;
 
         // Lightning flash: lift cloud brightness sharply toward
         // the bolt colour while a strike is firing. Per-fragment

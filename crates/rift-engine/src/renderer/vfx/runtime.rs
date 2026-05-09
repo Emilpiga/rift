@@ -28,9 +28,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 
 use super::spec::{
-    Effect, EmissionMode, ForceField, Layer, ParticleSpec, RibbonSpec, SpawnShape,
-    SpriteShape,
+    Effect, EffectBundle, EffectLight, EmissionMode, ForceField, Layer, ParticleSpec,
+    RibbonSpec, SpawnShape, SpriteShape,
 };
+use crate::renderer::forward::PointLight;
 
 /// Stable handle for one active effect. Wraps a generational
 /// index so freed slots can be reused without aliasing old IDs.
@@ -60,13 +61,28 @@ pub struct VfxParticleInstance {
     /// no two particles look identical even at the same age.
     pub seed: f32,
     /// `0` = soft glow, `1` = spark, `2` = smoke, `3` = shard,
-    /// `4` = ring. Cast from [`SpriteShape`] discriminant.
+    /// `4` = ring, `5` = streak. Cast from [`SpriteShape`]
+    /// discriminant.
     pub sprite: u32,
     /// `0` = alpha, `1` = additive, `2` = premultiplied. The
     /// renderer groups by this field so all alpha particles
     /// draw before any additive ones.
     pub blend: u32,
     pub _pad: u32,
+    /// World-space velocity in m/s. Drives screen-space motion
+    /// stretch in the vertex shader: fast-moving particles
+    /// elongate along the projection of this vector onto the
+    /// near plane, so embers and sparks read as crisp streaks
+    /// instead of dots. Slow particles fall back to an
+    /// axis-aligned billboard.
+    pub velocity: [f32; 3],
+    /// Per-particle rotation phase in radians. The vertex
+    /// shader rotates the billboard quad by this amount around
+    /// the camera-facing axis, so smoke / shard / ring sprites
+    /// no longer all share the same orientation. Encoded as
+    /// `seed * TAU + age * spin_rate` so each particle
+    /// continuously spins; the rate is inferred from `seed`.
+    pub spin: f32,
 }
 
 /// GPU-friendly per-ribbon instance. The renderer expands a quad
@@ -135,6 +151,23 @@ struct EffectInstance {
     /// Per-layer state — emission accumulators, RNG seeds,
     /// per-layer particle pools.
     layers: Vec<LayerState>,
+    /// Optional point light pushed each frame at the effect's
+    /// current anchor. Cloned out of the [`EffectBundle`] passed
+    /// to [`VfxSystem::spawn_bundle`].
+    light: Option<EffectLight>,
+    /// Fraction of the anchor's per-frame velocity inherited by
+    /// freshly-spawned particles. See
+    /// [`EffectBundle::inherit_velocity`].
+    inherit_velocity: f32,
+    /// Anchor position at the start of this frame's tick — used
+    /// to compute the anchor's velocity (delta / dt) for
+    /// velocity inheritance. `None` until the second tick (we
+    /// can't know the velocity from a single sample).
+    prev_anchor: Option<Vec3>,
+    /// Anchor velocity computed at the most recent tick.
+    /// Re-used by the per-layer spawner so every spawn within
+    /// a frame inherits the same velocity.
+    anchor_velocity: Vec3,
 }
 
 enum LayerState {
@@ -226,6 +259,16 @@ impl VfxSystem {
     /// Spawn a fresh effect at `anchor`. Returns the handle the
     /// caller uses to drive the effect (set endpoints, despawn).
     pub fn spawn(&mut self, effect: Effect, anchor: Vec3) -> EffectId {
+        self.spawn_bundle(EffectBundle::from(effect), anchor)
+    }
+
+    /// Spawn a fresh effect described by an [`EffectBundle`] —
+    /// effect + optional point light + optional velocity
+    /// inheritance. Use this entry-point for projectile trails
+    /// and impacts so the engine can drive the attached light
+    /// and inherit velocity from the moving anchor.
+    pub fn spawn_bundle(&mut self, bundle: EffectBundle, anchor: Vec3) -> EffectId {
+        let EffectBundle { effect, light, inherit_velocity } = bundle;
         let mut layers: Vec<LayerState> = Vec::with_capacity(effect.layers.len());
         for (i, layer) in effect.layers.iter().enumerate() {
             match layer {
@@ -269,6 +312,10 @@ impl VfxSystem {
             elapsed: 0.0,
             spawning: true,
             layers,
+            light,
+            inherit_velocity: inherit_velocity.clamp(0.0, 1.0),
+            prev_anchor: None,
+            anchor_velocity: Vec3::ZERO,
         };
 
         let index = if let Some(slot) = self.free.pop() {
@@ -365,6 +412,87 @@ impl VfxSystem {
         &self.ribbon_instances
     }
 
+    /// Append a [`PointLight`] to `out` for every live effect
+    /// whose [`EffectBundle::light`] was set at spawn time.
+    /// `time_secs` drives the optional flicker; pass the
+    /// renderer's `elapsed_secs()` so it stays in phase across
+    /// frames.
+    ///
+    /// Lights are attached at the effect's *current* anchor
+    /// (`follow_anchor` if set, else `anchor`) plus the light's
+    /// `offset`, and are intensity-modulated by the optional
+    /// `intensity_curve` evaluated over normalised effect life.
+    /// Persistent effects (`duration == 0`) sample the curve at
+    /// `t = 0` so the curve is effectively a constant — use
+    /// `flicker_amp` to add liveliness instead.
+    pub fn collect_lights(&self, time_secs: f32, out: &mut Vec<PointLight>) {
+        for inst in &self.instances {
+            let Some(spec) = inst.spec.as_ref() else {
+                continue;
+            };
+            let Some(light) = inst.light.as_ref() else {
+                continue;
+            };
+            // Drop lights once spawning has ended *and* every
+            // particle pool has drained — i.e. the visible
+            // portion of the effect is gone. Without this the
+            // light would linger for the slot's `free_slot`
+            // tick and pop off a frame later than the visuals.
+            if !inst.spawning {
+                let any_pool_alive = inst.layers.iter().any(|l| match l {
+                    LayerState::Particles(p) => !p.pool.is_empty(),
+                    LayerState::Ribbon(_) => false,
+                });
+                if !any_pool_alive {
+                    continue;
+                }
+            }
+            let anchor = inst.follow_anchor.unwrap_or(inst.anchor);
+            // Curve sample: for finite-duration effects this
+            // tracks the elapsed/duration ratio so the light
+            // can flash-then-fade with the explosion. For
+            // persistent (`duration == 0`) emitters we hold at
+            // t = 0 so the curve, if present, supplies a base
+            // multiplier; flicker is the source of variation.
+            let curve_t = if spec.duration > 0.0 {
+                (inst.elapsed / spec.duration).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let curve_mul = light
+                .intensity_curve
+                .as_ref()
+                .map(|c| c.sample(curve_t))
+                .unwrap_or(1.0);
+
+            // Two-octave flicker. The phase offset comes from
+            // the slot index so several simultaneous effects
+            // don't pulse in sync.
+            let flicker = if light.flicker_amp > 0.0 && light.flicker_hz > 0.0 {
+                let phase = (inst.elapsed * 0.91 + curve_t * 1.7).sin() * 0.0; // unused; see below
+                let _ = phase; // silence unused
+                let f = light.flicker_hz;
+                let t = time_secs;
+                let a = (t * f * std::f32::consts::TAU).sin();
+                let b = (t * f * 1.43 * std::f32::consts::TAU + 1.7).sin();
+                1.0 + (a * 0.6 + b * 0.4) * light.flicker_amp
+            } else {
+                1.0
+            };
+
+            let intensity = (light.intensity * curve_mul * flicker).max(0.0);
+            if intensity <= 1e-4 || light.radius <= 1e-3 {
+                continue;
+            }
+            out.push(PointLight {
+                position: anchor + light.offset,
+                color: light.color,
+                radius: light.radius,
+                intensity,
+            });
+        }
+    }
+
     /// Advance the simulation by `dt` seconds. Spawns new
     /// particles, applies forces, ages out dead particles, and
     /// rebuilds the cached instance buffers.
@@ -390,10 +518,39 @@ impl VfxSystem {
                 let anchor = inst.follow_anchor.unwrap_or(inst.anchor);
                 let orientation = inst.orientation;
 
+                // Anchor velocity for inheritance. We only get a
+                // meaningful number on the second-and-later tick
+                // (we can't infer velocity from a single sample).
+                // For the very first frame after spawn this is
+                // zero, so trail particles spawned that frame
+                // sit at the projectile centre — fine, the next
+                // frame onwards they fly with it.
+                let anchor_vel = if let Some(prev) = inst.prev_anchor {
+                    if dt > 1e-5 {
+                        (anchor - prev) / dt
+                    } else {
+                        Vec3::ZERO
+                    }
+                } else {
+                    Vec3::ZERO
+                };
+                inst.prev_anchor = Some(anchor);
+                inst.anchor_velocity = anchor_vel;
+                let inherit = inst.inherit_velocity;
+
                 // 1) Tick particle layers.
                 for layer in inst.layers.iter_mut() {
                     if let LayerState::Particles(p) = layer {
-                        tick_particles(p, anchor, orientation, dt, inst.spawning, total_cap);
+                        tick_particles(
+                            p,
+                            anchor,
+                            orientation,
+                            anchor_vel,
+                            inherit,
+                            dt,
+                            inst.spawning,
+                            total_cap,
+                        );
                     }
                 }
 
@@ -501,6 +658,8 @@ fn tick_particles(
     p: &mut ParticlesState,
     anchor: Vec3,
     orientation: Quat,
+    anchor_velocity: Vec3,
+    inherit_velocity: f32,
     dt: f32,
     spawning: bool,
     total_cap: usize,
@@ -554,7 +713,13 @@ fn tick_particles(
         if p.pool.len() >= total_cap.max(1) {
             break;
         }
-        p.pool.push(spawn_one(&p.spec, anchor, orientation, &mut p.rng_seed));
+        p.pool.push(spawn_one(
+            &p.spec,
+            anchor,
+            orientation,
+            anchor_velocity * inherit_velocity,
+            &mut p.rng_seed,
+        ));
     }
 
     // 2) Integrate.
@@ -632,7 +797,13 @@ fn apply_force(
     }
 }
 
-fn spawn_one(spec: &ParticleSpec, anchor: Vec3, orientation: Quat, rng: &mut u32) -> LiveParticle {
+fn spawn_one(
+    spec: &ParticleSpec,
+    anchor: Vec3,
+    orientation: Quat,
+    inherited_velocity: Vec3,
+    rng: &mut u32,
+) -> LiveParticle {
     let r1 = next_rand(rng);
     let r2 = next_rand(rng);
     let r3 = next_rand(rng);
@@ -726,7 +897,7 @@ fn spawn_one(spec: &ParticleSpec, anchor: Vec3, orientation: Quat, rng: &mut u32
 
     LiveParticle {
         position: anchor + offset,
-        velocity: direction * speed,
+        velocity: direction * speed + inherited_velocity,
         origin: anchor + offset,
         age: 0.0,
         max_life: lifetime,
@@ -743,6 +914,7 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         SpriteShape::Smoke => 2,
         SpriteShape::Shard => 3,
         SpriteShape::Ring => 4,
+        SpriteShape::Streak => 5,
     };
     for q in &p.pool {
         if !q.alive() {
@@ -753,6 +925,14 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         let mut col = p.spec.color.sample(t);
         let alpha = (col[3] * p.spec.opacity).clamp(0.0, 1.0);
         col[3] = alpha;
+        // Per-particle rotation: a constant offset from the
+        // seed (so adjacent particles start out of phase) plus
+        // a slow continuous spin proportional to age. The spin
+        // rate itself is keyed off `seed` so identical sprites
+        // tumble at slightly different speeds — important for
+        // the `Smoke` / `Shard` / `Ring` shapes where uniform
+        // rotation would be obvious.
+        let spin = q.seed * std::f32::consts::TAU + q.age * (0.4 + q.seed * 1.6);
         out.push(VfxParticleInstance {
             position: q.position.to_array(),
             size,
@@ -761,6 +941,8 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
             sprite,
             blend,
             _pad: 0,
+            velocity: q.velocity.to_array(),
+            spin,
         });
     }
 }

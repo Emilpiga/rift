@@ -13,7 +13,7 @@ pub mod post;
 pub mod overlay;
 pub mod font;
 pub mod vfx;
-pub mod decals;
+pub mod blood;
 
 pub use forward::Renderer;
 pub use overlay::{OverlayBatch, OverlayRenderer};

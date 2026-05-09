@@ -156,6 +156,7 @@ pub(super) fn apply_player_damage(
             events.push(WorldEvent::Death {
                 entity: net_id,
                 killer: None,
+                hit_dir: [0.0, 0.0, 0.0],
             });
             deaths.push((client_id, net_id));
         }
