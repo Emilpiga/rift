@@ -128,6 +128,25 @@ struct CompositePush {
     /// reconstruct view-space positions from the sampled depth
     /// buffer.
     inv_proj: [[f32; 4]; 4],
+    /// Volumetric god-ray data:
+    ///   `xy` — sun screen-space UV (NDC ½-mapped). May be
+    ///          outside [0,1] (sun off-screen); the shader's
+    ///          radial march still produces partial rays from
+    ///          on-screen sky pixels in that case.
+    ///   `z`  — strength in `[0, 1]`. 0 disables the effect.
+    ///   `w`  — `1.0` if the sun is in front of the camera,
+    ///          `0.0` if behind (god-rays disabled).
+    sun_screen: [f32; 4],
+    /// God-ray tint colour (rgb). Typically the sun's base
+    /// colour scaled by sun_strength so warmer suns produce
+    /// warmer rays.
+    sun_color: [f32; 4],
+    /// Heat-distortion source (single — brightest fire-like
+    /// point light each frame, picked CPU-side).
+    ///   `xy` — source screen UV.
+    ///   `z`  — falloff radius in UV units (typical 0.10–0.30).
+    ///   `w`  — strength in `[0, 1]`. 0 disables the effect.
+    heat_source: [f32; 4],
 }
 unsafe impl bytemuck::Pod for CompositePush {}
 unsafe impl bytemuck::Zeroable for CompositePush {}
@@ -199,9 +218,16 @@ impl OffscreenImage {
 
 pub struct PostProcessing {
     /// Render pass for the main forward scene (HDR + depth).
-    /// Sky, mesh, ribbons, particles all bind pipelines made
-    /// for this pass.
+    /// Sky and opaque mesh pipelines are built against this
+    /// pass. Ribbons and particles use `translucent_pass`.
     pub scene_pass: vk::RenderPass,
+    /// Render pass for translucent draws (ribbons + particles).
+    /// Loads the HDR + depth from the scene pass; depth is
+    /// bound as a read-only attachment AND simultaneously
+    /// available to the fragment shader as a combined-image-
+    /// sampler (binding via `translucent_set_layout`) so soft
+    /// particles can fade as they approach world geometry.
+    pub translucent_pass: vk::RenderPass,
     /// Render pass for any bloom ping-pong step (single HDR
     /// colour attachment, no depth). Used by the bright-pass
     /// and both blur passes — render-pass *compatibility* is
@@ -220,6 +246,7 @@ pub struct PostProcessing {
     bloom_b: Vec<OffscreenImage>,
 
     pub scene_framebuffers: Vec<vk::Framebuffer>,
+    pub translucent_framebuffers: Vec<vk::Framebuffer>,
     bright_framebuffers: Vec<vk::Framebuffer>,
     blur_h_framebuffers: Vec<vk::Framebuffer>,
     blur_v_framebuffers: Vec<vk::Framebuffer>,
@@ -241,11 +268,20 @@ pub struct PostProcessing {
     descriptor_pool: vk::DescriptorPool,
     single_set_layout: vk::DescriptorSetLayout,
     composite_set_layout: vk::DescriptorSetLayout,
+    /// Descriptor set layout used by ribbon + particle shaders
+    /// to read the scene depth buffer (binding 0,
+    /// COMBINED_IMAGE_SAMPLER). One set per swapchain image,
+    /// allocated in `translucent_in_sets`.
+    pub translucent_set_layout: vk::DescriptorSetLayout,
 
     bright_in_sets: Vec<vk::DescriptorSet>,    // bright reads HDR
     blur_h_in_sets: Vec<vk::DescriptorSet>,    // blur_h reads bloom_a
     blur_v_in_sets: Vec<vk::DescriptorSet>,    // blur_v reads bloom_b
     composite_in_sets: Vec<vk::DescriptorSet>, // composite reads HDR + bloom_a
+    /// Per-image descriptor set bound at set=1 by ribbon +
+    /// particle pipelines so their fragment shaders can sample
+    /// the scene depth buffer.
+    pub translucent_in_sets: Vec<vk::DescriptorSet>,
 
     bright_pipeline: vk::Pipeline,
     bright_layout: vk::PipelineLayout,
@@ -277,6 +313,7 @@ impl PostProcessing {
         let image_count = swapchain.image_views.len();
 
         let scene_pass = create_scene_pass(device)?;
+        let translucent_pass = create_translucent_pass(device)?;
         let bloom_pass = create_bloom_pass(device)?;
         let composite_pass = create_composite_pass(device, swapchain.format.format)?;
 
@@ -292,6 +329,10 @@ impl PostProcessing {
 
         // ---- Framebuffers ----
         let scene_framebuffers = create_fbs(device, scene_pass, extent,
+            hdr.iter().map(|h| [h.view, depth_view]).collect::<Vec<_>>().as_slice())?;
+        // Translucent pass shares the same hdr+depth framebuffer
+        // pair — it loads what scene_pass stored.
+        let translucent_framebuffers = create_fbs(device, translucent_pass, extent,
             hdr.iter().map(|h| [h.view, depth_view]).collect::<Vec<_>>().as_slice())?;
         let bright_framebuffers = create_fbs_single(device, bloom_pass, bloom_extent,
             &bloom_a.iter().map(|i| i.view).collect::<Vec<_>>())?;
@@ -368,13 +409,28 @@ impl PostProcessing {
                 None,
             )?
         };
+        // Translucent set: single binding (depth sampler) at
+        // set=1 of ribbon + particle pipelines.
+        let translucent_bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+        let translucent_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&translucent_bindings),
+                None,
+            )?
+        };
 
-        // 3 single-binding sets per image + 1 composite set per image.
-        let max_sets = (image_count * 4) as u32;
+        // 3 single-binding sets per image + 1 composite set per
+        // image + 1 translucent set per image.
+        let max_sets = (image_count * 5) as u32;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            // 3 * 1 (single) + 1 * 3 (composite: hdr+bloom+depth) = 6 per image
-            descriptor_count: (image_count * 6) as u32,
+            // 3*1 (single) + 1*3 (composite hdr+bloom+depth) +
+            // 1*1 (translucent depth) = 7 per image.
+            descriptor_count: (image_count * 7) as u32,
         }];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
@@ -416,6 +472,14 @@ impl PostProcessing {
                     .set_layouts(&composite_layouts),
             )?
         };
+        let translucent_layouts = vec![translucent_set_layout; image_count];
+        let translucent_in_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(descriptor_pool)
+                    .set_layouts(&translucent_layouts),
+            )?
+        };
 
         // Wire descriptors → image views. Each is a
         // COMBINED_IMAGE_SAMPLER with the linear-clamp sampler we
@@ -429,6 +493,18 @@ impl PostProcessing {
             write_combined(device, composite_in_sets[i], 0, hdr[i].view, sampler);
             write_combined(device, composite_in_sets[i], 1, bloom_a[i].view, sampler);
             write_combined(device, composite_in_sets[i], 2, depth_view, depth_sampler);
+            // Translucent set: same depth buffer, sampled by
+            // ribbon/particle frag shaders for soft fade. The
+            // descriptor's layout must match the image's actual
+            // layout *while the translucent pass is recording*
+            // — the subpass attachment ref keeps depth in
+            // DEPTH_STENCIL_READ_ONLY_OPTIMAL, so the descriptor
+            // must use the same.
+            write_combined_with_layout(
+                device, translucent_in_sets[i], 0,
+                depth_view, depth_sampler,
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            );
         }
 
         // ---- Pipelines ----
@@ -446,16 +522,19 @@ impl PostProcessing {
         )?;
 
         Ok(Self {
-            scene_pass, bloom_pass, composite_pass,
+            scene_pass, translucent_pass, bloom_pass, composite_pass,
             extent, bloom_extent,
             hdr, bloom_a, bloom_b,
-            scene_framebuffers, bright_framebuffers, blur_h_framebuffers,
+            scene_framebuffers, translucent_framebuffers,
+            bright_framebuffers, blur_h_framebuffers,
             blur_v_framebuffers, composite_framebuffers,
             sampler,
             depth_sampler,
             depth_view,
             descriptor_pool, single_set_layout, composite_set_layout,
+            translucent_set_layout,
             bright_in_sets, blur_h_in_sets, blur_v_in_sets, composite_in_sets,
+            translucent_in_sets,
             bright_pipeline, bright_layout,
             blur_pipeline, blur_layout,
             composite_pipeline, composite_layout,
@@ -473,6 +552,7 @@ impl PostProcessing {
     ) {
         unsafe {
             for &fb in self.scene_framebuffers.iter()
+                .chain(self.translucent_framebuffers.iter())
                 .chain(self.bright_framebuffers.iter())
                 .chain(self.blur_h_framebuffers.iter())
                 .chain(self.blur_v_framebuffers.iter())
@@ -482,6 +562,7 @@ impl PostProcessing {
             }
         }
         self.scene_framebuffers.clear();
+        self.translucent_framebuffers.clear();
         self.bright_framebuffers.clear();
         self.blur_h_framebuffers.clear();
         self.blur_v_framebuffers.clear();
@@ -501,6 +582,7 @@ impl PostProcessing {
         self.blur_h_in_sets.clear();
         self.blur_v_in_sets.clear();
         self.composite_in_sets.clear();
+        self.translucent_in_sets.clear();
     }
 
     /// Rebuild the offscreen images, framebuffers and descriptor
@@ -531,6 +613,8 @@ impl PostProcessing {
         }
 
         self.scene_framebuffers = create_fbs(device, self.scene_pass, self.extent,
+            self.hdr.iter().map(|h| [h.view, depth_view]).collect::<Vec<_>>().as_slice())?;
+        self.translucent_framebuffers = create_fbs(device, self.translucent_pass, self.extent,
             self.hdr.iter().map(|h| [h.view, depth_view]).collect::<Vec<_>>().as_slice())?;
         self.bright_framebuffers = create_fbs_single(device, self.bloom_pass, self.bloom_extent,
             &self.bloom_a.iter().map(|i| i.view).collect::<Vec<_>>())?;
@@ -563,6 +647,12 @@ impl PostProcessing {
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(self.descriptor_pool).set_layouts(&composite_layouts))?
         };
+        let translucent_layouts = vec![self.translucent_set_layout; image_count];
+        self.translucent_in_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool).set_layouts(&translucent_layouts))?
+        };
         for i in 0..image_count {
             write_combined(device, self.bright_in_sets[i], 0, self.hdr[i].view, self.sampler);
             write_combined(device, self.blur_h_in_sets[i], 0, self.bloom_a[i].view, self.sampler);
@@ -570,6 +660,11 @@ impl PostProcessing {
             write_combined(device, self.composite_in_sets[i], 0, self.hdr[i].view, self.sampler);
             write_combined(device, self.composite_in_sets[i], 1, self.bloom_a[i].view, self.sampler);
             write_combined(device, self.composite_in_sets[i], 2, self.depth_view, self.depth_sampler);
+            write_combined_with_layout(
+                device, self.translucent_in_sets[i], 0,
+                self.depth_view, self.depth_sampler,
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            );
         }
         Ok(())
     }
@@ -695,6 +790,9 @@ impl PostProcessing {
         ghost_mix: f32,
         inv_proj: [[f32; 4]; 4],
         ssao_strength: f32,
+        sun_screen: [f32; 4],
+        sun_color: [f32; 4],
+        heat_source: [f32; 4],
     ) {
         let i = image_index as usize;
         let viewport = vk::Viewport {
@@ -718,11 +816,62 @@ impl PostProcessing {
                 ghost_mix: ghost_mix.clamp(0.0, 1.0),
                 ssao_strength: ssao_strength.clamp(0.0, 1.0),
                 inv_proj,
+                sun_screen,
+                sun_color,
+                heat_source,
             };
             device.cmd_push_constants(cmd, self.composite_layout,
                 vk::ShaderStageFlags::FRAGMENT, 0, bytemuck::bytes_of(&push));
             device.cmd_draw(cmd, 3, 1, 0, 0);
         }
+    }
+
+    /// Recompile the bright / blur / composite pipelines from
+    /// the on-disk shader sources and atomically swap them in.
+    /// Used by the editor hot-reload path so that edits to
+    /// `post_bright.frag`, `post_blur.frag`, `post_composite.frag`
+    /// (or the shared `post.vert`) take effect without a
+    /// process restart. The descriptor set layouts, render
+    /// passes, and push-constant ranges are unchanged, so
+    /// the existing descriptor sets and recorded command
+    /// buffers remain valid.
+    ///
+    /// Caller is responsible for ensuring the device is idle
+    /// before invoking this (the old pipelines are destroyed
+    /// in place). On compile failure the existing pipelines
+    /// are kept and an error is returned.
+    pub fn reload_pipelines(
+        &mut self,
+        device: &ash::Device,
+        shader_dir: &Path,
+    ) -> Result<()> {
+        let (new_bright, new_bright_layout) = build_post_pipeline(
+            device, self.bloom_pass, shader_dir, "post.vert", "post_bright.frag",
+            self.single_set_layout, std::mem::size_of::<BrightPush>() as u32,
+        )?;
+        let (new_blur, new_blur_layout) = build_post_pipeline(
+            device, self.bloom_pass, shader_dir, "post.vert", "post_blur.frag",
+            self.single_set_layout, std::mem::size_of::<BlurPush>() as u32,
+        )?;
+        let (new_composite, new_composite_layout) = build_post_pipeline(
+            device, self.composite_pass, shader_dir, "post.vert", "post_composite.frag",
+            self.composite_set_layout, std::mem::size_of::<CompositePush>() as u32,
+        )?;
+        unsafe {
+            device.destroy_pipeline(self.bright_pipeline, None);
+            device.destroy_pipeline_layout(self.bright_layout, None);
+            device.destroy_pipeline(self.blur_pipeline, None);
+            device.destroy_pipeline_layout(self.blur_layout, None);
+            device.destroy_pipeline(self.composite_pipeline, None);
+            device.destroy_pipeline_layout(self.composite_layout, None);
+        }
+        self.bright_pipeline = new_bright;
+        self.bright_layout = new_bright_layout;
+        self.blur_pipeline = new_blur;
+        self.blur_layout = new_blur_layout;
+        self.composite_pipeline = new_composite;
+        self.composite_layout = new_composite_layout;
+        Ok(())
     }
 
     pub fn cleanup(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -737,9 +886,11 @@ impl PostProcessing {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.single_set_layout, None);
             device.destroy_descriptor_set_layout(self.composite_set_layout, None);
+            device.destroy_descriptor_set_layout(self.translucent_set_layout, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_sampler(self.depth_sampler, None);
             device.destroy_render_pass(self.scene_pass, None);
+            device.destroy_render_pass(self.translucent_pass, None);
             device.destroy_render_pass(self.bloom_pass, None);
             device.destroy_render_pass(self.composite_pass, None);
         }
@@ -757,10 +908,31 @@ fn write_combined(
     view: vk::ImageView,
     sampler: vk::Sampler,
 ) {
+    write_combined_with_layout(device, set, binding, view, sampler,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+}
+
+/// Variant of `write_combined` that lets the caller pick the
+/// descriptor's image layout. Required for the translucent
+/// pass's depth sampler binding: while particles draw, the
+/// depth image is in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` (so the
+/// render pass can both depth-test against it AND let the
+/// shader sample it). Using `SHADER_READ_ONLY_OPTIMAL` for
+/// that binding triggers VUID-vkCmdDrawIndexed-imageLayout-00344
+/// — Vulkan requires the descriptor layout to match the image's
+/// actual layout when the descriptor is accessed.
+fn write_combined_with_layout(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    binding: u32,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+    layout: vk::ImageLayout,
+) {
     let image_info = [vk::DescriptorImageInfo::default()
         .image_view(view)
         .sampler(sampler)
-        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        .image_layout(layout)];
     let write = vk::WriteDescriptorSet::default()
         .dst_set(set)
         .dst_binding(binding)
@@ -810,7 +982,8 @@ fn create_fbs_single(
 
 fn create_scene_pass(device: &ash::Device) -> Result<vk::RenderPass> {
     let attachments = [
-        // HDR colour
+        // HDR colour. Translucent pass loads this so we hand off
+        // in COLOR_ATTACHMENT_OPTIMAL, not SHADER_READ_ONLY.
         vk::AttachmentDescription::default()
             .format(HDR_FORMAT)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -819,11 +992,14 @@ fn create_scene_pass(device: &ash::Device) -> Result<vk::RenderPass> {
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            // Hand-off to the bright-pass which samples this image.
-            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-        // Depth. Stored + transitioned to SHADER_READ_ONLY_OPTIMAL
-        // at the end of the pass so the post composite can
-        // sample it for screen-space ambient occlusion.
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        // Depth. Final layout SHADER_READ_ONLY_OPTIMAL so any
+        // pass that samples depth (translucent particles, the
+        // composite SSAO) sees a stable, sampleable layout. The
+        // translucent pass re-binds it as a read-only depth
+        // attachment (DEPTH_STENCIL_READ_ONLY_OPTIMAL via the
+        // subpass attachment ref) and transitions back at the
+        // end — no manual barrier needed.
         vk::AttachmentDescription::default()
             .format(DEPTH_FORMAT)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -884,6 +1060,100 @@ fn create_scene_pass(device: &ash::Device) -> Result<vk::RenderPass> {
                 vk::AccessFlags::COLOR_ATTACHMENT_WRITE
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             )
+            .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ),
+    ];
+    let info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(std::slice::from_ref(&subpass))
+        .dependencies(&dependencies);
+    Ok(unsafe { device.create_render_pass(&info, None)? })
+}
+
+/// Render pass for the translucent layer (ribbons + particles).
+/// Loads HDR colour from the scene pass (initial layout
+/// COLOR_ATTACHMENT_OPTIMAL) and the depth buffer in
+/// DEPTH_STENCIL_READ_ONLY_OPTIMAL — depth test still works
+/// (with `depth_write = false` baked into the particle/ribbon
+/// pipelines), AND the same depth image can be sampled
+/// simultaneously by the fragment shader for soft-particle
+/// fade. Final layouts hand off to the bright-pass + composite:
+/// HDR → SHADER_READ_ONLY_OPTIMAL, depth → SHADER_READ_ONLY_OPTIMAL
+/// (composite SSAO samples it).
+fn create_translucent_pass(device: &ash::Device) -> Result<vk::RenderPass> {
+    let attachments = [
+        vk::AttachmentDescription::default()
+            .format(HDR_FORMAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        vk::AttachmentDescription::default()
+            .format(DEPTH_FORMAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            // Scene pass left depth in SHADER_READ_ONLY_OPTIMAL
+            // so descriptors that sample it (this pass + the
+            // composite) all agree on layout. The subpass
+            // attachment reference below specifies
+            // DEPTH_STENCIL_READ_ONLY_OPTIMAL so the render pass
+            // transitions for depth-test access on entry and
+            // back to SHADER_READ_ONLY_OPTIMAL on exit.
+            .initial_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+    ];
+    let color_ref = vk::AttachmentReference {
+        attachment: 0,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    };
+    // Read-only depth attachment — pipeline state controls
+    // depth-test (enabled) and depth-write (disabled).
+    let depth_ref = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    };
+    let subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(std::slice::from_ref(&color_ref))
+        .depth_stencil_attachment(&depth_ref);
+    let dependencies = [
+        // Wait for the scene pass to finish writing colour AND
+        // for the depth-write to be visible as a sampler read.
+        vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::SHADER_READ,
+            ),
+        // Make our colour write visible to the bright-pass
+        // sampler downstream.
+        vk::SubpassDependency::default()
+            .src_subpass(0)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
             .dst_access_mask(vk::AccessFlags::SHADER_READ),
     ];

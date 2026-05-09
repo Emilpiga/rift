@@ -19,20 +19,23 @@ pub struct UniformData {
     pub fog_color: Vec4,     // xyz = fog color, w unused
     pub fog_params: Vec4,    // x = start dist, y = end dist, z = density, w unused
     pub fog_origin: Vec4,    // xyz = world-space anchor for fog distance, w unused
-    /// Point lights: [pos.xyz, radius] packed into vec4s, then [color.rgb, intensity]
-    pub point_light_pos: [Vec4; 8],   // xyz = position, w = radius
-    pub point_light_color: [Vec4; 8], // xyz = color, w = intensity
-    pub point_light_count: Vec4,      // x = count (as float), yzw unused
+    /// Point lights: [pos.xyz, radius] packed into vec4s, then [color.rgb, intensity].
+    /// Capacity is `MAX_POINT_LIGHTS = 16`, sized to comfortably fit
+    /// every torch within the fog radius (typical dungeon torch
+    /// spacing × ~24 m visibility ≈ 8–12 torches at once).
+    pub point_light_pos: [Vec4; 16],   // xyz = position, w = radius
+    pub point_light_color: [Vec4; 16], // xyz = color, w = intensity
+    pub point_light_count: Vec4,       // x = count (as float), yzw unused
     /// Directional-light view-projection matrix. Used by both the shadow
     /// pass (to project geometry) and the main pass (to sample the shadow
     /// map at each fragment's projected position).
     pub light_vp: Mat4,
     /// Per-face view-projection matrices for the point-light cube shadow
     /// atlas. Layout: `[light0 +X, -X, +Y, -Y, +Z, -Z, light1 +X, ...]`
-    /// for `MAX_POINT_SHADOWS = 4` lights = 24 matrices. Filled by
+    /// for `MAX_POINT_SHADOWS = 8` lights = 48 matrices. Filled by
     /// [`crate::renderer::shadow_point::cube_face_view_projs`] each
     /// frame for every active shadow-casting point light.
-    pub point_shadow_face_vp: [Mat4; 24],
+    pub point_shadow_face_vp: [Mat4; 48],
     /// x = number of point lights that currently have a shadow slot
     /// (0..=MAX_POINT_SHADOWS). The main fragment shader iterates over
     /// just this many entries when computing point-light occlusion.

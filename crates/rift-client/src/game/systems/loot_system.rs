@@ -27,7 +27,12 @@ pub const PICKUP_RADIUS: f32 = 1.8;
 /// character-height torsos down to tiny accessories; rescaling
 /// to a constant footprint keeps the silhouette legible at
 /// gameplay distance regardless of source size.
-pub const GROUND_MODEL_FOOTPRINT: f32 = 0.55;
+///
+/// Sized to roughly match the equipped-on-character scale —
+/// authored armour pieces are torso-sized in bind pose, so a
+/// ~0.18 m footprint reads like the same item worn rather
+/// than a giant prop on the floor.
+pub const GROUND_MODEL_FOOTPRINT: f32 = 0.18;
 
 /// Height the popped item peaks at above the spawn point
 /// during the toss phase of the drop animation.

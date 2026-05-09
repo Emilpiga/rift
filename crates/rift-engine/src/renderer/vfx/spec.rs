@@ -57,12 +57,26 @@ pub struct EffectLight {
     /// Base intensity multiplier. Combined with `intensity_curve`
     /// (if any) and `flicker_amp` to produce the per-frame value.
     pub intensity: f32,
-    /// Optional intensity envelope sampled over normalised
-    /// effect life (`elapsed / duration`). For persistent
-    /// effects (`duration == 0`) this is sampled at `t = 0`
-    /// every frame so the curve is effectively unused — set
-    /// `flicker_amp` instead to add variation.
+    /// Optional intensity envelope.
+    ///
+    /// * If `lifetime` is `Some`, this is sampled over
+    ///   `elapsed / lifetime` so the light can flash to peak
+    ///   then decay independently of the particle pool's
+    ///   lifecycle. Use this for impact bursts.
+    /// * Otherwise it's sampled over the *effect's* normalised
+    ///   life (`elapsed / effect.duration`); for persistent
+    ///   effects (`duration == 0`) the curve sits at `t = 0`.
     pub intensity_curve: Option<Curve>,
+    /// Optional independent lifetime for the light, in seconds.
+    /// When `Some(t)`, the light persists for `t` seconds
+    /// regardless of whether the effect's particle pool has
+    /// drained or whether spawning has stopped — this is what
+    /// lets an explosion's flash decay smoothly *after* the
+    /// last ember has aged out, instead of disappearing the
+    /// instant the pool empties.
+    /// When `None`, the light tracks the particle pool's
+    /// lifetime (the legacy behaviour).
+    pub lifetime: Option<f32>,
     /// Sinusoidal flicker amplitude as a fraction of intensity
     /// (`0.0 = steady`, `0.15 = ±15%`). Two octaves at slightly
     /// detuned frequencies are summed for an organic feel.
@@ -75,6 +89,36 @@ pub struct EffectLight {
     /// emitter is at the projectile's centre but you want the
     /// light slightly above it (or behind it for a trail glow).
     pub offset: Vec3,
+    /// When `true`, the light's intensity tracks the effect's
+    /// **live particle population** instead of wall-clock time.
+    /// The runtime tracks the peak particle count seen since
+    /// the effect started; intensity is then driven by
+    /// `live / peak` so the light:
+    ///
+    ///   * peaks at the impact frame when all particles have
+    ///     just spawned;
+    ///   * decays in lockstep with the impact animation as
+    ///     embers / smoke / shockwave puffs age out;
+    ///   * smoothly fades to zero as the last particles die.
+    ///
+    /// `intensity_curve` (if set) shapes the response: it is
+    /// sampled at `1 - live/peak` so `t = 0` is the peak and
+    /// `t = 1` is "all particles dead". A curve like
+    /// `[(0, 1), (1, 0)]` is the linear default; a steeper
+    /// curve makes the light fall faster than the particles.
+    ///
+    /// Mutually exclusive with `lifetime` — when this is set,
+    /// `lifetime` is ignored.
+    pub follow_particles: bool,
+    /// When `true`, this light also emits a screen-space heat-
+    /// distortion source. The composite pass picks the
+    /// strongest one each frame and applies a noise-driven
+    /// UV warp around its screen position. Use for
+    /// explosions, dragon breath, magma bursts — any source
+    /// of *transient* radiant heat. Leave `false` for ambient
+    /// scene flames (torches, hearths) so the world doesn't
+    /// shimmer permanently.
+    pub heat_haze: bool,
 }
 
 impl EffectLight {
@@ -85,9 +129,12 @@ impl EffectLight {
             radius,
             intensity,
             intensity_curve: None,
+            lifetime: None,
             flicker_amp: 0.0,
             flicker_hz: 0.0,
             offset: Vec3::ZERO,
+            follow_particles: false,
+            heat_haze: false,
         }
     }
 }
@@ -105,6 +152,19 @@ pub struct EffectBundle {
     pub effect: Effect,
     /// Dynamic point light that follows the effect's anchor.
     pub light: Option<EffectLight>,
+    /// Optional second dynamic point light anchored to the
+    /// effect's *tip* endpoint (the second endpoint passed to
+    /// `set_endpoints`). Use for channeled beams / laser
+    /// abilities so the impact end carries continuous
+    /// illumination through the channel without the gameplay
+    /// layer having to spawn and despawn a separate "tip glow"
+    /// effect. The light tracks `set_endpoints` updates each
+    /// frame, so an aim sweep paints light across the wall it's
+    /// drawn on.
+    ///
+    /// Falls back to the anchor position when the effect has
+    /// never had endpoints set.
+    pub tip_light: Option<EffectLight>,
     /// Fraction of the *anchor's* per-frame velocity inherited
     /// by every particle at spawn time. `0.0` (default) keeps
     /// the legacy behaviour: particles spawn with only the
@@ -121,6 +181,7 @@ impl From<Effect> for EffectBundle {
         Self {
             effect,
             light: None,
+            tip_light: None,
             inherit_velocity: 0.0,
         }
     }
@@ -133,6 +194,15 @@ impl EffectBundle {
 
     pub fn with_light(mut self, light: EffectLight) -> Self {
         self.light = Some(light);
+        self
+    }
+
+    /// Attach a second light fixed to the effect's tip
+    /// endpoint. Intended for ribbon-based beam effects whose
+    /// gameplay layer calls `set_endpoints(origin, tip)` each
+    /// frame.
+    pub fn with_tip_light(mut self, light: EffectLight) -> Self {
+        self.tip_light = Some(light);
         self
     }
 
@@ -213,6 +283,19 @@ pub enum SpawnShape {
     /// Cylindrical column (XZ disc + Y extent) for upward spew
     /// (loot beams, portals).
     Column { radius: f32, height: f32, axis: Vec3 },
+    /// Cone-shaped column that tapers from `radius_base` at the
+    /// bottom to `radius_top` at the top, distributed over
+    /// `height` along `axis`. Spawn density is biased toward
+    /// the base (quadratic height curve) so the lower section
+    /// reads as the "thick root" and the top melts into nothing.
+    /// Used by loot-beam style fog plumes where the silhouette
+    /// must taper rather than read as a uniform cylinder.
+    TaperedColumn {
+        radius_base: f32,
+        radius_top: f32,
+        height: f32,
+        axis: Vec3,
+    },
     /// Thin-disc ring of radius `radius` on the XZ plane —
     /// targeting reticles, ground impacts.
     Ring { radius: f32, thickness: f32 },
@@ -487,6 +570,26 @@ pub enum SpriteShape {
     /// embers, dust trails, anything that should always read
     /// as motion.
     Streak = 5,
+    /// Vertical ethereal strand — a tall, soft capsule
+    /// modulated by scrolling fBm noise. Always anisotropic
+    /// along *world up*, regardless of velocity, with a
+    /// brighter inner core that wavers organically. Designed
+    /// for Diablo-style loot beams: stack a few of these in
+    /// a thin column and they read as a single luminous
+    /// strand of rising light rather than a cloud of
+    /// individual particles. Also useful for ghostly auras,
+    /// god-rays, or any "ethereal vertical light" motif.
+    Wisp = 6,
+    /// Full-beam silk strand — a single sprite that draws
+    /// the *entire* loot-beam pillar: a soft ethereal body
+    /// plus N sharp sine-wave silk threads spiralling around
+    /// it. Always vertical (world-up oriented), always
+    /// anchored at the base, with all widths/amplitudes
+    /// tapering to pixel-width at the top so the silhouette
+    /// melts into air. Designed for ARPG loot pillars where
+    /// the beam must read as a sharp HD highlight at close
+    /// range while still feeling ethereal at distance.
+    SilkStrand = 7,
 }
 
 impl Default for SpriteShape {

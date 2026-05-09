@@ -133,7 +133,18 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         ],
         elapsed,
     );
-    renderer.vfx_system.tick(dt);
+    renderer.vfx_system.tick(
+        dt,
+        // Cull off-screen VFX past a few metres beyond the
+        // fog wall — anything farther is invisible to the
+        // player but otherwise still pays the full per-
+        // particle cost. Anchored on `fog_origin` (the
+        // player) so zooming the camera doesn't pop nearby
+        // effects in/out of simulation. The +5 m margin
+        // avoids edge flicker when an effect anchor sits
+        // right at the fog distance.
+        Some((renderer.fog_origin, renderer.fog_end + 5.0)),
+    );
     // After the simulation tick, walk every live effect with an
     // attached light and push a [`PointLight`] into the
     // renderer's per-frame list. This is what makes projectile
@@ -145,11 +156,24 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // Split borrow: the system holds a `&self` while we mutate
     // `point_lights`, so we collect into a temp and append.
     {
+        // VFX heat sources are transient — reset every frame
+        // before the system republishes them. Unlike
+        // `point_lights`, no other system writes to this vec,
+        // so we own the clear here.
+        renderer.heat_sources.clear();
+        // VFX lights live in their own dedicated pool so that
+        // ambient torches/portals/etc can't crowd them out of
+        // the per-frame UBO. The renderer packs `vfx_lights`
+        // first into both the light array and the shadow
+        // atlas, then fills the remainder from `point_lights`.
+        renderer.vfx_lights.clear();
         let mut effect_lights: Vec<rift_engine::PointLight> = Vec::new();
+        let mut heat_sources: Vec<rift_engine::HeatSource> = Vec::new();
         renderer
             .vfx_system
-            .collect_lights(elapsed, &mut effect_lights);
-        renderer.point_lights.extend(effect_lights);
+            .collect_lights(elapsed, &mut effect_lights, &mut heat_sources);
+        renderer.vfx_lights.extend(effect_lights);
+        renderer.heat_sources.extend(heat_sources);
     }
     state.player_state.abilities.tick_all(dt);
 

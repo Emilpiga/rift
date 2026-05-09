@@ -219,9 +219,13 @@ impl TorchSystem {
 
         // Number of candidates to consider; we'll rank-fade
         // anything above `RANK_FULL` and drop everything past
-        // `RANK_CAP` (the renderer's hard limit).
-        const RANK_CAP: usize = 8;
-        const RANK_FULL: usize = 6;
+        // `RANK_CAP`. Matches the renderer's
+        // `MAX_POINT_LIGHTS = 16`. VFX-driven lights live in
+        // a separate `vfx_lights` pool that's packed first,
+        // so torches no longer need to leave headroom for
+        // projectile trails.
+        const RANK_CAP: usize = 16;
+        const RANK_FULL: usize = 14;
 
         let mut scored: Vec<(f32, PointLight, f32)> = self
             .torches

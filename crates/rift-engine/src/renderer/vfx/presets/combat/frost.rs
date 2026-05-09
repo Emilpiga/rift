@@ -18,8 +18,8 @@ use crate::renderer::vfx::spec::*;
 /// (origin, tip) endpoints supplied by the gameplay layer.
 /// Duration is `0.0` (infinite); the gameplay layer despawns on
 /// channel end.
-pub fn frost_ray() -> Effect {
-    Effect {
+pub fn frost_ray() -> EffectBundle {
+    EffectBundle::new(Effect {
         duration: 0.0,
         layers: vec![
             // Hand-base swirl: continuous cyan glow + a few sharper
@@ -75,14 +75,85 @@ pub fn frost_ray() -> Effect {
                 blend: BlendMode::Additive,
             }),
         ],
-    }
+    })
+    // Cold cyan hand-glow. The beam ribbon is additive and
+    // doesn't actually illuminate world geometry, so without
+    // this light the caster's body and the floor at their
+    // feet stay completely dark while channeling — the
+    // shimmering beam reads as a sticker floating in mid-air.
+    //
+    // Driven by `follow_particles`: the hand-base swirl
+    // emits at 60/s while the channel is active, so the
+    // light envelope quickly reaches peak and stays there.
+    // The instant gameplay calls `despawn` on channel end,
+    // emission stops, the envelope's exponential decay
+    // takes over (~0.85 s half-life) and the corridor glow
+    // softly fades — same mechanism as the fireball trail.
+    //
+    // No `intensity_curve` set: the runtime maps the
+    // envelope directly to `curve_mul`, so brightness
+    // tracks the swirl population 1:1.
+    .with_light(EffectLight {
+        // Cool cyan-white. Slightly biased toward white at
+        // the centre so up-close walls read as "frozen mist
+        // condensing" rather than a flat blue spotlight.
+        color: Vec3::new(1.6, 2.6, 3.6),
+        // 4 m reach: enough that the floor under the caster
+        // and the closest wall pick it up, short enough that
+        // it doesn't fight nearby torches at corridor scale.
+        radius: 4.0,
+        intensity: 1.4,
+        intensity_curve: None,
+        lifetime: None,
+        // Subtle, fast modulation. Frost Ray is a *focused*
+        // beam, not a flickering torch — keep amplitude
+        // small (3%) and the rate high enough (12 Hz) that
+        // it reads as energy crackle, not a dying flame.
+        flicker_amp: 0.03,
+        flicker_hz: 12.0,
+        // Lift slightly off the hand so the light's centre
+        // sits roughly inside the wrist/forearm region
+        // rather than at the palm, giving a more even rim
+        // across the caster's mesh.
+        offset: Vec3::new(0.0, 0.15, 0.0),
+        follow_particles: true,
+        heat_haze: false,
+    })
+    // Persistent tip light pinned to the beam's *tip*
+    // endpoint by the engine. Without this the only
+    // illumination at the impact end is the per-burst
+    // `frost_impact` flashes, which fire at 10 Hz and have
+    // ~0.45 s pool lives — perceptually they read as a
+    // strobing light, not a continuous source. The tip
+    // light bridges the gaps so the floor/wall/pierced
+    // enemies stay lit while the channel is active.
+    //
+    // Color/radius mirror the per-burst flash so the steady
+    // glow and the pulses sum cleanly when both fire on
+    // the same frame.
+    .with_tip_light(EffectLight {
+        color: Vec3::new(1.8, 3.0, 4.2),
+        radius: 3.5,
+        intensity: 1.5,
+        intensity_curve: None,
+        lifetime: None,
+        flicker_amp: 0.04,
+        flicker_hz: 14.0,
+        offset: Vec3::ZERO,
+        // Driven by the same hand-base swirl population as
+        // the anchor light — channel active means swirl
+        // emitting means envelope at peak. On `despawn` the
+        // exponential decay fades both lights together.
+        follow_particles: true,
+        heat_haze: false,
+    })
 }
 
 /// Frost-impact burst at the tip of a Frost Ray (or where a
 /// piercing beam crosses a target). Cold blue puff plus a few
 /// sharp shards.
-pub fn frost_impact() -> Effect {
-    Effect {
+pub fn frost_impact() -> EffectBundle {
+    EffectBundle::new(Effect {
         duration: 0.05,
         layers: vec![
             // Soft cold puff
@@ -118,5 +189,5 @@ pub fn frost_impact() -> Effect {
                 opacity: 1.0,
             }),
         ],
-    }
+    })
 }

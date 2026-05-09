@@ -35,14 +35,21 @@ use crate::vulkan::pipeline as pipe;
 /// Maximum number of simultaneous shadow-casting point lights. The atlas
 /// allocates `6 * MAX_POINT_SHADOWS` cube-face layers, so increasing this
 /// scales memory and worst-case render cost linearly. At 512² R32 + D32,
-/// 4 lights uses ~24 MiB color + 1 MiB depth.
-pub const MAX_POINT_SHADOWS: usize = 4;
+/// 8 lights uses ~48 MiB color + 1 MiB depth.
+///
+/// Sized to comfortably fit every torch within the typical dungeon
+/// fog radius (~24 m × ~6 m torch spacing). Below this number the
+/// closest-N selection in the renderer would otherwise pop shadows on
+/// and off as the player walks past sconces.
+pub const MAX_POINT_SHADOWS: usize = 8;
 
-/// Per-face resolution of the cube atlas. 512² is a deliberate balance:
-/// large enough that a torch's contact shadows on a 5 m wall still read
-/// crisply (each texel covers ~1 cm at 5 m with the 90° per-face FoV),
-/// but small enough that 24 layers fit in ~24 MiB.
-pub const POINT_SHADOW_SIZE: u32 = 512;
+/// Per-face resolution of the cube atlas. 1024² gives crisp contact
+/// shadows up close: each texel covers ~5 mm at 5 m with the 90°
+/// per-face FoV, so the shadow-map texel grid is no longer visible
+/// as pixelation when the player walks right up to a torch-lit
+/// wall. Memory cost: 8 lights × 6 faces × 1024² × 4 bytes ≈
+/// 192 MiB color + 4 MiB depth — acceptable on any GPU we ship to.
+pub const POINT_SHADOW_SIZE: u32 = 1024;
 
 /// Color attachment format. R32_SFLOAT gives floating-point precision
 /// for normalized distances and is universally supported as a color

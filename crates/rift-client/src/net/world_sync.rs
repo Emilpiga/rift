@@ -536,7 +536,32 @@ impl NetClient {
             if let Some(visual) = self.projectile_render.remove(&net_id) {
                 // Stored at spawn, so no per-ability branch here.
                 let burst = rift_engine::combat::effect_for_vfx(visual.impact);
-                renderer.vfx_system.spawn_bundle(burst, visual.render_pos);
+                // Pull the burst back along the last known
+                // travel direction so it sits *in front of*
+                // the wall it just hit instead of buried
+                // inside the geometry. The client has been
+                // dead-reckoning `render_pos` forward at the
+                // snapshot velocity every frame; on a wall
+                // collision the server simply stops including
+                // the projectile, and the last extrapolated
+                // position is therefore typically a half-frame
+                // past the contact surface. Without this nudge
+                // the entire fireball — light, smoke, ember
+                // shockwave — drowns inside the wall and reads
+                // as "the projectile vanished".
+                let speed = visual.anchor_vel.length();
+                let impact_pos = if speed > 1e-3 {
+                    let dir = visual.anchor_vel / speed;
+                    // ~0.6 m back-off: enough to clear common
+                    // wall thicknesses and the projectile's own
+                    // mesh radius, small enough that the player
+                    // still reads it as a wall hit and not a
+                    // mid-air detonation.
+                    visual.render_pos - dir * 0.6
+                } else {
+                    visual.render_pos
+                };
+                renderer.vfx_system.spawn_bundle(burst, impact_pos);
             }
         }
 

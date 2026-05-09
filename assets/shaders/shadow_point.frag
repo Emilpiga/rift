@@ -19,11 +19,11 @@ layout(set = 0, binding = 0) uniform UniformData {
     vec4 fogColor;
     vec4 fogParams;
     vec4 fogOrigin;
-    vec4 pointLightPos[8];   // xyz = position, w = radius
-    vec4 pointLightColor[8];
+    vec4 pointLightPos[16];   // xyz = position, w = radius
+    vec4 pointLightColor[16];
     vec4 pointLightCount;
     mat4 lightVP;
-    mat4 pointShadowFaceVP[24];
+    mat4 pointShadowFaceVP[48];
     vec4 pointShadowMeta;
 } ubo;
 

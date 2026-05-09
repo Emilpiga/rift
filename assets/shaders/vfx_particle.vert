@@ -33,9 +33,22 @@ layout(binding = 0) uniform UniformData {
     vec4 fogColor;
     vec4 fogParams;        // x = fog start, y = fog end
     vec4 fogOrigin;
-    vec4 pointLightPos[8];
-    vec4 pointLightColor[8];
+    vec4 pointLightPos[16];
+    vec4 pointLightColor[16];
     vec4 pointLightCount;
+    // The world shader's UBO continues with shadow matrices and
+    // metadata before reaching `timeData`. The particle shader
+    // doesn't sample shadow maps, but the UBO block is bound by
+    // descriptor index — we need to mirror the std140 layout up
+    // to and including `timeData` so byte offsets line up.
+    mat4 lightVP;
+    mat4 pointShadowFaceVP[48];
+    vec4 pointShadowMeta;
+    /// x = seconds since renderer start. Drives flow-map UV
+    /// scrolling and temporal noise modulation in the fragment
+    /// shader so smoke / streaks read as actively flowing
+    /// instead of static patterns.
+    vec4 timeData;
 } ubo;
 
 // Per-vertex quad corner (binding 0).
@@ -97,13 +110,95 @@ void main() {
     stretchAmount *= smoothstep(0.30, 1.20, speed);
     vec2 stretchDir = (speed > 1e-4) ? velScreen / speed : vec2(0.0);
 
+    // ---- Wisp / SilkStrand: cylindrical billboard ----
+    // The `Wisp` sprite (id 6) and `SilkStrand` sprite (id 7)
+    // are vertical-fixed pillars. Earlier we projected
+    // world-up into the camera's tangent plane and used the
+    // 2D screen-space stretch path, but that collapses the
+    // beam when the camera looks straight down (world-up
+    // projects to near-zero screen length and the pillar
+    // "lays down").
+    //
+    // Instead, build a true cylindrical billboard in 3D:
+    //   * vertical axis  = world-up (always)
+    //   * horizontal axis = camera-right projected onto the
+    //     plane perpendicular to world-up, then re-normalised
+    // The quad rotates around the vertical axis to face the
+    // camera horizontally, but its "up" never tilts. This
+    // matches god-ray / loot-beam billboards in standard
+    // engines and survives any camera elevation.
+    //
+    // We assemble the 3D world position here directly and
+    // skip the generic 2D corner-stretch path below by
+    // returning early at the end.
+    uint spriteId = floatBitsToUint(inMisc.y);
+    if (spriteId == 6u || spriteId == 7u) {
+        const vec3 worldUp = vec3(0.0, 1.0, 0.0);
+
+        // Horizontal billboard axis: camera-right with the
+        // vertical component projected out. Falls back to
+        // world-X if the camera is exactly aligned with up
+        // (degenerate but possible at gimbal extremes).
+        vec3 hAxis = camRight - worldUp * dot(camRight, worldUp);
+        float hLen = length(hAxis);
+        hAxis = (hLen > 1e-4) ? hAxis / hLen : vec3(1.0, 0.0, 0.0);
+
+        // Stretch differs by sprite — SilkStrand carries the
+        // entire beam in one billboard, Wisp is layered.
+        float stretch = (spriteId == 7u) ? 14.0 : 3.0;
+        float vSize = size * (1.0 + stretch);
+        // SilkStrand widens its billboard 2.5× so the
+        // fragment shader has room to draw the broad
+        // low-alpha fog shell that wraps the bright core.
+        // The fragment shader rescales its `t` coordinate to
+        // keep the core/threads at their original width.
+        float hSize = (spriteId == 7u) ? size * 2.5 : size;
+
+        // Anchor the beam at the particle's world position
+        // and grow upward only — the visible content lives in
+        // the upper half of the SilkStrand sprite anyway, so
+        // building the billboard symmetrically would waste
+        // half the quad height. Shifting the centre up by
+        // 0.5 * vSize puts the bottom edge at the anchor.
+        vec3 worldPos = worldCentre
+            + hAxis    * inCorner.x * hSize
+            + worldUp  * (inCorner.y + 0.5) * vSize;
+
+        gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+
+        // Per-pixel passthrough — same as the generic path.
+        float fogStart = ubo.fogParams.x;
+        float fogEnd   = ubo.fogParams.y;
+        float fogDist  = length(ubo.fogOrigin.xyz - worldCentre);
+        float fogRaw   = clamp((fogDist - fogStart) / max(fogEnd - fogStart, 1e-3),
+                               0.0, 1.0);
+        vFogFactor = fogRaw * fogRaw;
+
+        float camDist = length(ubo.cameraPos.xyz - worldCentre);
+        vDistDim = mix(0.55, 1.0, smoothstep(0.4, 1.5, camDist));
+
+        vColor      = inColor;
+        vUv         = inCorner + 0.5;
+        vSprite     = spriteId;
+        vSeed       = inMisc.x;
+        // Encode stretch direction in UV-space (y-up) for
+        // the fragment shader. Constant per-vertex; the
+        // fragment shader expects this in the same UV basis
+        // it samples vUv in. Length encodes the stretch the
+        // fragment uses to decide along/across geometry.
+        vStretchDir = vec2(0.0, 1.0) * stretch;
+        return;
+    }
+
     // Decompose the corner into "along stretch" + "across".
     // The along-stretch component scales by (1 + stretch); the
     // across-stretch component stays at 1×, so the billboard
     // becomes an oriented ellipse. When stretchAmount is zero
-    // this collapses back to the original square.
+    // this collapses back to the original square. Wisps go
+    // through this path even at zero velocity because the
+    // override above sets `stretchAmount` independently.
     vec2 corner = inCorner;
-    if (speed > 1e-4) {
+    if (stretchAmount > 1e-4) {
         vec2 along  = stretchDir;
         vec2 across = vec2(-stretchDir.y, stretchDir.x);
         float a = dot(corner, along);

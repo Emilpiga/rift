@@ -316,19 +316,38 @@ pub fn fireball_trail() -> EffectBundle {
     // behind the projectile.
     .with_inherit_velocity(0.78)
     // Crimson-orange point light following the projectile.
-    // The intensity is gently flickered so the corridor
-    // lighting reads as a live flame rather than a fixed
-    // spotlight. Radius 5 m means the player sees walls and
-    // enemies catch the warm spill before the fireball arrives,
-    // a tell that an attack is incoming.
+    // Softly modulated (low-amplitude, low-frequency flicker)
+    // so the corridor lighting reads as a live flame rather
+    // than a fixed spotlight, but never dips noticeably. The
+    // light has no `lifetime` set: it tracks the trail's
+    // particle pool, so when the projectile detonates and the
+    // trail is `despawn`ed, the light naturally fades out as
+    // the last embers age out. The bright impact light belongs
+    // to `fireball_explosion`, which spawns at the same world
+    // point at detonation and overlaps cleanly.
     .with_light(EffectLight {
         color: Vec3::new(3.6, 1.2, 0.30),
-        radius: 5.0,
-        intensity: 2.6,
+        radius: 5.5,
+        intensity: 2.8,
         intensity_curve: None,
-        flicker_amp: 0.18,
-        flicker_hz: 11.0,
+        lifetime: None,
+        flicker_amp: 0.06,
+        flicker_hz: 4.0,
         offset: Vec3::ZERO,
+        // Track the live ember population. While the
+        // projectile is in flight the trail spawns
+        // continuously and the envelope sits at peak, so the
+        // light reads as a steady comet glow. The instant
+        // the trail is `despawn`ed (on impact / expiry /
+        // wall collision) `inst.spawning` flips false and
+        // the runtime's exponential envelope decay (~0.85 s
+        // half-life) takes over — the corridor glow softly
+        // fades out instead of cutting off the moment the
+        // last continuously-spawned ember dies. Without
+        // this, the light went from full intensity to zero
+        // in a single frame and read as a hard pop.
+        follow_particles: true,
+        heat_haze: false,
     })
 }
 
@@ -338,23 +357,22 @@ pub fn fireball_trail() -> EffectBundle {
 ///
 ///   1. **White-hot flash** — instantaneous bright nucleus,
 ///      drives the eye to the impact point.
-///   2. **Outward fireball cloud** — many small `Smoke` sprites
-///      with noise-eroded silhouettes, packed together so
-///      individual sprites blend into one organic shape rather
-///      than reading as a grid of squares. Per-particle
-///      rotation (handled in the vertex shader) prevents
-///      visual repetition between adjacent puffs.
-///   3. **Hot ember sparks** — `Streak`-mode sparks fired
-///      radially with real gravity, the new motion-streak
-///      sprite producing oriented motion lines instead of
-///      static crosses.
-///   4. **Shockwave ring** on the ground.
-///   5. **Attached point light** — a brief intense flash that
-///      decays over the 0.5 s explosion lifetime, lighting
-///      walls and enemies for the duration of the burst.
-///
-/// The whole effect self-terminates after ~0.65 s once every
-/// layer's particles have aged out.
+///   2. **Hot core plasma** — densely-packed `SoftGlow` puffs
+///      with curl-noise turbulence, so the core *swirls*
+///      instead of just expanding radially.
+///   3. **Outer fireball cloud** — many small `Smoke` sprites
+///      with noise-eroded silhouettes and curl-driven motion,
+///      packed together so individual sprites blend into one
+///      organic shape rather than reading as a grid of
+///      squares.
+///   4. **Hot ember sparks** — `Streak`-mode sparks fired
+///      radially with real gravity.
+///   5. **Shockwave ring** on the ground.
+///   6. **Attached point light** with its own lifetime curve:
+///      ramp up to peak in 30 ms, hold briefly, decay over
+///      ~600 ms. The light persists past the particle pool so
+///      the explosion's afterglow reads cleanly even after
+///      the visible fire has dissipated.
 pub fn fireball_explosion() -> EffectBundle {
     EffectBundle::new(Effect {
         duration: 0.05,
@@ -381,28 +399,34 @@ pub fn fireball_explosion() -> EffectBundle {
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
-            // 2. Bright fireball plasma — a tight ball of
-            //    SoftGlow puffs that cluster around the impact
-            //    point. Reads as the *core* of the fireball.
-            //    Smaller than before so individual sprites
-            //    don't read as squares; more numerous so they
-            //    blend into a single mass.
+            // 2. Hot core plasma — a tight ball of SoftGlow
+            //    puffs that swirl around the impact point via
+            //    curl-noise. Reads as the *roiling core* of
+            //    the fireball, not a static cluster.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Burst { count: 28 },
+                emission: EmissionMode::Burst { count: 32 },
                 speed: (1.5, 4.5),
-                lifetime: (0.25, 0.45),
+                lifetime: (0.30, 0.55),
                 forces: vec![
-                    ForceField::Drag { coefficient: 4.5 },
+                    ForceField::Drag { coefficient: 4.0 },
                     ForceField::Gravity {
                         axis: Vec3::Y,
                         strength: 3.0,
                     },
+                    // Internal turbulence: smooth divergence-
+                    // driven motion that makes each puff
+                    // wander instead of moving on a straight
+                    // line. Cheap (5 hashes/particle/tick).
+                    ForceField::Curl {
+                        frequency: 0.9,
+                        strength: 14.0,
+                    },
                 ],
                 size: Curve::from_stops([
                     (0.00, 0.30),
-                    (0.30, 0.55),
-                    (1.00, 0.12),
+                    (0.30, 0.60),
+                    (1.00, 0.14),
                 ]),
                 color: Gradient::from_stops([
                     (0.00, [5.5, 3.4, 1.0, 1.0]),
@@ -413,35 +437,37 @@ pub fn fireball_explosion() -> EffectBundle {
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
-            // 3. Outer fireball cloud — the bulky smoke-and-
-            //    fire body. Uses the noise-eroded `Smoke`
-            //    sprite so silhouettes never repeat, with a
-            //    very warm gradient so it reads as the burning
-            //    body of the explosion rather than residue
-            //    smoke. Many small puffs > a few big ones —
-            //    fixes the "spawning squares" tell the user
-            //    flagged.
+            // 3. Outer fireball cloud — bulky smoke-and-fire
+            //    body. Many small puffs with curl-driven
+            //    motion + noise-eroded silhouettes (the new
+            //    3-octave Smoke sprite) so the cloud reads as
+            //    a single organic mass instead of a grid of
+            //    squares.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Burst { count: 48 },
+                emission: EmissionMode::Burst { count: 56 },
                 speed: (3.5, 8.5),
-                lifetime: (0.35, 0.65),
+                lifetime: (0.45, 0.80),
                 forces: vec![
-                    ForceField::Drag { coefficient: 3.2 },
+                    ForceField::Drag { coefficient: 2.8 },
                     ForceField::Gravity {
                         axis: Vec3::Y,
-                        strength: 2.0,
+                        strength: 1.8,
+                    },
+                    ForceField::Curl {
+                        frequency: 0.6,
+                        strength: 8.0,
                     },
                 ],
                 size: Curve::from_stops([
-                    (0.00, 0.35),
-                    (0.40, 0.70),
-                    (1.00, 0.95),
+                    (0.00, 0.32),
+                    (0.40, 0.75),
+                    (1.00, 1.05),
                 ]),
                 color: Gradient::from_stops([
-                    (0.00, [4.0, 2.0, 0.55, 0.90]),
-                    (0.40, [1.6, 0.55, 0.18, 0.65]),
-                    (0.80, [0.45, 0.20, 0.10, 0.35]),
+                    (0.00, [4.0, 2.0, 0.55, 0.92]),
+                    (0.30, [2.2, 0.85, 0.25, 0.78]),
+                    (0.70, [0.55, 0.22, 0.10, 0.40]),
                     (1.00, [0.10, 0.07, 0.06, 0.0]),
                 ]),
                 sprite: SpriteShape::Smoke,
@@ -449,14 +475,14 @@ pub fn fireball_explosion() -> EffectBundle {
                 opacity: 1.0,
             }),
             // 4. Hot embers — fast radial streaks with gravity.
-            //    The new `Streak` sprite + screen-space stretch
-            //    in the vertex shader makes each spark read as
-            //    a real motion line, not a dot.
+            //    The `Streak` sprite + screen-space stretch in
+            //    the vertex shader makes each spark read as a
+            //    real motion line, not a dot.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Burst { count: 36 },
-                speed: (6.0, 12.0),
-                lifetime: (0.30, 0.55),
+                emission: EmissionMode::Burst { count: 40 },
+                speed: (6.0, 13.0),
+                lifetime: (0.35, 0.65),
                 forces: vec![
                     ForceField::Drag { coefficient: 1.0 },
                     ForceField::Gravity {
@@ -465,7 +491,7 @@ pub fn fireball_explosion() -> EffectBundle {
                     },
                 ],
                 size: Curve::from_stops([
-                    (0.00, 0.12),
+                    (0.00, 0.13),
                     (1.00, 0.0),
                 ]),
                 color: Gradient::from_stops([
@@ -478,21 +504,21 @@ pub fn fireball_explosion() -> EffectBundle {
                 opacity: 1.0,
             }),
             // 5. Shockwave ring — flat ring on the ground that
-            //    expands and fades. The single Ring sprite gets
-            //    a rim highlight in the new fragment shader so
-            //    the leading edge reads as an antialiased band.
+            //    expands and fades. The Ring sprite gets a rim
+            //    highlight in the fragment shader so the
+            //    leading edge reads as an antialiased band.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 1 },
                 speed: (0.0, 0.0),
-                lifetime: (0.30, 0.30),
+                lifetime: (0.35, 0.35),
                 forces: vec![],
                 size: Curve::from_stops([
                     (0.00, 0.40),
-                    (1.00, 3.40),
+                    (1.00, 3.60),
                 ]),
                 color: Gradient::from_stops([
-                    (0.00, [3.5, 2.0, 0.5, 0.9]),
+                    (0.00, [3.8, 2.2, 0.6, 0.95]),
                     (1.00, [0.6, 0.20, 0.05, 0.0]),
                 ]),
                 sprite: SpriteShape::Ring,
@@ -501,22 +527,45 @@ pub fn fireball_explosion() -> EffectBundle {
             }),
         ],
     })
-    // Bright initial flash decaying over the explosion's life.
-    // The intensity curve is sampled over `elapsed / duration`
-    // — but `duration` here is the *spawning* duration (0.05s),
-    // so the curve effectively pegs at t=1 immediately. We
-    // instead lean on a flat intensity + the natural lifetime
-    // of the longest-lived particles to hold the flash for
-    // ~0.5 s, then the slot self-frees. To get a proper decay
-    // we would need a separate light-only duration, but for
-    // now: bright base + 25 Hz nervous flicker for liveliness.
+    // Impact light driven by `follow_particles`: intensity
+    // tracks the effect's live-particle population, so the
+    // light is at peak the instant the impact has spawned all
+    // its embers, smoke and shockwave puffs, then decays in
+    // exact lockstep with the impact animation as those
+    // particles age out. No hand-tuned wall-clock lifetime —
+    // if you tweak particle counts or layer lifetimes the
+    // light automatically follows.
+    //
+    // The curve shapes the response: the population drain is
+    // roughly linear (oldest particles spawn first / die
+    // first), but the eye perceives light brightness
+    // non-linearly. A curve that's nearly flat near `t = 0`
+    // (the peak) and accelerates toward `t = 1` (all dead)
+    // gives the "BANG! ... afterglow ... fade" pulse shape
+    // that reads as a real explosion.
     .with_light(EffectLight {
-        color: Vec3::new(5.0, 2.4, 0.7),
-        radius: 8.0,
-        intensity: 5.0,
-        intensity_curve: None,
-        flicker_amp: 0.20,
-        flicker_hz: 22.0,
+        color: Vec3::new(5.2, 2.6, 0.85),
+        radius: 9.0,
+        intensity: 1.2,
+        intensity_curve: Some(Curve::from_stops([
+            (0.00, 1.00),  // peak — all particles freshly spawned
+            (0.10, 0.92),  // brief sustain as the densest core fires
+            (0.25, 0.70),  // initial cooling
+            (0.45, 0.42),
+            (0.65, 0.20),
+            (0.82, 0.07),
+            (0.95, 0.015),
+            (1.00, 0.00),  // last particle dies
+        ])),
+        lifetime: None,
+        flicker_amp: 0.08,
+        flicker_hz: 24.0,
         offset: Vec3::new(0.0, 0.4, 0.0),
+        follow_particles: true,
+        // Heat-haze opt-in is wired through the engine but
+        // disabled — the warp didn't read as "radiant heat",
+        // it read as "the screen broke". Leave the plumbing
+        // in place for future tuning.
+        heat_haze: false,
     })
 }

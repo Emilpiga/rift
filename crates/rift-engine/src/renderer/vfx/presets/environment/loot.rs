@@ -8,41 +8,127 @@ use crate::renderer::vfx::spec::*;
 /// Rarity-tinted column rising from the drop point. Persistent
 /// (`duration = 0.0`); the gameplay layer despawns the effect
 /// when the loot is picked up.
+///
+/// Visual recipe — sharp HD silk pillar:
+///
+///   * Layer 1 (ground halo): wide low-opacity SoftGlow at
+///     ankle height — bleeds rarity colour into surrounding
+///     air so the beam doesn't sit on the world like a decal.
+///   * Layer 2 (silk pillar): two or three overlapping
+///     `SilkStrand` particles. The sprite is the entire
+///     beam: a soft ethereal central body plus 5 sharp
+///     sine-wave silk threads spiralling around it, all
+///     tapering to pixel-width at the top and melting into
+///     air. Per-particle seed offsets the thread phases so
+///     overlapping particles produce a richer, less
+///     repeating swirl.
+///   * Layer 3 (tinting motes): sparse rising sparks for
+///     life and rarity-colour readability at distance.
 pub fn loot_beam(color: [f32; 3]) -> Effect {
     Effect {
         duration: 0.0,
-        layers: vec![Layer::Particles(ParticleSpec {
-            spawn: SpawnShape::Column {
-                radius: 0.08,
-                height: 0.0,
-                axis: Vec3::Y,
-            },
-            emission: EmissionMode::BurstAndContinuous {
-                burst: 32,
-                rate: 150.0,
-            },
-            speed: (2.5, 5.0),
-            lifetime: (0.8, 2.0),
-            forces: vec![
-                ForceField::Gravity {
+        layers: vec![
+            // ---- Ground halo ----
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Column {
+                    radius: 0.45,
+                    height: 0.35,
                     axis: Vec3::Y,
-                    strength: 3.5, // upward pull
                 },
-                ForceField::Drag { coefficient: 0.8 },
-                ForceField::Orbit {
+                emission: EmissionMode::BurstAndContinuous {
+                    burst: 5,
+                    rate: 3.0,
+                },
+                speed: (0.0, 0.10),
+                lifetime: (1.8, 3.0),
+                forces: vec![ForceField::Drag { coefficient: 2.0 }],
+                size: Curve::from_stops([
+                    (0.0, 0.55),
+                    (0.5, 0.70),
+                    (1.0, 0.55),
+                ]),
+                color: Gradient::from_stops([
+                    (0.0, [color[0] * 1.1, color[1] * 1.1, color[2] * 1.1, 0.0]),
+                    (0.3, [color[0] * 1.2, color[1] * 1.2, color[2] * 1.2, 0.14]),
+                    (0.7, [color[0] * 1.1, color[1] * 1.1, color[2] * 1.1, 0.14]),
+                    (1.0, [color[0] * 0.8, color[1] * 0.8, color[2] * 0.8, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 0.30,
+            }),
+            // ---- Silk pillar ----
+            // The sprite IS the beam. We spawn 2-3 overlapping
+            // SilkStrand particles so different seed offsets
+            // produce different thread phases — the visible
+            // swirl combines all of them and reads as a
+            // dense, evolving silk braid rather than a single
+            // repeating sine pattern.
+            //
+            // Sized to give a tall visible pillar:
+            // size 0.65 × (1 + stretch 8) = 5.85 m billboard,
+            // anchored at base — visible beam rises ~5.5 m.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::BurstAndContinuous {
+                    // Two concurrent overlapping pillars,
+                    // refreshed slowly with cross-fade.
+                    burst: 2,
+                    rate: 1.0,
+                },
+                speed: (0.0, 0.0),
+                lifetime: (2.5, 2.5),
+                forces: vec![],
+                // Constant size — the sprite handles all the
+                // visual taper internally.
+                size: Curve::from_stops([(0.0, 0.65), (1.0, 0.65)]),
+                // Cross-fade in/out so the periodic respawn
+                // is invisible. Subtle pre-mul — the beam
+                // should feel ethereal, not laser-bright.
+                color: Gradient::from_stops([
+                    (0.00, [color[0] * 1.1, color[1] * 1.1, color[2] * 1.1, 0.0]),
+                    (0.20, [color[0] * 1.4, color[1] * 1.4, color[2] * 1.4, 0.55]),
+                    (0.80, [color[0] * 1.3, color[1] * 1.3, color[2] * 1.3, 0.55]),
+                    (1.00, [color[0] * 0.9, color[1] * 0.9, color[2] * 0.9, 0.0]),
+                ]),
+                sprite: SpriteShape::SilkStrand,
+                blend: BlendMode::Additive,
+                opacity: 0.55,
+            }),
+            // ---- Tinting motes ----
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Column {
+                    radius: 0.05,
+                    height: 0.15,
                     axis: Vec3::Y,
-                    speed: 5.0,
                 },
-            ],
-            size: Curve::from_stops([(0.0, 0.05), (1.0, 0.02)]),
-            color: Gradient::from_stops([
-                (0.0, [color[0] * 1.8, color[1] * 1.8, color[2] * 1.8, 1.0]),
-                (1.0, [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.0]),
-            ]),
-            sprite: SpriteShape::Spark,
-            blend: BlendMode::Additive,
-            opacity: 1.0,
-        })],
+                emission: EmissionMode::BurstAndContinuous {
+                    burst: 2,
+                    rate: 8.0,
+                },
+                speed: (1.0, 1.8),
+                lifetime: (0.9, 1.6),
+                forces: vec![
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 1.6,
+                    },
+                    ForceField::Drag { coefficient: 1.2 },
+                    ForceField::Orbit {
+                        axis: Vec3::Y,
+                        speed: 1.6,
+                    },
+                ],
+                size: Curve::from_stops([(0.0, 0.04), (1.0, 0.015)]),
+                color: Gradient::from_stops([
+                    (0.0, [color[0] * 1.8, color[1] * 1.8, color[2] * 1.8, 1.0]),
+                    (1.0, [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.0]),
+                ]),
+                sprite: SpriteShape::Spark,
+                blend: BlendMode::Additive,
+                opacity: 0.5,
+            }),
+        ],
     }
 }
 

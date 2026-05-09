@@ -35,7 +35,7 @@ pub fn effect_for_vfx(kind: VfxKind) -> EffectBundle {
         VfxKind::FireballImpact => vfx_presets::fireball_explosion(),
         VfxKind::ArcaneBoltTrail => vfx_presets::arcane_bolt_trail().into(),
         VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact().into(),
-        VfxKind::FrostRay => vfx_presets::frost_ray().into(),
+        VfxKind::FrostRay => vfx_presets::frost_ray(),
         VfxKind::FireWave => vfx_presets::fire_wave().into(),
         VfxKind::HealBurst => vfx_presets::heal_burst().into(),
         VfxKind::HealOverTimeAura => vfx_presets::heal_over_time_aura().into(),

@@ -9,15 +9,15 @@ layout(binding = 0) uniform UniformData {
     vec4 fogColor;
     vec4 fogParams; // x = start, y = end
     vec4 fogOrigin; // xyz = world-space anchor (player) for fog distance
-    vec4 pointLightPos[8];   // xyz = position, w = radius
-    vec4 pointLightColor[8]; // xyz = color, w = intensity
+    vec4 pointLightPos[16];   // xyz = position, w = radius
+    vec4 pointLightColor[16]; // xyz = color, w = intensity
     vec4 pointLightCount;    // x = count
     mat4 lightVP;            // directional light view-projection (for shadow map)
     // Per-face VPs for the cube shadow atlas. Unused by the main pass
     // (only the shadow_point pipeline reads them) but must be present
     // here so the UBO layout matches across all pipelines that bind
     // descriptor set 0.
-    mat4 pointShadowFaceVP[24];
+    mat4 pointShadowFaceVP[48];
     // x = active point-shadow caster count (0..=4). The point-light
     // loop below uses this to decide which point lights have a cube
     // atlas slot (and so should be sampled for occlusion) vs. which
@@ -748,13 +748,16 @@ float sampleShadow(vec3 N, vec3 L) {
     vec3 lightNDC = lightClip.xyz / max(lightClip.w, 1e-5);
     vec3 shadowUV = vec3(lightNDC.xy * 0.5 + 0.5, lightNDC.z);
 
-    // Slope-scaled depth bias. Surfaces near-perpendicular to the
-    // light need almost no bias; grazing surfaces need a lot to
-    // avoid shadow acne. The constant tail is the absolute floor
-    // — small enough that contact shadows on the ground stay
-    // tight against their casters.
+    // Slope-scaled depth bias. Kept very small so the contact
+    // shadow stays glued to its caster — too much bias here
+    // peels the umbra away from the silhouette and the wide
+    // PCF kernel reads as a detached penumbra halo around
+    // the now-lifted contact line. The constant floor is
+    // intentionally near-zero; the slope-scaled term plus the
+    // sampler2DShadow's hardware PCF give us all the acne
+    // protection we need on the actual surfaces.
     float NdotL = max(dot(N, L), 0.0);
-    float bias = max(0.0010 * (1.0 - NdotL), 0.00012);
+    float bias = max(0.00035 * (1.0 - NdotL), 0.00004);
     shadowUV.z -= bias;
 
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
@@ -810,35 +813,55 @@ float sampleShadow(vec3 N, vec3 L) {
     float grazing     = 1.0 - clamp(NdotL, 0.0, 1.0);
     float depthFactor = smoothstep(0.05, 0.95, clamp(shadowUV.z, 0.0, 1.0));
 
-    // Sharp ~1.8 texels close to camera, soft ~6.5 texels at
-    // the far edge of the playable area. The grazing and depth
-    // multipliers can push it further on oblique surfaces.
-    float kernelScale = mix(1.8, 6.5, distFactor)
-                      * (1.0 + grazing * 0.55)
-                      * (0.85 + depthFactor * 0.45);
-    vec2 kernel = texelSize * kernelScale;
-
-    float s = 0.0;
-    for (int i = 0; i < 12; i++) {
-        vec2 offset = POISSON_DISK[i] * kernel;
-        s += texture(shadowMap, vec3(shadowUV.xy + offset, shadowUV.z));
+    // ----- Sharp-near, soft-far -----
+    // The classic "detached halo" around a cast shadow is the
+    // PCF kernel itself: with 12 taps spanning ~1 texel, each
+    // tap that lands outside the silhouette votes "lit" but
+    // the average reads as a soft 1-texel fringe ring. To kill
+    // that fringe we use a *single* hardware-PCF tap for the
+    // foreground (no kernel = no fringe), and only blend in
+    // the multi-tap soft penumbra at the fog edge where the
+    // shadow map's sampling density is lowest and a soft
+    // edge actually helps hide undersampling artefacts.
+    //
+    // Even the single-tap result needs help: hardware PCF on
+    // a sampler2DShadow runs a 2×2 bilinear comparison, which
+    // returns one of {0, 0.25, 0.5, 0.75, 1.0}. Those five
+    // discrete levels read as 2–3 concentric rings around
+    // the umbra ("gradationally softer outlines from the
+    // inner shadow"). We dither the sample position by a
+    // half-texel of screen-space hash noise so the boundary
+    // becomes stochastic instead of stepped — perceptually
+    // a clean continuous edge.
+    vec2 hashSeed = gl_FragCoord.xy + vec2(ubo.timeData.x * 60.0, 0.0);
+    float jitterX = fract(sin(dot(hashSeed, vec2(12.9898, 78.233))) * 43758.5453);
+    float jitterY = fract(sin(dot(hashSeed, vec2(63.7264, 10.873))) * 43758.5453);
+    vec2 jitter = (vec2(jitterX, jitterY) - 0.5) * texelSize;
+    vec3 sharpUV = vec3(shadowUV.xy + jitter, shadowUV.z);
+    float sharp = texture(shadowMap, sharpUV);
+    float soft  = 0.0;
+    // Skip the 12-tap kernel entirely when distFactor is near
+    // zero — saves the work and guarantees a clean single-tap
+    // result on every foreground pixel.
+    if (distFactor > 0.05) {
+        // Kernel only widens once the receiver is past ~6 m
+        // from the camera. Worst case ~2 texels.
+        float kernelScale = mix(0.0, 2.0, distFactor)
+                          * (1.0 + grazing * 0.15);
+        vec2 kernel = texelSize * kernelScale;
+        for (int i = 0; i < 12; i++) {
+            vec2 offset = POISSON_DISK[i] * kernel;
+            soft += texture(shadowMap, vec3(shadowUV.xy + offset, shadowUV.z));
+        }
+        soft *= (1.0 / 12.0);
+    } else {
+        soft = sharp;
     }
-    s *= (1.0 / 12.0);
-
-    // ----- Contact tightening -----
-    // For receivers close to the camera (player, props at
-    // foreground depth) we also do a single ~1-texel sharp tap
-    // and pull the result toward the darker of the two. This
-    // keeps contact lines (feet on floor, props sitting on
-    // surfaces) crisp even though the global PCF kernel is set
-    // up for soft mid-distance shading. Faded out by distFactor
-    // so far surfaces keep their broad penumbra.
-    float contactWeight = (1.0 - distFactor) * 0.5;
-    if (contactWeight > 0.001) {
-        float contact = texture(shadowMap,
-            vec3(shadowUV.xy, shadowUV.z));
-        s = mix(s, min(s, contact), contactWeight);
-    }
+    // Blend sharp→soft as the receiver recedes. distFactor is
+    // already smoothstep'd 1.5..16 m so the transition feels
+    // natural — close shadows are crisp and welded to their
+    // casters; distant shadows soften into the fog.
+    float s = mix(sharp, soft, distFactor);
 
     // Apply the frustum-edge feather: pull s toward 1.0 as the
     // sample approaches the frustum boundary. This kills the
@@ -885,27 +908,63 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     float NdotL = max(dot(N, -dir), 0.0);
     float bias = max(0.0040 * (1.0 - NdotL), 0.0010);
 
-    // 5-tap PCF: center + four offsets along an orthonormal
-    // basis built from `dir`. Offsets scaled to ~1.5 atlas
-    // texels in normalized-distance space, which softens the
-    // contact penumbra without smearing it across whole walls.
+    // PCF over an orthonormal basis built from `dir`. Offsets
+    // are scaled in normalised-distance space so the kernel
+    // covers ~1–2 atlas texels at our 512² per face.
+    //
+    // Why 8 taps on a Poisson disk with a per-pixel rotation?
+    // The previous implementation used 5 hard `step()` taps on
+    // a fixed cross pattern, which can only produce 6 discrete
+    // output values {0, 0.2, ..., 1.0}. Every neighbouring
+    // pixel sampled the same offsets, so those discrete levels
+    // lined up across the screen as 4–5 visible concentric
+    // "softer outline" rings around every shadow — the exact
+    // artefact we kept chasing in the wrong shaders. Rotating
+    // the tap basis by a per-pixel screen-space hash turns
+    // each ring into spatial noise that the eye averages into
+    // a clean penumbra. Doubling the tap count to 8 brings
+    // the level count up to 9 so the residual noise is finer.
     vec3 up = abs(dir.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 tu = normalize(cross(up, dir));
-    vec3 tv = cross(dir, tu);
-    float k = 0.020;
+    vec3 tuRaw = normalize(cross(up, dir));
+    vec3 tvRaw = cross(dir, tuRaw);
+    // Per-pixel rotation angle from gl_FragCoord. The constants
+    // are the standard sin-fract noise basis; multiplying by
+    // 2π turns the [0,1) hash into a full rotation.
+    float rotHash = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float rotAng = rotHash * 6.2831853;
+    float rcs = cos(rotAng);
+    float rsn = sin(rotAng);
+    vec3 tu = tuRaw * rcs + tvRaw * rsn;
+    vec3 tv = -tuRaw * rsn + tvRaw * rcs;
+    // Kernel half-width in normalised-distance units. Sized
+    // so the disk fits inside ~1 atlas texel: pixels deep in
+    // shadow or fully lit have all 8 taps land in the same
+    // texel and read the same value (no grain), while pixels
+    // straddling the silhouette get a few taps on each side
+    // — combined with the per-pixel basis rotation that gives
+    // a clean stochastic feather only at the boundary.
+    float k = 0.0025;
+
+    // 8-tap Poisson-ish disk in 2D (radius 1).
+    const vec2 P0 = vec2( 0.000,  0.000);
+    const vec2 P1 = vec2( 0.866,  0.500);
+    const vec2 P2 = vec2(-0.500,  0.866);
+    const vec2 P3 = vec2(-0.866, -0.500);
+    const vec2 P4 = vec2( 0.500, -0.866);
+    const vec2 P5 = vec2( 0.383,  0.924);
+    const vec2 P6 = vec2(-0.924,  0.383);
+    const vec2 P7 = vec2(-0.383, -0.924);
 
     float occ = 0.0;
-    float c0 = texture(pointShadowAtlas, vec4(dir, float(lightIdx))).r;
-    occ += step(normFrag - bias, c0);
-    float c1 = texture(pointShadowAtlas, vec4(dir + tu * k, float(lightIdx))).r;
-    occ += step(normFrag - bias, c1);
-    float c2 = texture(pointShadowAtlas, vec4(dir - tu * k, float(lightIdx))).r;
-    occ += step(normFrag - bias, c2);
-    float c3 = texture(pointShadowAtlas, vec4(dir + tv * k, float(lightIdx))).r;
-    occ += step(normFrag - bias, c3);
-    float c4 = texture(pointShadowAtlas, vec4(dir - tv * k, float(lightIdx))).r;
-    occ += step(normFrag - bias, c4);
-    return occ * 0.2;
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P1.x + tv * P1.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P2.x + tv * P2.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P3.x + tv * P3.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P4.x + tv * P4.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P5.x + tv * P5.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P6.x + tv * P6.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P7.x + tv * P7.y) * k, float(lightIdx))).r);
+    return occ * 0.125;
 }
 
 // ---------------------------------------------------------------------------
@@ -962,7 +1021,7 @@ vec3 shadePbr() {
 
     // ---- Point lights (no shadow, with quadratic falloff) ----
     int numLights = int(ubo.pointLightCount.x);
-    for (int i = 0; i < numLights && i < 8; i++) {
+    for (int i = 0; i < numLights && i < 16; i++) {
         vec3 lightPos = ubo.pointLightPos[i].xyz;
         float radius = ubo.pointLightPos[i].w;
         vec3 lightCol = ubo.pointLightColor[i].xyz;
@@ -1290,7 +1349,7 @@ vec3 shadeCel() {
                   + rim;
 
     int numLights = int(ubo.pointLightCount.x);
-    for (int i = 0; i < numLights && i < 8; i++) {
+    for (int i = 0; i < numLights && i < 16; i++) {
         vec3 lightPos = ubo.pointLightPos[i].xyz;
         float radius = ubo.pointLightPos[i].w;
         vec3 lightCol = ubo.pointLightColor[i].xyz;

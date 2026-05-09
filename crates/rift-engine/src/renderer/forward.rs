@@ -148,6 +148,18 @@ pub struct Renderer {
     /// shadow pass and as the input list for per-light point
     /// shadow culling.
     shadow_draw_scratch: Vec<DrawCommand>,
+    /// Per-slot dirty-tracking state for the point-light shadow
+    /// atlas. `point_shadow_state[i]` is `Some(state)` if slot
+    /// `i` was rendered on a previous frame; `None` means the
+    /// slot has never been rendered (or was reset). Each frame
+    /// we recompute the would-be state for each active slot
+    /// and skip the 6-face render pass entirely when it
+    /// matches the cached value — a static torch-lit room
+    /// only re-renders point shadows when something actually
+    /// moves through it. State is a hash of the light pose
+    /// plus all caster transforms within the light's radius;
+    /// see [`Self::compute_point_shadow_slot_hash`].
+    point_shadow_state: [Option<PointShadowSlotState>; shadow_point::MAX_POINT_SHADOWS],
     // Ambient clear color (themed per floor)
     pub clear_color: [f32; 4],
     // Fog parameters
@@ -162,6 +174,26 @@ pub struct Renderer {
     pub fog_origin: Vec3,
     // Dynamic point lights (populated each frame by game code)
     pub point_lights: Vec<PointLight>,
+    /// Transient VFX-driven point lights (projectile trails,
+    /// impact bursts, breath weapons). Kept separate from
+    /// `point_lights` because they MUST always make it into
+    /// the per-frame UBO regardless of how many ambient
+    /// torches are visible. The renderer packs `vfx_lights`
+    /// first and fills the remainder from `point_lights`, so
+    /// a fireball racing down a corridor packed with sconces
+    /// still illuminates and casts shadows correctly.
+    /// Game code clears + republishes this every frame
+    /// (typically from `RiftRuntime::collect_lights`).
+    pub vfx_lights: Vec<PointLight>,
+    /// Heat-distortion sources, written each frame by VFX
+    /// effects that opt in via `EffectLight::heat_haze`. The
+    /// composite pass picks the strongest one and applies a
+    /// noise-driven UV warp around its screen position. This
+    /// is intentionally separate from `point_lights` so that
+    /// ambient warm lights (torches, braziers, the
+    /// character-select scene) don't shimmer the air — only
+    /// gameplay-driven explosions / breath weapons do.
+    pub heat_sources: Vec<HeatSource>,
     /// Procedural sky-dome configuration. Drawn before the
     /// scene each frame when `sky.enabled` is true (typically
     /// only outdoors). Game code mutates this field per biome.
@@ -260,6 +292,47 @@ pub struct PointLight {
     pub color: Vec3,
     pub radius: f32,
     pub intensity: f32,
+}
+
+/// Per-slot dirty-tracking state for the point-shadow atlas.
+/// Captured immediately after a slot's 6 cube faces are
+/// rendered; on the next frame the renderer recomputes the
+/// would-be value and skips the render entirely if it matches.
+///
+/// The hash collapses (a) the light's pose & radius and (b)
+/// the bit pattern of every shadow-caster's translation +
+/// bounds_radius within the light's effective range. That's
+/// cheap to compute (a single FNV-style fold per slot) and
+/// stable bit-for-bit across frames as long as the inputs are
+/// genuinely unchanged. False positives (skip when shouldn't)
+/// require a 64-bit hash collision *and* a coincidence in the
+/// recorded light pose — both vanishingly rare; the worst
+/// observable artefact would be a one-frame stale shadow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PointShadowSlotState {
+    light_bits: [u32; 4], // pos.x/y/z + radius, all to_bits()
+    caster_hash: u64,
+}
+
+/// One screen-space heat-distortion source. The composite pass
+/// picks the strongest of these each frame and applies a
+/// noise-driven UV warp to the HDR sample. Pushed only by VFX
+/// effects whose attached light has `heat_haze: true` —
+/// passive scene lights (torches, ambient flames) are
+/// excluded by design so the world doesn't shimmer
+/// permanently around them.
+#[derive(Clone, Copy, Debug)]
+pub struct HeatSource {
+    /// World-space origin (the same point as the source
+    /// light). Projected to screen UV in the composite path.
+    pub position: Vec3,
+    /// Falloff radius in metres. Drives the on-screen extent
+    /// of the warp via a perspective projection.
+    pub radius: f32,
+    /// Strength in `[0, 1]`. Drives both the warp amplitude
+    /// and the noise scroll rate. Should fade to 0 alongside
+    /// the source effect's animation.
+    pub strength: f32,
 }
 
 impl Renderer {
@@ -444,11 +517,15 @@ impl Renderer {
 
         let vfx_ribbon_renderer = RibbonRenderer::new(
             &device.device, &allocator, device.graphics_queue, command_pool,
-            render_pass, swapchain.extent, uniforms.descriptor_set_layout, &shader_dir,
+            post.translucent_pass, swapchain.extent,
+            uniforms.descriptor_set_layout, post.translucent_set_layout,
+            &shader_dir,
         )?;
         let vfx_particle_renderer = ParticleVfxRenderer::new(
             &device.device, &allocator, device.graphics_queue, command_pool,
-            render_pass, swapchain.extent, uniforms.descriptor_set_layout, &shader_dir,
+            post.translucent_pass, swapchain.extent,
+            uniforms.descriptor_set_layout, post.translucent_set_layout,
+            &shader_dir,
         )?;
         let vfx_system = VfxSystem::new(8192);
         let sky_renderer = SkyRenderer::new(&device.device, render_pass, &shader_dir)?;
@@ -491,15 +568,22 @@ impl Renderer {
             vfx_ribbon_renderer,
             vfx_particle_renderer,
             deletion_queue: Vec::new(),
-            draw_scratch: Vec::new(),
-            point_shadow_draw_scratch: Vec::new(),
-            shadow_draw_scratch: Vec::new(),
+            // Per-frame scratch lists. Pre-sized to avoid the
+            // first-frame allocator dance; they grow naturally
+            // as `objects` does so the steady-state cost is
+            // zero allocations.
+            draw_scratch: Vec::with_capacity(256),
+            point_shadow_draw_scratch: Vec::with_capacity(64),
+            shadow_draw_scratch: Vec::with_capacity(256),
+            point_shadow_state: [None; shadow_point::MAX_POINT_SHADOWS],
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
             fog_start: 5.0,
             fog_end: 16.0,
             fog_origin: Vec3::ZERO,
             point_lights: Vec::new(),
+            vfx_lights: Vec::new(),
+            heat_sources: Vec::new(),
             sky: SkyConfig::default(),
             sky_renderer,
             bloom: BloomConfig::default(),
@@ -572,12 +656,14 @@ impl Renderer {
 
         // Recreate VFX ribbon pipeline alongside.
         self.vfx_ribbon_renderer.recreate_pipeline(
-            &self.device.device, self.post.scene_pass, self.swapchain.extent,
-            self.uniforms.descriptor_set_layout, &self.shader_dir,
+            &self.device.device, self.post.translucent_pass, self.swapchain.extent,
+            self.uniforms.descriptor_set_layout, self.post.translucent_set_layout,
+            &self.shader_dir,
         )?;
         self.vfx_particle_renderer.recreate_pipeline(
-            &self.device.device, self.post.scene_pass, self.swapchain.extent,
-            self.uniforms.descriptor_set_layout, &self.shader_dir,
+            &self.device.device, self.post.translucent_pass, self.swapchain.extent,
+            self.uniforms.descriptor_set_layout, self.post.translucent_set_layout,
+            &self.shader_dir,
         )?;
 
         // Update camera aspect ratio
@@ -1451,10 +1537,83 @@ impl Renderer {
         unsafe { device.reset_fences(&[self.frame_sync.in_flight[frame]])? };
 
         // Update view/proj UBO once per frame
-        let mut point_light_pos = [Vec4::ZERO; 8];
-        let mut point_light_color = [Vec4::ZERO; 8];
-        let light_count = self.point_lights.len().min(8);
-        for (i, pl) in self.point_lights.iter().take(8).enumerate() {
+        // `MAX_POINT_LIGHTS` is the UBO array capacity for
+        // additive point lights — kept in sync with the
+        // matching `[16]` arrays in every shader that binds
+        // the camera UBO (triangle.frag, particle.vert,
+        // ribbon.vert, shadow*.{vert,frag}).
+        const MAX_POINT_LIGHTS: usize = 16;
+
+        // Merge VFX-driven lights and ambient/torch lights
+        // into a single per-frame list with a *deliberate*
+        // ordering:
+        //
+        //   slots [0..N)              shadow-casting torches
+        //                             (`point_lights`, capped at
+        //                             `MAX_POINT_SHADOWS = 8`)
+        //   slots [N..M)              VFX lights — additive only,
+        //                             never cast shadows. A
+        //                             projectile-trail light
+        //                             sits *inside* the
+        //                             projectile mesh, so any
+        //                             cube shadow rendered for
+        //                             it would be occluded in
+        //                             every outward direction
+        //                             (back-faces of the
+        //                             fireball) and the world
+        //                             would go pitch black
+        //                             around the projectile.
+        //   slots [M..16)             remaining torches as
+        //                             additive lights.
+        //
+        // The shader uses `lightIdx < pointShadowMeta.x` as
+        // the shadow-test, so shadow-casters MUST occupy the
+        // leading prefix. VFX lives just past that prefix, which
+        // also reserves it a slot even in dense torch rooms
+        // (worst case: 8 shadowed + 2 VFX + 6 plain = 16).
+        let n_shadow = self
+            .point_lights
+            .len()
+            .min(shadow_point::MAX_POINT_SHADOWS);
+        // Build the merged light list directly into a stack
+        // array of `MAX_POINT_LIGHTS` slots — saves the
+        // per-frame heap allocation that the previous
+        // `.chain().take(N).collect()` version did. The
+        // ordering matches the layered-iterator above:
+        // shadow-casters first, then VFX, then any
+        // additional torches that didn't get a shadow slot.
+        // The default-init `[PointLight; 16]` value never
+        // ships to the GPU because `light_count` bounds
+        // every consumer below.
+        const DEFAULT_LIGHT: PointLight = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ZERO,
+            radius: 0.0,
+            intensity: 0.0,
+        };
+        let mut merged_lights = [DEFAULT_LIGHT; MAX_POINT_LIGHTS];
+        let mut light_count = 0usize;
+        let push_light = |dst: &mut [PointLight; MAX_POINT_LIGHTS],
+                              count: &mut usize,
+                              src: PointLight| {
+            if *count < MAX_POINT_LIGHTS {
+                dst[*count] = src;
+                *count += 1;
+            }
+        };
+        for pl in self.point_lights.iter().take(n_shadow) {
+            push_light(&mut merged_lights, &mut light_count, *pl);
+        }
+        for pl in self.vfx_lights.iter() {
+            push_light(&mut merged_lights, &mut light_count, *pl);
+        }
+        for pl in self.point_lights.iter().skip(n_shadow) {
+            push_light(&mut merged_lights, &mut light_count, *pl);
+        }
+
+        let mut point_light_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
+        let mut point_light_color = [Vec4::ZERO; MAX_POINT_LIGHTS];
+        for (i, pl) in merged_lights.iter().take(light_count).enumerate() {
             point_light_pos[i] = Vec4::new(pl.position.x, pl.position.y, pl.position.z, pl.radius);
             point_light_color[i] = Vec4::new(pl.color.x, pl.color.y, pl.color.z, pl.intensity);
         }
@@ -1485,16 +1644,14 @@ impl Renderer {
         );
 
         // Build per-face VPs for the point-light cube shadow atlas.
-        // Caps the number of shadow-casting point lights at
-        // `MAX_POINT_SHADOWS`; lights past that index still contribute
-        // additive light but cast no shadow, identical to the previous
-        // behaviour.
-        let point_shadow_count = self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS);
-        let mut point_shadow_face_vp = [Mat4::IDENTITY; 24];
-        for (i, pl) in self
-            .point_lights
+        // Only the first `n_shadow` slots cast shadows; those are the
+        // ambient/torch lights from `point_lights`. VFX lights occupy
+        // the trailing slots and contribute pure additive light only.
+        let point_shadow_count = n_shadow;
+        let mut point_shadow_face_vp = [Mat4::IDENTITY; shadow_point::MAX_POINT_SHADOWS * 6];
+        for (i, pl) in merged_lights
             .iter()
-            .take(shadow_point::MAX_POINT_SHADOWS)
+            .take(point_shadow_count)
             .enumerate()
         {
             let faces = shadow_point::cube_face_view_projs(pl.position, pl.radius.max(0.1));
@@ -1763,7 +1920,7 @@ impl Renderer {
                 let mut light_draws =
                     std::mem::take(&mut self.point_shadow_draw_scratch);
                 for light_idx in 0..point_shadow_count {
-                    let pl = &self.point_lights[light_idx];
+                    let pl = &merged_lights[light_idx];
                     let lpos = pl.position;
                     let lrad = pl.radius.max(0.1);
                     // Cull once per light against the per-draw
@@ -1781,9 +1938,62 @@ impl Renderer {
                         }
                         light_draws.push(draw.clone());
                     }
-                    if light_draws.is_empty() {
+                    // ---- Dirty check ----
+                    // Hash the current frame's slot inputs
+                    // (light pose + every relevant caster's
+                    // translation & bounds_radius). If it
+                    // matches the cached value from when we
+                    // last rendered into this slot, skip the
+                    // 6-face render entirely — the atlas
+                    // contents are still valid because no
+                    // caster moved within range. FNV-1a 64
+                    // over the bit patterns is cheap (a few
+                    // multiplies per draw) and stable.
+                    let new_state = {
+                        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+                        const FNV_PRIME:  u64 = 0x100000001b3;
+                        let mut h: u64 = FNV_OFFSET;
+                        for d in light_draws.iter() {
+                            let t = d.model_matrix.w_axis.truncate();
+                            for word in [
+                                t.x.to_bits(), t.y.to_bits(), t.z.to_bits(),
+                                d.bounds_radius.to_bits(),
+                            ] {
+                                h ^= word as u64;
+                                h = h.wrapping_mul(FNV_PRIME);
+                            }
+                        }
+                        PointShadowSlotState {
+                            light_bits: [
+                                lpos.x.to_bits(),
+                                lpos.y.to_bits(),
+                                lpos.z.to_bits(),
+                                lrad.to_bits(),
+                            ],
+                            caster_hash: h,
+                        }
+                    };
+                    if self.point_shadow_state[light_idx] == Some(new_state) {
+                        // Slot is clean: previous frame's atlas
+                        // contents are still valid and the
+                        // image is already in
+                        // SHADER_READ_ONLY_OPTIMAL (left there
+                        // by the prior render pass's final
+                        // attachment layout). Nothing to do.
                         continue;
                     }
+                    self.point_shadow_state[light_idx] = Some(new_state);
+                    // Note: when `light_draws` is empty we still
+                    // run the 6 render passes — they hit the
+                    // LOAD_OP::CLEAR path with zero draws,
+                    // which paints the slot fully unoccluded.
+                    // Skipping the passes outright would leave
+                    // any previous frame's shadow content in
+                    // the atlas (visible as stale shadows for
+                    // a frame after a caster leaves the
+                    // light's radius). The descriptor-set
+                    // bind below is guarded so an empty
+                    // `light_draws` is safe.
                     for face_idx in 0..6 {
                         let face_slot = light_idx * 6 + face_idx;
                         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -1804,15 +2014,21 @@ impl Renderer {
                         );
                         // Bind the global descriptor set once per
                         // face — every draw in this face shares
-                        // the same set 0.
-                        device.cmd_bind_descriptor_sets(
-                            cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.point_shadow_atlas.pipeline_layout,
-                            0,
-                            &[light_draws[0].descriptor_set],
-                            &[],
-                        );
+                        // the same set 0. Guarded against an
+                        // empty caster list (the dirty-flag
+                        // path runs the render pass anyway so
+                        // the atlas is correctly cleared even
+                        // for isolated lights).
+                        if let Some(first) = light_draws.first() {
+                            device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                self.point_shadow_atlas.pipeline_layout,
+                                0,
+                                &[first.descriptor_set],
+                                &[],
+                            );
+                        }
                         for draw in light_draws.iter() {
                             device.cmd_bind_vertex_buffers(
                                 cmd,
@@ -1980,12 +2196,41 @@ impl Renderer {
                 device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
             }
 
+            // End the opaque scene pass. Depth is now in
+            // DEPTH_STENCIL_READ_ONLY_OPTIMAL — translucent
+            // pipelines can both depth-test against it and
+            // sample it as a combined-image-sampler for soft-
+            // particle fade.
+            device.cmd_end_render_pass(cmd);
+
+            // ---- Translucent pass: ribbons + particles ----
+            // Loads the HDR colour the opaque pass just wrote;
+            // depth is read-only so this pass can't write to
+            // it. Particle/ribbon pipelines bind set=1 to read
+            // scene depth.
+            let translucent_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(self.post.translucent_pass)
+                .framebuffer(self.post.translucent_framebuffers[image_index as usize])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.swapchain.extent,
+                });
+            device.cmd_begin_render_pass(cmd, &translucent_begin, vk::SubpassContents::INLINE);
+
             // VFX ribbons (world-space, premultiplied additive).
             // Drawn before particles so the spark/glow trails
             // composite on top of the beam core.
-            self.vfx_ribbon_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
+            self.vfx_ribbon_renderer.record(
+                frame, device, cmd,
+                self.uniforms.descriptor_sets[frame],
+                self.post.translucent_in_sets[image_index as usize],
+            );
             // VFX particles (world-space, two pipelines).
-            self.vfx_particle_renderer.record(frame, device, cmd, self.uniforms.descriptor_sets[frame]);
+            self.vfx_particle_renderer.record(
+                frame, device, cmd,
+                self.uniforms.descriptor_sets[frame],
+                self.post.translucent_in_sets[image_index as usize],
+            );
 
             device.cmd_end_render_pass(cmd);
 
@@ -2016,9 +2261,111 @@ impl Renderer {
             // ambient term) so we keep this gentle to avoid
             // crushing direct-lit pixels in deep crevices.
             let ssao_strength = 0.7;
+
+            // ---- Volumetric god-rays ----
+            // Project the sun direction (treated as a point at
+            // infinity) into screen UV. Disabled when the sky
+            // pass is off (indoors), when the sun is behind the
+            // camera, or when sun strength is zero.
+            let (sun_screen, sun_color) = if self.sky.enabled
+                && self.sky.sun_strength > 0.001
+            {
+                let view = self.camera.view_matrix();
+                let proj = self.camera.projection_matrix();
+                let sd = self.sky.sun_dir.normalize();
+                // Direction in view space (w=0 → infinitely far).
+                let view_dir = view.transform_vector3(sd);
+                if view_dir.z < -0.05 {
+                    // Sun in front of camera. Project a point
+                    // far along that direction (distance has no
+                    // effect on UV under perspective when the
+                    // point is treated as on a ray from the eye,
+                    // but using a finite distance gives well-
+                    // behaved w).
+                    let world_pt = self.camera.position + sd * 1000.0;
+                    let clip = proj * view * Vec4::new(world_pt.x, world_pt.y, world_pt.z, 1.0);
+                    if clip.w > 0.0 {
+                        let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+                        // Vulkan/GLSL UV: (ndc.xy * 0.5 + 0.5).
+                        // The renderer flips Y in proj so this
+                        // matches the depth-sample UV convention
+                        // already in the composite shader.
+                        let uv = Vec3::new(ndc.x, ndc.y, 0.0) * 0.5 + Vec3::new(0.5, 0.5, 0.0);
+                        // Strength scales with how centred the
+                        // sun is in view (cosine of angle to
+                        // camera forward) so off-screen rays
+                        // still appear but fade as the sun
+                        // leaves the frustum.
+                        let cam_fwd = -Vec3::new(view.row(2).x, view.row(2).y, view.row(2).z).normalize();
+                        let cosine = sd.dot(cam_fwd).max(0.0);
+                        let strength = (self.sky.sun_strength * 0.6 * cosine).clamp(0.0, 1.5);
+                        (
+                            [uv.x, uv.y, strength, 1.0],
+                            [
+                                self.sky.cloud_flash_color.x.max(1.0),
+                                self.sky.cloud_flash_color.y.max(0.95),
+                                self.sky.cloud_flash_color.z.max(0.85),
+                                1.0,
+                            ],
+                        )
+                    } else {
+                        ([0.0; 4], [0.0; 4])
+                    }
+                } else {
+                    ([0.0; 4], [0.0; 4])
+                }
+            } else {
+                ([0.0; 4], [0.0; 4])
+            };
+
+            // ---- Heat-distortion source ----
+            // Project the strongest VFX-published heat source
+            // to screen. Sources opt in via
+            // `EffectLight::heat_haze` and are written to
+            // `self.heat_sources` by the vfx runtime each
+            // frame — passive scene flames (torches, hearths)
+            // never appear here, so the world doesn't shimmer
+            // around the hub. Only one source is forwarded to
+            // the composite shader per frame; additional
+            // bursts take over when the strongest fades.
+            let heat_source = {
+                let view = self.camera.view_matrix();
+                let proj = self.camera.projection_matrix();
+                let mut best: Option<(f32, [f32; 4])> = None;
+                for hs in self.heat_sources.iter() {
+                    if hs.strength < 1e-3 { continue; }
+
+                    let world = Vec4::new(hs.position.x, hs.position.y, hs.position.z, 1.0);
+                    let view_p = view * world;
+                    if view_p.z >= -0.05 { continue; }
+                    let clip = proj * view_p;
+                    if clip.w <= 0.0 { continue; }
+                    let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+                    let uv = Vec3::new(ndc.x, ndc.y, 0.0) * 0.5 + Vec3::new(0.5, 0.5, 0.0);
+                    if uv.x < -0.2 || uv.x > 1.2 || uv.y < -0.2 || uv.y > 1.2 {
+                        continue;
+                    }
+                    let dist = (-view_p.z).max(0.1);
+                    // proj[1][1] is the y-focal term; with the
+                    // renderer's flipped-Y projection it's
+                    // negative, but we only want magnitude.
+                    let focal_y = proj.col(1).y.abs();
+                    let radius_uv = (hs.radius / dist) * focal_y * 0.5;
+                    if radius_uv < 0.02 { continue; }
+                    let s = hs.strength.clamp(0.0, 1.0);
+                    if best.map(|(prev, _)| s > prev).unwrap_or(true) {
+                        best = Some((
+                            s,
+                            [uv.x, uv.y, radius_uv.min(0.6), s],
+                        ));
+                    }
+                }
+                best.map(|(_, v)| v).unwrap_or([0.0; 4])
+            };
+
             self.post.record_composite(
                 device, cmd, image_index, &self.bloom, self.ghost_mix,
-                inv_proj, ssao_strength,
+                inv_proj, ssao_strength, sun_screen, sun_color, heat_source,
             );
 
             // Overlay (HUD)
@@ -2126,6 +2473,22 @@ impl Renderer {
                 Err(e) => {
                     log::error!("Hot-reload failed (keeping old pipeline): {}", e);
                 }
+            }
+
+            // Also rebuild the post-process pipelines (bright /
+            // blur / composite). The dirty flag fires for *any*
+            // .frag/.vert change in the shader directory so we
+            // can't tell whether triangle.* or post_*.* moved —
+            // just rebuild everything. Cheap relative to the
+            // device wait above. Compile failures are
+            // non-fatal: the existing pipelines stay live.
+            if let Err(e) = self.post.reload_pipelines(
+                &self.device.device,
+                &self.shader_dir,
+            ) {
+                log::error!("Post-pipeline hot-reload failed (keeping old pipelines): {}", e);
+            } else {
+                log::info!("Post pipelines hot-reloaded successfully!");
             }
         }
     }

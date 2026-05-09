@@ -22,14 +22,14 @@ layout(set = 0, binding = 0) uniform UniformData {
     vec4 fogColor;
     vec4 fogParams;
     vec4 fogOrigin;
-    vec4 pointLightPos[8];
-    vec4 pointLightColor[8];
+    vec4 pointLightPos[16];
+    vec4 pointLightColor[16];
     vec4 pointLightCount;
     mat4 lightVP;
     // Per-face cube-shadow VPs, packed as
     //   [light0 +X, -X, +Y, -Y, +Z, -Z, light1 +X, -X, ...]
     // Indexed in the vertex shader by `pc.indices.x` (0 .. 23).
-    mat4 pointShadowFaceVP[24];
+    mat4 pointShadowFaceVP[48];
     // x = number of active point lights with a shadow slot,
     // y/z/w unused.
     vec4 pointShadowMeta;

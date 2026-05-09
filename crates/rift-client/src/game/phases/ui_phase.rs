@@ -7,14 +7,76 @@
 use glam::Vec3;
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::{Input, Renderer};
+use std::cell::Cell;
+use std::time::Instant;
 
 use crate::game::hud;
 use crate::game::spellbook;
 use crate::game::state::GameState;
 
+// --- FPS counter state ---
+// Single-threaded: the UI phase runs only on the main thread,
+// so a thread-local Cell is sound and avoids plumbing yet
+// another field through GameState. Sampled with an EMA so
+// the displayed value doesn't flicker per-frame.
+thread_local! {
+    static FPS_LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    static FPS_EMA:  Cell<f32>             = const { Cell::new(60.0) };
+}
+
 pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     renderer.overlay_batch.clear();
     let (sw, sh) = renderer.screen_size();
+
+    // ---- FPS sample ----
+    // Measure wall-clock dt between this and the previous UI
+    // phase. We use Instant rather than the gameplay `dt`
+    // because the latter is clamped (anti-spiral-of-death)
+    // and paused effectively when the window loses focus —
+    // both would lie about real frame rate.
+    let now = Instant::now();
+    let smoothed_fps = FPS_LAST.with(|cell| {
+        let last = cell.replace(Some(now));
+        match last {
+            Some(prev) => {
+                let dt = now.duration_since(prev).as_secs_f32().max(1e-4);
+                let inst_fps = 1.0 / dt;
+                FPS_EMA.with(|e| {
+                    // Exponential moving average with ~0.5 s
+                    // time constant — fast enough to react to
+                    // hitches, slow enough not to flicker.
+                    let prev_ema = e.get();
+                    let alpha = (dt / 0.5).clamp(0.0, 1.0);
+                    let new_ema = prev_ema * (1.0 - alpha) + inst_fps * alpha;
+                    e.set(new_ema);
+                    new_ema
+                })
+            }
+            None => 60.0,
+        }
+    });
+
+    // ---- Draw FPS counter ----
+    // Top-left corner, small bright text, dark drop shadow
+    // for readability on bright sky / pale floor pixels.
+    let fps_text = format!("{:>3} FPS", smoothed_fps.round() as i32);
+    let fps_size = 16.0_f32;
+    let fps_x = 8.0_f32;
+    let fps_y = 8.0_f32;
+    renderer.overlay_batch.text(
+        &fps_text,
+        fps_x + 1.0, fps_y + 1.0,
+        fps_size,
+        [0.0, 0.0, 0.0, 0.6],
+        sw, sh,
+    );
+    renderer.overlay_batch.text(
+        &fps_text,
+        fps_x, fps_y,
+        fps_size,
+        [1.0, 1.0, 0.85, 0.95],
+        sw, sh,
+    );
 
     let nearest_loot = crate::game::loot_system::nearest_drop(&state.world, &state.loot);
     let view_proj = renderer.camera.view_projection();

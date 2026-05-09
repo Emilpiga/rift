@@ -57,6 +57,7 @@ impl RibbonRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<Self> {
         let quad_vb = crate::vulkan::buffer::create_device_local_buffer(
@@ -80,7 +81,7 @@ impl RibbonRenderer {
         )?;
 
         let (pipeline, pipeline_layout) =
-            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, shader_dir)?;
+            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, translucent_set_layout, shader_dir)?;
 
         Ok(Self {
             pipeline,
@@ -123,6 +124,7 @@ impl RibbonRenderer {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         descriptor_set: vk::DescriptorSet,
+        translucent_set: vk::DescriptorSet,
     ) {
         let count = self.instance_counts[frame];
         if count == 0 {
@@ -140,7 +142,7 @@ impl RibbonRenderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[descriptor_set],
+                &[descriptor_set, translucent_set],
                 &[],
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.quad_vb.buffer, instance_buf], &[0, 0]);
@@ -155,6 +157,7 @@ impl RibbonRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<()> {
         unsafe {
@@ -162,7 +165,7 @@ impl RibbonRenderer {
             device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
         let (pipeline, layout) =
-            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, shader_dir)?;
+            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, translucent_set_layout, shader_dir)?;
         self.pipeline = pipeline;
         self.pipeline_layout = layout;
         Ok(())
@@ -173,6 +176,7 @@ impl RibbonRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
         let vert_src = std::fs::read_to_string(shader_dir.join("ribbon.vert"))?;
@@ -300,7 +304,7 @@ impl RibbonRenderer {
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
-        let set_layouts = [descriptor_set_layout];
+        let set_layouts = [descriptor_set_layout, translucent_set_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 

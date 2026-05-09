@@ -61,6 +61,7 @@ impl ParticleVfxRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<Self> {
         let quad_vb = crate::vulkan::buffer::create_device_local_buffer(
@@ -88,6 +89,7 @@ impl ParticleVfxRenderer {
             render_pass,
             extent,
             descriptor_set_layout,
+            translucent_set_layout,
             shader_dir,
         )?;
 
@@ -159,6 +161,7 @@ impl ParticleVfxRenderer {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         descriptor_set: vk::DescriptorSet,
+        translucent_set: vk::DescriptorSet,
     ) {
         let r = self.ranges[frame];
         if r.alpha_count + r.additive_count == 0 {
@@ -175,7 +178,7 @@ impl ParticleVfxRenderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[descriptor_set],
+                &[descriptor_set, translucent_set],
                 &[],
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.quad_vb.buffer, instance_buf], &[0, 0]);
@@ -205,6 +208,7 @@ impl ParticleVfxRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<()> {
         unsafe {
@@ -217,6 +221,7 @@ impl ParticleVfxRenderer {
             render_pass,
             extent,
             descriptor_set_layout,
+            translucent_set_layout,
             shader_dir,
         )?;
         self.pipeline_alpha = pa;
@@ -230,6 +235,7 @@ impl ParticleVfxRenderer {
         render_pass: vk::RenderPass,
         extent: vk::Extent2D,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<(vk::Pipeline, vk::Pipeline, vk::PipelineLayout)> {
         let vert_src = std::fs::read_to_string(shader_dir.join("vfx_particle.vert"))?;
@@ -384,7 +390,7 @@ impl ParticleVfxRenderer {
         let blend_additive = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&attach_additive));
 
-        let set_layouts = [descriptor_set_layout];
+        let set_layouts = [descriptor_set_layout, translucent_set_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 

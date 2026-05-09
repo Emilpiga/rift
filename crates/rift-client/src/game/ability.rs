@@ -554,7 +554,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             for (_along, pos) in &hits {
                 // Centre on the enemy's torso, not their feet.
                 let burst_pos = *pos + Vec3::Y * 0.9;
-                renderer.vfx_system.spawn(
+                renderer.vfx_system.spawn_bundle(
                     rift_engine::renderer::vfx::presets::frost_impact(),
                     burst_pos,
                 );
@@ -567,7 +567,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             if clipped || hits.len() < cap {
                 renderer
                     .vfx_system
-                    .spawn(rift_engine::renderer::vfx::presets::frost_impact(), tip);
+                    .spawn_bundle(rift_engine::renderer::vfx::presets::frost_impact(), tip);
             }
         }
     }

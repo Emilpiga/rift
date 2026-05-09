@@ -13,7 +13,7 @@ pub mod combat;
 pub mod animation;
 
 pub use renderer::Renderer;
-pub use renderer::forward::PointLight;
+pub use renderer::forward::{HeatSource, PointLight};
 pub use renderer::forward::KeyLight;
 pub use renderer::sky::SkyConfig;
 pub use renderer::post::BloomConfig;
