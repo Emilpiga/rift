@@ -178,9 +178,12 @@ impl RiftApp {
                 rift_client::game::state::on_loot_dropped(
                     &mut state.loot,
                     renderer,
+                    &mut state.loot_model_cache,
                     re.net_id,
                     re.position,
                     item.clone(),
+                    net.local_gender()
+                        .map(rift_client::net::wire_gender_to_game),
                 );
             }
         }
@@ -572,12 +575,19 @@ impl RiftApp {
             position
         );
         let pos = Vec3::from_array(position);
+        let local_gender = self
+            .net
+            .as_ref()
+            .and_then(|n| n.local_gender())
+            .map(rift_client::net::wire_gender_to_game);
         rift_client::game::state::on_loot_dropped(
             &mut self.state.loot,
             renderer,
+            &mut self.state.loot_model_cache,
             loot,
             pos,
             item,
+            local_gender,
         );
     }
 
@@ -935,6 +945,9 @@ impl RiftApp {
                 rift_net::messages::PickupRejectReason::InventoryFull => {
                     state.warn_inventory_full();
                 }
+                rift_net::messages::PickupRejectReason::NotEligible => {
+                    state.warn_not_eligible();
+                }
             }
         }
 
@@ -947,7 +960,8 @@ impl RiftApp {
                 .into_iter()
                 .map(|opt| {
                     opt.and_then(|b| {
-                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored)
+                        let prov = b.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v));
+                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov)
                     })
                 })
                 .collect();
@@ -970,6 +984,7 @@ impl RiftApp {
                     blob.ilvl,
                     &blob.affixes,
                     blob.anchored,
+                    blob.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v)),
                 ) else {
                     continue;
                 };
@@ -1011,8 +1026,9 @@ impl RiftApp {
                         .into_iter()
                         .map(|opt| {
                             opt.and_then(|b| {
+                                let prov = b.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v));
                                 rift_game::loot::Item::from_wire(
-                                    b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored,
+                                    b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov,
                                 )
                             })
                         })
@@ -1126,8 +1142,8 @@ impl RiftApp {
         // `PlayerState`. The HUD reads this every frame to drive
         // the essence bar; the canonical scalar lives on the
         // server and is round-tripped via the snapshot's
-        // `essence_pct` field.
-        state.player_state.essence_pct = net.local_essence_pct();
+        // `resource_pct` field.
+        state.player_state.resource_pct = net.local_resource_pct();
 
         // Deferred local-equipment visual apply: the first
         // `EquipmentSync` arrives before the local avatar has

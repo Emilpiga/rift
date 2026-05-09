@@ -137,10 +137,10 @@ pub fn tick(
             .unwrap_or(0.0);
         if drain > 0.0 {
             let cost = drain * dt;
-            if player.essence + 1e-3 < cost {
+            if player.resource + 1e-3 < cost {
                 channel.remaining = 0.0;
             } else {
-                player.drain_essence(cost);
+                player.drain_resource(cost);
             }
         }
         channel.remaining -= dt;

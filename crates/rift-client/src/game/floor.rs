@@ -220,6 +220,13 @@ impl HubStorm {
 /// Manages floor generation: creating the dungeon, spawning entities.
 pub struct FloorManager {
     pub boss_room_center: Vec3,
+    /// Pre-baked anchor pair for the post-boss portals: the
+    /// dedicated portal room's two interior spots, in world
+    /// coordinates. `(left, right)` matches the dungeon
+    /// crate's convention. Mirrors `Floor::portal_anchors` for
+    /// the active floor; `None` on the hub or any synthetic
+    /// floor that has no portal room.
+    pub portal_anchors: Option<(Vec3, Vec3)>,
     pub nav_grid: NavGrid,
     pub monsters: MonsterCache,
     pub props: Props,
@@ -251,6 +258,7 @@ impl FloorManager {
         let floor = Floor::generate(FloorConfig::for_floor(1), 42);
         Self {
             boss_room_center: Vec3::ZERO,
+            portal_anchors: None,
             nav_grid: NavGrid::from_floor(&floor),
             monsters: MonsterCache::default(),
             props: Props::new(),
@@ -295,6 +303,7 @@ impl FloorManager {
         let floor = Floor::generate(config, seed);
 
         self.boss_room_center = floor.boss_room_center;
+        self.portal_anchors = floor.portal_anchors;
         self.nav_grid = NavGrid::from_floor(&floor);
 
         // Set floor theme clear color — cave-dark Diablo ambience.
@@ -348,12 +357,47 @@ impl FloorManager {
         renderer.add_mesh(&batched_walls, Mat4::IDENTITY)?;
         let wall_obj_idx = renderer.objects.len() - 1;
 
-        // Bind procedural stone textures to floor and walls.
+        // Bind authored PBR materials to floor and walls. We
+        // still call `ensure(...)` to keep the procedural sets
+        // available as a fallback when an asset fails to load,
+        // but prefer the authored brick / ground tile maps when
+        // they're ready.
         self.env.ensure(renderer);
-        if let Some(set) = self.env.floor_set {
+        self.env.ensure_ground_tiles(renderer);
+        self.env.ensure_bricks_wall(renderer);
+
+        // PBR material params: bit 0 of `flags` enables the PBR
+        // shader path; `parallax_scale` adds a small height-map
+        // displacement (tangent-space units) for stone depth;
+        // `uv_scale` is multiplied into the per-vertex UVs.
+        //
+        // Both the floor and wall meshes ship UVs in world units
+        // (1 mesh unit = 1 texture tile), so anything > 1 here
+        // would shrink the pattern below 1 m per tile and look
+        // both noisy and very expensive (small UVs blow out
+        // mipmap caches and force the parallax march to walk
+        // across many texels). We use uvScale < 1 so each tile
+        // covers ~3 m of floor / wall surface, which matches
+        // the apparent scale of the shipped 2k brick + ground
+        // tile maps.
+        //
+        // Parallax stays small (and zero on floors viewed from
+        // a steep top-down angle barely benefits from it) to
+        // keep the per-fragment cost down.
+        let pbr_flags = f32::from_bits(1u32);
+        let floor_params = [1.0 / 3.0, 0.0,  pbr_flags, 0.0];
+        let wall_params  = [1.0 / 3.0, 0.02, pbr_flags, 0.0];
+
+        if let Some(set) = self.env.ground_tiles_set {
+            renderer.set_object_shared_material(floor_obj_idx, set);
+            renderer.set_object_material_params(floor_obj_idx, floor_params);
+        } else if let Some(set) = self.env.floor_set {
             renderer.set_object_shared_material(floor_obj_idx, set);
         }
-        if let Some(set) = self.env.wall_set {
+        if let Some(set) = self.env.bricks_wall_set {
+            renderer.set_object_shared_material(wall_obj_idx, set);
+            renderer.set_object_material_params(wall_obj_idx, wall_params);
+        } else if let Some(set) = self.env.wall_set {
             renderer.set_object_shared_material(wall_obj_idx, set);
         }
 
@@ -413,6 +457,7 @@ impl FloorManager {
 
         let floor = Floor::hub();
         self.boss_room_center = Vec3::ZERO;
+        self.portal_anchors = None;
         self.nav_grid = NavGrid::from_floor(&floor);
 
         // Brooding "floating obsidian platform over an abyss"
@@ -429,12 +474,21 @@ impl FloorManager {
         // geometry ends and sky begins. Keep this in sync with
         // `SkyConfig::abyss_hub`'s `ground` value.
         renderer.fog_color = [0.06, 0.025, 0.035];
-        // Tight fog: starts close enough to grip the platform
-        // edge, ends just past the mountain ridge so the
-        // peaks read as silhouettes rising out of the haze
-        // and the bases dissolve completely into it.
-        renderer.fog_start = 12.0;
-        renderer.fog_end = 50.0;
+        // Fog: starts close enough to grip the platform edge
+        // and ends well past the back of the mountain ring so
+        // the full silhouette of the massif is legible against
+        // the storm sky. The previous `fog_end = 50` clipped
+        // the back half of the ring into solid haze before the
+        // peaks even read.
+        renderer.fog_start = 18.0;
+        renderer.fog_end = 140.0;
+        // The default camera far plane (100 m) cuts the back
+        // of the mountain ring (mid-radius ~70 m + player
+        // offset 42 m → up to ~110 m). Push it out so the
+        // entire ring is inside the frustum; fog still
+        // dissolves the far flanks long before they reach
+        // the new far plane.
+        renderer.camera.far = 260.0;
 
         // Crimson stormy sky. Brooding overhead, fire-orange
         // band on the horizon so the silhouettes of the
@@ -447,10 +501,16 @@ impl FloorManager {
         // Hub floor: a single dark obsidian platform disc.
         // Slightly oversized vs. the playable square so the
         // edge clearly extends past the walkable area before
-        // falling into void.
+        // falling into void. Y is a hair above zero so the
+        // disc top sits *just* under the avatar's feet —
+        // skinned bind poses on our character pack render
+        // their feet a few cm above the transform origin, so
+        // a disc at exactly y=0 reads as "the character is
+        // floating". Two cm of lift hides the gap without
+        // looking like a step.
         let hub_centre = Vec3::new(
             (floor.width / 2) as f32,
-            -0.01,
+            0.02,
             (floor.depth / 2) as f32,
         );
         const PLATFORM_RADIUS: f32 = 42.0;
@@ -458,23 +518,61 @@ impl FloorManager {
             hub_centre,
             PLATFORM_RADIUS,
             96,
-            // White vertex color so the demon-ground texture
-            // shows through unmodulated. UVs are scaled so one
-            // tile of the procedural crimson-stone texture
-            // spans ~14 m of world space — large enough that
-            // the eye doesn't latch on to the repeat across
-            // the platform.
+            // White vertex color so the lava-rocks texture
+            // shows through unmodulated. Mesh `uv_scale` of
+            // `1.0/8.0` means one tile of the 2k texture spans
+            // 8 m of world space — large enough that the eye
+            // doesn't latch on to the repeat across the
+            // platform, small enough that surface detail
+            // (cracks, embers) still reads at walking range.
             Vec3::splat(1.0),
-            1.0 / 14.0,
+            1.0 / 8.0,
         );
         renderer.add_mesh(&platform, Mat4::IDENTITY)?;
         let platform_obj_idx = renderer.objects.len() - 1;
-        // Bind the procedural crimson cracked-stone tile.
-        // Cached on `EnvTextures` so re-entering the hub
-        // doesn't re-run the generator.
-        self.env.ensure_crimson_stone(renderer);
-        if let Some(set) = self.env.crimson_stone_set {
+        // Bind the desert-rocks basecolor only on the cel-
+        // shading path. PBR is intentionally skipped here —
+        // the disc is huge and viewed top-down, so PBR
+        // specular tends to wander distractingly across it as
+        // the camera nudges and the normal / height detail
+        // is invisible at that distance. The cel path produces
+        // a calm painterly finish that doesn't shimmer. Falls
+        // back to the procedural crimson-stone tile if the
+        // asset fails to load.
+        //
+        // The actual PNG decode happens in the background
+        // during character-select via
+        // `EnvTextures::tick_world_preload`, so this call is
+        // typically a no-op cache hit by the time we hit
+        // `generate_hub`. Calling it here defensively covers
+        // the corner case where the user clicked Play very
+        // quickly and pre-warm hasn't reached desert_rocks
+        // yet — at worst we pay the decode for one pack
+        // (instead of all four like before).
+        self.env.ensure_desert_rocks(renderer);
+        if let Some(set) = self.env.desert_rocks_set {
             renderer.set_object_shared_material(platform_obj_idx, set);
+            // Enable the PBR shading path now that the disc is
+            // bound to a full sand PBR pack. uvScale stays at
+            // the platform mesh's baked `1/8` so one tile of
+            // the 2 k sand maps spans 8 m of world space (the
+            // mesh emits world-space UVs pre-multiplied by
+            // that factor, so passing `1.0` here yields the
+            // intended 8 m / tile coverage). Parallax stays
+            // off — the disc is viewed nearly top-down at the
+            // hub camera angle, where parallax detail isn't
+            // visible and would just burn fragment shader
+            // cycles.
+            let pbr_flags = f32::from_bits(1u32);
+            renderer.set_object_material_params(
+                platform_obj_idx,
+                [1.0, 0.0, pbr_flags, 0.0],
+            );
+        } else {
+            self.env.ensure_crimson_stone(renderer);
+            if let Some(set) = self.env.crimson_stone_set {
+                renderer.set_object_shared_material(platform_obj_idx, set);
+            }
         }
         // Thin glowing crimson rim along the platform edge so
         // the floating-island silhouette reads when the player
@@ -488,54 +586,90 @@ impl FloorManager {
         );
         renderer.add_mesh(&rim, Mat4::IDENTITY)?;
 
-        // Platform underside: a downward squashed ellipsoid
-        // hanging below the disc. The ellipsoid is centered at
-        // y = -(scale.y) so its TOP vertex sits at y=0 (right
-        // at the platform disc) and the entire shape extends
-        // *downward* into the abyss — no dome rising above the
-        // platform. The lower half drowns in fog.
-        const UNDERSIDE_DEPTH: f32 = 32.0;
-        let mut underside = Mesh::empty();
-        underside.append_ellipsoid(
-            // Slightly wider than the top disc so the silhouette
-            // bulges before tapering. Tall vertical scale gives
-            // a dramatic root.
-            Vec3::new(PLATFORM_RADIUS * 1.05, UNDERSIDE_DEPTH, PLATFORM_RADIUS * 1.05),
-            // Center sits a hair below the disc surface so the
-            // very top of the ellipsoid (y = center + scale.y)
-            // tucks just under the platform instead of poking
-            // through it.
-            hub_centre + Vec3::new(0.0, -UNDERSIDE_DEPTH - 0.02, 0.0),
-            Vec3::new(0.025, 0.018, 0.025),
-            32,
-            18,
-        );
-        renderer.add_mesh(&underside, Mat4::IDENTITY)?;
+        // No underside geometry: the platform reads as a
+        // floating disc above an unbounded abyss. Anything
+        // hung below the disc (the old squashed ellipsoid
+        // "root") tended to poke through the rim and fight
+        // with the fog wall, so we just let the disc cast a
+        // hard silhouette and let the fog do the rest.
 
-        // Distant procedural mountain ring. Bases are sunk
-        // ~40 m below the platform so the player→base distance
-        // is significantly larger than the player→peak
-        // distance, which is what lets distance fog
-        // differentiate the two. Result: ridge crests cut
-        // crisply against the crimson sky band, bases dissolve
-        // into the dark crimson fog wall. Seed is fixed so the
-        // skyline is stable across hub returns.
-        let mountains = Mesh::mountain_ring(
+        // Distant procedural mountain *terrain*. The ring is
+        // a polar heightfield generated by rift-math: per-
+        // vertex elevations come from fBm + ridged-multifractal
+        // noise, normals are computed by central differences,
+        // and the radial taper pinches the band to flush at
+        // the play-area boundary and the fog horizon. The
+        // result has actual sloped flanks, recognisable peaks
+        // and valleys, and accepts a tiling PBR material —
+        // the old silhouette strip was just two verts per
+        // segment and read flat from any oblique angle.
+        //
+        // Inner radius is just past the platform so the
+        // mountains' lower flanks sweep down to the abyss
+        // immediately around the disc. Outer radius reaches
+        // far enough that distance fog fully swallows the
+        // back side. Seed is fixed so the skyline is stable
+        // across hub returns.
+        let mountain_params = rift_math::terrain::MountainRingParams {
+            // Inner edge sits just past the platform rim so
+            // the lower flanks meet the disc edge cleanly.
+            inner_radius: 44.0,
+            // Outer edge well within the bumped fog range so
+            // the back of the massif fades smoothly into
+            // distance haze rather than getting clipped by
+            // the camera far plane.
+            outer_radius: 95.0,
+            // Base just below the platform level. The radial
+            // taper drops the inner ring to this height, so
+            // setting it slightly below the disc top hides
+            // the mesh seam under the platform's rim glow
+            // without making the whole massif sink into the
+            // abyss the way `-40` did. Peaks now rise to
+            // `base_y + peak_height = ~30 m` above the
+            // platform — clearly visible against the sky
+            // instead of being entirely buried below the
+            // floor.
+            base_y: -3.0,
+            peak_height: 32.0,
+            angular_segments: 256,
+            radial_segments: 24,
+            noise_frequency: 0.090,
+            ridged_blend: 0.72,
+            seed: 0xA855_E575_FACE_BEEF,
+        };
+        let mountains = Mesh::mountain_terrain(
+            &mountain_params,
             hub_centre,
-            /*radius*/ 46.0,
-            /*base_y*/ -40.0,
-            /*min_height*/ 6.0,
-            /*max_height*/ 16.0,
-            /*segments*/ 96,
-            /*seed*/ 0xA855_E575_FACE_BEEF,
-            // Color matches the fog/sky-ground band so as the
-            // mountain dissolves into haze it does so without
-            // a perceptible color shift. Slightly darker than
-            // the fog itself so a faint silhouette survives
-            // even after fog saturates.
-            Vec3::new(0.04, 0.018, 0.025),
+            // White vertex tint lets the cliff_rocks basecolor
+            // through unmodulated. If the PBR material fails
+            // to bind below we fall back to vertex-tint
+            // shading and a near-fog colour keeps the
+            // silhouette plausible.
+            Vec3::ONE,
+            // World metres per texture tile. 4 m gives clearly
+            // readable rock detail at the inner flanks
+            // without obvious tile repeats at silhouette
+            // distance.
+            4.0,
         );
         renderer.add_mesh(&mountains, Mat4::IDENTITY)?;
+        let mountains_obj_idx = renderer.objects.len() - 1;
+        // Bind the authored cliff-rocks PBR pack. Mountains
+        // benefit strongly from PBR: the rim light at the
+        // peak silhouette has real bite from the normal map,
+        // AO darkens the crevasses, and a small parallax
+        // value sells depth on the closer flanks. uvScale at
+        // 1.0 because the mesh already bakes the world-metre
+        // tiling described above.
+        self.env.ensure_cliff_rocks(renderer);
+        if let Some(set) = self.env.cliff_rocks_set {
+            renderer.set_object_shared_material(mountains_obj_idx, set);
+            let pbr_flags = f32::from_bits(1u32);
+            renderer.set_object_material_params(
+                mountains_obj_idx,
+                [1.0, 0.015, pbr_flags, 0.0],
+            );
+        }
 
         // Lightning strike anchors. The cloud cover itself is
         // now drawn procedurally by the sky shader (see

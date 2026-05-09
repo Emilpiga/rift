@@ -27,6 +27,16 @@ pub struct UniformData {
     /// pass (to project geometry) and the main pass (to sample the shadow
     /// map at each fragment's projected position).
     pub light_vp: Mat4,
+    /// Per-face view-projection matrices for the point-light cube shadow
+    /// atlas. Layout: `[light0 +X, -X, +Y, -Y, +Z, -Z, light1 +X, ...]`
+    /// for `MAX_POINT_SHADOWS = 4` lights = 24 matrices. Filled by
+    /// [`crate::renderer::shadow_point::cube_face_view_projs`] each
+    /// frame for every active shadow-casting point light.
+    pub point_shadow_face_vp: [Mat4; 24],
+    /// x = number of point lights that currently have a shadow slot
+    /// (0..=MAX_POINT_SHADOWS). The main fragment shader iterates over
+    /// just this many entries when computing point-light occlusion.
+    pub point_shadow_meta: Vec4,
 }
 
 pub struct UniformBuffers {
@@ -58,7 +68,8 @@ impl UniformBuffers {
         }
 
         // Descriptor set layout: binding 0 = UBO, binding 1 = legacy texture sampler,
-        // binding 2 = shadow map (sampler2DShadow in the fragment shader).
+        // binding 2 = directional shadow map (sampler2DShadow in the fragment shader),
+        // binding 3 = point-light cube shadow atlas (samplerCubeArray).
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -72,6 +83,11 @@ impl UniformBuffers {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -91,8 +107,9 @@ impl UniformBuffers {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                // 2 image samplers per set: legacy + shadow map
-                descriptor_count: 2 * MAX_FRAMES_IN_FLIGHT as u32,
+                // 3 image samplers per set: legacy + directional shadow +
+                // point-shadow cube atlas.
+                descriptor_count: 3 * MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
 
@@ -167,6 +184,30 @@ impl UniformBuffers {
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info));
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+    }
+
+    /// Bind the point-light cube shadow atlas (color image + linear
+    /// sampler) to all descriptor sets at binding 3. Caller keeps the
+    /// view+sampler alive for the renderer's lifetime.
+    pub fn bind_point_shadow_atlas(
+        &self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) {
+        for &set in &self.descriptor_sets {
+            let image_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&image_info));
             unsafe { device.update_descriptor_sets(&[write], &[]) };

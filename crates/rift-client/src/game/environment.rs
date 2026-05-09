@@ -7,10 +7,14 @@
 //! UV layout of `Mesh::dungeon_floor` and `Mesh::wall_colored`.
 
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
 use rift_engine::ash::vk;
 use rift_engine::ash::Device;
 use rift_engine::gpu_allocator::vulkan::Allocator;
+use rift_engine::renderer::asset_decode::{
+    decode_linear, decode_mr_atlas, decode_srgb, DecodedPbrPack, DecodedTexture,
+};
 use rift_engine::renderer::texture::Texture;
 use rift_engine::Renderer;
 
@@ -33,7 +37,47 @@ pub struct EnvTextures {
     /// abyss-hub platform surface. Generated on first use via
     /// [`Self::ensure_crimson_stone`].
     pub crimson_stone_set: Option<vk::DescriptorSet>,
+    /// Authored PBR brick wall material used for dungeon walls.
+    /// Loaded lazily by [`Self::ensure_bricks_wall`].
+    pub bricks_wall_set: Option<vk::DescriptorSet>,
+    /// Authored PBR ground tile material used for dungeon floors.
+    /// Loaded lazily by [`Self::ensure_ground_tiles`].
+    pub ground_tiles_set: Option<vk::DescriptorSet>,
+    /// Authored desert-rocks **basecolor only** texture used
+    /// for the hub-platform surface. Loaded lazily by
+    /// [`Self::ensure_desert_rocks`]. We deliberately bind
+    /// only the colour map here — the giant disc is viewed
+    /// from above so PBR specular wanders distractingly across
+    /// it as the camera shifts, and parallax/normal-mapping
+    /// don't pay off at this scale either. The cel-shading
+    /// path produces a calm, painterly look instead.
+    /// Authored sand PBR pack used for the hub platform
+    /// disc. Lazy-loaded by [`Self::ensure_desert_rocks`].
+    /// The sand pack ships only basecolor / normal / roughness
+    /// / AO / height (no metallic) — the MR atlas decoder
+    /// substitutes a constant zero-metallic channel, which is
+    /// what we want for desert sand anyway.
+    pub desert_rocks_set: Option<vk::DescriptorSet>,
+    /// Authored PBR cliff-rocks material used for the
+    /// procedural mountain-ring terrain around the hub.
+    /// Loaded lazily by [`Self::ensure_cliff_rocks`]. Unlike
+    /// the disc, the mountains *do* benefit from PBR: at
+    /// silhouette range the normal/AO maps give the rim
+    /// light real bite, and parallax sells the sense of
+    /// depth on the closer flanks.
+    pub cliff_rocks_set: Option<vk::DescriptorSet>,
     textures: Vec<Texture>,
+    /// Background-decode worker for authored material packs.
+    /// Lazily spawned the first time `tick_world_preload` is
+    /// called. The worker thread decodes each PBR pack's PNGs
+    /// to RGBA bytes (the slow part — pure CPU, no Vulkan)
+    /// and ships the result back over an `mpsc` channel; the
+    /// main thread polls the channel and runs only the GPU
+    /// upload step. Using a worker means the main render
+    /// thread keeps drawing the character-select screen and
+    /// pumping renet packets while the textures decode in
+    /// the background.
+    decode_worker: Option<DecodeWorker>,
 }
 
 impl Default for EnvTextures {
@@ -44,7 +88,12 @@ impl Default for EnvTextures {
             grass_floor_set: None,
             demon_ground_set: None,
             crimson_stone_set: None,
+            bricks_wall_set: None,
+            ground_tiles_set: None,
+            desert_rocks_set: None,
+            cliff_rocks_set: None,
             textures: Vec::new(),
+            decode_worker: None,
         }
     }
 }
@@ -87,6 +136,9 @@ impl EnvTextures {
         self.grass_floor_set = None;
         self.demon_ground_set = None;
         self.crimson_stone_set = None;
+        self.bricks_wall_set = None;
+        self.ground_tiles_set = None;
+        self.desert_rocks_set = None;
     }
 
     /// Lazy-initialise the grass tile used by the outdoor hub.
@@ -150,6 +202,369 @@ impl EnvTextures {
             Err(e) => log::warn!("env crimson_stone texture upload failed: {}", e),
         }
     }
+
+    /// Lazy-initialise the authored PBR brick wall material from
+    /// `assets/textures/bricks_wall/`. Loads basecolor + OpenGL-
+    /// convention normal map + AO + height + (metallic, roughness)
+    /// into a single per-object descriptor set so the PBR shader
+    /// path can read every channel at once. The metallic and
+    /// roughness PNGs ship as separate single-channel files; the
+    /// renderer packs them on the CPU into a single MR atlas
+    /// before upload.
+    pub fn ensure_bricks_wall(&mut self, renderer: &mut Renderer) {
+        if self.bricks_wall_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material_split_mr(
+            Path::new("assets/textures/bricks_wall/bricks_wall_07_baseColor_2k.png"),
+            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png")),
+            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png")),
+            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png")),
+            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png")),
+            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_height_2k.png")),
+        );
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.bricks_wall_set = Some(set);
+            }
+            Err(e) => log::warn!("env bricks_wall PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the authored PBR ground tile material from
+    /// `assets/textures/ground_tiles/`. See
+    /// [`Self::ensure_bricks_wall`] for channel handling notes.
+    pub fn ensure_ground_tiles(&mut self, renderer: &mut Renderer) {
+        if self.ground_tiles_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material_split_mr(
+            Path::new("assets/textures/ground_tiles/ground_tiles_25_basecolor_2k.png"),
+            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png")),
+            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png")),
+            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png")),
+            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png")),
+            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_height_2k.png")),
+        );
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.ground_tiles_set = Some(set);
+            }
+            Err(e) => log::warn!("env ground_tiles PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the desert-rocks **basecolor only**
+    /// texture used for the hub-platform surface. We
+    /// deliberately skip the PBR channels here: the disc is
+    /// viewed from far overhead, so PBR specular highlights
+    /// wander distractingly across it as the camera moves,
+    /// and normal/height detail is invisible at that distance.
+    /// Cel-shading on the basecolor gives a calm painterly
+    /// finish at a fraction of the per-fragment cost.
+    /// Lazy-initialise the authored sand PBR pack used to
+    /// surface the hub platform disc. The pack ships no
+    /// metallic map (sand is fully dielectric), so we pass
+    /// `None` for that channel and let the MR atlas decoder
+    /// fill in a zero metallic value.
+    pub fn ensure_desert_rocks(&mut self, renderer: &mut Renderer) {
+        if self.desert_rocks_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material_split_mr(
+            Path::new("assets/textures/sand/sand_04_color_2k.png"),
+            Some(Path::new("assets/textures/sand/sand_04_normal_gl_2k.png")),
+            None,
+            Some(Path::new("assets/textures/sand/sand_04_roughness_2k.png")),
+            Some(Path::new("assets/textures/sand/sand_04_ambient_occlusion_2k.png")),
+            Some(Path::new("assets/textures/sand/sand_04_height_2k.png")),
+        );
+        match result {
+            Ok((mut texs, set)) => {
+                log::info!("env: bound sand PBR pack (hub platform)");
+                self.textures.append(&mut texs);
+                self.desert_rocks_set = Some(set);
+            }
+            Err(e) => log::warn!("env sand PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the authored sandy cliff-rocks PBR
+    /// material used for the procedural mountain ring around
+    /// the hub. See [`Self::ensure_bricks_wall`] for channel
+    /// handling notes — the metallic + roughness PNGs are
+    /// packed on the CPU into a single MR atlas before
+    /// upload.
+    pub fn ensure_cliff_rocks(&mut self, renderer: &mut Renderer) {
+        if self.cliff_rocks_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material_split_mr(
+            Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_color_2k.png"),
+            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png")),
+            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png")),
+            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png")),
+            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png")),
+            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png")),
+        );
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.cliff_rocks_set = Some(set);
+            }
+            Err(e) => log::warn!("env sandy_cliff_rocks PBR upload failed: {}", e),
+        }
+    }
+
+    /// Drive the background pre-warm of authored PBR packs.
+    /// On the first call this spawns a worker thread that
+    /// decodes every world material's PNGs to RGBA bytes; on
+    /// each subsequent call we drain whatever the worker has
+    /// finished and run the (fast) GPU upload step on the
+    /// main thread. Returns `true` while any pack is still
+    /// outstanding so callers know to keep ticking.
+    ///
+    /// The decode is the expensive half (~0.5–1 s per 2 k
+    /// PNG, pure CPU); the upload is a few hundred
+    /// milliseconds total even for the full set. Splitting
+    /// them across a worker means the main thread keeps
+    /// drawing the character-select UI and pumping renet
+    /// packets at full rate, so renetcode's 5 s timeout
+    /// never gets near triggering.
+    pub fn tick_world_preload(&mut self, renderer: &mut Renderer) -> bool {
+        // Spawn the worker on first poll. Subsequent calls
+        // just drain its outbox.
+        if self.decode_worker.is_none() {
+            self.decode_worker = Some(DecodeWorker::spawn());
+        }
+        let worker = self.decode_worker.as_mut().expect("just spawned");
+
+        // Drain ready jobs. We `try_recv` in a loop so a fast
+        // worker that finished multiple packs between frames
+        // can drop them all into descriptor sets in one tick;
+        // each upload is on the order of tens of ms so even
+        // four-in-a-row is well under the netcode budget.
+        while let Ok(done) = worker.outbox.try_recv() {
+            match done {
+                DecodeOutput::DesertRocks(pack) => {
+                    if self.desert_rocks_set.is_none() {
+                        match renderer.upload_shared_pbr_material_decoded(pack) {
+                            Ok((mut texs, set)) => {
+                                self.textures.append(&mut texs);
+                                self.desert_rocks_set = Some(set);
+                                log::info!("env: bound sand PBR pack (worker)");
+                            }
+                            Err(e) => log::warn!(
+                                "env sand PBR decoded upload failed: {}",
+                                e
+                            ),
+                        }
+                    }
+                }
+                DecodeOutput::Pbr(name, pack) => match renderer.upload_shared_pbr_material_decoded(pack)
+                {
+                    Ok((mut texs, set)) => {
+                        self.textures.append(&mut texs);
+                        match name.as_str() {
+                            "cliff_rocks" => {
+                                if self.cliff_rocks_set.is_none() {
+                                    self.cliff_rocks_set = Some(set);
+                                }
+                            }
+                            "ground_tiles" => {
+                                if self.ground_tiles_set.is_none() {
+                                    self.ground_tiles_set = Some(set);
+                                }
+                            }
+                            "bricks_wall" => {
+                                if self.bricks_wall_set.is_none() {
+                                    self.bricks_wall_set = Some(set);
+                                }
+                            }
+                            other => log::warn!(
+                                "env: unknown PBR pack name from worker: {other}"
+                            ),
+                        }
+                        log::info!("env: bound PBR pack `{name}` (worker)");
+                    }
+                    Err(e) => log::warn!(
+                        "env PBR pack `{name}` decoded upload failed: {}",
+                        e
+                    ),
+                },
+                DecodeOutput::Failed(name, err) => {
+                    log::warn!("env: worker failed to decode `{name}`: {err}");
+                }
+            }
+            worker.in_flight = worker.in_flight.saturating_sub(1);
+        }
+
+        worker.in_flight > 0
+    }
+}
+
+// ---------------------------------------------------------------------
+// Background-decode worker
+// ---------------------------------------------------------------------
+
+/// Output of one decode job. Either a fully-decoded texture /
+/// pack ready to upload on the main thread, or a failure
+/// message so the main thread can log and move on.
+enum DecodeOutput {
+    DesertRocks(DecodedPbrPack),
+    Pbr(String, DecodedPbrPack),
+    Failed(String, String),
+}
+
+/// Persistent decode worker. Spawned on first
+/// [`EnvTextures::tick_world_preload`] call. The thread runs
+/// through a fixed list of jobs once and then exits. The
+/// receiver side stays alive for the lifetime of
+/// [`EnvTextures`] so a re-poll after the worker thread has
+/// joined still drains any pending messages from the channel
+/// buffer cleanly.
+struct DecodeWorker {
+    outbox: mpsc::Receiver<DecodeOutput>,
+    /// Number of jobs the worker is still expected to
+    /// produce. Decremented as messages are consumed; once
+    /// it hits zero `tick_world_preload` returns `false`
+    /// and the caller can stop polling.
+    in_flight: usize,
+}
+
+impl DecodeWorker {
+    fn spawn() -> Self {
+        // Manifest of background jobs. Ordered largest-
+        // perceptual-impact-first so a player who clicks
+        // Play very quickly sees the most visible surfaces
+        // (hub disc, mountains) bind first.
+        type Job = Box<dyn FnOnce() -> DecodeOutput + Send + 'static>;
+        let jobs: Vec<Job> = vec![
+            Box::new(|| match decode_pbr_pack("sand", &SAND_PATHS) {
+                DecodeOutput::Pbr(_, pack) => DecodeOutput::DesertRocks(pack),
+                other => other,
+            }),
+            Box::new(|| decode_pbr_pack("cliff_rocks", &CLIFF_ROCKS_PATHS)),
+            Box::new(|| decode_pbr_pack("ground_tiles", &GROUND_TILES_PATHS)),
+            Box::new(|| decode_pbr_pack("bricks_wall", &BRICKS_WALL_PATHS)),
+        ];
+        let (tx, rx) = mpsc::channel();
+        let in_flight = jobs.len();
+        std::thread::Builder::new()
+            .name("env-decode".into())
+            .spawn(move || {
+                for job in jobs {
+                    let result = job();
+                    if tx.send(result).is_err() {
+                        // Receiver dropped — main thread
+                        // probably exiting. Stop quietly.
+                        return;
+                    }
+                }
+            })
+            .expect("spawn env-decode worker");
+        Self {
+            outbox: rx,
+            in_flight,
+        }
+    }
+}
+
+/// Spec describing the file paths for one authored PBR pack.
+struct PbrPackPaths {
+    basecolor: &'static str,
+    normal: Option<&'static str>,
+    metallic: Option<&'static str>,
+    roughness: Option<&'static str>,
+    ao: Option<&'static str>,
+    height: Option<&'static str>,
+}
+
+const SAND_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/sand/sand_04_color_2k.png",
+    normal: Some("assets/textures/sand/sand_04_normal_gl_2k.png"),
+    // Sand is dielectric — no metallic map is shipped, so
+    // the MR atlas builder substitutes zero metallic.
+    metallic: None,
+    roughness: Some("assets/textures/sand/sand_04_roughness_2k.png"),
+    ao: Some("assets/textures/sand/sand_04_ambient_occlusion_2k.png"),
+    height: Some("assets/textures/sand/sand_04_height_2k.png"),
+};
+
+const CLIFF_ROCKS_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/sandy_cliff_rocks/cliff_rocks_01_color_2k.png",
+    normal: Some("assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png"),
+    metallic: Some("assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png"),
+    roughness: Some("assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png"),
+    ao: Some("assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png"),
+    height: Some("assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png"),
+};
+
+const GROUND_TILES_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/ground_tiles/ground_tiles_25_basecolor_2k.png",
+    normal: Some("assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png"),
+    metallic: Some("assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png"),
+    roughness: Some("assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png"),
+    ao: Some("assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png"),
+    height: Some("assets/textures/ground_tiles/ground_tiles_25_height_2k.png"),
+};
+
+const BRICKS_WALL_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/bricks_wall/bricks_wall_07_baseColor_2k.png",
+    normal: Some("assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png"),
+    metallic: Some("assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png"),
+    roughness: Some("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png"),
+    ao: Some("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png"),
+    height: Some("assets/textures/bricks_wall/bricks_wall_07_height_2k.png"),
+};
+
+fn decode_pbr_pack(name: &'static str, paths: &PbrPackPaths) -> DecodeOutput {
+    let pb = std::path::Path::new;
+    let basecolor = match decode_srgb(pb(paths.basecolor)) {
+        Ok(d) => d,
+        Err(e) => return DecodeOutput::Failed(name.into(), e.to_string()),
+    };
+    let opt_linear = |p: Option<&'static str>| -> std::result::Result<Option<DecodedTexture>, String> {
+        match p {
+            None => Ok(None),
+            Some(s) => decode_linear(pb(s))
+                .map(Some)
+                .map_err(|e| e.to_string()),
+        }
+    };
+    let normal = match opt_linear(paths.normal) {
+        Ok(v) => v,
+        Err(e) => return DecodeOutput::Failed(name.into(), e),
+    };
+    let mr = match decode_mr_atlas(paths.metallic.map(pb), paths.roughness.map(pb)) {
+        Ok(v) => v,
+        Err(e) => return DecodeOutput::Failed(name.into(), e.to_string()),
+    };
+    let ao = match opt_linear(paths.ao) {
+        Ok(v) => v,
+        Err(e) => return DecodeOutput::Failed(name.into(), e),
+    };
+    let height = match opt_linear(paths.height) {
+        Ok(v) => v,
+        Err(e) => return DecodeOutput::Failed(name.into(), e),
+    };
+    DecodeOutput::Pbr(
+        name.into(),
+        DecodedPbrPack {
+            name: name.into(),
+            basecolor,
+            normal,
+            mr,
+            ao,
+            height,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------

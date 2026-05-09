@@ -4,7 +4,9 @@
 
 pub use glam::*;
 
+pub mod noise;
 pub mod physics;
+pub mod terrain;
 
 /// Linear interpolation between `a` and `b` by `t`. `t` is not
 /// clamped — passing values outside `[0, 1]` extrapolates.

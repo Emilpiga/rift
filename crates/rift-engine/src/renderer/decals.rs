@@ -75,9 +75,20 @@ impl DecalSystem {
         for i in 0..floor_count {
             let offset_x = self.rand_range(-1.4, 1.4);
             let offset_z = self.rand_range(-1.4, 1.4);
+            // Per-decal random Y stagger between 4 cm and 9 cm
+            // above the kill point. The fixed 5 cm anchor we
+            // had before put every floor splat from every kill
+            // on exactly the same world-Y plane — overlapping
+            // splats at that plane were the actual source of
+            // the "z-fighting" the player sees, not co-planarity
+            // with the floor mesh. Spreading splats across a
+            // 5 cm range means two overlapping splats land on
+            // distinct planes, so depth test picks one cleanly
+            // every frame.
+            let y_jitter = self.rand_range(0.04, 0.09);
             let splat_pos = Vec3::new(
                 position.x + offset_x,
-                0.02, // just above floor to avoid z-fighting
+                position.y + y_jitter,
                 position.z + offset_z,
             );
             // First splat is the big one; the rest are 25-55% size.
@@ -124,7 +135,14 @@ impl DecalSystem {
                 }
                 // Place splatter on wall (normal is opposite of ray direction)
                 let wall_normal = -*dir;
-                let wall_pos = hit.point + wall_normal * 0.05;
+                // Push the wall splatter 8 cm out from the
+                // hit surface. The old 5 cm offset was tight
+                // enough that bricks-wall parallax-occlusion
+                // (which displaces the perceived surface up
+                // to a couple of centimetres along the view
+                // ray) could push the wall *in front of* the
+                // decal and produce flicker.
+                let wall_pos = hit.point + wall_normal * 0.08;
                 let size = self.rand_range(0.25, 0.6);
                 let mesh = self.gen_splatter_mesh(size, true);
 
@@ -239,18 +257,31 @@ impl DecalSystem {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        // Multi-tone palette for "fresh blood on stone".
-        // `sheen` is intentionally pushed slightly above the
-        // standard sRGB range on R so the new HDR/bloom pipeline
-        // catches it as a wet-light highlight without making the
-        // splat itself look pink.
-        let sheen      = Vec3::new(0.55, 0.040, 0.025);
-        let core_wet   = Vec3::new(0.40, 0.028, 0.016);
-        let mid_visc   = Vec3::new(0.30, 0.020, 0.012);
-        let rim_dry    = Vec3::new(0.18, 0.012, 0.008);
+        // Fresh-blood-on-stone palette. The previous values
+        // (0.18 R / 0.40 R / 0.55 R) were authored before the
+        // PBR / HDR pass and read as nearly-black on the dark
+        // floor textures — fine for "horror grit" in LDR but
+        // in HDR the bloom only catches the tiny inner sheen
+        // and the rest of the splat looks flat-cartoony.
+        // Pushed to a saturated, slightly HDR-bright crimson
+        // so the body actually reads as red at the player's
+        // typical viewing exposure, with strong tonal
+        // separation between layers.
+        //
+        // Vertex colours feed the cel-shading path which
+        // multiplies by the lit basecolor; values above 1.0
+        // survive the multiplication and seed the bloom.
+        let sheen      = Vec3::new(1.40, 0.10, 0.06);  // wet HDR glint
+        let core_wet   = Vec3::new(0.85, 0.06, 0.04);  // fresh inner pool
+        let mid_visc   = Vec3::new(0.55, 0.04, 0.03);  // viscous body
+        let rim_dry    = Vec3::new(0.30, 0.025, 0.020); // crusty outer rim
 
         // ---- Outer pool: irregular jagged disk (rim_dry edge) ----
-        let segments = 18 + (self.rand() * 8.0) as usize;
+        // More segments + multi-frequency outline distortion so
+        // the silhouette has real organic spillage shapes
+        // instead of the previous regular star-polygon.
+        let segments = 28 + (self.rand() * 10.0) as usize;
+        let outline_seed = self.rand_range(0.0, 1000.0);
         let center_idx = vertices.len() as u32;
         vertices.push(Vertex {
             position: Vec3::new(0.0, 0.001, 0.0),
@@ -260,19 +291,30 @@ impl DecalSystem {
         });
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            // Jagged outline — taller spikes, occasional pinches.
-            let spike = if self.rand() < 0.22 {
-                self.rand_range(1.10, 1.55)
+            // Two-octave radial perturbation: a low-frequency
+            // wave (broad lobes) plus high-frequency jitter
+            // (per-vertex spikes / pinches). Matches how a
+            // real spilled fluid pools — broad blobs with
+            // little fingers, not a uniform polygon.
+            let low = ((angle * 2.3 + outline_seed).sin() * 0.5
+                + (angle * 1.1 - outline_seed * 0.7).sin() * 0.5)
+                * 0.20;
+            let spike = if self.rand() < 0.18 {
+                self.rand_range(1.15, 1.55)
             } else if self.rand() < 0.10 {
-                self.rand_range(0.70, 0.90)
+                self.rand_range(0.55, 0.80)
             } else {
-                1.0
+                self.rand_range(0.92, 1.05)
             };
-            let r = size * self.rand_range(0.55, 0.95) * spike;
+            let r = size * (0.78 + low) * spike;
             let x = angle.cos() * r;
             let z = angle.sin() * r;
-            // Per-vertex jitter on the dry rim to break uniformity.
-            let c = rim_dry * self.rand_range(0.80, 1.10);
+            // Per-vertex colour interpolation between rim and
+            // mid so the gradient toward the body looks
+            // natural, plus a tiny brightness jitter so no
+            // two outline points read identically.
+            let outer_t = self.rand_range(0.0, 0.45);
+            let c = rim_dry.lerp(mid_visc, outer_t) * self.rand_range(0.85, 1.10);
             vertices.push(Vertex {
                 position: Vec3::new(x, 0.001, z),
                 normal: Vec3::Y,
@@ -288,24 +330,31 @@ impl DecalSystem {
         }
 
         // ---- Mid ring: viscous body (core_wet inner, mid_visc outer) ----
-        // A second, smaller disk sits on top of the rim disk to
-        // give the pool a darker outer / brighter inner gradient
-        // without needing an extra texture.
-        let mid_segs = 14;
+        // Sits 4 mm above the rim disc (was 0.5 mm) to avoid
+        // self-z-fighting between the layers when the camera
+        // is at a steep top-down angle.
+        let mid_segs = 22;
         let mid_center = vertices.len() as u32;
         vertices.push(Vertex {
-            position: Vec3::new(0.0, 0.0015, 0.0),
+            position: Vec3::new(0.0, 0.005, 0.0),
             normal: Vec3::Y,
             color: core_wet,
             uv: Vec2::new(0.5, 0.5),
         });
         for i in 0..mid_segs {
             let angle = (i as f32 / mid_segs as f32) * std::f32::consts::TAU;
-            let r = size * self.rand_range(0.40, 0.62);
+            // Slightly perturbed radius so the mid ring's
+            // outline doesn't read as a perfect circle through
+            // the rim disc.
+            let wobble = (angle * 3.7 + outline_seed * 0.4).sin() * 0.06;
+            let r = size * (self.rand_range(0.40, 0.62) + wobble);
+            // Gradient mid-pool: vertices closer to centre
+            // bias toward core_wet, edge bias toward mid_visc.
+            let mid_t = self.rand_range(0.6, 1.0);
             vertices.push(Vertex {
-                position: Vec3::new(angle.cos() * r, 0.0015, angle.sin() * r),
+                position: Vec3::new(angle.cos() * r, 0.005, angle.sin() * r),
                 normal: Vec3::Y,
-                color: mid_visc,
+                color: core_wet.lerp(mid_visc, mid_t),
                 uv: Vec2::new(0.5, 0.5),
             });
         }
@@ -317,14 +366,16 @@ impl DecalSystem {
         }
 
         // ---- Wet sheen: tiny bright inner disc for HDR glint ----
-        let sheen_segs = 10;
+        // 9 mm above the rim disc (was 2 mm) so it can't
+        // co-plane with the mid ring during depth-test rounding.
+        let sheen_segs = 12;
         let sheen_center = vertices.len() as u32;
         // Slight off-centre offset — the highlight rarely sits
         // exactly on the geometric centre of a real splat.
         let sheen_off = Vec3::new(
-            self.rand_range(-0.08, 0.08) * size,
-            0.0020,
-            self.rand_range(-0.08, 0.08) * size,
+            self.rand_range(-0.10, 0.10) * size,
+            0.009,
+            self.rand_range(-0.10, 0.10) * size,
         );
         vertices.push(Vertex {
             position: sheen_off,
@@ -334,7 +385,7 @@ impl DecalSystem {
         });
         for i in 0..sheen_segs {
             let angle = (i as f32 / sheen_segs as f32) * std::f32::consts::TAU;
-            let r = size * self.rand_range(0.12, 0.22);
+            let r = size * self.rand_range(0.10, 0.20);
             vertices.push(Vertex {
                 position: sheen_off + Vec3::new(angle.cos() * r, 0.0, angle.sin() * r),
                 normal: Vec3::Y,
@@ -356,7 +407,7 @@ impl DecalSystem {
         for _ in 0..droplet_count {
             let angle = self.rand_range(0.0, std::f32::consts::TAU);
             let dist = size * self.rand_range(0.85, 2.1);
-            let drop_center = Vec3::new(angle.cos() * dist, 0.002, angle.sin() * dist);
+            let drop_center = Vec3::new(angle.cos() * dist, 0.012, angle.sin() * dist);
             // Wider jitter — some are hair-thin, some are pea-sized.
             let drop_r = size * self.rand_range(0.04, 0.22);
             let drop_segs = 6;
@@ -400,15 +451,18 @@ impl DecalSystem {
             let perp = Vec3::new(-angle.sin(), 0.0, angle.cos());
 
             // Base of streak overlaps the pool rim — wet & bright.
+            // Streaks live on a 3 mm plane above the rim disc
+            // so they're always drawn on top of the outer
+            // pool but below the mid/sheen highlights.
             let start = dir * size * 0.35;
             vertices.push(Vertex {
-                position: start + perp * width + Vec3::new(0.0, 0.001, 0.0),
+                position: start + perp * width + Vec3::new(0.0, 0.003, 0.0),
                 normal: Vec3::Y,
                 color: core_wet,
                 uv: Vec2::new(0.5, 0.5),
             });
             vertices.push(Vertex {
-                position: start - perp * width + Vec3::new(0.0, 0.001, 0.0),
+                position: start - perp * width + Vec3::new(0.0, 0.003, 0.0),
                 normal: Vec3::Y,
                 color: core_wet,
                 uv: Vec2::new(0.5, 0.5),
@@ -418,20 +472,20 @@ impl DecalSystem {
             let mid_w = width * 0.7;
             let mid_color = mid_visc;
             vertices.push(Vertex {
-                position: mid + perp * mid_w + Vec3::new(0.0, 0.001, 0.0),
+                position: mid + perp * mid_w + Vec3::new(0.0, 0.003, 0.0),
                 normal: Vec3::Y,
                 color: mid_color,
                 uv: Vec2::new(0.5, 0.5),
             });
             vertices.push(Vertex {
-                position: mid - perp * mid_w + Vec3::new(0.0, 0.001, 0.0),
+                position: mid - perp * mid_w + Vec3::new(0.0, 0.003, 0.0),
                 normal: Vec3::Y,
                 color: mid_color,
                 uv: Vec2::new(0.5, 0.5),
             });
             // Tip: tapered point, dry-rim tone.
             vertices.push(Vertex {
-                position: dir * length + Vec3::new(0.0, 0.001, 0.0),
+                position: dir * length + Vec3::new(0.0, 0.003, 0.0),
                 normal: Vec3::Y,
                 color: rim_dry,
                 uv: Vec2::new(0.5, 0.5),

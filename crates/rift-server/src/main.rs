@@ -857,6 +857,25 @@ impl Server {
     }
 
     pub(crate) fn send_to(&mut self, to: ClientId, ch: Channel, msg: &ServerMsg) {
+        // Drop sends to clients that have already been evicted
+        // by the netcode layer. The handler graph holds onto
+        // `ClientId`s in queued broadcasts (party UI, portal
+        // proposals, chat lines, …) and a disconnect that lands
+        // mid-frame can leave one of those queues pointing at a
+        // gone client. Without this guard `renet::send_message`
+        // logs `Tried to send a message to invalid client …`
+        // every time, which floods the server console on every
+        // user disconnect. We still log at trace so a real bug
+        // (e.g. sending to an id we never accepted) is
+        // discoverable when needed.
+        let raw = renet::ClientId::from_raw(to.0);
+        if !self.handle.server.is_connected(raw) {
+            log::trace!(
+                "send_to: skipping {:?} — client no longer connected",
+                to
+            );
+            return;
+        }
         let bytes = match encode(msg) {
             Ok(b) => b,
             Err(e) => {
@@ -864,11 +883,7 @@ impl Server {
                 return;
             }
         };
-        self.handle.server.send_message(
-            renet::ClientId::from_raw(to.0),
-            ch as u8,
-            bytes,
-        );
+        self.handle.server.send_message(raw, ch as u8, bytes);
     }
 
     /// Send a message to every currently-connected client.

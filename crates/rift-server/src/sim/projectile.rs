@@ -621,6 +621,47 @@ pub(super) fn apply_hits_to_enemies(
                 }
             }
         }
+        // OnHit / OnCrit proc dispatch. Done after the enemy
+        // borrow drops so we can read the attacker player's
+        // proc list. Spawned AoE zones go into
+        // `ctx.death_aoe_zones` so they're folded into the
+        // active pool the same frame, matching the EXPLODER
+        // death-pop pattern. `OnHit` always fires; `OnCrit`
+        // additionally fires only on a crit.
+        if let Some(ae) = attacker_entity {
+            let procs_clone: Vec<rift_game::loot::ability_mods::Proc> = world
+                .get::<&super::player::ServerPlayer>(ae)
+                .map(|p| p.ability_mods.procs.iter().copied().collect())
+                .unwrap_or_default();
+            if !procs_clone.is_empty() {
+                let mut sink = super::procs::ProcSink {
+                    aoe_zones: ctx.death_aoe_zones,
+                    next_projectile_net_id: ctx.next_projectile_net_id,
+                    tick: ctx.tick,
+                };
+                let origin = super::procs::ProcOrigin {
+                    position: hit.enemy_pos,
+                    attacker_kind: super::meters::ATTACKER_KIND_OTHER,
+                    ability_id: hit.ability_id,
+                    team: Team::Player,
+                    salt: hit.crit_seed ^ 0xC0DE_F00D,
+                };
+                super::procs::dispatch(
+                    rift_game::loot::ProcEvent::OnHit,
+                    &procs_clone,
+                    &origin,
+                    &mut sink,
+                );
+                if crit {
+                    super::procs::dispatch(
+                        rift_game::loot::ProcEvent::OnCrit,
+                        &procs_clone,
+                        &origin,
+                        &mut sink,
+                    );
+                }
+            }
+        }
     }
     // Apply queued aggro alerts. Done after the hit loop so we
     // don't conflict with the per-victim mutable borrows above.

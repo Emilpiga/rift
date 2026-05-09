@@ -73,6 +73,17 @@ pub fn update_character_select(
 ) {
     renderer.overlay_batch.clear();
 
+    // Background-load the world's authored PBR material packs
+    // while the user is browsing characters. Each call decodes
+    // at most one pack (~1 s of 2 k PNG decode + GPU upload),
+    // and we hit it every frame, so by the time the user
+    // clicks Play the hub disc, mountains, and dungeon
+    // surfaces are already warm in the texture cache. This
+    // replaces the old "block in `generate_hub` for ~8 s"
+    // approach which was tripping the netcode 5 s timeout
+    // and forcing the server to drop the connect-token key.
+    state.floor_mgr.env.tick_world_preload(renderer);
+
     // Preview avatar (independent of UI; needs &mut World/Renderer).
     state
         .character_select
@@ -176,6 +187,13 @@ pub fn apply_server_roster(
 /// the netcode loop keeps pumping while heavy work runs (asset
 /// decode, hub generation, outfit attach).
 pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase: EnterPhase) {
+    // Continue any pending world-PBR pre-warm that didn't
+    // finish during character-select. Same one-pack-per-tick
+    // budget as the character-select path, so each
+    // EnteringWorld frame still pumps netcode between heavy
+    // decodes.
+    state.floor_mgr.env.tick_world_preload(renderer);
+
     let (label, next): (&'static str, Option<EnterPhase>) = match phase {
         EnterPhase::PrepareScene => {
             state
@@ -202,6 +220,17 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
         EnterPhase::GenerateHub => {
             state.floor.in_hub = true;
             state.rift = RiftState::new(1);
+            // `generate_hub` calls `renderer.clear_objects()`,
+            // which invalidates every renderer object index
+            // we hold elsewhere. Drop loot ground-mesh /
+            // VFX references *before* the regen so stale
+            // `object_index = 0` entries can't stomp the new
+            // hub platform's model matrix on the very next
+            // frame.
+            crate::game::systems::loot_system::clear_world_visuals(
+                &mut state.loot,
+                renderer,
+            );
             match state.floor_mgr.generate_hub(
                 &mut state.world,
                 renderer,
@@ -293,6 +322,10 @@ pub fn tick_net_entering(
             if index == 0 {
                 state.floor.in_hub = true;
                 state.rift = RiftState::new(1);
+                crate::game::systems::loot_system::clear_world_visuals(
+                    &mut state.loot,
+                    renderer,
+                );
                 match state.floor_mgr.generate_hub(
                     &mut state.world,
                     renderer,
@@ -310,6 +343,10 @@ pub fn tick_net_entering(
             } else {
                 state.floor.in_hub = false;
                 state.rift = RiftState::new(index);
+                crate::game::systems::loot_system::clear_world_visuals(
+                    &mut state.loot,
+                    renderer,
+                );
                 if let Err(e) = state.floor_mgr.generate(
                     &mut state.world,
                     renderer,

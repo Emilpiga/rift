@@ -36,7 +36,12 @@ impl VulkanDevice {
 
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
-            .fill_mode_non_solid(true);
+            .fill_mode_non_solid(true)
+            // Required for the point-light cube shadow atlas, which is
+            // sampled in the main fragment shader as `samplerCubeArray`.
+            // Universally supported on desktop GPUs from the past
+            // decade; the engine simply won't initialise without it.
+            .image_cube_array(true);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)

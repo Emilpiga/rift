@@ -526,6 +526,15 @@ impl NetClient {
         self.profile.as_ref().map(|p| p.character_name.as_str())
     }
 
+    /// Local player's authored gender from the active profile.
+    /// `None` until `set_profile` has run. Used by the loot
+    /// pipeline to pick the matching gendered mesh variant for
+    /// dropped items so the bind-pose silhouette on the ground
+    /// matches what the avatar would equip.
+    pub fn local_gender(&self) -> Option<rift_net::messages::Gender> {
+        self.profile.as_ref().map(|p| p.gender)
+    }
+
     fn send_hello(&mut self) {
         let Some(profile) = self.profile.clone() else {
             return;
@@ -1099,9 +1108,9 @@ impl NetClient {
     /// with our row arrives. The HUD reads this every frame to
     /// drive the essence bar; the canonical scalar is on the
     /// server.
-    pub fn local_essence_pct(&self) -> f32 {
+    pub fn local_resource_pct(&self) -> f32 {
         let Some(nid) = self.our_net_id else { return 1.0 };
-        self.remote.get(&nid).map(|r| r.essence_pct).unwrap_or(1.0)
+        self.remote.get(&nid).map(|r| r.resource_pct).unwrap_or(1.0)
     }
 
     /// Look up a remote player's display name by `NetId`. Returns

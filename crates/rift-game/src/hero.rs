@@ -22,14 +22,14 @@ pub struct HeroConfig {
     pub hp_per_level: f32,
     /// Base essence pool (the universal ability resource) at
     /// level 1.
-    pub base_essence: f32,
+    pub base_resource: f32,
     /// Essence pool gained per level.
-    pub essence_per_level: f32,
+    pub resource_per_level: f32,
     /// Essence per second restored while the player is not
     /// actively spending. Server pauses regen briefly after
     /// every cast / channel tick (see
-    /// `ServerPlayer::essence_regen_pause`).
-    pub base_essence_regen: f32,
+    /// `ServerPlayer::resource_regen_pause`).
+    pub base_resource_regen: f32,
     /// Base damage (before weapon/attributes).
     pub base_damage: f32,
     /// Base defense (before armor/attributes).
@@ -52,9 +52,9 @@ pub const HERO: HeroConfig = HeroConfig {
     primary_attribute: AttributeType::Agility,
     base_hp: 80.0,
     hp_per_level: 6.0,
-    base_essence: 100.0,
-    essence_per_level: 5.0,
-    base_essence_regen: 8.0,
+    base_resource: 100.0,
+    resource_per_level: 5.0,
+    base_resource_regen: 8.0,
     base_damage: 8.0,
     base_defense: 3.0,
     base_attack_speed: 1.4,

@@ -77,6 +77,13 @@ pub struct CombatCtx<'a> {
     /// Net-id allocator for `death_aoe_zones`. Same allocator
     /// the projectile pipeline uses so wire ids are unique.
     pub next_projectile_net_id: &'a mut u32,
+    /// How many ticks `Item::provenance` is enforced for after
+    /// a kill. Threaded through `drop_for_enemy` so the
+    /// per-`ServerLoot` [`super::loot::ShareWindow`] is built
+    /// from the same constant the pickup gate consults.
+    /// Mirrors [`super::SHARE_WINDOW_TICKS`]; passed in instead
+    /// of imported so unit tests can override it.
+    pub share_window_ticks: u32,
 }
 
 /// One row pushed to [`CombatCtx::meter_events`] per damage / heal

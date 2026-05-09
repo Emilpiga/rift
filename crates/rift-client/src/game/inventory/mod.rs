@@ -274,6 +274,7 @@ impl MpInventoryUI {
                 "Hovered",
                 primary_anchor,
                 Some(&player_state.loadout),
+                Some(player_state.experience.level),
             );
             // Ctrl-hover salvage hint. Drawn as a small banner
             // beneath the primary tooltip so it doesn't push the
@@ -335,6 +336,7 @@ impl MpInventoryUI {
                         "Equipped",
                         eq_anchor,
                         Some(&player_state.loadout),
+                        Some(player_state.experience.level),
                     );
                     if ui.shift_held() {
                         let delta_anchor = if stack_right {

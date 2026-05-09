@@ -52,15 +52,32 @@ pub enum Stat {
     Vitality,
     Armor,
     Evasion,
+    /// Flat health regenerated per second. Authored on items as
+    /// e.g. `+3 Health Regen`. Ticks alongside essence regen on
+    /// the server, no spend-pause gating.
+    HealthRegen,
+    /// Damage reduction vs. `Element::Physical` ability hits,
+    /// percent (0..1, capped at 0.75 in the consumer). Stacks
+    /// additively across gear.
+    PhysicalResist,
+    /// Damage reduction vs. `Element::{Fire,Ice,Lightning}`
+    /// ability hits, percent (0..1, capped at 0.75). One stat
+    /// covers all three elements; per-element resists can be
+    /// split out later if/when the design needs it.
+    ElementalResist,
+    /// Bonus to incoming heals, percent (0.20 = +20% heals
+    /// received). Multiplies both direct heals and HoT ticks
+    /// at apply time. Stacks additively across gear.
+    HealingReceived,
     /// Maximum essence pool (flat). Authored on items as e.g.
     /// `+12 Max Essence`. Stacks with class base + level.
-    MaxEssence,
-    /// Essence regen bonus, percent. Multiplies the class's
-    /// base regen rate the same way `Stat::Health` percent
-    /// channels work.
-    EssenceRegen,
+    MaxResource,
     // Utility
     CooldownReduction,
+    /// Essence regeneration bonus, percent. The in-game name is
+    /// "Essence Regen" but the programmatic identifier stays
+    /// `ResourceRegen` so future resource systems can share it.
+    /// Multiplies the class's base regen rate.
     ResourceRegen,
     MoveSpeed,
     // Damage-bucket scaling — multiplies abilities whose
@@ -92,10 +109,13 @@ impl Stat {
             Stat::Vitality => "Vitality",
             Stat::Armor => "Armor",
             Stat::Evasion => "Evasion",
-            Stat::MaxEssence => "Max Essence",
-            Stat::EssenceRegen => "Essence Regen",
+            Stat::HealthRegen => "Health Regen",
+            Stat::PhysicalResist => "Physical Resist",
+            Stat::ElementalResist => "Elemental Resist",
+            Stat::HealingReceived => "Healing Received",
+            Stat::MaxResource => "Max Essence",
             Stat::CooldownReduction => "Cooldown Reduction",
-            Stat::ResourceRegen => "Resource Regen",
+            Stat::ResourceRegen => "Essence Regen",
             Stat::MoveSpeed => "Move Speed",
             Stat::WeaponDamage => "Weapon Damage",
             Stat::SpellDamage => "Spell Damage",
@@ -121,9 +141,11 @@ impl Stat {
                 | Stat::AttackSpeed
                 | Stat::CooldownReduction
                 | Stat::ResourceRegen
-                | Stat::EssenceRegen
                 | Stat::MoveSpeed
                 | Stat::Evasion
+                | Stat::PhysicalResist
+                | Stat::ElementalResist
+                | Stat::HealingReceived
                 | Stat::WeaponDamage
                 | Stat::SpellDamage
                 | Stat::PhysicalDamage
@@ -262,14 +284,27 @@ pub struct CharacterStats {
     /// `Stat::Health` from gear.
     pub max_hp: f32,
     /// Maximum essence pool (the universal ability resource).
-    /// Class base + per-level scaling + flat `Stat::MaxEssence`.
+    /// Class base + per-level scaling + flat `Stat::MaxResource`.
     /// Drives [`Ability::resource_cost`] gating on the server
     /// and the essence bar on the HUD.
-    pub max_essence: f32,
+    pub max_resource: f32,
     /// Essence per second restored while not actively spending.
-    /// Class base * (1 + `Stat::EssenceRegen`).
-    pub essence_regen: f32,
-    /// Flat armor — mirrors `Stat::Armor`.
+    /// Class base * (1 + `Stat::ResourceRegen`).
+    pub resource_regen: f32,
+    /// Flat HP per second restored passively. Sourced entirely
+    /// from `Stat::HealthRegen`. Ticks every frame on the
+    /// server, no spend-pause gating.
+    pub health_regen: f32,
+    /// Bonus to incoming heals, 0..1 (`+0.20` = +20% heals
+    /// received). Multiplied onto direct heals + HoT ticks.
+    pub healing_received: f32,
+    /// Damage reduction vs. `Element::Physical`, 0..0.75.
+    pub physical_resist: f32,
+    /// Damage reduction vs. `Element::{Fire,Ice,Lightning}`,
+    /// 0..0.75.
+    pub elemental_resist: f32,
+    /// Flat armor — mirrors `Stat::Armor`. Consumed via
+    /// [`CharacterStats::armor_damage_reduction`].
     pub armor: f32,
     /// Evasion chance, 0..1 — mirrors `Stat::Evasion`.
     pub evasion: f32,
@@ -300,9 +335,6 @@ pub struct CharacterStats {
     /// Cooldown reduction, 0..1 (capped at 0.75). Mirrors
     /// `Stat::CooldownReduction`.
     pub cooldown_reduction: f32,
-    /// Resource (mana / focus) regen multiplier — 1 +
-    /// `Stat::ResourceRegen`.
-    pub resource_regen: f32,
     /// Effective ability range in metres (class base, no affix
     /// source yet).
     pub range: f32,
@@ -373,12 +405,16 @@ impl CharacterStats {
                 + flat(Stat::Health)
                 + flat(Stat::Vitality))
                 * pct(Stat::Health),
-            max_essence: (class.base_essence
-                + class.essence_per_level * level as f32
-                + flat(Stat::MaxEssence))
-                * pct(Stat::MaxEssence),
-            essence_regen: class.base_essence_regen
-                * (1.0 + flat(Stat::EssenceRegen)),
+            max_resource: (class.base_resource
+                + class.resource_per_level * level as f32
+                + flat(Stat::MaxResource))
+                * pct(Stat::MaxResource),
+            resource_regen: class.base_resource_regen
+                * (1.0 + flat(Stat::ResourceRegen)),
+            health_regen: flat(Stat::HealthRegen).max(0.0),
+            healing_received: flat(Stat::HealingReceived),
+            physical_resist: flat(Stat::PhysicalResist).clamp(0.0, 0.75),
+            elemental_resist: flat(Stat::ElementalResist).clamp(0.0, 0.75),
             armor: flat(Stat::Armor) * pct(Stat::Armor),
             evasion: flat(Stat::Evasion),
             defense: class.base_defense * attr_defense_mult,
@@ -393,7 +429,6 @@ impl CharacterStats {
 
             move_speed: class.base_move_speed * (1.0 + flat(Stat::MoveSpeed)),
             cooldown_reduction: flat(Stat::CooldownReduction).min(0.75),
-            resource_regen: 1.0 + flat(Stat::ResourceRegen),
             range: class.base_range,
 
             fire_damage: flat(Stat::FireDamage),
@@ -453,5 +488,32 @@ impl CharacterStats {
             Archetype::Movement | Archetype::Utility => 1.0,
         };
         scaling * element * archetype
+    }
+
+    /// Fraction of incoming damage absorbed by armor, 0..0.75.
+    /// Standard ARPG-style soft cap: `armor / (armor + K)` where
+    /// `K` scales with the receiver's level so high-level players
+    /// don't get free immortality from low-level armor numbers.
+    /// Capped at 0.75 to leave a real damage floor.
+    pub fn armor_damage_reduction(&self, level: u32) -> f32 {
+        if self.armor <= 0.0 {
+            return 0.0;
+        }
+        let k = 50.0 + 10.0 * level as f32;
+        (self.armor / (self.armor + k)).clamp(0.0, 0.75)
+    }
+
+    /// Resist multiplier on incoming damage of `element` (1.0 =
+    /// no resist, 0.25 = 75 % reduction, the cap). `Physical`
+    /// uses `physical_resist`; the three elements share
+    /// `elemental_resist`. `None` (untyped) is unresisted.
+    pub fn incoming_resist_mult(&self, element: crate::abilities::Element) -> f32 {
+        use crate::abilities::Element;
+        let r = match element {
+            Element::Physical => self.physical_resist,
+            Element::Fire | Element::Ice | Element::Lightning => self.elemental_resist,
+            Element::None => 0.0,
+        };
+        (1.0 - r.clamp(0.0, 0.75)).max(0.0)
     }
 }

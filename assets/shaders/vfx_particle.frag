@@ -41,23 +41,37 @@ float valueNoise(vec2 p) {
 float softGlow(vec2 uv) {
     vec2 c = uv - 0.5;
     float d = dot(c, c) * 4.0;          // 0 at centre, 1 at edge
-    return exp(-d * 3.5);                // gaussian
+    // Tighter exponent so the core stays bright a larger
+    // fraction of the radius and the rolloff is steeper.
+    // The previous 3.5 produced a wide gauzy halo that the
+    // bloom pass then smeared further; 7.0 keeps the same
+    // visible footprint but reads as a defined disc rather
+    // than a soft cloud.
+    return exp(-d * 7.0);
 }
 
 float spark(vec2 uv) {
     vec2 c = (uv - 0.5) * 2.0;
     float d = length(c);
-    float core = exp(-d * d * 14.0);
+    // Tighter core (was 14.0) so sparks read as crisp
+    // points rather than fuzzy dots. The streaks already
+    // taper sharply along the cross axis; we leave them.
+    float core = exp(-d * d * 32.0);
     // Cross-streaks: bright lines along x and y
-    float streakX = exp(-c.y * c.y * 80.0) * exp(-abs(c.x) * 3.0);
-    float streakY = exp(-c.x * c.x * 80.0) * exp(-abs(c.y) * 3.0);
+    float streakX = exp(-c.y * c.y * 110.0) * exp(-abs(c.x) * 3.5);
+    float streakY = exp(-c.x * c.x * 110.0) * exp(-abs(c.y) * 3.5);
     return clamp(core + 0.6 * (streakX + streakY), 0.0, 2.0);
 }
 
 float smokePuff(vec2 uv, float seed) {
     vec2 c = uv - 0.5;
     float r = length(c);
-    float disc = 1.0 - smoothstep(0.30, 0.50, r);
+    // Narrower transition band so the smoke disc has a
+    // defined silhouette instead of bleeding into the
+    // background. Smoke shouldn't be razor-sharp, but the
+    // old 0.30-wide ramp made every puff read as a 50 %
+    // alpha haze.
+    float disc = 1.0 - smoothstep(0.36, 0.50, r);
     // Roiling noise modulation, offset by seed so adjacent
     // particles look different even at the same age.
     float n = valueNoise(uv * 5.5 + vec2(seed * 13.0, seed * 7.0));
@@ -72,13 +86,19 @@ float shard(vec2 uv, float seed) {
     float ca = cos(ang), sa = sin(ang);
     vec2 r = vec2(ca * c.x - sa * c.y, sa * c.x + ca * c.y);
     float d = abs(r.x) + abs(r.y) * 1.6;  // diamond, slightly tall
-    return 1.0 - smoothstep(0.18, 0.42, d);
+    // Hard-ish edge: the previous 0.18–0.42 ramp put 24 %
+    // of the sprite radius in a soft transition that read
+    // as blur. 0.30–0.40 keeps a 1-pixel anti-alias band
+    // at typical sprite sizes while leaving the body solid.
+    return 1.0 - smoothstep(0.30, 0.40, d);
 }
 
 float ring(vec2 uv) {
     vec2 c = uv - 0.5;
     float r = length(c);
-    float band = exp(-pow((r - 0.40) * 14.0, 2.0));
+    // Narrower band (was *14.0). The ring now reads as a
+    // defined hoop rather than a fat smear of light.
+    float band = exp(-pow((r - 0.40) * 24.0, 2.0));
     return band;
 }
 

@@ -37,9 +37,9 @@ pub struct PlayerState {
     cached_stats: CharacterStats,
     /// Last server-reported essence pool fraction (0..=1) for
     /// the local player. Mirrored from the snapshot's
-    /// `essence_pct` each frame in `world_sync`. The HUD reads
+    /// `resource_pct` each frame in `world_sync`. The HUD reads
     /// this directly; the canonical scalar is server-side.
-    pub essence_pct: f32,
+    pub resource_pct: f32,
     /// Last server-reported salvage currency balance. Mirrored
     /// from [`rift_net::ServerMsg::ShardsSync`] in `main.rs`.
     /// The HUD reads this for the shard counter; the canonical
@@ -78,7 +78,7 @@ impl PlayerState {
             abilities,
             talents,
             cached_stats,
-            essence_pct: 1.0,
+            resource_pct: 1.0,
             shards: 0,
         }
     }

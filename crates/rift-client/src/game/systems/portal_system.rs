@@ -239,6 +239,14 @@ pub fn tick_hub(
 /// an F-press inside the interact radius into an `EnterRift`
 /// request — the server's `RequestEnterRift` handler reads that
 /// as "advance one floor" because `floor_index != 0`.
+///
+/// `anchor` is the world position pre-baked by the dungeon
+/// generator's portal-room — typically one of the two
+/// `Floor::portal_anchors` slots. Spawning at a pre-validated
+/// floor tile guarantees the portal can't end up inside a
+/// wall or clipping into a neighbouring room, both of which
+/// the previous offset-from-boss-centre math could produce on
+/// awkward BSP layouts.
 pub fn tick_exit(
     exit_portal: &mut Option<HubPortal>,
     world: &hecs::World,
@@ -249,20 +257,17 @@ pub fn tick_exit(
     descend_prompt: &mut bool,
     floor_complete: bool,
     in_hub: bool,
-    boss_room_center: Vec3,
+    anchor: Vec3,
     vote_active: bool,
     vote_cooldown: f32,
     dt: f32,
 ) {
     // Spawn lazily on first qualifying frame.
     if floor_complete && !in_hub && exit_portal.is_none() {
-        // Sit slightly above ground so the ring isn't z-fought
-        // by the floor decal — mirrors the hub portal's
-        // `+ Y 0.5` offset. Offset along -X by the same
-        // distance the rift-exit portal uses on +X so the two
-        // boss-room portals sit symmetrically about the room
-        // centre and the player can see both choices at once.
-        let pos = boss_room_center + Vec3::new(-3.5, 0.5, 0.0);
+        // The +Y 0.5 keeps the ring from z-fighting the
+        // floor decal; the anchor itself sits inside the
+        // portal room so we don't add any lateral offset.
+        let pos = anchor + Vec3::new(0.0, 0.5, 0.0);
         log::info!("exit portal: spawning at {:?}", pos);
         spawn_exit(exit_portal, renderer, pos);
     }
@@ -341,10 +346,13 @@ pub fn tick_exit(
 /// the F press is ignored: gatekeeping the living team out of
 /// an exit by spamming votes would be too easy otherwise.
 ///
-/// `boss_room_center` is the anchor for the spawn position;
-/// the portal sits a couple of metres to the side of the
-/// descend portal so the two are clearly distinct choices
-/// rather than overlapping on the same tile.
+/// `anchor` is the world position pre-baked by the dungeon
+/// generator's portal-room — the second of the two
+/// `Floor::portal_anchors` slots, sibling to the descend
+/// portal's anchor. Both anchors live inside the dedicated
+/// portal room, a corridor away from the boss room, so the
+/// player physically walks from the boss kill into a separate
+/// chamber to choose descend vs return-to-hub.
 pub fn tick_rift_spawn(
     portal_slot: &mut Option<HubPortal>,
     world: &hecs::World,
@@ -354,7 +362,7 @@ pub fn tick_rift_spawn(
     hud_prompt: &mut Option<&'static str>,
     floor_complete: bool,
     in_hub: bool,
-    boss_room_center: Vec3,
+    anchor: Vec3,
     vote_active: bool,
     cooldown_remaining: f32,
     is_ghost: bool,
@@ -373,16 +381,12 @@ pub fn tick_rift_spawn(
         // can't bail out of a floor they haven't cleared.
         // Once the boss is down, this portal is the
         // "leave with loot" half of the boss-room choice;
-        // the descend portal sits next to it.
+        // the descend portal sits next to it inside the
+        // portal room.
         if !floor_complete {
             return;
         }
-        // Sit slightly above ground so the ring isn't z-fought
-        // by the floor decal, and offset a few metres along +X
-        // from the descend portal so the two are visually
-        // distinct doorways rather than a single overlapping
-        // ring.
-        let pos = boss_room_center + Vec3::new(3.5, 0.5, 0.0);
+        let pos = anchor + Vec3::new(0.0, 0.5, 0.0);
         log::info!("rift exit portal: spawning at {:?}", pos);
         // Stepping into this portal returns the party to the
         // hub, so the disc bakes the *meadow* palette — bright

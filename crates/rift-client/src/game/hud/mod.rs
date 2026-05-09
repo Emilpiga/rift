@@ -111,20 +111,20 @@ pub fn render_hud(
     );
 
     // Essence bar (universal ability resource — see
-    // `CharacterStats::max_essence`). Sits directly under HP so
+    // `CharacterStats::max_resource`). Sits directly under HP so
     // the eye reads "vital pools" as a single block. Max value
     // comes from the local cached stat sheet; current fraction
-    // is the server-mirrored `essence_pct`.
-    let essence_pct = player_state.essence_pct.clamp(0.0, 1.0);
+    // is the server-mirrored `resource_pct`.
+    let resource_pct = player_state.resource_pct.clamp(0.0, 1.0);
     let essence_y = bar_y + bar_h + 2.0 * s;
-    ProgressBar::new(essence_pct)
+    ProgressBar::new(resource_pct)
         .fill(Color::rgba(0.32, 0.55, 0.95, 0.95))
         .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
         .rounded(false)
         .show(ui, Rect::from_xywh(bar_x, essence_y, bar_w, essence_h));
-    let max_essence = player_state.stats().max_essence;
-    let essence_now = (essence_pct * max_essence).round();
-    let essence_label = format!("{essence_now:.0} / {max_essence:.0}");
+    let max_resource = player_state.stats().max_resource;
+    let essence_now = (resource_pct * max_resource).round();
+    let essence_label = format!("{essence_now:.0} / {max_resource:.0}");
     let essence_text_size = 11.0 * s;
     let essence_text_w = ui.measure_text(&essence_label, essence_text_size);
     ui.draw_text(
@@ -317,8 +317,8 @@ pub fn render_ability_bar(
     ui: &mut Ui<'_>,
     abilities: &AbilitySlot,
     player_level: u32,
-    // Current essence pool in raw units (`essence_pct *
-    // max_essence`). Drives the unaffordable-slot tint and the
+    // Current essence pool in raw units (`resource_pct *
+    // max_resource`). Drives the unaffordable-slot tint and the
     // cost line in the tooltip.
     current_essence: f32,
     targeting_slot: Option<usize>,

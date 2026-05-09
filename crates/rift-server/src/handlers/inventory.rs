@@ -72,6 +72,7 @@ impl Server {
                     slot_index: 0,
                     anchored,
                     tab_index: 0,
+                    provenance: super::provenance_to_persisted(&item),
                 };
                 if !handle.append_inventory_item(rec.id, persisted) {
                     log::warn!("persistence: append_inventory_item dropped for {from:?}");
@@ -232,6 +233,7 @@ impl Server {
                     slot_index,
                     anchored,
                     tab_index: 0,
+                    provenance: super::provenance_to_persisted(&item),
                 }
             })
             .collect();
@@ -417,6 +419,7 @@ impl Server {
                     slot_index: slot_index as i32,
                     anchored,
                     tab_index: tab_index as i16,
+                    provenance: super::provenance_to_persisted(&item),
                 });
             }
         }
@@ -520,9 +523,22 @@ impl Server {
 
     /// Drop the bag item at `inventory_index` onto the ground at
     /// the picker's current position. Removes the row, spawns a
-    /// fresh `ServerLoot`, and queues `WorldEvent::LootDropped`
+    /// fresh `ServerLoot` tagged with a [`crate::sim::SHARE_WINDOW_TICKS`]
+    /// eligibility snapshot, and queues `WorldEvent::LootDropped`
     /// so every observer's loot pillar appears.
+    ///
+    /// Refuses while the dropper is in the hub: under the
+    /// level-requirement system, dropping endgame gear in town
+    /// is the obvious twink vector, so the rule is simply "no
+    /// drops in town." Stash + bag still cover storage in the
+    /// hub.
     pub(crate) fn handle_drop_inventory_item(&mut self, from: ClientId, inventory_index: usize) {
+        if self.sim_for_client(from).is_hub() {
+            log::debug!(
+                "inv: drop rejected for {from:?} idx={inventory_index} (in hub)"
+            );
+            return;
+        }
         let Some((item, pos)) = self.sim_for_client_mut(from).pop_inventory_item(from, inventory_index) else {
             log::debug!(
                 "inv: drop rejected for {from:?} idx={inventory_index}"
@@ -533,7 +549,7 @@ impl Server {
             "inv: {from:?} dropped {} at {pos:?}",
             item.display_name(),
         );
-        self.sim_for_client_mut(from).spawn_dropped_loot(item, pos);
+        self.sim_for_client_mut(from).spawn_player_drop(item, pos, from);
         self.broadcast_inventory_state(from);
         self.persist_inventory_state(from);
     }

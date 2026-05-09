@@ -202,8 +202,41 @@ pub fn generate_bsp(config: &FloorConfig, seed: u64) -> (Vec<Room>, Vec<(usize, 
     let mut rooms = root.collect_rooms();
 
     // Assign boss room to the largest room
-    if let Some(idx) = rooms.iter().enumerate().max_by_key(|(_, r)| r.area()).map(|(i, _)| i) {
+    let boss_idx = rooms
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, r)| r.area())
+        .map(|(i, _)| i);
+    if let Some(idx) = boss_idx {
         rooms[idx].room_type = RoomType::BossRoom;
+    }
+
+    // Assign the portal room: the non-boss room whose centre
+    // is closest to the boss room. BSP corridors connect every
+    // room into a single graph, so the geographic neighbour is
+    // almost always BSP-sibling-connected by an L-shaped
+    // corridor — exactly the "short walk from the boss to the
+    // portals" feel we want. Skip if there's only one room
+    // (degenerate small floors), and protect against
+    // accidentally re-tagging the boss room.
+    if let Some(boss_idx) = boss_idx {
+        let (bx, bz) = rooms[boss_idx].center();
+        let mut best: Option<(usize, usize)> = None; // (idx, dist²)
+        for (i, r) in rooms.iter().enumerate() {
+            if i == boss_idx || r.room_type != RoomType::Arena {
+                continue;
+            }
+            let (cx, cz) = r.center();
+            let dx = cx as isize - bx as isize;
+            let dz = cz as isize - bz as isize;
+            let d2 = (dx * dx + dz * dz) as usize;
+            if best.map(|(_, b)| d2 < b).unwrap_or(true) {
+                best = Some((i, d2));
+            }
+        }
+        if let Some((idx, _)) = best {
+            rooms[idx].room_type = RoomType::PortalRoom;
+        }
     }
 
     (rooms, corridors)

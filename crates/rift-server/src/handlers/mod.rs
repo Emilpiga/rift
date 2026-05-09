@@ -61,7 +61,59 @@ pub(crate) fn item_to_blob(
         ilvl,
         affixes,
         anchored,
+        provenance: provenance_to_wire(item),
     }
+}
+
+/// Convert an [`Item`]'s in-memory [`rift_game::loot::LootProvenance`]
+/// into the `Option<Vec<[u8; 16]>>` shape used on the wire and
+/// in [`rift_net::messages::ItemBlob`]. Returns `None` for
+/// legacy / unprovenanced items so the receiver can route them
+/// to the self-bind-on-touch path.
+pub(crate) fn provenance_to_wire(
+    item: &rift_game::loot::Item,
+) -> Option<Vec<[u8; 16]>> {
+    item.provenance.as_ref().map(|p| p.eligible.clone())
+}
+
+/// Convert an [`Item`]'s provenance into the
+/// `Option<Vec<rift_persistence::Uuid>>` shape stored as
+/// `provenance UUID[]` in the database. Same `None` semantics
+/// as [`provenance_to_wire`].
+pub(crate) fn provenance_to_persisted(
+    item: &rift_game::loot::Item,
+) -> Option<Vec<rift_persistence::Uuid>> {
+    item.provenance.as_ref().map(|p| {
+        p.eligible
+            .iter()
+            .map(|bytes| rift_persistence::Uuid::from_bytes(*bytes))
+            .collect()
+    })
+}
+
+/// Decode the wire / persisted byte vector back into a runtime
+/// [`rift_game::loot::LootProvenance`]. `None` round-trips to
+/// `None`. Centralised so the inverse of
+/// [`provenance_to_wire`] / [`provenance_to_persisted`] is
+/// always evaluated the same way.
+#[allow(dead_code)]
+pub(crate) fn provenance_from_wire(
+    bytes: Option<Vec<[u8; 16]>>,
+) -> Option<rift_game::loot::LootProvenance> {
+    bytes.map(|eligible| rift_game::loot::LootProvenance::from_ids(eligible))
+}
+
+/// Decode a persisted `Vec<Uuid>` back into a runtime
+/// [`rift_game::loot::LootProvenance`]. Mirror of
+/// [`provenance_from_wire`].
+pub(crate) fn provenance_from_persisted(
+    uuids: Option<Vec<rift_persistence::Uuid>>,
+) -> Option<rift_game::loot::LootProvenance> {
+    uuids.map(|v| {
+        rift_game::loot::LootProvenance::from_ids(
+            v.into_iter().map(|u| u.into_bytes()),
+        )
+    })
 }
 
 /// Insert `item` at `slot_index` in a sparse bag/stash, growing

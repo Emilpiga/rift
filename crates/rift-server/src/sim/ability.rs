@@ -304,7 +304,7 @@ pub fn submit(
             // borrow is already dropped by this point.
             {
                 let mut p_mut = world.get::<&mut ServerPlayer>(entity).ok()?;
-                if !p_mut.try_spend_essence(ability.resource_cost) {
+                if !p_mut.try_spend_resource(ability.resource_cost) {
                     return None;
                 }
             }

@@ -14,7 +14,9 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// Create a texture from raw RGBA8 pixel data.
+    /// Create a texture from raw RGBA8 pixel data, sampled as
+    /// SRGB (the default for color textures). Equivalent to
+    /// `from_rgba_with_format(.., R8G8B8A8_SRGB)`.
     pub fn from_rgba(
         device: &ash::Device,
         allocator: &Arc<Mutex<Allocator>>,
@@ -23,6 +25,34 @@ impl Texture {
         width: u32,
         height: u32,
         pixels: &[u8],
+    ) -> Result<Self> {
+        Self::from_rgba_with_format(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            width,
+            height,
+            pixels,
+            vk::Format::R8G8B8A8_SRGB,
+        )
+    }
+
+    /// Create a texture from raw RGBA8 pixel data with an
+    /// explicit Vulkan format. Use `R8G8B8A8_SRGB` for color
+    /// inputs (basecolor / albedo) and `R8G8B8A8_UNORM` for
+    /// data textures (normal maps, metallic / roughness / AO
+    /// channels, height maps) so the GPU doesn't apply an
+    /// sRGB → linear curve to non-color data.
+    pub fn from_rgba_with_format(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        format: vk::Format,
     ) -> Result<Self> {
         let image_size = (width * height * 4) as vk::DeviceSize;
 
@@ -62,7 +92,7 @@ impl Texture {
             .extent(vk::Extent3D { width, height, depth: 1 })
             .mip_levels(1)
             .array_layers(1)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .tiling(vk::ImageTiling::OPTIMAL)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
@@ -180,7 +210,7 @@ impl Texture {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,

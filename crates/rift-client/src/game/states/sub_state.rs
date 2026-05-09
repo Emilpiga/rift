@@ -384,6 +384,48 @@ pub struct LootDropVisual {
     /// VFX handle for the gold-cyan halo spawned only when
     /// `item.anchored` is true. `None` for ordinary drops.
     pub anchored_emitter: Option<rift_engine::renderer::vfx::EffectId>,
+    /// Optional 3D bind-pose mesh laid on the ground. `None`
+    /// when the item's [`rift_game::loot::BaseItem::models`]
+    /// has no art for the local player's gender (or the file
+    /// failed to decode); in that case the pillar / base /
+    /// halo VFX above are the only visual.
+    pub ground_mesh: Option<LootGroundMesh>,
+}
+
+/// State for a loot drop's on-ground 3D model: the renderer
+/// object slot, the ground-rest position the animation settles
+/// onto, and the current animation phase. Spawned at
+/// `anim_t = 0` and ticked by
+/// [`crate::game::loot_system::tick_drop_animation`].
+#[derive(Debug)]
+pub struct LootGroundMesh {
+    /// Renderer object index returned by `add_dynamic_mesh`.
+    /// We never update vertices on it — it stays in bind pose
+    /// — but the renderer still requires a dynamic slot to
+    /// expose the per-frame `model_matrix` for animation.
+    pub object_index: usize,
+    /// Rest position the pop animation settles onto (slightly
+    /// above the spawn point so the model doesn't z-fight with
+    /// the floor).
+    pub rest_position: glam::Vec3,
+    /// Constant scale applied to the model so the bind-pose
+    /// mesh lands at a recognisable on-ground size regardless
+    /// of how the artist authored the source bounds.
+    pub base_scale: f32,
+    /// Yaw the model rests at, randomised per drop so chains
+    /// of identical drops don't all face the same way.
+    pub rest_yaw: f32,
+    /// Mesh-local AABB min, captured at spawn so the per-frame
+    /// transform can centre the visual centroid under the loot
+    /// beam and lift the lowest point above the floor without
+    /// re-fetching the model cache every tick.
+    pub bounds_min: glam::Vec3,
+    /// Mesh-local AABB max, paired with [`Self::bounds_min`].
+    pub bounds_max: glam::Vec3,
+    /// Animation timer in seconds. Drives the pop-up arc and
+    /// scale-in tween for the first `POP_DURATION` seconds, then
+    /// holds the rest pose with a slow ambient bob.
+    pub anim_t: f32,
 }
 
 /// Client-side mirror of every revive-shrine row currently

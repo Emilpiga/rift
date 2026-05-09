@@ -64,8 +64,8 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             yaw: p.k.yaw,
             velocity: p.k.velocity.to_array(),
             health_pct: (p.hp / p.hp_max).clamp(0.0, 1.0),
-            essence_pct: if p.stats.max_essence > 0.0 {
-                (p.essence / p.stats.max_essence).clamp(0.0, 1.0)
+            resource_pct: if p.stats.max_resource > 0.0 {
+                (p.resource / p.stats.max_resource).clamp(0.0, 1.0)
             } else {
                 1.0
             },
@@ -111,7 +111,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             yaw: en.k.yaw,
             velocity: en.k.velocity.to_array(),
             health_pct: (en.hp / en.hp_max.max(0.001)).clamp(0.0, 1.0),
-            essence_pct: 1.0,
+            resource_pct: 1.0,
             flags,
             effects,
         });
@@ -133,7 +133,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             yaw,
             velocity: proj.velocity.to_array(),
             health_pct: 1.0,
-            essence_pct: 1.0,
+            resource_pct: 1.0,
             flags: 0,
             effects: Vec::new(),
         });
@@ -147,6 +147,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             continue;
         }
         let (base_id, rarity, ilvl, affixes, anchored) = loot_row.item.to_wire();
+        let provenance = loot_row.item.provenance.as_ref().map(|p| p.eligible.clone());
         entities.push(EntitySnapshot {
             net_id: loot_row.net_id,
             kind: EntityKind::Loot {
@@ -156,13 +157,14 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                     ilvl,
                     affixes,
                     anchored,
+                    provenance,
                 },
             },
             position: loot_row.position.to_array(),
             yaw: 0.0,
             velocity: [0.0; 3],
             health_pct: 1.0,
-            essence_pct: 1.0,
+            resource_pct: 1.0,
             flags: 0,
             effects: Vec::new(),
         });
@@ -186,7 +188,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             yaw: 0.0,
             velocity: [0.0; 3],
             health_pct: 1.0,
-            essence_pct: 1.0,
+            resource_pct: 1.0,
             flags: 0,
             effects: Vec::new(),
         });

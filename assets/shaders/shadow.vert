@@ -24,6 +24,8 @@ layout(set = 0, binding = 0) uniform UniformData {
     vec4 pointLightColor[8];
     vec4 pointLightCount;
     mat4 lightVP;
+    mat4 pointShadowFaceVP[24];
+    vec4 pointShadowMeta;
 } ubo;
 
 layout(push_constant) uniform PushConstants {

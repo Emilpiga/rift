@@ -7,6 +7,12 @@ pub enum RoomType {
     Arena,
     /// Large room for end-of-floor boss fight.
     BossRoom,
+    /// Quiet room placed adjacent to the boss room — holds the
+    /// pair of post-boss portals (descend / return-to-hub) so
+    /// the choice is physically separated from the boss-fight
+    /// loot pile. Tagged here purely for downstream lookup; the
+    /// client just renders it as floor like any other room.
+    PortalRoom,
     /// Narrow connecting passage between rooms.
     Corridor,
 }
@@ -33,6 +39,32 @@ impl Room {
 
     pub fn area(&self) -> usize {
         self.width * self.depth
+    }
+
+    /// Two interior anchor points for the post-boss portal
+    /// pair, returned as `(left, right)` in world coordinates.
+    /// Both sit on the room centre's Z axis with a symmetric
+    /// X offset, clamped to keep at least one tile of border
+    /// between each anchor and the wall so portal meshes can't
+    /// poke through. The minimum offset (1.5 m) is enough that
+    /// the loot pile dropped at the boss centre — which sits
+    /// in a *different* room — never overlaps either anchor's
+    /// pickup / interact radius even when the corridor is
+    /// short. The widest a room ever gets bounds the maximum
+    /// at `width/2 - 1`, so callers can rely on the anchors
+    /// being inside `Tile::Floor`.
+    pub fn portal_anchors(&self) -> (Vec3, Vec3) {
+        let (cx, cz) = self.center();
+        // Half-width minus one tile of border, capped so giant
+        // rooms don't push the portals into the corners.
+        let max_off = (self.width as f32 / 2.0 - 1.0).max(1.0);
+        let dx = max_off.min(3.0).max(1.5);
+        let cx = cx as f32;
+        let cz = cz as f32;
+        (
+            Vec3::new(cx - dx, 0.0, cz),
+            Vec3::new(cx + dx, 0.0, cz),
+        )
     }
 
     /// Get random floor positions inside the room for spawning entities.

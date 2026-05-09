@@ -63,9 +63,10 @@ pub use drops::{
 };
 pub use equipment::Equipment;
 pub use inventory::{Inventory, Loadout};
-pub use item::{Item, RolledAffix};
+pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix};
 pub use items::{
-    tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, ItemSlot, WeaponKind, BASE_ITEMS,
+    tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, GenderedModel, ItemSlot, WeaponKind,
+    BASE_ITEMS,
 };
 pub use rarity::Rarity;
 pub use rarity::salvage_yield;

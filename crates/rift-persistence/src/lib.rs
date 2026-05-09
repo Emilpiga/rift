@@ -90,6 +90,14 @@ pub struct PersistedItem {
     /// `[0..n)`; the count is implied by the highest index in
     /// `stash_tabs` for the character.
     pub tab_index: i16,
+    /// Pickup-eligibility lineage. `Some` carries the character
+    /// UUIDs that shared the originating expedition; `None`
+    /// is the legacy state for rows that pre-date the
+    /// provenance system. The runtime self-binds `None` to
+    /// the holding character on first interaction.
+    ///
+    /// Stored in the `provenance` column as `UUID[] NULL`.
+    pub provenance: Option<Vec<Uuid>>,
 }
 
 /// One persisted stash-tab metadata row. Items live in their
@@ -697,9 +705,9 @@ async fn load_inventory(
     pool: &PgPool,
     character_id: Uuid,
 ) -> Result<Vec<PersistedItem>, PersistenceError> {
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, Option<i16>, i32, bool)> =
+    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, Option<i16>, i32, bool, Option<Vec<Uuid>>)> =
         sqlx::query_as(
-            "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored \
+            "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance \
              FROM inventory_items \
              WHERE character_id = $1 \
              ORDER BY equipped_slot NULLS LAST, slot_index, acquired_at, id",
@@ -709,7 +717,7 @@ async fn load_inventory(
         .await?;
     Ok(rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored)| PersistedItem {
+        .map(|(base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance)| PersistedItem {
             base_id,
             rarity,
             ilvl,
@@ -718,6 +726,7 @@ async fn load_inventory(
             slot_index,
             anchored,
             tab_index: 0,
+            provenance,
         })
         .collect())
 }
@@ -742,10 +751,10 @@ async fn append_inventory_item(
     // collide on a stale client-side counter.
     sqlx::query(
         "INSERT INTO inventory_items \
-         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored) \
+         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, \
             COALESCE((SELECT MAX(slot_index) + 1 FROM inventory_items \
-                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8)",
+                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8, $9)",
     )
     .bind(Uuid::new_v4())
     .bind(character_id)
@@ -755,6 +764,7 @@ async fn append_inventory_item(
     .bind(sqlx::types::Json(affixes_json))
     .bind(item.equipped_slot)
     .bind(item.anchored)
+    .bind(item.provenance.as_deref())
     .execute(pool)
     .await?;
     Ok(())
@@ -783,8 +793,8 @@ async fn reset_character_inventory(
             .collect();
         sqlx::query(
             "INSERT INTO inventory_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -795,6 +805,7 @@ async fn reset_character_inventory(
         .bind(item.equipped_slot)
         .bind(item.slot_index)
         .bind(item.anchored)
+        .bind(item.provenance.as_deref())
         .execute(&mut *tx)
         .await?;
     }
@@ -827,9 +838,9 @@ async fn load_stash(
         .map(|(tab_index, name, color)| PersistedStashTab { tab_index, name, color })
         .collect();
 
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32, bool, i16)> =
+    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32, bool, i16, Option<Vec<Uuid>>)> =
         sqlx::query_as(
-            "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index \
+            "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance \
              FROM stash_items \
              WHERE character_id = $1 \
              ORDER BY tab_index, slot_index, acquired_at, id",
@@ -839,7 +850,7 @@ async fn load_stash(
         .await?;
     let items = rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index)| PersistedItem {
+        .map(|(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance)| PersistedItem {
             base_id,
             rarity,
             ilvl,
@@ -848,6 +859,7 @@ async fn load_stash(
             slot_index,
             anchored,
             tab_index,
+            provenance,
         })
         .collect();
     Ok((tabs, items))
@@ -893,8 +905,8 @@ async fn reset_character_stash(
             .collect();
         sqlx::query(
             "INSERT INTO stash_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -905,6 +917,7 @@ async fn reset_character_stash(
         .bind(item.slot_index)
         .bind(item.anchored)
         .bind(item.tab_index)
+        .bind(item.provenance.as_deref())
         .execute(&mut *tx)
         .await?;
     }

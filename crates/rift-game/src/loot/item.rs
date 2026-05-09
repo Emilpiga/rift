@@ -107,6 +107,75 @@ pub struct Item {
     /// [`ANCHORED_CHANCE`] inside [`Item::roll`]. Purely
     /// additive — no stat impact, just persistence.
     pub anchored: bool,
+    /// Eligibility lineage for ground-loot pickup. Snapshotted
+    /// once at the moment the item is first generated (monster
+    /// kill in a rift) and **carried with the item forever** —
+    /// across stash, equip, drop, and re-pickup. The set holds
+    /// every character (by 16-byte UUID) that shared the
+    /// originating expedition.
+    ///
+    /// `None` is the legacy / unprovenanced state for items
+    /// that predate this system. The server self-binds a
+    /// `None` to the current holder on first interaction
+    /// (equip, drop, pickup) so the loophole closes the moment
+    /// a legacy item is touched.
+    ///
+    /// rift-game intentionally does **not** depend on the
+    /// `uuid` crate; the bytes are passed through as raw
+    /// `[u8; 16]` and converted at the `rift-persistence` /
+    /// server boundary. Wire / persistence formats default to
+    /// `None` so old payloads decode cleanly.
+    pub provenance: Option<LootProvenance>,
+}
+
+/// 16-byte little-endian UUID payload identifying a character.
+/// Used as the eligibility key inside [`LootProvenance`]. Kept as
+/// a plain byte array so `rift-game` doesn't need to depend on
+/// the `uuid` crate; the persistence / network layers convert
+/// to and from `uuid::Uuid` at their boundary.
+pub type CharacterIdBytes = [u8; 16];
+
+/// Eligibility lineage attached to an [`Item`]. See
+/// [`Item::provenance`] for the high-level rules. Today this
+/// only carries the `eligible` set, but the type is named so the
+/// payload can grow (timestamp, originating rift seed, etc.)
+/// without churning every call site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LootProvenance {
+    /// Snapshot of every character UUID that shared the
+    /// originating expedition. A pickup is allowed when the
+    /// pickup'er's character id appears in this list — or when
+    /// the per-ground-instance share window has expired (handled
+    /// outside this struct, on the server's `ServerLoot`).
+    ///
+    /// Stored as a `Vec` rather than `HashSet` because the set
+    /// is tiny (party sizes are bounded) and `contains` on a
+    /// short vec wins every time. Order is irrelevant.
+    pub eligible: Vec<CharacterIdBytes>,
+}
+
+impl LootProvenance {
+    /// Build a provenance snapshot from a slice of character ids.
+    /// Empty input is allowed (produces an empty `eligible` set
+    /// — equivalent to a no-pickup gate, used by tests and as a
+    /// defensive fallback).
+    pub fn from_ids(ids: impl IntoIterator<Item = CharacterIdBytes>) -> Self {
+        let mut eligible: Vec<CharacterIdBytes> = ids.into_iter().collect();
+        // De-dup so a buggy caller that passes the same id twice
+        // doesn't bloat the persisted payload. Sort first so the
+        // dedup is O(n log n) rather than O(n^2).
+        eligible.sort_unstable();
+        eligible.dedup();
+        Self { eligible }
+    }
+
+    /// `true` if `who` shared the originating expedition. The
+    /// time-window gate (after which any peer can pick up) lives
+    /// on the server's `ServerLoot` row, not here — provenance
+    /// itself is timeless.
+    pub fn allows(&self, who: &CharacterIdBytes) -> bool {
+        self.eligible.contains(who)
+    }
 }
 
 /// Per-roll chance that a Legendary drop is also Anchored.
@@ -233,6 +302,13 @@ impl Item {
             ilvl,
             affixes: rolled,
             anchored,
+            // Caller (server `drop_for_enemy`) is responsible for
+            // attaching provenance after the roll — it owns the
+            // current Sim's character roster, which `rift-game`
+            // doesn't know about. Items rolled via tests / debug
+            // seeding leave it `None` and self-bind on first
+            // interaction.
+            provenance: None,
         }
     }
 
@@ -251,6 +327,29 @@ impl Item {
         block
     }
 
+    /// Minimum character level required to equip this item.
+    ///
+    /// Derived (not stored), so the wire / persistence formats stay
+    /// unchanged: it's the larger of the item's own item-level and
+    /// the highest `min_ilvl` of any rolled affix. The ilvl term
+    /// keeps the rift-tier signal — a level-30 rift drops gear that
+    /// asks for level 30 to wear, even when its affix block happens
+    /// to be modest. The affix term defends against future affixes
+    /// that gate themselves above their host item's ilvl.
+    ///
+    /// Floored at 1 so freshly-created characters always have *some*
+    /// equippable starter.
+    pub fn required_level(&self) -> u32 {
+        let from_ilvl = self.ilvl.max(1);
+        let from_affixes = self
+            .affixes
+            .iter()
+            .map(|a| a.def.min_ilvl)
+            .max()
+            .unwrap_or(0);
+        from_ilvl.max(from_affixes).max(1)
+    }
+
     pub fn display_name(&self) -> String {
         if self.anchored {
             format!("Anchored {} {}", self.rarity.name(), self.base.name)
@@ -264,23 +363,27 @@ impl Item {
     /// Structured top-down for readability:
     /// 1. Name (rarity-coloured by the renderer)
     /// 2. `Item Level N`
-    /// 3. Implicits (base-item lines, e.g. "+24 Armor")
-    /// 4. **Signature block** \u2014 the slot-defining lines, ordered
+    /// 3. `Requires Level N` — the minimum character level to equip
+    ///    this item (see [`Item::required_level`]). The renderer
+    ///    can colour this red when the viewing player can't meet it.
+    /// 4. Implicits (base-item lines, e.g. "+24 Armor")
+    /// 5. **Signature block** \u2014 the slot-defining lines, ordered
     ///    `[primary, Vitality, secondary?]` so the slot's headline
     ///    stat reads first and the eternal `+N Vitality` anchor
     ///    sits directly under it.
-    /// 5. **Bonus block** \u2014 separator (`\u2500\u2500\u2500`) then any
+    /// 6. **Bonus block** \u2014 separator (`\u2500\u2500\u2500`) then any
     ///    rarity-rolled stat affixes.
-    /// 6. Amplify / cooldown affixes.
-    /// 7. Legendary effect (when present) \u2014 prefixed `\u2605 ` so the
+    /// 7. Amplify / cooldown affixes.
+    /// 8. Legendary effect (when present) \u2014 prefixed `\u2605 ` so the
     ///    UI / player can pick it out at a glance.
-    /// 8. Synergy footer (when `loadout.is_some()`) \u2014 a one-line
+    /// 9. Synergy footer (when `loadout.is_some()`) \u2014 a one-line
     ///    `\u2192 Boosts <ability> (slot N)` for each slotted ability
     ///    this item benefits.
     pub fn tooltip(&self, loadout: Option<&crate::loadout::Loadout>) -> Vec<String> {
         let mut out = Vec::with_capacity(8 + self.affixes.len());
         out.push(self.display_name());
         out.push(format!("Item Level {}", self.ilvl));
+        out.push(format!("Requires Level {}", self.required_level()));
         if self.anchored {
             // Tagged so the renderer can colour this line
             // distinctly from regular flavour text.
@@ -580,6 +683,7 @@ impl Item {
         ilvl: u16,
         affixes: &[(u16, f32)],
         anchored: bool,
+        provenance: Option<LootProvenance>,
     ) -> Option<Self> {
         let base = super::items::BASE_ITEMS.get(base_id as usize)?;
         let rarity = match rarity_byte {
@@ -600,6 +704,7 @@ impl Item {
             ilvl: ilvl as u32,
             affixes: rolled,
             anchored,
+            provenance,
         })
     }
 
@@ -637,6 +742,7 @@ impl Item {
         ilvl: u16,
         affixes: &[(String, f32)],
         anchored: bool,
+        provenance: Option<LootProvenance>,
     ) -> Option<Self> {
         let base = super::items::BASE_ITEMS.iter().find(|b| b.id == base_id)?;
         let rarity = match rarity_byte {
@@ -660,6 +766,151 @@ impl Item {
             ilvl: ilvl as u32,
             affixes: rolled,
             anchored,
+            provenance,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::affixes::AFFIX_POOL;
+    use super::super::items::BASE_ITEMS;
+    use super::super::rng::LootRng;
+    use super::*;
+
+    /// Pick a base by static id, panicking with a useful message
+    /// if the catalog drifts out from under the test.
+    fn base(id: &str) -> &'static super::super::items::BaseItem {
+        BASE_ITEMS
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("base item `{id}` missing from BASE_ITEMS"))
+    }
+
+    #[test]
+    fn required_level_floors_at_one_for_ilvl_zero() {
+        // Synthetic item with no affixes and a degenerate ilvl.
+        // Floor guarantees fresh characters always have *some*
+        // equippable starter, even if a future code path produces
+        // an ilvl-0 drop by accident.
+        let item = Item {
+            base: base("staff_basic"),
+            rarity: Rarity::Common,
+            ilvl: 0,
+            affixes: Vec::new(),
+            anchored: false,
+            provenance: None,
+        };
+        assert_eq!(item.required_level(), 1);
+    }
+
+    #[test]
+    fn required_level_tracks_item_level_when_affixes_are_low_tier() {
+        // Common drop from a level-30 rift with no affixes that
+        // outscale the item-level: requirement equals the ilvl,
+        // i.e. "you cleared rift 30, this asks you to be level 30".
+        let item = Item {
+            base: base("staff_basic"),
+            rarity: Rarity::Common,
+            ilvl: 30,
+            affixes: Vec::new(),
+            anchored: false,
+            provenance: None,
+        };
+        assert_eq!(item.required_level(), 30);
+    }
+
+    #[test]
+    fn required_level_uses_highest_affix_min_ilvl_when_above_ilvl() {
+        // Pick any two affixes with distinct min_ilvls and verify
+        // the requirement tracks the highest one when it exceeds
+        // the item's ilvl.
+        let a_low = AFFIX_POOL.iter().find(|a| a.min_ilvl == 1).expect(
+            "AFFIX_POOL should contain at least one min_ilvl=1 entry",
+        );
+        let a_high = AFFIX_POOL
+            .iter()
+            .filter(|a| a.min_ilvl > 1)
+            .max_by_key(|a| a.min_ilvl)
+            .expect("AFFIX_POOL should contain at least one min_ilvl>1 entry");
+        let item = Item {
+            base: base("staff_basic"),
+            rarity: Rarity::Rare,
+            // ilvl deliberately low so the affix term wins.
+            ilvl: 1,
+            affixes: vec![
+                RolledAffix { def: a_low, value: 0.0 },
+                RolledAffix { def: a_high, value: 0.0 },
+            ],
+            anchored: false,
+            provenance: None,
+        };
+        assert_eq!(item.required_level(), a_high.min_ilvl.max(1));
+    }
+
+    #[test]
+    fn required_level_takes_max_of_ilvl_and_affix_terms() {
+        // ilvl=20, affix at min_ilvl<=20 → ilvl term wins.
+        // ilvl=20, affix at min_ilvl>20  → affix term wins.
+        // Pick affixes from the live pool so this test stays
+        // immune to renames.
+        let a_low = AFFIX_POOL
+            .iter()
+            .filter(|a| a.min_ilvl <= 20)
+            .next()
+            .expect("AFFIX_POOL should contain at least one min_ilvl<=20 entry");
+        let item_a = Item {
+            base: base("staff_basic"),
+            rarity: Rarity::Common,
+            ilvl: 20,
+            affixes: vec![RolledAffix { def: a_low, value: 0.0 }],
+            anchored: false,
+            provenance: None,
+        };
+        assert_eq!(item_a.required_level(), 20);
+
+        // Find any affix gated at >20 to drive the second branch.
+        if let Some(high) = AFFIX_POOL.iter().find(|a| a.min_ilvl > 20) {
+            let item_b = Item {
+                base: base("staff_basic"),
+                rarity: Rarity::Common,
+                ilvl: 20,
+                affixes: vec![RolledAffix { def: high, value: 0.0 }],
+                anchored: false,
+                provenance: None,
+            };
+            assert_eq!(item_b.required_level(), high.min_ilvl);
+        }
+    }
+
+    #[test]
+    fn required_level_for_rolled_item_never_exceeds_max_of_ilvl_and_pool_max() {
+        // End-to-end: roll a Legendary at a moderate ilvl with a
+        // deterministic seed and verify the requirement is bounded
+        // by max(ilvl, pool max min_ilvl). This catches regressions
+        // where a future field starts contributing to the
+        // requirement without being reflected in the tests.
+        let pool_max = AFFIX_POOL.iter().map(|a| a.min_ilvl).max().unwrap_or(0);
+        let mut rng = LootRng::new(0xDEAD_BEEF_CAFE);
+        let item = Item::roll(base("staff_basic"), Rarity::Legendary, 25, &mut rng);
+        let req = item.required_level();
+        assert!(
+            req <= 25u32.max(pool_max),
+            "req={req} exceeds bound max(25, pool_max={pool_max})",
+        );
+        assert!(req >= 1);
+    }
+
+    #[test]
+    fn tooltip_includes_requires_level_line() {
+        let mut rng = LootRng::new(1);
+        let item = Item::roll(base("staff_basic"), Rarity::Magic, 12, &mut rng);
+        let lines = item.tooltip(None);
+        let req = item.required_level();
+        let expected = format!("Requires Level {}", req);
+        assert!(
+            lines.iter().any(|l| l == &expected),
+            "tooltip missing `{expected}`; got {lines:?}",
+        );
     }
 }

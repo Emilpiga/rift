@@ -105,6 +105,13 @@ impl Server {
             self.hub.set_player_loadout(from, loadout);
             let shards = rec.shards.max(0) as u32;
             self.hub.set_player_shards(from, shards);
+            // Mirror the persisted character UUID onto the
+            // live `ServerPlayer` so the loot subsystem can
+            // stamp `LootProvenance` onto every fresh drop
+            // and gate `try_pickup_loot` against the picker's
+            // identity. Hub-only at hello time; per-rift sims
+            // re-mirror on entry via the same call site.
+            self.hub.set_player_character_id(from, rec.id);
         }
 
         // Inventory: skipped when persistence is disabled (dev
@@ -133,6 +140,7 @@ impl Server {
                         r.ilvl as u16,
                         &r.affixes,
                         r.anchored,
+                        super::provenance_from_persisted(r.provenance),
                     ) else {
                         continue;
                     };
@@ -211,6 +219,7 @@ impl Server {
                         r.ilvl as u16,
                         &r.affixes,
                         r.anchored,
+                        super::provenance_from_persisted(r.provenance),
                     ) else {
                         continue;
                     };

@@ -108,6 +108,10 @@ pub struct GameState {
     /// hair) keyed by (gltf path, sub-mesh name, host skeleton
     /// size). Populated lazily on first avatar spawn per gender.
     pub avatar_cosmetics_cache: super::avatar_cosmetics::AvatarCosmeticsCache,
+    /// Bind-pose mesh cache for ground-loot 3D visuals,
+    /// keyed by glTF/GLB path. Populated lazily the first
+    /// time a base item with `models` set drops on the floor.
+    pub loot_model_cache: super::loot_models::LootModelCache,
 }
 
 /// Hub entry portal. Visual + interaction state for the glowing ring
@@ -162,6 +166,7 @@ impl GameState {
                 super::equipment_visuals::EquipmentVisualCache::new(),
             avatar_cosmetics_cache:
                 super::avatar_cosmetics::AvatarCosmeticsCache::new(),
+            loot_model_cache: super::loot_models::LootModelCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
             chat: super::chat::ChatUi::new(),
             party: super::party::PartyUi::new(),
@@ -230,6 +235,14 @@ impl GameState {
     /// `PickupRejected::InventoryFull`.
     pub fn warn_inventory_full(&mut self) {
         loot_system::warn_inventory_full(&self.world, &mut self.combat_text);
+    }
+
+    /// Surface a "Not your loot" warning above the local player.
+    /// Called by the binary when the server replies with
+    /// `PickupRejected::NotEligible` — the picker isn't on the
+    /// share-window eligibility snapshot for that drop.
+    pub fn warn_not_eligible(&mut self) {
+        loot_system::warn_not_eligible(&self.world, &mut self.combat_text);
     }
 
     /// Tear down the visual for a loot drop that was claimed.

@@ -14,7 +14,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
-use rift_game::loot::{drops, Item, LootRng};
+use rift_game::loot::{drops, CharacterIdBytes, Item, LootProvenance, LootRng};
 use rift_game::monsters::MonsterRole;
 use rift_net::{
     messages::{ItemBlob, WorldEvent},
@@ -23,6 +23,7 @@ use rift_net::{
 
 use super::combat_ctx::{CombatCtx, KillInfo};
 use super::enemies::ServerEnemy;
+use super::player::ServerPlayer;
 
 /// Finalise a batch of kills queued by a damage subsystem:
 /// 1. Read each dead enemy's role + position out of the ECS.
@@ -62,6 +63,7 @@ pub fn finalise_kills(
                 role,
                 pos,
                 ctx.floor_index,
+                ctx.share_window_ticks,
             );
             // Elite EXPLODER mod: spawn an enemy-team AoE zone
             // at the corpse so anyone standing on top of a fresh
@@ -107,12 +109,45 @@ pub struct ServerLoot {
     pub net_id: NetId,
     pub position: Vec3,
     pub item: Item,
+    /// Time-bounded share gate. `Some` means the underlying
+    /// [`Item::provenance`] is still being enforced for
+    /// pickup; once `current_tick >= expires_at_tick` the
+    /// gate is lifted and any Sim-peer can claim the drop.
+    /// `None` is reserved for un-windowed legacy spawns
+    /// (e.g. dev-only debug seeding) — they behave as
+    /// instantly-free-for-all regardless of provenance.
+    pub share: Option<ShareWindow>,
+}
+
+/// Time-only pickup window. Eligibility itself lives on
+/// [`Item::provenance`]; this struct just tells the pickup
+/// path when to stop enforcing it. Decoupled from any live
+/// party / instance state so that someone leaving the run
+/// mid-window doesn't retroactively change who can claim
+/// the loot.
+#[derive(Clone, Debug)]
+pub struct ShareWindow {
+    /// Server tick after which the eligibility check is
+    /// skipped. Computed at drop time as
+    /// `current_tick + SHARE_WINDOW_TICKS` so we never need to
+    /// know wall-clock time to evaluate the gate.
+    pub expires_at_tick: NetTick,
 }
 
 /// Roll the drop table for the killed enemy and spawn the resulting
 /// [`ServerLoot`] entities. Pushes a [`WorldEvent::LootDropped`]
-/// per drop. Idempotent on `Vec` — caller batches multiple kills
+/// per drop. Idempotent on `Vec` \u2014 caller batches multiple kills
 /// per tick.
+///
+/// Each rolled [`Item`] is stamped with a [`LootProvenance`]
+/// snapshot of every [`ServerPlayer::character_id`] currently
+/// present in the world (i.e. the participants of the rift run
+/// at the moment of the kill). The accompanying [`ShareWindow`]
+/// expires `share_window_ticks` later, after which the gate
+/// lifts and any Sim-peer can claim the drop. Players whose
+/// session hasn't bound a `character_id` yet (very first hello
+/// tick) are skipped — the resulting empty provenance is treated
+/// by the pickup path as "self-bind on first interaction".
 ///
 /// `tick` + `enemy_net_id` together seed the [`LootRng`] so all
 /// observers can re-derive the same drop offline if needed (e.g. a
@@ -127,6 +162,7 @@ pub fn drop_for_enemy(
     role: MonsterRole,
     enemy_pos: Vec3,
     floor_index: u32,
+    share_window_ticks: u32,
 ) {
     let table = drops::table_for(role);
     // Seed: floor pollutes the seed so re-entering a floor produces
@@ -139,27 +175,44 @@ pub fn drop_for_enemy(
     let ilvl = (floor_index + 1).max(1);
     let drops_rolled = table.roll(&mut rng, ilvl);
 
-    for item in drops_rolled {
+    // Snapshot every Sim-peer's character UUID into a single
+    // `LootProvenance` shared across this kill's drops. Cloned
+    // per item so each rolled stack carries its own owned copy
+    // (cheap \u2014 party sizes are tiny). Players whose Hello hasn't
+    // bound a `character_id` yet are skipped; if nobody has one
+    // we leave provenance `None` and the pickup path will
+    // self-bind to the first picker.
+    let provenance = collect_world_provenance(world);
+    let expires_at_tick = NetTick(tick.0.wrapping_add(share_window_ticks));
+
+    for mut item in drops_rolled {
         let net_id = NetId(*next_loot_net_id);
-        // Loot id range is 0x2000_0000..0x4000_0000 — see `Sim::new`.
+        // Loot id range is 0x2000_0000..0x4000_0000 \u2014 see `Sim::new`.
         *next_loot_net_id = next_loot_net_id.wrapping_add(1);
         if *next_loot_net_id >= 0x4000_0000 {
             *next_loot_net_id = 0x2000_0000;
         }
 
+        item.provenance = provenance.clone();
+
         let (base_id, rarity, ilvl_w, affixes, anchored) = item.to_wire();
+        let provenance_wire = item.provenance.as_ref().map(|p| p.eligible.clone());
         let blob = ItemBlob {
             base_id,
             rarity,
             ilvl: ilvl_w,
             affixes,
             anchored,
+            provenance: provenance_wire,
         };
 
         let loot = ServerLoot {
             net_id,
             position: enemy_pos,
             item,
+            // Time-bounded share gate; eligibility lives on
+            // the `Item::provenance` field above.
+            share: Some(ShareWindow { expires_at_tick }),
         };
         let _ = world.spawn((loot,));
         events.push(WorldEvent::LootDropped {
@@ -167,6 +220,23 @@ pub fn drop_for_enemy(
             item: blob,
             position: enemy_pos.to_array(),
         });
+    }
+}
+
+/// Collect every [`ServerPlayer::character_id`] currently in
+/// `world` into a fresh [`LootProvenance`], or `None` if not a
+/// single resident has bound their persistent UUID yet (in which
+/// case the pickup path will self-bind to the first toucher).
+pub fn collect_world_provenance(world: &hecs::World) -> Option<LootProvenance> {
+    let ids: Vec<CharacterIdBytes> = world
+        .query::<&ServerPlayer>()
+        .iter()
+        .filter_map(|(_, p)| p.character_id.map(|u| u.into_bytes()))
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(LootProvenance::from_ids(ids))
     }
 }
 

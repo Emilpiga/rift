@@ -41,6 +41,11 @@ pub const SHRINE_INTERACT_RADIUS: f32 = 2.5;
 pub enum PickupRejectReason {
     /// Picker's bag has [`INVENTORY_CAPACITY`] filled slots.
     InventoryFull,
+    /// The item is inside a player-drop share window and the
+    /// picker isn't on the eligibility snapshot taken at drop
+    /// time. Lifts automatically once the window expires;
+    /// monster drops never produce this reason.
+    NotEligible,
 }
 
 // ─── Client → Server ─────────────────────────────────────────────────────
@@ -1094,8 +1099,8 @@ pub struct EntitySnapshot {
     /// non-player rows compress identically to before. Forward-
     /// compatible: older clients deserialise as the default
     /// `1.0`.
-    #[serde(default = "essence_pct_default")]
-    pub essence_pct: f32,
+    #[serde(default = "resource_pct_default")]
+    pub resource_pct: f32,
     /// State flags (airborne, dead, hidden, ...).
     pub flags: u8,
     /// Currently-active buffs / debuffs on this entity. Empty for
@@ -1106,11 +1111,11 @@ pub struct EntitySnapshot {
     pub effects: Vec<ActiveEffect>,
 }
 
-/// Default for [`EntitySnapshot::essence_pct`] on older
+/// Default for [`EntitySnapshot::resource_pct`] on older
 /// servers / older serialised blobs that predate the field.
 /// `1.0` reads as "full" so HUDs that infer the bar from the
 /// snapshot don't briefly draw an empty pool on first frame.
-fn essence_pct_default() -> f32 {
+fn resource_pct_default() -> f32 {
     1.0
 }
 
@@ -1214,6 +1219,15 @@ pub struct ItemBlob {
     /// builds deserialise as non-anchored.
     #[serde(default)]
     pub anchored: bool,
+    /// Optional pickup-eligibility lineage. `Some` carries the
+    /// 16-byte UUIDs of every character that shared the
+    /// originating expedition; `None` is the legacy state
+    /// (item predates the provenance system) and is upgraded
+    /// to `Some` on first server-side interaction. Old wire
+    /// payloads default to `None` so existing clients keep
+    /// decoding cleanly.
+    #[serde(default)]
+    pub provenance: Option<Vec<[u8; 16]>>,
 }
 
 /// Wire shape of a single stash tab. The stash is now a

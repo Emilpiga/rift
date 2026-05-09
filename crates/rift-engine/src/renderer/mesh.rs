@@ -548,6 +548,10 @@ impl Mesh {
         }
         for i in 0..segments {
             let next = (i + 1) % segments;
+            // World-CCW from +Y, i.e. normal = +Y, so the
+            // disc's upward face is the front face under
+            // this engine's Y-flipped projection +
+            // `FrontFace::CCW` pipeline state.
             indices.extend_from_slice(&[0, 1 + next, 1 + i]);
         }
 
@@ -653,6 +657,87 @@ impl Mesh {
             // Wind so the inward face is front-facing.
             indices.extend_from_slice(&[bi, tn, ti, bi, bn, tn]);
         }
+        Self { vertices, indices }
+    }
+
+    /// Triangulated mountain-ring terrain mesh with computed
+    /// normals + tiling UVs, ready for a PBR cliff/rock
+    /// material. The shape is described by
+    /// [`rift_math::terrain::MountainRingParams`]; this method
+    /// is a thin adapter that:
+    ///
+    /// 1. Calls [`rift_math::terrain::generate_mountain_ring`]
+    ///    to get the polar heightfield grid.
+    /// 2. Triangulates the grid as a wrapping strip (the
+    ///    angular axis wraps; the radial axis does not).
+    /// 3. Copies positions / normals / UVs into [`Vertex`].
+    ///
+    /// `color` is written into every vertex as a constant tint
+    /// so callers without a material set still get a sensible
+    /// silhouette colour. Callers binding a PBR material
+    /// usually pass `Vec3::ONE` and let the basecolor texture
+    /// do the work.
+    ///
+    /// `uv_world_scale` divides the world-space tile UVs from
+    /// the generator (1 unit per metre) down to a value that
+    /// makes a single tile of the bound texture span an
+    /// appropriate world distance. For our 2 k cliff_rocks
+    /// pack a value around `4.0` (= one tile per 4 m)
+    /// produces detail that reads at climbing distance
+    /// without obvious repeats from the play arena.
+    pub fn mountain_terrain(
+        params: &rift_math::terrain::MountainRingParams,
+        center: Vec3,
+        color: Vec3,
+        uv_world_scale: f32,
+    ) -> Self {
+        let grid = rift_math::terrain::generate_mountain_ring(params, center);
+        let cols = grid.cols;
+        let rows = grid.rows;
+        let inv_uv = 1.0 / uv_world_scale.max(1e-3);
+
+        let mut vertices = Vec::with_capacity(grid.vertices.len());
+        for tv in &grid.vertices {
+            vertices.push(Vertex {
+                position: tv.position,
+                normal: tv.normal,
+                color,
+                uv: tv.tile_uv * inv_uv,
+            });
+        }
+
+        // The angular axis wraps, so each ring of quads links
+        // column `i` to column `(i + 1) % cols`. The radial
+        // axis is open, so we stop at `j = rows - 1`.
+        let mut indices = Vec::with_capacity(((rows - 1) * cols * 6) as usize);
+        for j in 0..rows.saturating_sub(1) {
+            for i in 0..cols {
+                let next_i = (i + 1) % cols;
+                let a = j * cols + i;
+                let b = j * cols + next_i;
+                let c = (j + 1) * cols + i;
+                let d = (j + 1) * cols + next_i;
+                // For a heightfield with the radial direction
+                // pointing outward (`j` increasing) and the
+                // angular direction wrapping CCW from above
+                // (`i` increasing), the cross product of
+                // (c-a) × (d-a) on a flat slice points
+                // *downward* (−Y). With the engine's
+                // Y-flipped projection + `FrontFace::CCW`,
+                // world-CCW around an outward / upward
+                // normal is the front face — so we need to
+                // wind the triangles the *other* way around
+                // to make the inner-facing slope (the side
+                // visible to a player on the platform
+                // looking outward) the front face. The
+                // previous `[a, c, d, a, d, b]` winding put
+                // the front face on the *outside* of the
+                // ring, leaving the inner slopes back-culled
+                // and reading as see-through.
+                indices.extend_from_slice(&[a, d, c, a, b, d]);
+            }
+        }
+
         Self { vertices, indices }
     }
 

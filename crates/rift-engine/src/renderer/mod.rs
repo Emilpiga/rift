@@ -1,4 +1,5 @@
 pub mod forward;
+pub mod asset_decode;
 pub mod camera;
 pub mod mesh;
 pub mod uniform;
@@ -6,6 +7,7 @@ pub mod depth;
 pub mod texture;
 pub mod material;
 pub mod shadow;
+pub mod shadow_point;
 pub mod sky;
 pub mod post;
 pub mod overlay;

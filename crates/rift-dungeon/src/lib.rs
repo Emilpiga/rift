@@ -24,6 +24,16 @@ pub struct Floor {
     pub rooms: Vec<Room>,
     pub spawn_pos: Vec3,
     pub boss_room_center: Vec3,
+    /// World positions of the two post-boss portals (descend
+    /// + return-to-hub), pre-baked from the dedicated
+    /// [`RoomType::PortalRoom`]. `None` only on degenerate
+    /// floors where no second room could be found (the
+    /// hub-style synthetic floor or a tiny floor where every
+    /// other room got a different role). Callers that don't
+    /// find this should fall back to spawning at
+    /// `boss_room_center` so the portals still appear, but
+    /// the normal rift path always populates this.
+    pub portal_anchors: Option<(Vec3, Vec3)>,
     pub config: FloorConfig,
 }
 
@@ -71,11 +81,23 @@ impl Floor {
             }
         }
 
-        // Spawn in center of first (non-boss) room
+        // Spawn in center of first (non-boss) room.
+        // Excludes the portal room too — landing on top of
+        // the post-boss portals on every floor entry would
+        // defeat the "fight your way through, then choose"
+        // pacing.
         let spawn_pos = rooms
             .iter()
-            .find(|r| r.room_type != RoomType::BossRoom)
+            .find(|r| r.room_type == RoomType::Arena)
             .map(|r| r.center_world() + Vec3::new(0.0, 0.5, 0.0))
+            .or_else(|| {
+                // Fallback: if no Arena room (tiny BSP), any
+                // non-boss room works.
+                rooms
+                    .iter()
+                    .find(|r| r.room_type != RoomType::BossRoom)
+                    .map(|r| r.center_world() + Vec3::new(0.0, 0.5, 0.0))
+            })
             .unwrap_or(Vec3::new(width as f32 / 2.0, 0.5, depth as f32 / 2.0));
 
         // Boss room center
@@ -85,6 +107,16 @@ impl Floor {
             .map(|r| r.center_world())
             .unwrap_or(Vec3::ZERO);
 
+        // Pre-bake portal anchors from the portal room. Done
+        // once at floor-gen time so the runtime portal-spawn
+        // path is a constant-time lookup, and so changing the
+        // anchor formula doesn't drift between client and any
+        // future server-side proximity check.
+        let portal_anchors = rooms
+            .iter()
+            .find(|r| r.room_type == RoomType::PortalRoom)
+            .map(|r| r.portal_anchors());
+
         Self {
             width,
             depth,
@@ -92,6 +124,7 @@ impl Floor {
             rooms,
             spawn_pos,
             boss_room_center,
+            portal_anchors,
             config,
         }
     }
@@ -256,6 +289,7 @@ impl Floor {
             rooms: vec![room],
             spawn_pos,
             boss_room_center: Vec3::ZERO,
+            portal_anchors: None,
             config,
         }
     }

@@ -12,6 +12,7 @@ use crate::renderer::depth::DepthBuffer;
 use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex};
 use crate::renderer::shadow::{self, ShadowMap};
+use crate::renderer::shadow_point::{self, PointShadowAtlas};
 use crate::renderer::sky::{SkyConfig, SkyRenderer};
 use crate::renderer::post::{BloomConfig, PostProcessing};
 use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
@@ -51,6 +52,15 @@ pub struct RenderObject {
     /// with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, so any object with
     /// `tint.a < 1.0` blends against the framebuffer.
     pub tint: [f32; 4],
+    /// Per-object PBR / sampling tweaks. Layout:
+    /// `(uv_scale, parallax_scale, flags, _reserved)`. Default
+    /// `(1.0, 0.0, 0.0, 0.0)` keeps the legacy cel-shaded
+    /// diffuse path. Setting `flags.x` bit 0 (numeric value
+    /// `1.0`) flips the shader into PBR + normal-mapping mode
+    /// and reads the material set's normal / MR / AO / height
+    /// bindings. `parallax_scale` enables parallax-occlusion
+    /// when non-zero (typical 0.02–0.05 in world units).
+    pub material_params: [f32; 4],
 }
 
 pub struct Renderer {
@@ -76,6 +86,7 @@ pub struct Renderer {
     default_texture: Texture,
     material_pool: MaterialPool,
     shadow_map: ShadowMap,
+    point_shadow_atlas: PointShadowAtlas,
     uniforms: UniformBuffers,
     swapchain: Swapchain,
     allocator: Arc<Mutex<Allocator>>,
@@ -295,6 +306,22 @@ impl Renderer {
         )?;
         uniforms.bind_shadow_map(&device.device, shadow_map.view, shadow_map.sampler);
 
+        // Omnidirectional point-light shadow atlas. Reuses the same
+        // descriptor-set-0 layout as the main pipeline so the
+        // shadow_point pass can read the per-face VPs from the same
+        // UBO that gets updated for the main draw.
+        let point_shadow_atlas = PointShadowAtlas::new(
+            &device.device,
+            &allocator,
+            uniforms.descriptor_set_layout,
+            &shader_dir,
+        )?;
+        uniforms.bind_point_shadow_atlas(
+            &device.device,
+            point_shadow_atlas.cube_array_view,
+            point_shadow_atlas.sampler,
+        );
+
         // Set up hot-reloader
         let hot_reloader = match HotReloader::new(&shader_dir) {
             Ok(hr) => Some(hr),
@@ -361,6 +388,7 @@ impl Renderer {
             default_texture,
             material_pool,
             shadow_map,
+            point_shadow_atlas,
             uniforms,
             objects: Vec::new(),
             camera,
@@ -514,6 +542,7 @@ impl Renderer {
             material_set: self.material_pool.default_set,
             texture: None,
             tint: [1.0, 1.0, 1.0, 1.0],
+            material_params: [1.0, 0.0, 0.0, 0.0],
         });
 
         Ok(())
@@ -579,6 +608,7 @@ impl Renderer {
             material_set: self.material_pool.default_set,
             texture: None,
             tint: [1.0, 1.0, 1.0, 1.0],
+            material_params: [1.0, 0.0, 0.0, 0.0],
         });
 
         Ok(self.objects.len() - 1)
@@ -732,6 +762,138 @@ impl Renderer {
         Ok((texture, set))
     }
 
+    /// Same as [`Self::upload_shared_pbr_material`] but accepts
+    /// metallic and roughness as separate single-channel PNGs
+    /// (the convention most asset packs ship in) and packs them
+    /// CPU-side into a single `R = metallic, G = roughness`
+    /// UNORM texture before binding. Convenience wrapper for
+    /// callers that don't want to pre-bake an MR atlas.
+    pub fn upload_shared_pbr_material_split_mr(
+        &mut self,
+        basecolor_path: &std::path::Path,
+        normal_path: Option<&std::path::Path>,
+        metallic_path: Option<&std::path::Path>,
+        roughness_path: Option<&std::path::Path>,
+        ao_path: Option<&std::path::Path>,
+        height_path: Option<&std::path::Path>,
+    ) -> Result<(
+        Vec<crate::renderer::texture::Texture>,
+        vk::DescriptorSet,
+    )> {
+        use crate::renderer::material::{
+            load_texture_from_file, load_texture_from_file_linear,
+        };
+        let basecolor = load_texture_from_file(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            basecolor_path,
+        )?;
+        let mut owned: Vec<crate::renderer::texture::Texture> = vec![basecolor];
+
+        let mut load_linear = |path: Option<&std::path::Path>| -> Result<Option<usize>> {
+            let Some(p) = path else { return Ok(None) };
+            let t = load_texture_from_file_linear(
+                &self.device.device,
+                &self.allocator,
+                self.device.graphics_queue,
+                self.command_pool,
+                p,
+            )?;
+            owned.push(t);
+            Ok(Some(owned.len() - 1))
+        };
+
+        let normal_idx = load_linear(normal_path)?;
+        let ao_idx = load_linear(ao_path)?;
+        let height_idx = load_linear(height_path)?;
+
+        // Pack metallic + roughness into a single UNORM RGBA
+        // image. `metallic_path` lands in R; `roughness_path`
+        // lands in G; B/A are unused. We resolve each PNG with
+        // the same path-resolution candidates the engine uses
+        // (so callers can pass `assets/...` from any cwd).
+        let mr_idx = if metallic_path.is_some() || roughness_path.is_some() {
+            let resolve = |p: &std::path::Path| -> Result<std::path::PathBuf> {
+                let candidates = [
+                    p.to_path_buf(),
+                    std::path::PathBuf::from("..").join(p),
+                    std::path::PathBuf::from("../..").join(p),
+                    std::path::PathBuf::from("../../..").join(p),
+                ];
+                candidates
+                    .iter()
+                    .find(|c| c.exists())
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("MR channel not found: {:?}", p))
+            };
+            // Decode whichever channels were provided. We need
+            // matching dimensions, so when only one is provided
+            // we infer the size from it.
+            let metallic_img = if let Some(p) = metallic_path {
+                Some(image::open(resolve(p)?)?.to_luma8())
+            } else {
+                None
+            };
+            let roughness_img = if let Some(p) = roughness_path {
+                Some(image::open(resolve(p)?)?.to_luma8())
+            } else {
+                None
+            };
+            let (w, h) = match (&metallic_img, &roughness_img) {
+                (Some(m), Some(r)) => {
+                    if m.dimensions() != r.dimensions() {
+                        return Err(anyhow::anyhow!(
+                            "metallic and roughness map dimensions differ: {:?} vs {:?}",
+                            m.dimensions(), r.dimensions()
+                        ));
+                    }
+                    m.dimensions()
+                }
+                (Some(m), None) => m.dimensions(),
+                (None, Some(r)) => r.dimensions(),
+                (None, None) => unreachable!(),
+            };
+            let mut packed = vec![0u8; (w * h * 4) as usize];
+            for i in 0..(w * h) as usize {
+                packed[i * 4 + 0] = metallic_img
+                    .as_ref()
+                    .map(|m| m.as_raw()[i])
+                    .unwrap_or(0);
+                packed[i * 4 + 1] = roughness_img
+                    .as_ref()
+                    .map(|r| r.as_raw()[i])
+                    .unwrap_or(255);
+                packed[i * 4 + 2] = 0;
+                packed[i * 4 + 3] = 255;
+            }
+            let tex = crate::renderer::texture::Texture::from_rgba_with_format(
+                &self.device.device,
+                &self.allocator,
+                self.device.graphics_queue,
+                self.command_pool,
+                w, h, &packed,
+                vk::Format::R8G8B8A8_UNORM,
+            )?;
+            owned.push(tex);
+            Some(owned.len() - 1)
+        } else {
+            None
+        };
+
+        let basecolor_ref = &owned[0];
+        let set = self.material_pool.alloc_pbr_set(
+            &self.device.device,
+            basecolor_ref,
+            normal_idx.map(|i| &owned[i]),
+            mr_idx.map(|i| &owned[i]),
+            ao_idx.map(|i| &owned[i]),
+            height_idx.map(|i| &owned[i]),
+        )?;
+        Ok((owned, set))
+    }
+
     /// Decode a PNG/JPG file from disk and upload it as a shared
     /// SRGB RGBA8 texture, returning the texture handle and a
     /// freshly allocated descriptor set. The caller owns the
@@ -750,6 +912,164 @@ impl Renderer {
         )?;
         let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
         Ok((texture, set))
+    }
+
+    /// Upload an already-decoded RGBA8 buffer (produced by
+    /// [`crate::renderer::asset_decode::decode_srgb`] or
+    /// [`crate::renderer::asset_decode::decode_linear`] on a
+    /// worker thread) as a shared single-binding texture and
+    /// return the texture + descriptor set. Pairs with the
+    /// off-thread decode helpers so callers can do the slow
+    /// PNG work in the background and only touch Vulkan from
+    /// the main thread.
+    pub fn upload_shared_texture_decoded(
+        &mut self,
+        decoded: crate::renderer::asset_decode::DecodedTexture,
+    ) -> Result<(crate::renderer::texture::Texture, vk::DescriptorSet)> {
+        let texture = crate::renderer::texture::Texture::from_rgba_with_format(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            decoded.width,
+            decoded.height,
+            &decoded.pixels,
+            decoded.format,
+        )?;
+        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        Ok((texture, set))
+    }
+
+    /// Upload an already-decoded PBR pack (produced off-thread
+    /// via [`crate::renderer::asset_decode`]) into a single
+    /// per-object descriptor set. The metallic + roughness
+    /// channels must already be merged into the `mr` atlas;
+    /// this function does only the GPU buffer-copy + image-
+    /// create + descriptor-set steps and never touches the
+    /// disk or PNG decoder. Missing maps fall back to the
+    /// material pool's neutral defaults so the PBR shader
+    /// path degrades gracefully.
+    pub fn upload_shared_pbr_material_decoded(
+        &mut self,
+        pack: crate::renderer::asset_decode::DecodedPbrPack,
+    ) -> Result<(
+        Vec<crate::renderer::texture::Texture>,
+        vk::DescriptorSet,
+    )> {
+        let crate::renderer::asset_decode::DecodedPbrPack {
+            name: _,
+            basecolor,
+            normal,
+            mr,
+            ao,
+            height,
+        } = pack;
+
+        let mut owned: Vec<crate::renderer::texture::Texture> = Vec::with_capacity(5);
+        let upload = |this: &Renderer, d: crate::renderer::asset_decode::DecodedTexture| {
+            crate::renderer::texture::Texture::from_rgba_with_format(
+                &this.device.device,
+                &this.allocator,
+                this.device.graphics_queue,
+                this.command_pool,
+                d.width,
+                d.height,
+                &d.pixels,
+                d.format,
+            )
+        };
+
+        owned.push(upload(self, basecolor)?);
+        let push_opt = |opt: Option<_>, owned: &mut Vec<_>, this: &Renderer| -> Result<Option<usize>> {
+            if let Some(d) = opt {
+                let t = upload(this, d)?;
+                owned.push(t);
+                Ok(Some(owned.len() - 1))
+            } else {
+                Ok(None)
+            }
+        };
+        let normal_idx = push_opt(normal, &mut owned, self)?;
+        let mr_idx = push_opt(mr, &mut owned, self)?;
+        let ao_idx = push_opt(ao, &mut owned, self)?;
+        let height_idx = push_opt(height, &mut owned, self)?;
+
+        let basecolor_ref = &owned[0];
+        let set = self.material_pool.alloc_pbr_set(
+            &self.device.device,
+            basecolor_ref,
+            normal_idx.map(|i| &owned[i]),
+            mr_idx.map(|i| &owned[i]),
+            ao_idx.map(|i| &owned[i]),
+            height_idx.map(|i| &owned[i]),
+        )?;
+        Ok((owned, set))
+    }
+
+    /// Decode a full PBR material from disk (basecolor + optional
+    /// normal / metallic-roughness / AO / height) and bind every
+    /// loaded channel into a fresh per-object descriptor set.
+    /// Missing channels (`None`) fall back to the pool's neutral
+    /// defaults so the shader's PBR path degrades gracefully.
+    /// Color textures are decoded as SRGB; data textures stay
+    /// linear (UNORM) so the GPU doesn't gamma-correct them.
+    /// Returns the owned textures alongside the descriptor set
+    /// so the caller can keep them alive in an asset cache.
+    pub fn upload_shared_pbr_material(
+        &mut self,
+        basecolor_path: &std::path::Path,
+        normal_path: Option<&std::path::Path>,
+        metallic_roughness_path: Option<&std::path::Path>,
+        ao_path: Option<&std::path::Path>,
+        height_path: Option<&std::path::Path>,
+    ) -> Result<(
+        Vec<crate::renderer::texture::Texture>,
+        vk::DescriptorSet,
+    )> {
+        use crate::renderer::material::{
+            load_texture_from_file, load_texture_from_file_linear,
+        };
+        let basecolor = load_texture_from_file(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            basecolor_path,
+        )?;
+        let mut owned: Vec<crate::renderer::texture::Texture> = vec![basecolor];
+        // Helper closure: decode `path` as a UNORM texture and
+        // append to `owned`, returning the most-recently-pushed
+        // texture index for re-borrowing below.
+        let mut load_linear =
+            |path: Option<&std::path::Path>| -> Result<Option<usize>> {
+                let Some(p) = path else { return Ok(None) };
+                let t = load_texture_from_file_linear(
+                    &self.device.device,
+                    &self.allocator,
+                    self.device.graphics_queue,
+                    self.command_pool,
+                    p,
+                )?;
+                owned.push(t);
+                Ok(Some(owned.len() - 1))
+            };
+        let normal_idx = load_linear(normal_path)?;
+        let mr_idx = load_linear(metallic_roughness_path)?;
+        let ao_idx = load_linear(ao_path)?;
+        let height_idx = load_linear(height_path)?;
+        // Re-borrow with the final layout fixed so the
+        // descriptor write uses the texture views that survive
+        // the move into `owned`.
+        let basecolor_ref = &owned[0];
+        let set = self.material_pool.alloc_pbr_set(
+            &self.device.device,
+            basecolor_ref,
+            normal_idx.map(|i| &owned[i]),
+            mr_idx.map(|i| &owned[i]),
+            ao_idx.map(|i| &owned[i]),
+            height_idx.map(|i| &owned[i]),
+        )?;
+        Ok((owned, set))
     }
 
     /// Bind a previously-allocated shared descriptor set to an object.
@@ -772,6 +1092,23 @@ impl Renderer {
             }
         }
         obj.material_set = set;
+    }
+
+    /// Set the per-object PBR / sampling tweaks pushed at offset
+    /// 80 of the per-draw push-constant range. Layout matches
+    /// the `material_params` field on [`RenderObject`]:
+    /// `(uv_scale, parallax_scale, flags, _reserved)`. Bit 0
+    /// of `flags` (numeric value `1.0`) flips the shader into
+    /// PBR + normal-mapping mode and starts reading the
+    /// material set's normal / MR / AO / height bindings.
+    pub fn set_object_material_params(
+        &mut self,
+        obj_idx: usize,
+        params: [f32; 4],
+    ) {
+        if let Some(obj) = self.objects.get_mut(obj_idx) {
+            obj.material_params = params;
+        }
     }
 
     /// Replace mesh data at an existing object index.
@@ -1004,6 +1341,25 @@ impl Renderer {
             Vec3::new(light_dir_normalized.x, light_dir_normalized.y, light_dir_normalized.z),
         );
 
+        // Build per-face VPs for the point-light cube shadow atlas.
+        // Caps the number of shadow-casting point lights at
+        // `MAX_POINT_SHADOWS`; lights past that index still contribute
+        // additive light but cast no shadow, identical to the previous
+        // behaviour.
+        let point_shadow_count = self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS);
+        let mut point_shadow_face_vp = [Mat4::IDENTITY; 24];
+        for (i, pl) in self
+            .point_lights
+            .iter()
+            .take(shadow_point::MAX_POINT_SHADOWS)
+            .enumerate()
+        {
+            let faces = shadow_point::cube_face_view_projs(pl.position, pl.radius.max(0.1));
+            for (f, m) in faces.iter().enumerate() {
+                point_shadow_face_vp[i * 6 + f] = *m;
+            }
+        }
+
         let ubo = UniformData {
             view: self.camera.view_matrix(),
             proj: self.camera.projection_matrix(),
@@ -1029,6 +1385,8 @@ impl Renderer {
             point_light_color,
             point_light_count: Vec4::new(light_count as f32, 0.0, 0.0, 0.0),
             light_vp,
+            point_shadow_face_vp,
+            point_shadow_meta: Vec4::new(point_shadow_count as f32, 0.0, 0.0, 0.0),
         };
         self.uniforms.update(frame, &ubo);
 
@@ -1068,6 +1426,7 @@ impl Renderer {
                 material_set: obj.material_set,
                 model_matrix: obj.model_matrix,
                 tint: obj.tint,
+                material_params: obj.material_params,
             });
         }
 
@@ -1141,6 +1500,137 @@ impl Renderer {
             }
             device.cmd_end_render_pass(cmd);
 
+            // ---- Point-light shadow pass: render the visible scene
+            // into each cube face for every active point light. The
+            // pipeline writes normalized world-space distance from
+            // the light, which the main fragment shader then samples
+            // through `pointShadowAtlas`.
+            //
+            // Per-light visibility is approximated by an AABB-vs-
+            // sphere check on the draw's bounding sphere: a draw is
+            // submitted only if it overlaps the light's effective
+            // radius. This keeps a typical hub torch's shadow-pass
+            // cost to ~1 ms even with the full mesh count, since
+            // most static geometry is well outside any one torch's
+            // illumination volume.
+            if point_shadow_count > 0 {
+                let psh_clear = [
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            // Default to "fully unoccluded" (>= 1.0)
+                            // so directions that were never rasterised
+                            // sample as lit, not as black walls.
+                            float32: [1.0, 1.0, 1.0, 1.0],
+                        },
+                    },
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                ];
+                device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.point_shadow_atlas.pipeline,
+                );
+                for light_idx in 0..point_shadow_count {
+                    let pl = &self.point_lights[light_idx];
+                    let lpos = pl.position;
+                    let lrad = pl.radius.max(0.1);
+                    for face_idx in 0..6 {
+                        let face_slot = light_idx * 6 + face_idx;
+                        let rp_begin = vk::RenderPassBeginInfo::default()
+                            .render_pass(self.point_shadow_atlas.render_pass)
+                            .framebuffer(self.point_shadow_atlas.framebuffers[face_slot])
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D { x: 0, y: 0 },
+                                extent: vk::Extent2D {
+                                    width: shadow_point::POINT_SHADOW_SIZE,
+                                    height: shadow_point::POINT_SHADOW_SIZE,
+                                },
+                            })
+                            .clear_values(&psh_clear);
+                        device.cmd_begin_render_pass(
+                            cmd,
+                            &rp_begin,
+                            vk::SubpassContents::INLINE,
+                        );
+                        for draw in &draws {
+                            // Cull draws whose bounding sphere can't
+                            // reach into this light's radius. Cheap
+                            // sphere-sphere test on the draw's
+                            // already-extracted world-space center.
+                            let center = draw.model_matrix.w_axis.truncate();
+                            // We don't have bounds_radius on
+                            // DrawCommand; conservatively use a 4 m
+                            // padding which is larger than any single
+                            // hub prop. Refine later if profiling
+                            // shows this pass is hot.
+                            let approx_bounds = 4.0_f32;
+                            if (center - lpos).length() > lrad + approx_bounds {
+                                continue;
+                            }
+                            device.cmd_bind_vertex_buffers(
+                                cmd,
+                                0,
+                                &[draw.vertex_buffer],
+                                &[0],
+                            );
+                            device.cmd_bind_index_buffer(
+                                cmd,
+                                draw.index_buffer,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                self.point_shadow_atlas.pipeline_layout,
+                                0,
+                                &[draw.descriptor_set],
+                                &[],
+                            );
+                            // Push: model matrix (64 B) + indices
+                            // (16 B). `face_slot` indexes the per-
+                            // face VP array in the UBO; `light_idx`
+                            // indexes the point light's pos/radius
+                            // for the fragment-side distance calc.
+                            let model_bytes: &[u8] =
+                                bytemuck::bytes_of(&draw.model_matrix);
+                            device.cmd_push_constants(
+                                cmd,
+                                self.point_shadow_atlas.pipeline_layout,
+                                vk::ShaderStageFlags::VERTEX
+                                    | vk::ShaderStageFlags::FRAGMENT,
+                                0,
+                                model_bytes,
+                            );
+                            let indices: [u32; 4] =
+                                [face_slot as u32, light_idx as u32, 0, 0];
+                            device.cmd_push_constants(
+                                cmd,
+                                self.point_shadow_atlas.pipeline_layout,
+                                vk::ShaderStageFlags::VERTEX
+                                    | vk::ShaderStageFlags::FRAGMENT,
+                                64,
+                                bytemuck::bytes_of(&indices),
+                            );
+                            device.cmd_draw_indexed(
+                                cmd,
+                                draw.index_count,
+                                1,
+                                0,
+                                0,
+                                0,
+                            );
+                        }
+                        device.cmd_end_render_pass(cmd);
+                    }
+                }
+            }
+
             // ---- Main pass (HDR scene) ----
             // Renders into the post-process HDR colour target,
             // not the swapchain. Sky, world meshes, ribbons and
@@ -1213,6 +1703,14 @@ impl Renderer {
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     64,
                     tint_bytes,
+                );
+                let mp_bytes: &[u8] = bytemuck::bytes_of(&draw.material_params);
+                device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    80,
+                    mp_bytes,
                 );
                 device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
             }
@@ -1430,6 +1928,8 @@ impl Drop for Renderer {
         self.default_texture.cleanup(&self.device.device, &self.allocator);
         self.material_pool.cleanup(&self.device.device, &self.allocator);
         self.shadow_map.cleanup(&self.device.device, &self.allocator);
+        self.point_shadow_atlas
+            .cleanup(&self.device.device, &self.allocator);
         self.depth_buffer.cleanup(&self.device.device, &self.allocator);
         self.overlay.cleanup(&self.device.device, &self.allocator);
         self.vfx_ribbon_renderer.cleanup(&self.device.device, &self.allocator);

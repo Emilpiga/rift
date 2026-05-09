@@ -38,6 +38,11 @@ pub struct DrawCommand {
     /// path; ghost-mode avatars push a pale cyan-white with
     /// reduced alpha.
     pub tint: [f32; 4],
+    /// Per-object PBR / sampling tweaks pushed at offset 80.
+    /// Layout: `(uv_scale, parallax_scale, flags, _reserved)`.
+    /// `flags` bit 0 = enable PBR + normal mapping (otherwise the
+    /// shader stays on the legacy cel-shaded diffuse path).
+    pub material_params: [f32; 4],
 }
 
 pub fn record_render_pass(
@@ -110,6 +115,14 @@ pub fn record_render_pass(
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 64,
                 tint_bytes,
+            );
+            let mp_bytes: &[u8] = bytemuck::bytes_of(&draw.material_params);
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                80,
+                mp_bytes,
             );
 
             device.cmd_draw_indexed(command_buffer, draw.index_count, 1, 0, 0, 0);

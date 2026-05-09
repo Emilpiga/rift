@@ -159,15 +159,16 @@ pub fn create_graphics_pipeline(
         .attachments(std::slice::from_ref(&color_blend_attachment));
 
     let set_layouts = descriptor_set_layouts;
-    // Push constant range: `mat4 model` (64 bytes) followed by
-    // `vec4 tint` (16 bytes). The vert reads `model`; the frag
-    // reads `tint`, so we mark the whole range visible to both
-    // stages. Vulkan requires the union of stages here even
-    // though each stage only touches its own subrange.
+    // Push constant range: `mat4 model` (64 bytes), `vec4 tint`
+    // (16 bytes), `vec4 material_params` (16 bytes). The vert
+    // reads `model`; the frag reads `tint` + `material_params`,
+    // so we mark the whole range visible to both stages.
+    // Vulkan requires the union of stages here even though each
+    // stage only touches its own subrange.
     let push_constant_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
         offset: 0,
-        size: 80, // Mat4 (64) + vec4 tint (16)
+        size: 96, // Mat4 (64) + vec4 tint (16) + vec4 material_params (16)
     };
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(set_layouts)

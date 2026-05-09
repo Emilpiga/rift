@@ -250,10 +250,16 @@ impl PostProcessing {
         shader_dir: &Path,
     ) -> Result<Self> {
         let extent = swapchain.extent;
-        let bloom_extent = vk::Extent2D {
-            width: (extent.width / 2).max(1),
-            height: (extent.height / 2).max(1),
-        };
+        // Bloom at full screen resolution. Half-res was making
+        // small particle sprites read as chunky 2-pixel blobs
+        // once their bright contribution was upsampled back
+        // into the composite — the HDR halo from the bloom
+        // pass dominates the visible footprint of a spark or
+        // ember, so any blur kernel at half-res is what the
+        // player perceives as "pixelated". Native res keeps
+        // the bloom soft + smooth and the cost is bounded by
+        // the 4-tap separable blur (still very cheap).
+        let bloom_extent = extent;
         let image_count = swapchain.image_views.len();
 
         let scene_pass = create_scene_pass(device)?;
@@ -470,10 +476,9 @@ impl PostProcessing {
         depth_view: vk::ImageView,
     ) -> Result<()> {
         self.extent = swapchain.extent;
-        self.bloom_extent = vk::Extent2D {
-            width: (self.extent.width / 2).max(1),
-            height: (self.extent.height / 2).max(1),
-        };
+        // Match the constructor: full-res bloom for crisp
+        // particles. See `new` for rationale.
+        self.bloom_extent = self.extent;
         let image_count = swapchain.image_views.len();
 
         for _ in 0..image_count {

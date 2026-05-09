@@ -17,7 +17,8 @@ layout(binding = 0) uniform UniformData {
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
-    vec4 tint; // rgb multiplies frag colour, a is output alpha (frag-only field; vert ignores)
+    vec4 tint;            // rgb multiplies frag colour, a is output alpha (frag-only)
+    vec4 materialParams;  // x = uvScale, y = parallaxScale, z = flags, w = reserved
 } push;
 
 layout(location = 0) in vec3 inPosition;
@@ -36,5 +37,9 @@ void main() {
     fragWorldPos = worldPos.xyz;
     fragNormal = mat3(push.model) * inNormal;
     fragColor = inColor;
-    fragUV = inUV;
+    // Per-object UV scale lets the same texture cover larger
+    // floor / wall meshes without re-authoring per-tile UVs.
+    // Defaults to 1.0 (raw mesh UVs) for legacy objects.
+    float uvScale = max(push.materialParams.x, 1e-3);
+    fragUV = inUV * uvScale;
 }

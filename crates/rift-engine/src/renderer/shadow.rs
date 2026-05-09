@@ -4,7 +4,10 @@
 //! then sampled in the main fragment shader to darken occluded surfaces.
 //!
 //! Single cascade, fixed orthographic frustum following the camera. Tuned for
-//! a top-down dungeon: 36 m × 36 m projection, 60 m near→far.
+//! a top-down dungeon: 28 m × 28 m projection, 60 m near→far. The frustum is
+//! deliberately tight around the play-area so the 2k depth buffer maps to
+//! ~73 texels / world-meter, which is what the 12-tap Poisson PCF in
+//! `triangle.frag::sampleShadow` relies on for soft-but-defined penumbras.
 
 use anyhow::Result;
 use ash::vk;
@@ -22,8 +25,11 @@ pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const SHADOW_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// Half-extent (in world units) of the orthographic light frustum. Larger
-/// values cover more area but reduce shadow resolution per texel.
-pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 18.0;
+/// values cover more area but reduce shadow resolution per texel. The 14 m
+/// half-extent below produces a 28×28 m projection, which at 2048² gives
+/// ~73 texels/m — sharp enough that small props (chests, loot pillars)
+/// cast crisp, recognisable shadows under the wide PCF kernel.
+pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 14.0;
 /// Distance behind the focus point at which to place the light camera.
 pub const SHADOW_BACK_DISTANCE: f32 = 30.0;
 /// Near/far planes of the orthographic light frustum.

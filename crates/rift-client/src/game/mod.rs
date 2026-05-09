@@ -27,6 +27,7 @@ pub mod meters;
 pub mod party;
 pub mod equipment_visuals;
 pub mod avatar_cosmetics;
+pub mod loot_models;
 
 // Flatten the systems / phases / states hierarchies back into
 // the `game` namespace so existing `crate::game::sub_state::*`,

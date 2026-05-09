@@ -138,8 +138,18 @@ pub fn render_stats_panel(
 
             header(ui, &mut y, "DEFENSE");
             row(ui, &mut y, "Health", int(s.max_hp), txt);
+            row(ui, &mut y, "Health Regen", format!("{:.1}/s", s.health_regen), txt);
             row(ui, &mut y, "Armor", int(s.armor), txt);
             row(ui, &mut y, "Evasion", pct(s.evasion), txt);
+            if s.physical_resist > 0.0 {
+                row(ui, &mut y, "Physical Resist", pct(s.physical_resist), txt);
+            }
+            if s.elemental_resist > 0.0 {
+                row(ui, &mut y, "Elemental Resist", pct(s.elemental_resist), txt);
+            }
+            if s.healing_received > 0.0 {
+                row(ui, &mut y, "Healing Received", pct(s.healing_received), txt);
+            }
             y += 6.0;
 
             header(ui, &mut y, "UTILITY");
@@ -151,7 +161,7 @@ pub fn render_stats_panel(
                 pct(s.cooldown_reduction),
                 txt,
             );
-            row(ui, &mut y, "Resource Regen", format!("{:.2}x", s.resource_regen), txt);
+            row(ui, &mut y, "Essence Regen", format!("{:.1}/s", s.resource_regen), txt);
 
             // Elemental section only when at least one bonus is
             // non-zero so the panel doesn't feel empty for

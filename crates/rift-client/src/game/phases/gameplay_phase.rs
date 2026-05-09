@@ -31,14 +31,23 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         dt,
     );
 
-    // Exit portal: appears in the boss room after the boss
-    // dies; F-press advances to the next rift floor (server
-    // opens a descend ready-check vote in multiplayer).
+    // Exit (descend) portal: appears in the dedicated portal
+    // room after the boss dies; F-press advances to the next
+    // rift floor (server opens a descend ready-check vote in
+    // multiplayer). Anchor is the *left* of the two
+    // pre-baked portal-room slots, falling back to the boss
+    // room centre on synthetic floors that have no portal
+    // room (the hub never reaches this branch because
+    // `in_hub` short-circuits inside the tick).
     let (vote_active, vote_cd) = state
         .exit_vote
         .as_ref()
         .map(|v| (v.active, v.cooldown_remaining))
         .unwrap_or((false, 0.0));
+    let (descend_anchor, return_anchor) = state
+        .floor_mgr
+        .portal_anchors
+        .unwrap_or((state.floor_mgr.boss_room_center, state.floor_mgr.boss_room_center));
     portal_system::tick_exit(
         &mut state.floor.exit_portal,
         &state.world,
@@ -49,18 +58,19 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &mut state.frame.descend_prompt,
         state.rift.floor_complete,
         state.floor.in_hub,
-        state.floor_mgr.boss_room_center,
+        descend_anchor,
         vote_active,
         vote_cd,
         dt,
     );
 
     // Rift exit portal (return-to-hub). Lazily spawned in
-    // the boss room *after* the boss dies, side-by-side with
-    // the descend portal — the player picks "leave with
-    // loot" vs "push deeper" right where the boss fell. No
-    // longer spawned at the floor's spawn point: once you
-    // commit to a floor you must clear its boss to get home.
+    // the dedicated portal room next to the descend portal
+    // — the player walks one corridor from the boss kill
+    // and picks "leave with loot" vs "push deeper" there.
+    // No longer spawned at the floor's spawn point: once
+    // you commit to a floor you must clear its boss to get
+    // home.
     let is_ghost = state.net.local_ghost_cached;
     portal_system::tick_rift_spawn(
         &mut state.floor.rift_spawn_portal,
@@ -71,7 +81,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &mut state.frame.hud_prompt,
         state.rift.floor_complete,
         state.floor.in_hub,
-        state.floor_mgr.boss_room_center,
+        return_anchor,
         vote_active,
         vote_cd,
         is_ghost,
@@ -129,6 +139,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &mut state.combat_text,
         input,
     );
+
+    // Drive the per-drop pop / settle animation on any 3D
+    // ground meshes attached to live loot drops. Cheap walk
+    // over a small `Vec`; safe on empty.
+    crate::game::loot_system::tick_drop_animation(&mut state.loot, renderer, dt);
 
     // Revive shrines: hover prompt + F-press toggles channel
     // intent. Server is authority on actual progress; we

@@ -300,11 +300,14 @@ pub fn tick(
         // Emitting the wire event from inside the query borrow
         // is fine because `ctx.events` doesn't alias the world.
         // Heals are scaled by the target's healing-received
-        // multiplier (Necrotic ⇒ 0.5×) so HoT ticks honour the
-        // same debuff that direct heals do. Captured before
-        // the drain so the pending self-tick this frame can't
-        // shrink itself by its own application.
-        let heal_mult = stack.healing_received_mult();
+        // multiplier (Necrotic ⇒ 0.5×) and by the
+        // `Stat::HealingReceived` gear bonus so HoT ticks
+        // honour both the same debuff direct heals do and any
+        // healing-amp affixes the target has rolled. Captured
+        // before the drain so the pending self-tick this frame
+        // can't shrink itself by its own application.
+        let heal_mult =
+            stack.healing_received_mult() * (1.0 + p.stats.healing_received).max(0.0);
         for heal in heals.drain(..).filter(|h| h.target == entity) {
             let amount = heal.amount * heal_mult;
             // Capture pre-heal HP so the meter can credit only

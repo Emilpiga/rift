@@ -10,18 +10,24 @@ use rift_game::stats::Stat;
 /// adjacent tooltips horizontally. `loadout` enables the
 /// synergy footer ("→ Boosts <ability>") — pass `None` from
 /// previews / character-select where the player has no slotted
-/// abilities yet.
+/// abilities yet. `viewer_level` colours the `Requires Level N`
+/// line red when the viewing player can't equip the item; pass
+/// `None` to suppress that check (e.g. preview screens where
+/// the viewer's character isn't relevant).
 pub fn render_item_tooltip(
     ui: &mut Ui<'_>,
     item: &Item,
     header: &str,
     anchor: Pos2,
     loadout: Option<&rift_game::loadout::Loadout>,
+    viewer_level: Option<u32>,
 ) -> Rect {
     let theme = *ui.theme();
     let raw: Vec<String> = item.tooltip(loadout);
     let rarity = item.rarity.color();
     let rarity_col = Color::rgba(rarity[0], rarity[1], rarity[2], 1.0);
+    let req = item.required_level();
+    let viewer_too_low = viewer_level.map(|lv| lv < req).unwrap_or(false);
     let lines: Vec<TooltipLine<'_>> = raw
         .iter()
         .enumerate()
@@ -38,6 +44,14 @@ pub fn render_item_tooltip(
                 theme.colors.text
             } else if s.starts_with("Item Level") {
                 theme.colors.text_dim
+            } else if s.starts_with("Requires Level") {
+                if viewer_too_low {
+                    // Red so an under-level viewer immediately
+                    // sees the gate that's blocking them.
+                    Color::rgba(0.96, 0.40, 0.40, 1.0)
+                } else {
+                    theme.colors.text_dim
+                }
             } else if s.starts_with('\u{2500}') {
                 // Divider between signature and bonus blocks.
                 theme.colors.text_dim

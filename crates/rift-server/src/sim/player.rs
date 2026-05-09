@@ -65,14 +65,21 @@ pub struct ServerPlayer {
     /// Server-authoritative. Drained at cast time
     /// (`Ability::resource_cost`) and per-tick during channels
     /// (`Ability::channel_cost_per_sec`); regenerates at
-    /// `stats.essence_regen` per second after a short
-    /// `essence_regen_pause`.
-    pub essence: f32,
+    /// `stats.resource_regen` per second after a short
+    /// `resource_regen_pause`.
+    pub resource: f32,
     /// Seconds remaining before passive essence regen resumes.
     /// Set every time a cost is paid; ticks down each
     /// `Sim::step`. While > 0 the regen branch is skipped so
     /// the bar visibly hitches after a spend.
-    pub essence_regen_pause: f32,
+    pub resource_regen_pause: f32,
+    /// Edge-detection latch for the `OnLowHealth` proc event.
+    /// `true` when HP is at or above the 30 % threshold (proc
+    /// is "armed"); set `false` the tick HP first dips below,
+    /// fires the proc once, then waits for HP to rise back
+    /// above to re-arm. Prevents continuous re-firing while
+    /// the player sits at low HP.
+    pub low_hp_proc_armed: bool,
     /// Last input `seq` we successfully applied. Echoed back in
     /// snapshots so the client can prune its prediction buffer.
     pub last_input_seq: u32,
@@ -109,6 +116,17 @@ pub struct ServerPlayer {
     /// Character level. Used by [`CharacterStats::compute`] for
     /// HP-per-level scaling.
     pub level: u32,
+    /// Persistent character UUID once the owner has finished
+    /// the Hello handshake and the [`rift_persistence::CharacterRecord`]
+    /// has been bound to the session. `None` for the brief
+    /// window between [`ServerPlayer::fresh`] and the Hello
+    /// handler resolving the character row, and stays `None`
+    /// for offline / single-player sims that bypass the
+    /// persistence layer entirely. Used by the loot
+    /// [`rift_game::loot::LootProvenance`] system to stamp
+    /// pickup-eligibility lineage onto fresh drops and to
+    /// gate `try_pickup_loot`.
+    pub character_id: Option<rift_persistence::Uuid>,
     /// Authoritative XP / level state. Source of truth for the
     /// `ServerMsg::CharacterStats` reply pushed to the owning
     /// client. `level` is mirrored in the dedicated `level`
@@ -181,7 +199,7 @@ impl ServerPlayer {
         );
         let ability_mods = equipment.ability_mods();
         let hp_max = stats.max_hp;
-        let max_essence = stats.max_essence;
+        let max_resource = stats.max_resource;
         Self {
             client_id,
             net_id,
@@ -197,14 +215,16 @@ impl ServerPlayer {
             },
             hp_max,
             hp: hp_max,
-            essence: max_essence,
-            essence_regen_pause: 0.0,
+            resource: max_resource,
+            resource_regen_pause: 0.0,
+            low_hp_proc_armed: true,
             last_input_seq: 0,
             inventory: Vec::new(),
             equipment,
             stash: vec![StashTab::fresh(0)],
             stash_open: false,
             level: DEFAULT_LEVEL,
+            character_id: None,
             attrs,
             stats,
             ability_mods,
@@ -244,9 +264,9 @@ impl ServerPlayer {
         // `+Max Essence` item heals the pool to the same
         // fraction it was at before the resize — no surprise
         // "swap rings, lose 30 essence" moments.
-        let essence_max_old = self.stats.max_essence.max(1.0);
-        let essence_pct = (self.essence / essence_max_old).clamp(0.0, 1.0);
-        self.essence = new_stats.max_essence * essence_pct;
+        let resource_max_old = self.stats.max_resource.max(1.0);
+        let resource_pct = (self.resource / resource_max_old).clamp(0.0, 1.0);
+        self.resource = new_stats.max_resource * resource_pct;
         self.stats = new_stats;
         // Equipment changes also rotate the affix-driven
         // gameplay-changing mods (extra projectiles, transforms,
@@ -312,20 +332,20 @@ impl ServerPlayer {
     /// Universal essence-cost gate. Returns `true` and deducts
     /// `cost` if the player can afford it; returns `false`
     /// otherwise (caller should reject the cast). A successful
-    /// spend also pauses passive regen for [`ESSENCE_SPEND_PAUSE`]
+    /// spend also pauses passive regen for [`RESOURCE_SPEND_PAUSE`]
     /// seconds so the bar visibly hitches after a cast.
     /// Treats `cost <= 0.0` as a free, no-op success so the
     /// existing free-cast abilities (Melee, Evasive Roll,
     /// triggers) keep working.
-    pub fn try_spend_essence(&mut self, cost: f32) -> bool {
+    pub fn try_spend_resource(&mut self, cost: f32) -> bool {
         if cost <= 0.0 {
             return true;
         }
-        if self.essence + 1e-3 < cost {
+        if self.resource + 1e-3 < cost {
             return false;
         }
-        self.essence -= cost;
-        self.essence_regen_pause = ESSENCE_SPEND_PAUSE;
+        self.resource -= cost;
+        self.resource_regen_pause = RESOURCE_SPEND_PAUSE;
         true
     }
 
@@ -334,30 +354,51 @@ impl ServerPlayer {
     /// if the pool empties mid-channel the channel itself is
     /// ended cleanly by [`super::channel::tick`], so we just
     /// clamp at zero here.
-    pub fn drain_essence(&mut self, amount: f32) {
+    pub fn drain_resource(&mut self, amount: f32) {
         if amount <= 0.0 {
             return;
         }
-        self.essence = (self.essence - amount).max(0.0);
-        self.essence_regen_pause = ESSENCE_SPEND_PAUSE;
+        self.resource = (self.resource - amount).max(0.0);
+        self.resource_regen_pause = RESOURCE_SPEND_PAUSE;
     }
 
     /// Per-tick essence regen. Counts down the post-spend pause
-    /// first; once it elapses, restores `stats.essence_regen` per
-    /// second up to `stats.max_essence`. Dead / ghost players
+    /// first; once it elapses, restores `stats.resource_regen` per
+    /// second up to `stats.max_resource`. Dead / ghost players
     /// don't regen so a downed player can't sneak a cast off the
     /// instant they rise.
-    pub fn tick_essence(&mut self, dt: f32) {
+    pub fn tick_resource(&mut self, dt: f32) {
         if self.is_dead_or_ghosting() {
             return;
         }
-        if self.essence_regen_pause > 0.0 {
-            self.essence_regen_pause = (self.essence_regen_pause - dt).max(0.0);
+        if self.resource_regen_pause > 0.0 {
+            self.resource_regen_pause = (self.resource_regen_pause - dt).max(0.0);
             return;
         }
-        if self.essence < self.stats.max_essence {
-            self.essence = (self.essence + self.stats.essence_regen * dt)
-                .min(self.stats.max_essence);
+        if self.resource < self.stats.max_resource {
+            self.resource = (self.resource + self.stats.resource_regen * dt)
+                .min(self.stats.max_resource);
+        }
+    }
+
+    /// Per-tick passive HP regen from `Stat::HealthRegen`. No
+    /// post-damage pause (unlike essence) — combat-focused
+    /// regen builds want it ticking through the fight. Skipped
+    /// for dead / ghosting players. Re-arms the
+    /// [`Self::low_hp_proc_armed`] latch when HP rises back above
+    /// the OnLowHealth threshold.
+    pub fn tick_health_regen(&mut self, dt: f32) {
+        if self.is_dead_or_ghosting() {
+            return;
+        }
+        if self.stats.health_regen > 0.0 && self.hp < self.hp_max {
+            self.hp = (self.hp + self.stats.health_regen * dt).min(self.hp_max);
+        }
+        // Re-arm the low-HP proc once we climb back above 30 %.
+        if !self.low_hp_proc_armed && self.hp_max > 0.0 {
+            if self.hp / self.hp_max >= LOW_HP_PROC_REARM {
+                self.low_hp_proc_armed = true;
+            }
         }
     }
 }
@@ -366,7 +407,16 @@ impl ServerPlayer {
 /// upfront cost or channel per-tick drain). Matches the feel of
 /// classic ARPG resource bars: spam-cast and the bar visibly
 /// hitches; let go and it ramps back smoothly.
-pub const ESSENCE_SPEND_PAUSE: f32 = 0.6;
+pub const RESOURCE_SPEND_PAUSE: f32 = 0.6;
+
+/// HP fraction below which `OnLowHealth` procs fire (one-shot
+/// per dip — see [`ServerPlayer::low_hp_proc_armed`]).
+pub const LOW_HP_PROC_THRESHOLD: f32 = 0.30;
+
+/// HP fraction the player must climb back above to re-arm the
+/// `OnLowHealth` proc latch. Slightly above the trigger so the
+/// proc doesn't chatter while the player hovers around 30 %.
+pub const LOW_HP_PROC_REARM: f32 = 0.40;
 
 /// Edge-triggered button bits we forward across input coalescing so a
 /// brief press never gets dropped between server ticks.
