@@ -1,0 +1,126 @@
+#version 460
+//
+// GPU mesh skinning — one thread per vertex.
+//
+// Reads the rest-pose vertex stream + per-vertex skin influences,
+// blends up to four bone matrices per vertex, and writes a fully
+// transformed Vertex to the output buffer that the forward and
+// shadow pipelines then consume as if it were any other static
+// vertex buffer.
+//
+// Vertex layout (std430, must match `renderer::mesh::Vertex` —
+// position vec3 + normal vec3 + color vec3 + uv vec2 = 44 bytes
+// of payload, but std430 will pad each `vec3` to 16 bytes if it
+// stands alone. We avoid that by packing as 11 floats and casting.
+// Easier: declare with `float` to match the C `repr(C)` layout
+// exactly.
+//
+// One push-constant block carries the vertex count plus an
+// optional uniform `inflate` (used to push outfit shells slightly
+// outside the body skin so they don't z-fight).
+
+layout(local_size_x = 64) in;
+
+// --- Input: rest-pose vertices (read-only). ----------------------------
+// 11 floats per vertex matching `repr(C) Vertex`:
+//   [0..3]  position
+//   [3..6]  normal
+//   [6..9]  color
+//   [9..11] uv
+layout(set = 0, binding = 0, std430) readonly buffer RestVertices {
+    float data[];
+} rest;
+
+// --- Input: per-vertex skin influences (read-only). --------------------
+// Matches `VertexSkin { joints: [u16; 4], weights: [f32; 4] }`. The
+// CPU-side `repr(C)` packs `joints` as eight bytes followed by 16
+// bytes of weights, total 24 bytes. We expose joints as one uint
+// pair (4×u16 packed into 2×u32) plus four floats of weights.
+layout(set = 0, binding = 1, std430) readonly buffer SkinData {
+    uint data[];
+} skin;
+
+// --- Input: per-frame bone palette (read-only). ------------------------
+// `palette[j] = current_joint_world(j) * inverse_bind(j)`. Bound as a
+// storage buffer (not a UBO) so we have room for the 128-joint cap
+// without bumping into the 16 KiB UBO limit.
+layout(set = 0, binding = 2, std430) readonly buffer Palette {
+    mat4 data[];
+} palette;
+
+// --- Output: skinned vertices the graphics pipelines will read. --------
+layout(set = 0, binding = 3, std430) writeonly buffer OutVertices {
+    float data[];
+} outv;
+
+layout(push_constant) uniform PC {
+    uint  vertex_count;
+    float inflate;        // outfit shell push along skinned normal
+    uint  _pad0;
+    uint  _pad1;
+} pc;
+
+const uint VERTEX_FLOATS = 11u;       // floats per Vertex
+const uint SKIN_UINTS    = 6u;        // uint slots per VertexSkin
+                                      //   (2 packed-u16 joint pairs + 4 weights)
+
+void main() {
+    uint vid = gl_GlobalInvocationID.x;
+    if (vid >= pc.vertex_count) return;
+
+    // ------------ load rest vertex --------------------------------------
+    uint  rb = vid * VERTEX_FLOATS;
+    vec3  pos = vec3(rest.data[rb + 0], rest.data[rb + 1], rest.data[rb + 2]);
+    vec3  nrm = vec3(rest.data[rb + 3], rest.data[rb + 4], rest.data[rb + 5]);
+    vec3  col = vec3(rest.data[rb + 6], rest.data[rb + 7], rest.data[rb + 8]);
+    vec2  uv  = vec2(rest.data[rb + 9], rest.data[rb + 10]);
+
+    // ------------ load skin influences ----------------------------------
+    // joint indices live as 4×u16 packed into 2 u32 (little-endian on the
+    // platforms we ship to — Windows/Linux x86_64 + macOS arm64).
+    uint sb = vid * SKIN_UINTS;
+    uint j01 = skin.data[sb + 0];
+    uint j23 = skin.data[sb + 1];
+    uvec4 j = uvec4(
+        j01 & 0xFFFFu,
+        (j01 >> 16) & 0xFFFFu,
+        j23 & 0xFFFFu,
+        (j23 >> 16) & 0xFFFFu
+    );
+    vec4 w = vec4(
+        uintBitsToFloat(skin.data[sb + 2]),
+        uintBitsToFloat(skin.data[sb + 3]),
+        uintBitsToFloat(skin.data[sb + 4]),
+        uintBitsToFloat(skin.data[sb + 5])
+    );
+
+    // ------------ build skinning matrix ---------------------------------
+    mat4 m = mat4(0.0);
+    if (w.x != 0.0) m += palette.data[j.x] * w.x;
+    if (w.y != 0.0) m += palette.data[j.y] * w.y;
+    if (w.z != 0.0) m += palette.data[j.z] * w.z;
+    if (w.w != 0.0) m += palette.data[j.w] * w.w;
+    // Vertices that somehow have all-zero weights fall back to identity
+    // so they stay in bind pose instead of collapsing to the origin.
+    if (w.x + w.y + w.z + w.w == 0.0) m = mat4(1.0);
+
+    vec3 sp = (m * vec4(pos, 1.0)).xyz;
+    vec3 sn = normalize(mat3(m) * nrm);
+    if (any(isnan(sn))) sn = nrm;
+
+    sp += sn * pc.inflate;
+
+    // ------------ store skinned vertex ----------------------------------
+    uint ob = vid * VERTEX_FLOATS;
+    outv.data[ob + 0]  = sp.x;
+    outv.data[ob + 1]  = sp.y;
+    outv.data[ob + 2]  = sp.z;
+    outv.data[ob + 3]  = sn.x;
+    outv.data[ob + 4]  = sn.y;
+    outv.data[ob + 5]  = sn.z;
+    outv.data[ob + 6]  = col.r;
+    outv.data[ob + 7]  = col.g;
+    outv.data[ob + 8]  = col.b;
+    outv.data[ob + 9]  = uv.x;
+    outv.data[ob + 10] = uv.y;
+}

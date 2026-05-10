@@ -92,11 +92,13 @@ pub fn spawn_character_entity(
         |n| is_body_mesh_name(n),
     ) {
         Ok(skinned) => {
-            let mut bind_mesh = Mesh::empty();
-            bind_mesh.vertices = skinned.bind_vertices.clone();
-            bind_mesh.indices = skinned.indices.clone();
-            let idx = renderer
-                .add_dynamic_mesh(&bind_mesh, Mat4::from_translation(cfg.position))?;
+            let idx = renderer.add_skinned_mesh(
+                &skinned.bind_vertices,
+                &skinned.vertex_skin,
+                &skinned.indices,
+                Mat4::from_translation(cfg.position),
+                0.0,
+            )?;
             if let Err(e) = renderer.set_object_texture(idx, tex_path) {
                 log::warn!("Character texture load failed: {}", e);
             }

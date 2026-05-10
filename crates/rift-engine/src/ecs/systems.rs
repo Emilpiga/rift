@@ -421,16 +421,16 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
         // they sit just outside the base skin (no z-fighting), and any
         // body parts the outfit doesn't cover (head, neck, hands when
         // there are no gloves) still render correctly.
-        skinned.mesh.skin_to(&palette, &mut skinned.scratch);
-        renderer.update_dynamic_vertices(renderable.object_index, &skinned.scratch);
+        // Hand the freshly built bone palette to the GPU skinner.
+        // The compute shader will run once per visible skinned mesh
+        // before the shadow pass and write the deformed vertices to
+        // a device-local buffer the graphics pipelines bind.
+        renderer.update_palette(renderable.object_index, &palette);
 
         // Re-skin attached outfit pieces with the same palette. They were
         // remapped at load time so their joint indices reference the host
         // skeleton's palette directly.
         if let Some(atts) = atts {
-            // ~5mm of outward inflate is enough to clear the base skin
-            // without being visible as a gap.
-            const OUTFIT_INFLATE: f32 = 0.022;
             let host_xform = transform.matrix();
             for piece in &mut atts.pieces {
                 if piece.object_index >= renderer.objects.len() { continue }
@@ -439,12 +439,11 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
                     continue;
                 }
                 renderer.objects[piece.object_index].model_matrix = host_xform;
-                if piece.inflate {
-                    piece.mesh.skin_to_inflated(&palette, OUTFIT_INFLATE, &mut piece.scratch);
-                } else {
-                    piece.mesh.skin_to(&palette, &mut piece.scratch);
-                }
-                renderer.update_dynamic_vertices(piece.object_index, &piece.scratch);
+                // Outfit shells share the body's bone palette — the
+                // per-piece `inflate` flag is baked into each mesh's
+                // `SkinningSystem` registration at load time, so we
+                // just upload the same palette here.
+                renderer.update_palette(piece.object_index, &palette);
             }
         }
     }

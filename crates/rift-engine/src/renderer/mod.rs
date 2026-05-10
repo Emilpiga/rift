@@ -14,6 +14,7 @@ pub mod overlay;
 pub mod font;
 pub mod vfx;
 pub mod blood;
+pub mod gpu_skin;
 
 pub use forward::Renderer;
 pub use overlay::{OverlayBatch, OverlayRenderer};

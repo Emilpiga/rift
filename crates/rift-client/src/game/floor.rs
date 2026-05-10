@@ -794,15 +794,18 @@ pub fn spawn_remote_enemy_entity(
         .get(role)
         .ok_or_else(|| anyhow::anyhow!("monster role {role:?} not loaded"))?;
 
-    let mut bind_mesh = Mesh::empty();
-    bind_mesh.vertices = asset.mesh.bind_vertices.clone();
-    bind_mesh.indices = asset.mesh.indices.clone();
     let scaled = Mat4::from_scale_rotation_translation(
         Vec3::splat(role.scale()),
         glam::Quat::IDENTITY,
         position,
     );
-    let obj_index = renderer.add_dynamic_mesh(&bind_mesh, scaled)?;
+    let obj_index = renderer.add_skinned_mesh(
+        &asset.mesh.bind_vertices,
+        &asset.mesh.vertex_skin,
+        &asset.mesh.indices,
+        scaled,
+        0.0,
+    )?;
     if let Some(set) = shared_set {
         renderer.set_object_shared_material(obj_index, set);
     }

@@ -101,7 +101,10 @@ impl NetClient {
                     if let Ok(r) = world.get::<&Renderable>(entity) {
                         let idx = r.object_index;
                         if idx < renderer.objects.len() {
-                            renderer.objects[idx].model_matrix = Mat4::ZERO;
+                            // Reclaim the GPU skinning slot so the
+                            // freed buffers can be reused by the
+                            // next monster / cosmetic to spawn.
+                            renderer.free_skinned_mesh(idx);
                         }
                     }
                     // Also collapse every modular-equipment /
@@ -113,7 +116,7 @@ impl NetClient {
                     if let Ok(atts) = world.get::<&SkinnedAttachments>(entity) {
                         for piece in &atts.pieces {
                             if piece.object_index < renderer.objects.len() {
-                                renderer.objects[piece.object_index].model_matrix = Mat4::ZERO;
+                                renderer.free_skinned_mesh(piece.object_index);
                             }
                         }
                     }
@@ -389,7 +392,14 @@ impl NetClient {
                 if let Ok(r) = world.get::<&Renderable>(entity) {
                     let idx = r.object_index;
                     if idx < renderer.objects.len() {
-                        renderer.objects[idx].model_matrix = Mat4::ZERO;
+                        // Reclaim the GPU skinning slot — the
+                        // dispatch queue, output VB and palette
+                        // UBOs free up after MAX_FRAMES_IN_FLIGHT
+                        // frames and become available for the next
+                        // spawn. Critical for endless-density
+                        // floors where hundreds of monsters die
+                        // before the floor wipes.
+                        renderer.free_skinned_mesh(idx);
                     }
                 }
                 let _ = world.despawn(entity);

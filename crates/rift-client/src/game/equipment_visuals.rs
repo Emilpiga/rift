@@ -23,7 +23,7 @@ use rift_engine::ecs::components::{
     AttachmentPiece, LocalPlayer, Skinned, SkinnedAttachments, Transform,
 };
 use rift_engine::renderer::mesh::SkinnedMesh;
-use rift_engine::{Mesh, Renderer};
+use rift_engine::Renderer;
 
 use rift_game::character::Gender;
 use rift_game::loot::{Equipment, BASE_ITEMS};
@@ -226,13 +226,16 @@ pub fn apply_equipment_visuals(
 
     // Phase 2: register new pieces with the renderer + push them.
     for (slot, mesh) in to_add {
-        let mut bind = Mesh::empty();
-        bind.vertices = mesh.bind_vertices.clone();
-        bind.indices = mesh.indices.clone();
-        let object_index = match renderer.add_dynamic_mesh(&bind, host_xform) {
+        let object_index = match renderer.add_skinned_mesh(
+            &mesh.bind_vertices,
+            &mesh.vertex_skin,
+            &mesh.indices,
+            host_xform,
+            0.022,
+        ) {
             Ok(idx) => idx,
             Err(e) => {
-                log::warn!("equipment visual: failed to register dynamic mesh: {}", e);
+                log::warn!("equipment visual: failed to register skinned mesh: {}", e);
                 continue;
             }
         };

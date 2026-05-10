@@ -22,7 +22,7 @@ use rift_engine::{
         widgets::{label, text_field, title},
         Button, Color, Frame, Id, Pad, Pos2, Rect, Stroke, Ui, Vec2,
     },
-    Mesh, Renderer,
+    Renderer,
 };
 use std::sync::Arc;
 
@@ -271,18 +271,20 @@ impl CharacterSelect {
             .or_else(|| anim_set.clips.values().next().cloned());
         let animator = idle_clip.map(Animator::new);
 
-        let mut bind_mesh = Mesh::empty();
-        bind_mesh.vertices = skinned.bind_vertices.clone();
-        bind_mesh.indices = skinned.indices.clone();
         let podium_pos = Vec3::new(0.0, 0.0, 0.0);
-        let obj_idx =
-            match renderer.add_dynamic_mesh(&bind_mesh, Mat4::from_translation(podium_pos)) {
-                Ok(i) => i,
-                Err(e) => {
-                    log::warn!("Preview mesh upload failed: {}", e);
-                    return None;
-                }
-            };
+        let obj_idx = match renderer.add_skinned_mesh(
+            &skinned.bind_vertices,
+            &skinned.vertex_skin,
+            &skinned.indices,
+            Mat4::from_translation(podium_pos),
+            0.0,
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("Preview mesh upload failed: {}", e);
+                return None;
+            }
+        };
         if let Err(e) = renderer.set_object_texture(obj_idx, tex_path) {
             log::warn!("Preview texture load failed: {}", e);
         }

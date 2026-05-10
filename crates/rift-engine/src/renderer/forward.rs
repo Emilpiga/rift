@@ -10,8 +10,9 @@ use crate::hot_reload::{self, HotReloader};
 use crate::renderer::camera::Camera;
 use crate::renderer::depth::DepthBuffer;
 use crate::renderer::blood;
+use crate::renderer::gpu_skin::{SkinHandle, SkinningSystem};
 use crate::renderer::material::MaterialPool;
-use crate::renderer::mesh::{Mesh, Vertex};
+use crate::renderer::mesh::{Mesh, Vertex, VertexSkin};
 use crate::renderer::shadow::{self, ShadowMap};
 use crate::renderer::shadow_point::{self, PointShadowAtlas};
 use crate::renderer::sky::{SkyConfig, SkyRenderer};
@@ -40,6 +41,11 @@ pub struct RenderObject {
     /// When set, `vertex_buffer` above is unused for drawing; the per-frame
     /// buffer at index `current_frame` is bound instead.
     pub dynamic_vertex_buffers: Option<Vec<GpuBuffer>>,
+    /// If Some, this object is GPU-skinned: `vertex_buffer` is unused
+    /// at draw time and the renderer binds the compute shader's
+    /// output VB (via `SkinningSystem::output_vertex_buffer`)
+    /// instead. Takes precedence over `dynamic_vertex_buffers`.
+    pub skin_handle: Option<SkinHandle>,
     /// Per-object material descriptor set (set 1). Defaults to the
     /// MaterialPool's white-texture set when no custom texture is bound.
     pub material_set: vk::DescriptorSet,
@@ -126,6 +132,11 @@ pub struct Renderer {
     /// additive); instances are partitioned by `blend` field at
     /// upload time and drawn in two `cmd_draw_indexed` calls.
     pub vfx_particle_renderer: ParticleVfxRenderer,
+    /// Compute-shader mesh skinner. Owns the `skin.comp` pipeline
+    /// and per-skinned-mesh GPU resources (rest VB, skin SSBO,
+    /// palette UBO ring, output VB, descriptor sets). Replaces
+    /// the legacy CPU `skin_to` + per-frame VB upload path.
+    pub skin_system: SkinningSystem,
     // Deferred deletion queue for GPU buffers
     deletion_queue: Vec<(u64, GpuBuffer)>,
     /// Per-frame visible-draw scratch buffer. Reused across
@@ -529,6 +540,7 @@ impl Renderer {
         )?;
         let vfx_system = VfxSystem::new(8192);
         let sky_renderer = SkyRenderer::new(&device.device, render_pass, &shader_dir)?;
+        let skin_system = SkinningSystem::new(&device.device, &shader_dir)?;
 
         log::info!("Renderer initialized successfully");
 
@@ -567,6 +579,7 @@ impl Renderer {
             vfx_system,
             vfx_ribbon_renderer,
             vfx_particle_renderer,
+            skin_system,
             deletion_queue: Vec::new(),
             // Per-frame scratch lists. Pre-sized to avoid the
             // first-frame allocator dance; they grow naturally
@@ -758,6 +771,7 @@ impl Renderer {
             model_matrix,
             bounds_radius,
             dynamic_vertex_buffers: None,
+            skin_handle: None,
             material_set: self.material_pool.default_set,
             texture: None,
             tint: [1.0, 1.0, 1.0, 1.0],
@@ -824,6 +838,7 @@ impl Renderer {
             model_matrix,
             bounds_radius,
             dynamic_vertex_buffers: Some(dynamic_vertex_buffers),
+            skin_handle: None,
             material_set: self.material_pool.default_set,
             texture: None,
             tint: [1.0, 1.0, 1.0, 1.0],
@@ -857,6 +872,111 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// Register a skinned mesh with the GPU skinning system and create a
+    /// `RenderObject` that draws from the compute shader's output buffer.
+    /// Replaces the legacy `add_dynamic_mesh` + per-frame CPU `skin_to`
+    /// pipeline for any mesh whose vertices are produced by skinning.
+    ///
+    /// `rest_vertices` is the unskinned bind pose; `skin_data` carries the
+    /// per-vertex `(joints, weights)` influences (length must match);
+    /// `inflate` pushes every output vertex along its skinned normal by
+    /// that many world units (use `0.0` for body, ~`0.022` for outfit
+    /// shells so they sit just outside the body and don't z-fight).
+    ///
+    /// Returns the new object index so callers can later `update_palette`
+    /// and bind material textures the same way as for static meshes.
+    pub fn add_skinned_mesh(
+        &mut self,
+        rest_vertices: &[Vertex],
+        skin_data: &[VertexSkin],
+        indices: &[u32],
+        model_matrix: Mat4,
+        inflate: f32,
+    ) -> Result<usize> {
+        let handle = self.skin_system.register_mesh(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            rest_vertices,
+            skin_data,
+            inflate,
+        )?;
+
+        // Index buffer: device-local, immutable — same as a static mesh.
+        let index_buffer = buffer::create_device_local_buffer(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            indices,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            "skinned_index_buffer",
+        )?;
+
+        // Tiny placeholder so `vertex_buffer` always has a real handle to
+        // clean up. Draw loop ignores it whenever `skin_handle` is set.
+        let placeholder = buffer::create_host_buffer(
+            &self.device.device,
+            &self.allocator,
+            &[0u8; 16],
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "skinned_vertex_placeholder",
+        )?;
+
+        let bounds_radius = rest_vertices.iter()
+            .map(|v| v.position.length())
+            .fold(0.0_f32, f32::max);
+
+        self.objects.push(RenderObject {
+            vertex_buffer: placeholder,
+            index_buffer,
+            index_count: indices.len() as u32,
+            model_matrix,
+            bounds_radius,
+            dynamic_vertex_buffers: None,
+            skin_handle: Some(handle),
+            material_set: self.material_pool.default_set,
+            texture: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            material_params: [1.0, 0.0, 0.0, 0.0],
+        });
+
+        Ok(self.objects.len() - 1)
+    }
+
+    /// Upload a fresh bone palette for the GPU skinner. Mirrors the old
+    /// CPU path's per-frame `skin_to` step — call once per visible
+    /// skinned object before `render`.
+    pub fn update_palette(&mut self, obj_idx: usize, palette: &[Mat4]) {
+        let frame = self.current_frame;
+        let handle = match self.objects.get(obj_idx).and_then(|o| o.skin_handle) {
+            Some(h) => h,
+            None => return,
+        };
+        self.skin_system.update_palette(frame, handle, palette);
+    }
+
+    /// Release the GPU skinning resources backing this object's
+    /// mesh. Buffers are deferred for `MAX_FRAMES_IN_FLIGHT` frames
+    /// before destruction so any in-flight pass that already
+    /// recorded a reference to them finishes safely. The
+    /// `RenderObject` itself is *not* removed (`object_index`
+    /// references elsewhere stay valid); we just clear its
+    /// `skin_handle` and zero its model matrix so it disappears
+    /// from the draw list. Cheap to call repeatedly: a no-op once
+    /// the slot is already free.
+    pub fn free_skinned_mesh(&mut self, obj_idx: usize) {
+        let obj = match self.objects.get_mut(obj_idx) {
+            Some(o) => o,
+            None => return,
+        };
+        if let Some(handle) = obj.skin_handle.take() {
+            self.skin_system.free_mesh(handle);
+        }
+        obj.model_matrix = Mat4::ZERO;
     }
 
     /// True if this object was created via `add_dynamic_mesh`.
@@ -1418,6 +1538,11 @@ impl Renderer {
                 tex.cleanup(&self.device.device, &self.allocator);
             }
         }
+        // Wipe every GPU-skinning slot so the next floor's monsters
+        // don't immediately blow past the registration cap (objects
+        // and skin slots are 1:1; the indices we just dropped above
+        // referenced these slots).
+        self.skin_system.clear(&self.device.device, &self.allocator);
         // Also flush deferred deletion queue since everything is idle
         let device = &self.device.device;
         let allocator = &self.allocator;
@@ -1725,10 +1850,17 @@ impl Renderer {
             if dist_to_fog_origin - obj.bounds_radius > fog_cull_dist {
                 continue;
             }
-            // Pick the per-frame dynamic VB if present, else the static one.
-            let vb = match obj.dynamic_vertex_buffers.as_ref() {
-                Some(bufs) => bufs[frame].buffer,
-                None => obj.vertex_buffer.buffer,
+            // Pick the GPU-skinner output VB if present, then fall
+            // back to the legacy host-visible dynamic ring, then to
+            // the static device-local VB. The skin handle wins over
+            // dynamic_vertex_buffers because a freshly converted
+            // mesh may briefly carry both during transition.
+            let vb = match obj.skin_handle.and_then(|h| self.skin_system.output_vertex_buffer(h)) {
+                Some(b) => b,
+                None => match obj.dynamic_vertex_buffers.as_ref() {
+                    Some(bufs) => bufs[frame].buffer,
+                    None => obj.vertex_buffer.buffer,
+                },
             };
             let cmd = DrawCommand {
                 vertex_buffer: vb,
@@ -1785,6 +1917,14 @@ impl Renderer {
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::default();
             device.begin_command_buffer(cmd, &begin_info)?;
+
+            // ---- GPU mesh skinning ---------------------------------
+            // Run the compute shader for every skinned mesh whose
+            // bone palette was refreshed this frame, then issue a
+            // single COMPUTE_SHADER_WRITE -> VERTEX_ATTRIBUTE_READ
+            // barrier so the upcoming shadow + forward passes see
+            // the new vertices. No-op if nothing's active.
+            self.skin_system.record_dispatches(device, cmd, self.current_frame, &self.allocator);
 
             // ---- Shadow pass: render scene depth from light's POV ----
             let shadow_clear = [vk::ClearValue {
@@ -2587,6 +2727,7 @@ impl Drop for Renderer {
         self.overlay.cleanup(&self.device.device, &self.allocator);
         self.vfx_ribbon_renderer.cleanup(&self.device.device, &self.allocator);
         self.vfx_particle_renderer.cleanup(&self.device.device, &self.allocator);
+        self.skin_system.cleanup(&self.device.device, &self.allocator);
         self.sky_renderer.cleanup(&self.device.device);
         // Tear down all post-process resources (offscreen
         // images, framebuffers, pipelines, render passes,

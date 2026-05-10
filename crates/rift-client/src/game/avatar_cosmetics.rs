@@ -38,7 +38,7 @@ use rift_engine::ecs::components::{
     AttachmentPiece, Skinned, SkinnedAttachments, Transform,
 };
 use rift_engine::renderer::mesh::SkinnedMesh;
-use rift_engine::{Mesh, Renderer};
+use rift_engine::Renderer;
 
 use rift_game::character::Gender;
 
@@ -283,13 +283,16 @@ pub fn apply_avatar_cosmetics(
 
     // Phase 2: register the new dynamic meshes and push.
     for piece in to_add {
-        let mut bind = Mesh::empty();
-        bind.vertices = piece.mesh.bind_vertices.clone();
-        bind.indices = piece.mesh.indices.clone();
-        let object_index = match renderer.add_dynamic_mesh(&bind, host_xform) {
+        let object_index = match renderer.add_skinned_mesh(
+            &piece.mesh.bind_vertices,
+            &piece.mesh.vertex_skin,
+            &piece.mesh.indices,
+            host_xform,
+            0.0,
+        ) {
             Ok(idx) => idx,
             Err(e) => {
-                log::warn!("avatar cosmetic: add_dynamic_mesh failed: {}", e);
+                log::warn!("avatar cosmetic: add_skinned_mesh failed: {}", e);
                 continue;
             }
         };
