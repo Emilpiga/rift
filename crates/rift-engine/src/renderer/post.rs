@@ -309,7 +309,21 @@ impl PostProcessing {
         // player perceives as "pixelated". Native res keeps
         // the bloom soft + smooth and the cost is bounded by
         // the 4-tap separable blur (still very cheap).
-        let bloom_extent = extent;
+        // Bloom runs at half resolution. The HDR bright pass +
+        // the two separable Gaussian blurs are some of the most
+        // fragment-heavy work in the frame; halving each
+        // dimension cuts those three passes' pixel count to a
+        // quarter, which is the single biggest fragment-bound
+        // win available short of dropping bloom entirely. Visual
+        // quality is essentially unchanged because bloom is by
+        // construction a low-frequency blur — the LINEAR sampler
+        // both downsamples (bright reads from full-res HDR) and
+        // upsamples (composite reads from half-res bloom) for
+        // free, with no aliasing on the eventual screen.
+        let bloom_extent = vk::Extent2D {
+            width: extent.width.max(2) / 2,
+            height: extent.height.max(2) / 2,
+        };
         let image_count = swapchain.image_views.len();
 
         let scene_pass = create_scene_pass(device)?;
@@ -599,7 +613,13 @@ impl PostProcessing {
         self.extent = swapchain.extent;
         // Match the constructor: full-res bloom for crisp
         // particles. See `new` for rationale.
-        self.bloom_extent = self.extent;
+        // See `new` for the rationale on half-res bloom; we have
+        // to mirror that decision here so swapchain recreation
+        // (window resize) keeps bloom at the right size.
+        self.bloom_extent = vk::Extent2D {
+            width: self.extent.width.max(2) / 2,
+            height: self.extent.height.max(2) / 2,
+        };
         // Cache the new depth view — the depth attachment is
         // recreated when the swapchain is, so the SSAO sampler
         // binding has to point at the new image.

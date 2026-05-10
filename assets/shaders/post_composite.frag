@@ -277,7 +277,7 @@ vec3 god_rays(vec2 uv) {
     if (marchDist < 1e-4) return vec3(0.0);
     vec2 dir = to_sun / max(dist, 1e-4);
 
-    const int STEPS = 24;
+    const int STEPS = 12;
     vec3 accum = vec3(0.0);
     float weightSum = 0.0;
     // Per-pixel jitter to break up the obvious radial banding.

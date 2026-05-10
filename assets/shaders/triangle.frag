@@ -945,26 +945,25 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     // a clean stochastic feather only at the boundary.
     float k = 0.0025;
 
-    // 8-tap Poisson-ish disk in 2D (radius 1).
+    // 4-tap Poisson disk in 2D (radius 1). Tightened from 8 taps
+    // because point shadows are the most expensive part of the
+    // light loop during heavy combat (each shadow-casting light
+    // here costs N cube-map samples per pixel; halving N halves
+    // the total cube fetches per pixel). The per-pixel rotation
+    // applied via `tu`/`tv` keeps the residual banding at 5
+    // discrete levels invisible by spreading them spatially as
+    // noise that the eye averages.
     const vec2 P0 = vec2( 0.000,  0.000);
     const vec2 P1 = vec2( 0.866,  0.500);
     const vec2 P2 = vec2(-0.500,  0.866);
-    const vec2 P3 = vec2(-0.866, -0.500);
-    const vec2 P4 = vec2( 0.500, -0.866);
-    const vec2 P5 = vec2( 0.383,  0.924);
-    const vec2 P6 = vec2(-0.924,  0.383);
-    const vec2 P7 = vec2(-0.383, -0.924);
+    const vec2 P3 = vec2( 0.500, -0.866);
 
     float occ = 0.0;
     occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
     occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P1.x + tv * P1.y) * k, float(lightIdx))).r);
     occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P2.x + tv * P2.y) * k, float(lightIdx))).r);
     occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P3.x + tv * P3.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P4.x + tv * P4.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P5.x + tv * P5.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P6.x + tv * P6.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P7.x + tv * P7.y) * k, float(lightIdx))).r);
-    return occ * 0.125;
+    return occ * 0.25;
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1064,15 @@ vec3 shadePbr() {
         // The result: lower walls and pillar bases pick up a
         // warm fill exactly where torches sit nearby, without
         // any extra render passes or descriptor work.
+        //
+        // Restricted to shadow-casting lights only: this is
+        // the static torch grid that the bounce is designed
+        // for, and skipping it for AoE flashes / VFX lights /
+        // secondary unshadowed fillers cuts the per-light cost
+        // of the inner loop roughly in half during heavy combat
+        // — the ground-bounce halo is invisible from a transient
+        // 200ms light burst anyway.
+        if (i < int(ubo.pointShadowMeta.x)) {
         vec3 bouncePos = vec3(lightPos.x, ubo.timeData.y, lightPos.z);
         vec3 bounceVec = bouncePos - fragWorldPos;
         float bounceDist = length(bounceVec);
@@ -1087,6 +1095,7 @@ vec3 shadePbr() {
             lighting += albedo / PI * bounceCol * intensity
                       * NdotB * bAtten * 0.18;
         }
+        }  // end shadow-light bounce gate (PBR path)
     }
 
     return lighting;
@@ -1380,8 +1389,10 @@ vec3 shadeCel() {
         }
 
         // Hemispherical floor-bounce. See `shadePbr` for the
-        // rationale; here it's a Lambert-only addition since the
-        // cel path doesn't compute a microfacet term.
+        // rationale; gated to shadow-casting lights only — the
+        // perceptual point of the bounce is static torches lit
+        // dungeon stone, not transient AoE/VFX flashes.
+        if (i < int(ubo.pointShadowMeta.x)) {
         vec3 bouncePos = vec3(lightPos.x, ubo.timeData.y, lightPos.z);
         vec3 bounceVec = bouncePos - fragWorldPos;
         float bounceDist = length(bounceVec);
@@ -1395,6 +1406,7 @@ vec3 shadeCel() {
             lighting += baseColor * bounceCol * intensity
                      * NdotB * bAtten * 0.16;
         }
+        }  // end shadow-light bounce gate (cel path)
     }
 
     return lighting;
