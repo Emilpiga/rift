@@ -179,6 +179,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
                             min_distance: 8.0,
                             max_distance: 25.0,
                             looping: false,
+                            pitch: 1.0,
                         };
                         // Anchor at the foot's actual world
                         // position so spatialisation matches

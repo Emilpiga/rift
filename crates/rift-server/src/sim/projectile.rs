@@ -161,10 +161,7 @@ pub(super) fn mix64(mut x: u64) -> u64 {
 
 fn hit_seed(tick: rift_net::NetTick, enemy: NetId, owner: NetId, salt: u64) -> u64 {
     mix64(
-        (tick.0 as u64)
-            ^ ((enemy.0 as u64) << 8)
-            ^ ((owner.0 as u64) << 24)
-            ^ salt.rotate_left(7),
+        (tick.0 as u64) ^ ((enemy.0 as u64) << 8) ^ ((owner.0 as u64) << 24) ^ salt.rotate_left(7),
     )
 }
 
@@ -278,14 +275,9 @@ pub fn tick(
                     let dist_xz = (dx * dx + dz * dz).sqrt();
                     if dist_xz < PLAYER_HIT_RADIUS + proj.size * 0.5 {
                         let crit_mult = if proj.crit_chance > 0.0 {
-                            let seed = hit_seed(
-                                ctx.tick,
-                                NetId(0),
-                                proj.owner,
-                                proj.net_id.0 as u64,
-                            );
-                            let roll =
-                                (mix64(seed) >> 40) as f32 / (1u32 << 24) as f32;
+                            let seed =
+                                hit_seed(ctx.tick, NetId(0), proj.owner, proj.net_id.0 as u64);
+                            let roll = (mix64(seed) >> 40) as f32 / (1u32 << 24) as f32;
                             if roll < proj.crit_chance {
                                 1.0 + proj.crit_damage
                             } else {
@@ -331,9 +323,7 @@ pub fn tick(
     // via `attacker_kind` instead of mirroring back to a
     // remote source meter.
     for (player_entity, debuff_id, ability_id, attacker_kind) in player_debuffs {
-        if let Ok(mut stack) =
-            world.get::<&mut super::effect::EffectStack>(player_entity)
-        {
+        if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(player_entity) {
             stack.apply(debuff_id, None, None, ability_id, attacker_kind);
         }
     }
@@ -348,6 +338,7 @@ pub fn tick(
 /// by the caller, the same way enemy projectile rows are.
 pub fn tick_aoe(
     world: &mut hecs::World,
+    floor: &Floor,
     zones: &mut Vec<ServerAoeZone>,
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
@@ -381,33 +372,40 @@ pub fn tick_aoe(
                     for (en_entity, en_pos, en_net_id, _r) in enemies {
                         let dx = en_pos.x - zone_pos.x;
                         let dz = en_pos.z - zone_pos.z;
-                        if dx * dx + dz * dz < zone_radius * zone_radius {
-                            hits.push(Hit {
-                                enemy: *en_entity,
-                                enemy_net_id: *en_net_id,
-                                enemy_pos: *en_pos,
-                                attacker: zone_owner,
-                                ability_id: zone.ability_id,
-                                damage: zone_dmg,
-                                crit_chance: zone_crit_chance,
-                                crit_damage: zone_crit_damage,
-                                crit_seed: hit_seed(
-                                    ctx.tick,
-                                    *en_net_id,
-                                    zone_owner,
-                                    (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
-                                ),
-                                apply_debuff: zone.apply_debuff,
-                                // Radial-outward from zone
-                                // centre — reads as the blast
-                                // pushing the victim outward.
-                                hit_dir: Vec3::new(
-                                    en_pos.x - zone_pos.x,
-                                    0.0,
-                                    en_pos.z - zone_pos.z,
-                                ),
-                            });
+                        if dx * dx + dz * dz >= zone_radius * zone_radius {
+                            continue;
                         }
+                        // Wall LOS gate: an AoE zone may sit
+                        // in a doorway and overlap the radius
+                        // of an enemy on the other side of a
+                        // wall, but the wall should still
+                        // block damage. Skip the hit when the
+                        // straight line from the zone centre
+                        // to the enemy is broken by a wall.
+                        if !floor.line_of_sight(zone_pos, *en_pos) {
+                            continue;
+                        }
+                        hits.push(Hit {
+                            enemy: *en_entity,
+                            enemy_net_id: *en_net_id,
+                            enemy_pos: *en_pos,
+                            attacker: zone_owner,
+                            ability_id: zone.ability_id,
+                            damage: zone_dmg,
+                            crit_chance: zone_crit_chance,
+                            crit_damage: zone_crit_damage,
+                            crit_seed: hit_seed(
+                                ctx.tick,
+                                *en_net_id,
+                                zone_owner,
+                                (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
+                            ),
+                            apply_debuff: zone.apply_debuff,
+                            // Radial-outward from zone
+                            // centre — reads as the blast
+                            // pushing the victim outward.
+                            hit_dir: Vec3::new(en_pos.x - zone_pos.x, 0.0, en_pos.z - zone_pos.z),
+                        });
                     }
                 }
                 Team::Enemy => {
@@ -417,38 +415,45 @@ pub fn tick_aoe(
                     for (player_entity, ppos) in players {
                         let dx = ppos.x - zone_pos.x;
                         let dz = ppos.z - zone_pos.z;
-                        if dx * dx + dz * dz < zone_radius * zone_radius {
-                            let crit_mult = if zone_crit_chance > 0.0 {
-                                let seed = hit_seed(
-                                    ctx.tick,
-                                    NetId(0),
-                                    zone_owner,
-                                    (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
-                                );
-                                let roll = (mix64(seed) >> 40) as f32
-                                    / (1u32 << 24) as f32;
-                                if roll < zone_crit_chance {
-                                    1.0 + zone_crit_damage
-                                } else {
-                                    1.0
-                                }
+                        if dx * dx + dz * dz >= zone_radius * zone_radius {
+                            continue;
+                        }
+                        // Same wall LOS gate as the player-
+                        // team branch — an enemy AoE blast
+                        // shouldn't hit a player hiding
+                        // behind a wall.
+                        if !floor.line_of_sight(zone_pos, *ppos) {
+                            continue;
+                        }
+                        let crit_mult = if zone_crit_chance > 0.0 {
+                            let seed = hit_seed(
+                                ctx.tick,
+                                NetId(0),
+                                zone_owner,
+                                (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
+                            );
+                            let roll = (mix64(seed) >> 40) as f32 / (1u32 << 24) as f32;
+                            if roll < zone_crit_chance {
+                                1.0 + zone_crit_damage
                             } else {
                                 1.0
-                            };
-                            player_damage.push(super::combat_ctx::PlayerHit {
-                                target: *player_entity,
-                                attacker_kind: zone.attacker_kind,
-                                ability_id: zone.ability_id,
-                                amount: zone_dmg * crit_mult,
-                            });
-                            if let Some(debuff_id) = zone.apply_debuff {
-                                player_debuffs.push((
-                                    *player_entity,
-                                    debuff_id,
-                                    zone.ability_id,
-                                    zone.attacker_kind,
-                                ));
                             }
+                        } else {
+                            1.0
+                        };
+                        player_damage.push(super::combat_ctx::PlayerHit {
+                            target: *player_entity,
+                            attacker_kind: zone.attacker_kind,
+                            ability_id: zone.ability_id,
+                            amount: zone_dmg * crit_mult,
+                        });
+                        if let Some(debuff_id) = zone.apply_debuff {
+                            player_debuffs.push((
+                                *player_entity,
+                                debuff_id,
+                                zone.ability_id,
+                                zone.attacker_kind,
+                            ));
                         }
                     }
                 }
@@ -462,9 +467,7 @@ pub fn tick_aoe(
     }
     apply_hits_to_enemies(world, hits, ctx);
     for (player_entity, debuff_id, ability_id, attacker_kind) in player_debuffs {
-        if let Ok(mut stack) =
-            world.get::<&mut super::effect::EffectStack>(player_entity)
-        {
+        if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(player_entity) {
             // Enemy AoE: caster Entity isn't tracked through
             // the zone struct (zones outlive their spawner),
             // but the zone's `attacker_kind` snapshot is enough
@@ -545,16 +548,12 @@ pub(super) fn apply_hits_to_enemies(
             // Stagger: any crit, or any hit > threshold of hp_max,
             // and the enemy isn't a juggernaut. Skipped on the
             // killing blow — the death anim takes over there.
-            let juggernaut = (en.elite_mods
-                & super::enemies::elite_mod::JUGGERNAUT)
-                != 0;
+            let juggernaut = (en.elite_mods & super::enemies::elite_mod::JUGGERNAUT) != 0;
             let stagger_eligible = !died
                 && !juggernaut
                 && (crit || scaled > en.hp_max * super::enemies::STAGGER_THRESHOLD);
             if stagger_eligible {
-                en.stagger_remaining = en
-                    .stagger_remaining
-                    .max(super::enemies::STAGGER_DUR);
+                en.stagger_remaining = en.stagger_remaining.max(super::enemies::STAGGER_DUR);
             }
             // Threat accumulation: by raw scaled damage so big
             // hits weigh proportionally. Skipped on death (the
@@ -569,11 +568,12 @@ pub(super) fn apply_hits_to_enemies(
             // the attacker. Includes killing blows so the
             // scoreboard reflects the final swing of the run.
             if let Some(ae) = attacker_entity {
-                ctx.meter_events.push(super::combat_ctx::MeterEvent::DamageDealt {
-                    attacker: ae,
-                    ability_id: hit.ability_id,
-                    amount: scaled,
-                });
+                ctx.meter_events
+                    .push(super::combat_ctx::MeterEvent::DamageDealt {
+                        attacker: ae,
+                        ability_id: hit.ability_id,
+                        amount: scaled,
+                    });
             }
             let thorns = (en.elite_mods & super::enemies::elite_mod::THORNS) != 0;
             drop(en);
@@ -596,9 +596,7 @@ pub(super) fn apply_hits_to_enemies(
             // becomes the DoT's caster so per-tick damage is
             // credited back to the right meter row.
             if let Some(debuff_id) = hit.apply_debuff {
-                if let Ok(mut stack) =
-                    world.get::<&mut super::effect::EffectStack>(hit.enemy)
-                {
+                if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(hit.enemy) {
                     // Enemy target: `attacker_kind` is unused
                     // (TAKEN tab tracks players only) so the
                     // OTHER sentinel is fine.
@@ -711,4 +709,3 @@ pub(super) fn apply_hits_to_enemies(
 /// taller and the bolt should connect on glancing blows so the
 /// telegraph reads as a real threat instead of a free dodge.
 pub const PLAYER_HIT_RADIUS: f32 = 0.5;
-

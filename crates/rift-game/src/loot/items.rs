@@ -36,15 +36,7 @@ pub mod tag {
     pub const UTILITY: u32 = 1 << 8;
 
     /// Every tag — used by accessories, which can roll anything.
-    pub const ALL: u32 = FIRE
-        | ICE
-        | LIGHTNING
-        | CRIT
-        | SPEED
-        | DEFENSE
-        | CASTER
-        | MELEE
-        | UTILITY;
+    pub const ALL: u32 = FIRE | ICE | LIGHTNING | CRIT | SPEED | DEFENSE | CASTER | MELEE | UTILITY;
 
     /// Caster gear shorthand.
     pub const ANY_ELEMENT: u32 = FIRE | ICE | LIGHTNING;
@@ -239,7 +231,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: ANY_ELEMENT | CASTER,
         implicit: &[(Stat::SpellDamage, 0.08)],
         min_ilvl: 1,
-        icon: "",
+        icon: "loot/Weapons/1",
         models: None,
     },
     BaseItem {
@@ -251,7 +243,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: MELEE | CRIT,
         implicit: &[(Stat::WeaponDamage, 0.10)],
         min_ilvl: 1,
-        icon: "",
+        icon: "loot/Weapons/2",
         models: None,
     },
     BaseItem {
@@ -263,7 +255,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CRIT | SPEED,
         implicit: &[(Stat::WeaponDamage, 0.06), (Stat::CritChance, 0.05)],
         min_ilvl: 1,
-        icon: "",
+        icon: "loot/Weapons/3",
         models: None,
     },
     BaseItem {
@@ -275,7 +267,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::SpellDamage, 0.06), (Stat::CooldownReduction, 0.04)],
         min_ilvl: 1,
-        icon: "",
+        icon: "loot/Weapons/4",
         models: None,
     },
     // ---- Armor — Helm, Chest, Legs, Hands, Boots ---------------------
@@ -293,7 +285,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         icon: "loot/Helmets/Helmet_1",
         models: Some(GenderedModel {
             female: Some("assets/models/loot/helm/armor_helm_leather_01_female.glb"),
-            male: Some("assets/models/loot/helm/armor_helm_leather_01_male.glb")
+            male: Some("assets/models/loot/helm/armor_helm_leather_01_male.glb"),
         }),
     },
     BaseItem {
@@ -307,7 +299,9 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         min_ilvl: 1,
         icon: "loot/Shoulders/Shoulders_1",
         models: Some(GenderedModel {
-            female: Some("assets/models/loot/shoulderpads/armor_shoulderpads_leather_01_female.glb"),
+            female: Some(
+                "assets/models/loot/shoulderpads/armor_shoulderpads_leather_01_female.glb",
+            ),
             male: Some("assets/models/loot/shoulderpads/armor_shoulderpads_leather_01_male.glb"),
         }),
     },

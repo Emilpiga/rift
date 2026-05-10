@@ -543,6 +543,27 @@ impl Health {
     }
 }
 
+/// Essence / mana component — the universal ability resource.
+///
+/// Shaped like [`Health`] so HUD widgets can read `current /
+/// max` the same way for both. The local player's authoritative
+/// pool is the server-side `PlayerState.resource`; client code
+/// receives a fraction in `[0, 1]` per snapshot. For remote
+/// avatars we mirror that fraction by setting `current = max *
+/// resource_pct`, with `max` kept at a placeholder (1.0 by
+/// default) — the bar code only ever looks at the ratio.
+#[derive(Clone, Copy, Debug)]
+pub struct Resource {
+    pub current: f32,
+    pub max: f32,
+}
+
+impl Resource {
+    pub fn new(max: f32) -> Self {
+        Self { current: max, max }
+    }
+}
+
 /// Axis-aligned bounding box collider (world-space).
 #[derive(Clone, Copy, Debug)]
 pub struct Collider {

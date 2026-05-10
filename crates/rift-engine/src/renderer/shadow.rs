@@ -21,18 +21,19 @@ use crate::hot_reload;
 use crate::renderer::mesh::Vertex;
 use crate::vulkan::pipeline as pipe;
 
-pub const SHADOW_MAP_SIZE: u32 = 2048;
+pub const SHADOW_MAP_SIZE: u32 = 4096;
 pub const SHADOW_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// Half-extent (in world units) of the orthographic light frustum. Larger
-/// values cover more area but reduce shadow resolution per texel. The 20 m
-/// half-extent below produces a 40×40 m projection, which at 2048² gives
-/// ~51 texels/m — sharp enough that small props (chests, loot pillars)
-/// cast crisp, recognisable shadows under the wide PCF kernel, while
-/// extending far enough past the player that the edge feather in
-/// `triangle.frag::sampleShadow` lands well inside the fog band and
-/// shadow despawn is invisible at any camera angle.
-pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 20.0;
+/// values cover more area but reduce shadow resolution per texel. The 16 m
+/// half-extent below produces a 32×32 m projection, which at 4096² gives
+/// ~128 texels/m (~8 mm/texel) — fine enough that a shadow falling on a
+/// character's torso reads as a soft cohesive shape rather than a chunky
+/// 2 cm staircase along the silhouette. The frustum still extends well
+/// past the third-person camera's visible radius, and the edge feather
+/// in `triangle.frag::sampleShadow` lands inside the fog band at any
+/// camera angle so shadow despawn at the boundary stays invisible.
+pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 16.0;
 /// Distance behind the focus point at which to place the light camera.
 pub const SHADOW_BACK_DISTANCE: f32 = 30.0;
 /// Near/far planes of the orthographic light frustum.
@@ -61,7 +62,11 @@ impl ShadowMap {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(SHADOW_FORMAT)
-            .extent(vk::Extent3D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE, depth: 1 })
+            .extent(vk::Extent3D {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -77,7 +82,9 @@ impl ShadowMap {
             linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })?;
-        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())?; }
+        unsafe {
+            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+        }
 
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -85,8 +92,10 @@ impl ShadowMap {
             .format(SHADOW_FORMAT)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0, level_count: 1,
-                base_array_layer: 0, layer_count: 1,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
             });
         let view = unsafe { device.create_image_view(&view_info, None)? };
 
@@ -157,13 +166,18 @@ impl ShadowMap {
         let framebuffer = unsafe { device.create_framebuffer(&fb_info, None)? };
 
         // ---- Pipeline ----
-        let (pipeline, pipeline_layout) = create_shadow_pipeline(
-            device, render_pass, descriptor_set_layout, shader_dir,
-        )?;
+        let (pipeline, pipeline_layout) =
+            create_shadow_pipeline(device, render_pass, descriptor_set_layout, shader_dir)?;
 
         Ok(Self {
-            image, view, sampler, allocation: Some(allocation),
-            render_pass, framebuffer, pipeline, pipeline_layout,
+            image,
+            view,
+            sampler,
+            allocation: Some(allocation),
+            render_pass,
+            framebuffer,
+            pipeline,
+            pipeline_layout,
         })
     }
 
@@ -175,9 +189,8 @@ impl ShadowMap {
         descriptor_set_layout: vk::DescriptorSetLayout,
         shader_dir: &Path,
     ) -> Result<()> {
-        let (pipeline, pipeline_layout) = create_shadow_pipeline(
-            device, self.render_pass, descriptor_set_layout, shader_dir,
-        )?;
+        let (pipeline, pipeline_layout) =
+            create_shadow_pipeline(device, self.render_pass, descriptor_set_layout, shader_dir)?;
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -213,7 +226,11 @@ impl ShadowMap {
 /// convention as the main UBO's `light_dir`.
 pub fn light_view_proj(focus: Vec3, light_dir_to: Vec3) -> Mat4 {
     let l = light_dir_to.normalize_or_zero();
-    let l = if l.length_squared() < 0.001 { Vec3::Y } else { l };
+    let l = if l.length_squared() < 0.001 {
+        Vec3::Y
+    } else {
+        l
+    };
     // Snap focus to texel size to reduce shimmering as the camera moves.
     let texel_world = (2.0 * SHADOW_ORTHO_HALF_EXTENT) / SHADOW_MAP_SIZE as f32;
     let snap = |v: f32| (v / texel_world).round() * texel_world;
@@ -240,16 +257,15 @@ fn create_shadow_pipeline(
     let vert_path = shader_dir.join("shadow.vert");
     let vert_source = std::fs::read_to_string(&vert_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", vert_path, e))?;
-    let vert_spv = hot_reload::compile_glsl(&vert_source, "shadow.vert", shaderc::ShaderKind::Vertex)?;
+    let vert_spv =
+        hot_reload::compile_glsl(&vert_source, "shadow.vert", shaderc::ShaderKind::Vertex)?;
     let vert_module = pipe::create_shader_module(device, &vert_spv)?;
 
     let entry_name = c"main";
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(entry_name),
-    ];
+    let stages = [vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vert_module)
+        .name(entry_name)];
 
     let binding_desc = [Vertex::binding_description()];
     let attr_descs = Vertex::attribute_descriptions();
@@ -261,14 +277,19 @@ fn create_shadow_pipeline(
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
 
     let viewport = vk::Viewport {
-        x: 0.0, y: 0.0,
+        x: 0.0,
+        y: 0.0,
         width: SHADOW_MAP_SIZE as f32,
         height: SHADOW_MAP_SIZE as f32,
-        min_depth: 0.0, max_depth: 1.0,
+        min_depth: 0.0,
+        max_depth: 1.0,
     };
     let scissor = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE },
+        extent: vk::Extent2D {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+        },
     };
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewports(std::slice::from_ref(&viewport))
@@ -298,8 +319,7 @@ fn create_shadow_pipeline(
         .stencil_test_enable(false);
 
     // No color attachments — the shadow pass writes only depth.
-    let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
-        .attachments(&[]);
+    let color_blending = vk::PipelineColorBlendStateCreateInfo::default().attachments(&[]);
 
     let set_layouts = [descriptor_set_layout];
     let push_constant_range = vk::PushConstantRange {
@@ -326,11 +346,14 @@ fn create_shadow_pipeline(
         .subpass(0);
 
     let pipeline = unsafe {
-        device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
             .map_err(|(_, e)| e)?[0]
     };
 
-    unsafe { device.destroy_shader_module(vert_module, None); }
+    unsafe {
+        device.destroy_shader_module(vert_module, None);
+    }
 
     Ok((pipeline, pipeline_layout))
 }

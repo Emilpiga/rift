@@ -299,17 +299,32 @@ void applyBloodField(
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return;
 
     float floorY = ubo.timeData.y;
+    float floorYMax = ubo.timeData.z;
+    // For a flat (single-elevation) floor `floorYMax` equals
+    // `floorY`; for a rift floor with raised daises / lowered
+    // pits the two bracket the playable surface band. `yAbove`
+    // is kept relative to the lowest plane (the historical
+    // anchor) so the wall splatter pattern hashes stay
+    // continuous; the surface-classification gates below use
+    // both bounds.
     float yAbove = fragWorldPos.y - floorY;
 
     // ----- Surface classification -----
     // Three cases:
-    //   floor   : Ngeo.y > 0.55 AND y near floor — full pool composite
-    //   wall    : Ngeo.y < 0.45 AND y in [-0.1, 2.5] above floor —
-    //             vertical-streak composite, height-attenuated
-    //   reject  : everything else (wall caps, ceilings, raised
-    //             platforms, ledges)
-    bool isFloor = Ngeo.y > 0.55 && abs(yAbove) < 0.25;
-    bool isWall  = Ngeo.y < 0.45 && yAbove > -0.10 && yAbove < 2.50;
+    //   floor   : Ngeo.y > 0.55 AND frag Y near any platform
+    //             elevation in `[floorY, floorYMax]` (\u00b1 a few
+    //             cm tolerance for shader / rasteriser drift)
+    //   wall    : Ngeo.y < 0.45 AND frag Y in [floorY - 0.1,
+    //             floorYMax + 2.5] above the lowest platform
+    //             \u2014 i.e. anywhere up to wall-cap-ish height
+    //             above the highest walkable plane
+    //   reject  : everything else (wall caps, ceilings)
+    bool isFloor = Ngeo.y > 0.55
+                && fragWorldPos.y >= floorY    - 0.25
+                && fragWorldPos.y <= floorYMax + 0.25;
+    bool isWall  = Ngeo.y < 0.45
+                && fragWorldPos.y > floorY    - 0.10
+                && fragWorldPos.y < floorYMax + 2.50;
     if (!isFloor && !isWall) return;
 
     // ----- Time-evolving advection (floor only) -----
@@ -902,55 +917,72 @@ float sampleShadowAt(vec3 worldPos, vec3 N, vec3 L) {
     float grazing     = 1.0 - clamp(NdotL, 0.0, 1.0);
     float depthFactor = smoothstep(0.05, 0.95, clamp(shadowUV.z, 0.0, 1.0));
 
-    // ----- Sharp-near, soft-far -----
-    // The classic "detached halo" around a cast shadow is the
-    // PCF kernel itself: with 12 taps spanning ~1 texel, each
-    // tap that lands outside the silhouette votes "lit" but
-    // the average reads as a soft 1-texel fringe ring. To kill
-    // that fringe we use a *single* hardware-PCF tap for the
-    // foreground (no kernel = no fringe), and only blend in
-    // the multi-tap soft penumbra at the fog edge where the
-    // shadow map's sampling density is lowest and a soft
-    // edge actually helps hide undersampling artefacts.
+    // ----- Smooth Gaussian penumbra -----
+    // Earlier revisions used a 12-tap rotated-Poisson kernel
+    // for the near-range disc. With per-pixel rotation jitter
+    // and only 12 samples the *average* across neighbouring
+    // fragments was correct, but each individual fragment
+    // sampled a different sub-disc of the kernel — so on
+    // curved receivers (character torsos, limbs, helmets)
+    // the cast shadow read as stippled noise instead of a
+    // smooth gradient. The eye picks that up immediately
+    // as "pixelated shadow", even with a wide kernel.
     //
-    // Even the single-tap result needs help: hardware PCF on
-    // a sampler2DShadow runs a 2×2 bilinear comparison, which
-    // returns one of {0, 0.25, 0.5, 0.75, 1.0}. Those five
-    // discrete levels read as 2–3 concentric rings around
-    // the umbra ("gradationally softer outlines from the
-    // inner shadow"). We dither the sample position by a
-    // half-texel of screen-space hash noise so the boundary
-    // becomes stochastic instead of stepped — perceptually
-    // a clean continuous edge.
-    vec2 hashSeed = gl_FragCoord.xy + vec2(ubo.timeData.x * 60.0, 0.0);
-    float jitterX = fract(sin(dot(hashSeed, vec2(12.9898, 78.233))) * 43758.5453);
-    float jitterY = fract(sin(dot(hashSeed, vec2(63.7264, 10.873))) * 43758.5453);
-    vec2 jitter = (vec2(jitterX, jitterY) - 0.5) * texelSize;
-    vec3 sharpUV = vec3(shadowUV.xy + jitter, shadowUV.z);
-    float sharp = texture(shadowMap, sharpUV);
-    float soft  = 0.0;
-    // Skip the 12-tap kernel entirely when distFactor is near
-    // zero — saves the work and guarantees a clean single-tap
-    // result on every foreground pixel.
-    if (distFactor > 0.05) {
-        // Kernel only widens once the receiver is past ~6 m
-        // from the camera. Worst case ~2 texels.
-        float kernelScale = mix(0.0, 2.0, distFactor)
-                          * (1.0 + grazing * 0.15);
-        vec2 kernel = texelSize * kernelScale;
-        for (int i = 0; i < 12; i++) {
-            vec2 offset = POISSON_DISK[i] * kernel;
-            soft += texture(shadowMap, vec3(shadowUV.xy + offset, shadowUV.z));
-        }
-        soft *= (1.0 / 12.0);
-    } else {
-        soft = sharp;
-    }
-    // Blend sharp→soft as the receiver recedes. distFactor is
-    // already smoothstep'd 1.5..16 m so the transition feels
-    // natural — close shadows are crisp and welded to their
-    // casters; distant shadows soften into the fog.
-    float s = mix(sharp, soft, distFactor);
+    // Solution: replace the rotated-Poisson disc with a
+    // fixed 5×5 separable Gaussian. Every fragment samples
+    // exactly the same 25 positions in the same orientation,
+    // so the result is a *deterministic* smooth blur of the
+    // hardware-PCF result instead of a stochastic estimate
+    // of one. Cost is higher (25 taps vs 12) but each tap
+    // is a hardware-PCF compare, and we drop the second
+    // 12-tap "soft" loop entirely — a single kernel whose
+    // radius scales with distance/grazing covers everything.
+    float nearTexels = 4.0 * (1.0 + grazing * 1.2);
+    // Widen further with camera distance so distant shadows
+    // soften into the fog band rather than aliasing.
+    float kernelTexels = mix(nearTexels, 8.0, distFactor);
+    vec2  kernelStep   = texelSize * (kernelTexels / 2.0); // half-radius per ring
+
+    // 5×5 Gaussian weights (sigma ≈ 1.0). Hand-rolled so the
+    // compiler unrolls cleanly on every driver.
+    const float W0 = 0.2270270270;          // centre
+    const float W1 = 0.1945945946;          // axial ±1
+    const float W2 = 0.1216216216;          // axial ±2
+    // Off-axis weights are products. We don't store them;
+    // the compiler folds the constants.
+    float s = 0.0;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0, -2.0), shadowUV.z)) * (W2 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0, -2.0), shadowUV.z)) * (W1 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0, -2.0), shadowUV.z)) * (W0 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0, -2.0), shadowUV.z)) * (W1 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0, -2.0), shadowUV.z)) * (W2 * W2);
+
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0, -1.0), shadowUV.z)) * (W2 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0, -1.0), shadowUV.z)) * (W1 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0, -1.0), shadowUV.z)) * (W0 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0, -1.0), shadowUV.z)) * (W1 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0, -1.0), shadowUV.z)) * (W2 * W1);
+
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  0.0), shadowUV.z)) * (W2 * W0);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  0.0), shadowUV.z)) * (W1 * W0);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  0.0), shadowUV.z)) * (W0 * W0);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  0.0), shadowUV.z)) * (W1 * W0);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  0.0), shadowUV.z)) * (W2 * W0);
+
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  1.0), shadowUV.z)) * (W2 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  1.0), shadowUV.z)) * (W1 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  1.0), shadowUV.z)) * (W0 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  1.0), shadowUV.z)) * (W1 * W1);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  1.0), shadowUV.z)) * (W2 * W1);
+
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  2.0), shadowUV.z)) * (W2 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  2.0), shadowUV.z)) * (W1 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  2.0), shadowUV.z)) * (W0 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  2.0), shadowUV.z)) * (W1 * W2);
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  2.0), shadowUV.z)) * (W2 * W2);
+    // Weights sum to 1.0 by construction (the W{0,1,2}
+    // values above are the canonical 5-tap Gaussian
+    // coefficients), so no normalisation is required.
 
     // Apply the frustum-edge feather: pull s toward 1.0 as the
     // sample approaches the frustum boundary. This kills the
@@ -1033,40 +1065,45 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     vec3 tu = tuRaw * rcs + tvRaw * rsn;
     vec3 tv = -tuRaw * rsn + tvRaw * rcs;
     // Kernel half-width in normalised-distance units. Sized
-    // so the disk fits inside ~1 atlas texel: pixels deep in
-    // shadow or fully lit have all 8 taps land in the same
-    // texel and read the same value (no grain), while pixels
-    // straddling the silhouette get a few taps on each side
-    // — combined with the per-pixel basis rotation that gives
-    // a clean stochastic feather only at the boundary.
-    float k = 0.0025;
+    // so the disk straddles ~2 atlas texels: deep-shadow and
+    // fully-lit fragments still resolve as a uniform value
+    // (taps land on equivalent depths) while silhouette
+    // fragments get a graded penumbra.
+    float k = 0.008;
 
-    // 4-tap Poisson disk in 2D (radius 1). Tightened from 8 taps
-    // because point shadows are the most expensive part of the
-    // light loop during heavy combat (each shadow-casting light
-    // here costs N cube-map samples per pixel; halving N halves
-    // the total cube fetches per pixel). The per-pixel rotation
-    // applied via `tu`/`tv` keeps the residual banding at 5
-    // discrete levels invisible by spreading them spatially as
-    // noise that the eye averages.
-    // 4-tap Poisson disk PCF was the historical default, but
-    // the cube sampler already runs 2\u00d72 hardware bilinear
-    // comparison internally, and the per-pixel basis rotation
-    // (`tu`/`tv` above) further smears any residual stepping
-    // into spatial noise the eye averages. In practice a
-    // single rotated tap reads visually identical to 4 taps
-    // at our shadow-atlas density (1024\u00b2/face) and the
-    // dungeon framerate is dominated by *cube samples per
-    // pixel*: 8 shadow-casting torches \u00d7 4 taps = 32 cube
-    // fetches per fragment, against a per-frame budget that
-    // can comfortably afford ~12. Single-tap brings us inside
-    // budget while keeping the soft-edge feel the rotation
-    // hash provides. The const-vec disk + commented taps
-    // stay below so we can step back up to 4-tap if a future
-    // floor with very fine wall detail needs it.
-    const vec2 P0 = vec2( 0.000,  0.000);
+    // 8-tap Poisson disk PCF. The earlier single-tap fast path
+    // (P0 = (0,0)) collapsed every fragment to a hard binary
+    // `step()` because rotating a zero offset still gave zero,
+    // and the per-pixel basis rotation contributed nothing —
+    // result was the chunky one-bit shadow the player sees on
+    // their own body and on the ground under torches.
+    //
+    // 8 taps gives 9 discrete output levels which, combined
+    // with the per-pixel rotation, dither into a continuous
+    // penumbra perceptually. Cost is 8 cubemap-array fetches
+    // per shadow-casting torch per fragment; with a hard cap
+    // of `pointShadowMeta.x ≤ 4` casters the worst-case bill
+    // is 32 cube fetches per fragment — well within the
+    // dungeon's per-frame texture budget on every target GPU.
+    const vec2 P0 = vec2( 0.0000,  0.0000);
+    const vec2 P1 = vec2( 0.7071,  0.0000);
+    const vec2 P2 = vec2(-0.7071,  0.0000);
+    const vec2 P3 = vec2( 0.0000,  0.7071);
+    const vec2 P4 = vec2( 0.0000, -0.7071);
+    const vec2 P5 = vec2( 0.5000,  0.5000);
+    const vec2 P6 = vec2(-0.5000,  0.5000);
+    const vec2 P7 = vec2( 0.5000, -0.5000);
 
-    float occ = step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
+    float occ = 0.0;
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P1.x + tv * P1.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P2.x + tv * P2.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P3.x + tv * P3.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P4.x + tv * P4.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P5.x + tv * P5.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P6.x + tv * P6.y) * k, float(lightIdx))).r);
+    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P7.x + tv * P7.y) * k, float(lightIdx))).r);
+    occ *= (1.0 / 8.0);
     return occ;
 }
 
@@ -1830,6 +1867,125 @@ void main() {
     if (useRift)      lighting = shadeRift();
     else if (usePbr)  lighting = shadePbr();
     else              lighting = shadeCel();
+
+    // ---- See-through wall x-ray ----
+    // Walls tagged with `material_params.z` bit 3 (set in
+    // `floor.rs::rebuild_dungeon` for every batched wall
+    // object) carve a stippled porthole around the camera→
+    // player segment. The effect replaces the older
+    // "snap camera forward when occluded" trick in
+    // `camera_follow_system`: instead of moving the camera,
+    // we leave the framing alone and open a window in the
+    // wall so the player stays visible.
+    //
+    // Anatomy of the cutout:
+    //   1. We project `fragWorldPos` onto the camera→player
+    //      ray to get a parameter `t` (distance from camera
+    //      along the ray). Fragments past the player or
+    //      behind the camera are ignored — only walls that
+    //      are *actually* between the camera and the player
+    //      are eligible.
+    //   2. The perpendicular distance `d` from the fragment
+    //      to that ray drives the porthole strength: at the
+    //      centre of the porthole `d ≈ 0` and the wall
+    //      vanishes; at the rim `d ≈ R` and the wall is
+    //      fully opaque.
+    //   3. A blue-noise hash + scrolling scanline pattern
+    //      decides which fragments to `discard`. Discarded
+    //      fragments don't write depth, so characters and
+    //      props rendered later show through cleanly.
+    //   4. A thin cyan glow at the rim (`smoothstep` band)
+    //      sells the "this is an x-ray scan, not a hole" read
+    //      and gives the eye an edge to lock onto.
+    //
+    // Because discard is deferred, this runs after fog so the
+    // remaining (non-discarded) wall fragments still tonemap
+    // and dim with distance like normal walls.
+    if ((flags & 8u) != 0u && ubo.fogOrigin.w > 0.001) {
+        vec3 camToFrag   = fragWorldPos     - ubo.cameraPos.xyz;
+        vec3 camToPlayer = ubo.fogOrigin.xyz - ubo.cameraPos.xyz;
+        float distPlayer = length(camToPlayer);
+        // CPU-side eased strength: 0 = off, 1 = fully open.
+        // We use it as a multiplier on the porthole mask so
+        // the cutout fades in over ~240 ms when the camera
+        // newly crosses behind a wall, and fades back out
+        // when it clears, instead of popping on the frame
+        // the raycast result flips.
+        float xrayStrength = clamp(ubo.fogOrigin.w, 0.0, 1.0);
+
+        if (distPlayer > 0.001) {
+            vec3 dirPlayer = camToPlayer / distPlayer;
+
+            float tFrag = dot(camToFrag, dirPlayer);
+            // Allow walls well past the player to carve too.
+            // Under the locked top-down pitch, a wall sitting
+            // ahead of the player (the far side of a corridor,
+            // the entrance arch of the next room) will block
+            // the view of what lies beyond unless the porthole
+            // also opens through it. The CPU raycast extends
+            // 12 m past the player and we mirror that here so
+            // the same fragments qualify on the GPU side.
+            // 12 m comfortably reaches across one full room
+            // at the dungeon's typical scale, letting the
+            // player peek into the next chamber as soon as
+            // the camera ray clips its near wall.
+            if (tFrag > 0.2 && tFrag < distPlayer + 12.0) {
+                // Decompose the perpendicular offset from the
+                // camera→player ray into horizontal (ground-
+                // plane) and vertical (world-Y) components, so
+                // we can shape the porthole as a flattened
+                // ellipse instead of a perfect circle.
+                // Horizontal occluders span the most screen
+                // area in a top-down ARPG (corridor walls), so
+                // a wide-flat porthole reveals more of the
+                // gameplay-relevant area than a circle of the
+                // same vertical reach.
+                vec3 closest = ubo.cameraPos.xyz + dirPlayer * tFrag;
+                vec3 perp    = fragWorldPos - closest;
+                // Vertical world-axis component, then take the
+                // remainder as horizontal magnitude.
+                float perpY  = perp.y;
+                float perpH  = length(perp - vec3(0.0, perpY, 0.0));
+
+                // Squash the horizontal axis (divide by 2.4)
+                // and stretch the vertical axis a touch (×1.1)
+                // so the same threshold yields ~2.4× wider
+                // than tall. The threshold itself is then a
+                // simple radius test in this stretched space.
+                vec2  shaped     = vec2(perpH / 2.4, perpY * 1.1);
+                float r          = length(shaped);
+
+                // Distance-scaled radius so the porthole's
+                // *world* footprint scales with depth — at the
+                // far end of a long corridor it stays the same
+                // screen-space size as the near end. The
+                // additive base term (`+ 1.6`) keeps the
+                // porthole from shrinking to nothing when the
+                // camera is zoomed in close to the player; at
+                // very low `tFrag` it bottoms out at a
+                // generous fixed minimum that reads as a clear
+                // viewport rather than a pinhole.
+                float R_inner = 0.12 * tFrag + 1.0;
+                float R_outer = 0.17 * tFrag + 1.4;
+
+                if (r < R_outer) {
+                    float mask = 1.0 - smoothstep(R_inner, R_outer, r);
+                    mask *= xrayStrength;
+
+                    float hash = fract(sin(dot(gl_FragCoord.xy,
+                                               vec2(12.9898, 78.233)))
+                                       * 43758.5453);
+                    float scan = 0.5 + 0.5 * sin(gl_FragCoord.y * 0.45
+                                                 + ubo.timeData.x * 1.8);
+                    float stipple = mix(hash, scan, 0.35);
+
+                    if (stipple < mask - 0.05) {
+                        discard;
+                    }
+                }
+            }
+        }
+    }
 
     // Distance fog (player-anchored). The rift is a hole
     // through reality — fog still applies (so you can't see

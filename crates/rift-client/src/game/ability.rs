@@ -91,10 +91,12 @@ pub fn trigger_local_cast(
     //    on channel-end. Any other shape (AoE placed, movement,
     //    utility) doesn't need a pose and is fully covered by
     //    the effects list above.
-    let has_projectile = ability
-        .effects
-        .iter()
-        .any(|e| matches!(e, rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }));
+    let has_projectile = ability.effects.iter().any(|e| {
+        matches!(
+            e,
+            rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }
+        )
+    });
     let is_channeled = matches!(
         rift_game::abilities::lookup(ability.wire_id).map(|d| d.kind),
         Some(rift_game::abilities::AbilityKind::Channel { .. })
@@ -108,7 +110,9 @@ pub fn trigger_local_cast(
         .map(|(e, _)| e)
         .next();
     let Some(pid) = pid else { return };
-    let Ok(mut cast) = world.get::<&mut SpellCast>(pid) else { return };
+    let Ok(mut cast) = world.get::<&mut SpellCast>(pid) else {
+        return;
+    };
     if is_channeled {
         cast.begin_channel(ability.clone(), aim_dir);
     } else {
@@ -149,9 +153,7 @@ pub fn on_remote_ability_cast(
     // 1. Ground-AoE emitter for any SpawnAoeZone effects.
     for effect in ability.effects {
         if let rift_game::abilities::AbilityEffect::SpawnAoeZone {
-            visual,
-            visual_y,
-            ..
+            visual, visual_y, ..
         } = effect
         {
             let Some(preset) = visual else { continue };
@@ -159,9 +161,10 @@ pub fn on_remote_ability_cast(
             // the cast was placed (e.g. Rain of Fire), otherwise
             // fall back to a forward offset along aim from the
             // caster origin.
-            let pos = target.unwrap_or(cast_origin + aim * 5.0)
-                + Vec3::new(0.0, *visual_y, 0.0);
-            renderer.vfx_system.spawn_bundle(effect_for_vfx(*preset), pos);
+            let pos = target.unwrap_or(cast_origin + aim * 5.0) + Vec3::new(0.0, *visual_y, 0.0);
+            renderer
+                .vfx_system
+                .spawn_bundle(effect_for_vfx(*preset), pos);
         }
     }
 
@@ -174,10 +177,7 @@ pub fn on_remote_ability_cast(
     // the burst is short-lived enough that the snap to the
     // cast-time position reads as intentional.
     for effect in ability.effects {
-        if let rift_game::abilities::AbilityEffect::SpawnEmitterAtCaster {
-            visual,
-            height,
-        } = effect
+        if let rift_game::abilities::AbilityEffect::SpawnEmitterAtCaster { visual, height } = effect
         {
             renderer.vfx_system.spawn_bundle(
                 effect_for_vfx(*visual),
@@ -186,13 +186,29 @@ pub fn on_remote_ability_cast(
         }
     }
 
+    // 1c. Cast SFX. Anchored at the caster's hand height so a
+    // distant caster's spell reads as coming from them, not
+    // from the listener. The audio table returns silent
+    // defaults for abilities that don't declare a cast sound,
+    // so this is a no-op for those.
+    let recipe = crate::game::ability_audio::audio_for(ability.wire_id);
+    if let (Some(path), Some(audio)) = (recipe.cast, state.audio.as_mut()) {
+        let mut spec = crate::game::ability_audio::cast_spec(path);
+        crate::game::ability_audio::jitter_one_shot(&mut spec);
+        // ~1.4 m up from the caster's feet — roughly chest /
+        // outstretched-hand height for the cast pose.
+        audio.play_one_shot(&spec, cast_origin + Vec3::new(0.0, 1.4, 0.0));
+    }
+
     // 2. Remote cast pose. Only projectile / channel shapes drive
     //    a pose today; snapshots cover the rest.
     let Some(entity) = caster_avatar else { return };
-    let has_projectile = ability
-        .effects
-        .iter()
-        .any(|e| matches!(e, rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }));
+    let has_projectile = ability.effects.iter().any(|e| {
+        matches!(
+            e,
+            rift_game::abilities::AbilityEffect::SpawnProjectiles { .. }
+        )
+    });
     let is_channeled = matches!(
         rift_game::abilities::lookup(ability.wire_id).map(|d| d.kind),
         Some(rift_game::abilities::AbilityKind::Channel { .. })
@@ -287,7 +303,6 @@ pub fn on_channel_end(
     }
 }
 
-
 /// Per-frame update for every active channel visual.
 ///
 /// For each entry we lazily spawn a stretched beam mesh on the
@@ -361,24 +376,27 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         // non-Beam shape (Whirlwind aura, …) skip the beam
         // mesh path entirely.
         let ability_record = rift_game::abilities::lookup(vis.ability_id);
-        let (beam_range, beam_corridor_width, pierce_targets) =
-            match ability_record.map(|a| a.kind) {
-                Some(rift_game::abilities::AbilityKind::Channel {
-                    effect:
-                        rift_game::abilities::ChannelEffect::Beam {
-                            range,
-                            width,
-                            pierce_targets,
-                            ..
-                        },
-                    ..
-                }) => (range, width, pierce_targets),
-                _ => (0.0, 0.0, 0),
-            };
+        let (beam_range, beam_corridor_width, pierce_targets) = match ability_record.map(|a| a.kind)
+        {
+            Some(rift_game::abilities::AbilityKind::Channel {
+                effect:
+                    rift_game::abilities::ChannelEffect::Beam {
+                        range,
+                        width,
+                        pierce_targets,
+                        ..
+                    },
+                ..
+            }) => (range, width, pierce_targets),
+            _ => (0.0, 0.0, 0),
+        };
         // Beam visual recipe: VFX preset + hand-offset
         // fallback when no skinned hand-joint is available.
         let beam_visual = ability_record.and_then(|a| match a.visuals.shape {
-            ShapeVisuals::Beam { effect, hand_offset } => Some((effect, hand_offset)),
+            ShapeVisuals::Beam {
+                effect,
+                hand_offset,
+            } => Some((effect, hand_offset)),
             _ => None,
         });
 
@@ -396,9 +414,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         // frame before despawning. Detecting "this visual is
         // ours but our local channel has already stopped"
         // collapses that flicker into a clean immediate fade.
-        let local_release_pending = our_net_id
-            .map(|id| id == vis.caster)
-            .unwrap_or(false)
+        let local_release_pending = our_net_id.map(|id| id == vis.caster).unwrap_or(false)
             && local_active_ability != Some(vis.ability_id);
         if local_release_pending {
             vis.ending = true;
@@ -429,8 +445,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
                 });
                 (t.position, p.aim_dir, hand)
             });
-        let is_local =
-            remote_data.is_none() && local_active_ability == Some(vis.ability_id);
+        let is_local = remote_data.is_none() && local_active_ability == Some(vis.ability_id);
         let mut hand_override: Option<Vec3> = None;
         if let Some((pos, aim, hand)) = remote_data {
             // Remote caster: anchor the beam to their hand
@@ -592,9 +607,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
 /// `NetId` is our own.
 pub fn on_remote_death(world: &mut hecs::World, entity: hecs::Entity) {
     use rift_engine::animation::Animator;
-    use rift_engine::ecs::components::{
-        AnimationSet, Health, PlayerAction, SpellCast, Velocity,
-    };
+    use rift_engine::ecs::components::{AnimationSet, Health, PlayerAction, SpellCast, Velocity};
 
     let candidates: &[&str] = &["Death01", "Death_01", "Death", "Death02", "Death_02"];
     let clip = match world.get::<&AnimationSet>(entity) {

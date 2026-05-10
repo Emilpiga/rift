@@ -23,8 +23,6 @@
 //! memory and are never freed (they're tiny relative to the GPU
 //! upload they back). When the GPU-texture cache is added it will
 //! gain an explicit `cleanup_gpu` like the existing ad-hoc caches.
-//!
-//! See `notes/assets.md` (TODO) for the full migration plan.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

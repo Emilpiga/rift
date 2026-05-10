@@ -7,6 +7,45 @@ use rift_net::{Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
 use super::{item_to_blob, place_at_slot_index};
 use crate::Server;
 
+/// Maximum number of characters (Unicode scalars) accepted in a
+/// player-supplied account or character name. Mirrors the input
+/// cap the client's character-select screen already enforces
+/// (`text_field(.., 18, ..)` in `character_select.rs`); we
+/// re-check here because the wire is server-authoritative — a
+/// hand-rolled or modded client can send anything.
+const MAX_NAME_CHARS: usize = 18;
+
+/// Maximum length of a `class_id` string the client may declare
+/// at login. Longer than the longest content table id we ever
+/// expect (`necromancer` is the current max at 11) but short
+/// enough that a hostile client can't pad memory by sending
+/// megabytes of `class_id`.
+const MAX_CLASS_ID_CHARS: usize = 32;
+
+/// Trim whitespace, then validate that `value` looks like a
+/// reasonable player-supplied display name: non-empty after
+/// trim, at most `max_chars` Unicode scalars long, and free of
+/// control characters (which would otherwise mangle log lines,
+/// chat broadcasts, and the character-select UI). Returns the
+/// trimmed name on success, or an `Err` whose payload is a
+/// short user-facing reason for the rejection.
+fn validate_name(value: &str, max_chars: usize, what: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{what} cannot be empty."));
+    }
+    let len = trimmed.chars().count();
+    if len > max_chars {
+        return Err(format!(
+            "{what} is too long ({len} characters, maximum is {max_chars})."
+        ));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(format!("{what} contains invalid control characters."));
+    }
+    Ok(trimmed.to_string())
+}
+
 impl Server {
     /// Handle a fresh client's `Hello`: validate protocol, hydrate
     /// their persisted character + inventory, spawn into the sim,
@@ -23,15 +62,62 @@ impl Server {
         gender: Gender,
     ) {
         if protocol_version != PROTOCOL_VERSION {
+            // User-visible string: the client surfaces this verbatim
+            // and exits, so it has to read like an end-user message,
+            // not a debug log line. Direction of mismatch picks the
+            // right "your client is out of date" / "server is out
+            // of date" wording so a player knows whether to update
+            // or to wait for the operator.
+            let direction = if protocol_version < PROTOCOL_VERSION {
+                "Your client is out of date. Please update to the latest version."
+            } else {
+                "The server is out of date. Please wait for the operator to update it."
+            };
             let reason = format!(
-                "protocol version mismatch: server={PROTOCOL_VERSION} client={protocol_version}"
+                "{direction} (protocol: client v{protocol_version}, server v{PROTOCOL_VERSION})"
             );
-            log::warn!("rejecting {from:?}: {reason}");
+            log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
             self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
             return;
         }
+
+        // Re-validate every client-supplied string before we let
+        // it touch persistence, the sim, or any broadcast. The
+        // client UI already caps these at 18 chars, but the wire
+        // is server-authoritative — a modded client can send
+        // anything, including empty strings, megabyte payloads,
+        // or embedded control characters that would mangle log
+        // lines and chat fan-out. Failures send a Reject the
+        // client can surface verbatim and exit cleanly.
+        let account_name = match validate_name(&account_name, MAX_NAME_CHARS, "Account name") {
+            Ok(s) => s,
+            Err(reason) => {
+                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+        let character_name = match validate_name(&character_name, MAX_NAME_CHARS, "Character name")
+        {
+            Ok(s) => s,
+            Err(reason) => {
+                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+        let class_id = match validate_name(&class_id, MAX_CLASS_ID_CHARS, "Class id") {
+            Ok(s) => s,
+            Err(reason) => {
+                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+
         log::info!(
-            "Hello from {from:?}: account={account_name:?} name={character_name:?} class={class_id:?} gender={gender:?}"
+            "{} Hello: account={account_name:?} name={character_name:?} class={class_id:?} gender={gender:?}",
+            self.client_tag(from)
         );
 
         // Phased login: load → spawn → hydrate → reply → announce.
@@ -63,8 +149,7 @@ impl Server {
         // to an in-memory record if persistence is disabled or
         // unreachable, so dev iteration without `docker compose up`
         // still works.
-        let record =
-            self.load_character_record(account_name, character_name, class_id, gender);
+        let record = self.load_character_record(account_name, character_name, class_id, gender);
         if let Some(s) = self.sessions.get_mut(from) {
             s.account_name = Some(account_name.to_string());
             s.character_name = Some(character_name.to_string());
@@ -146,9 +231,7 @@ impl Server {
                     };
                     match r.equipped_slot {
                         Some(b) => match rift_game::loot::EquipSlot::from_u8(b as u8) {
-                            Some(slot)
-                                if rift_game::loot::Equipment::accepts(slot, &item) =>
-                            {
+                            Some(slot) if rift_game::loot::Equipment::accepts(slot, &item) => {
                                 loaded_equipment.set(slot, Some(item));
                             }
                             _ => place_at_slot_index(&mut loaded_items, r.slot_index, item),
@@ -158,17 +241,18 @@ impl Server {
                 }
                 let bag_filled = loaded_items.iter().filter(|s| s.is_some()).count();
                 log::info!(
-                    "persistence: loaded {} bag item(s) + {} equipped for {from:?}",
+                    "{} loaded {} bag item(s) + {} equipped",
+                    self.client_tag(from),
                     bag_filled,
                     loaded_equipment.count()
                 );
-                self.hub.set_player_inventory(
-                    from,
-                    loaded_items.clone(),
-                    loaded_equipment,
-                );
+                self.hub
+                    .set_player_inventory(from, loaded_items.clone(), loaded_equipment);
             }
-            Err(e) => log::warn!("persistence: load_inventory failed for {from:?}: {e}"),
+            Err(e) => log::warn!(
+                "{} persistence: load_inventory failed: {e}",
+                self.client_tag(from)
+            ),
         }
         // Hydrate the per-character stash. Eager-load it at
         // Hello time so the chest interaction path stays
@@ -177,8 +261,8 @@ impl Server {
         // login lean.
         match handle.load_stash_blocking(rec_id) {
             Ok((tab_rows, item_rows)) => {
-                use crate::sim::StashTab;
                 use crate::sim::player::DEFAULT_STASH_TAB_COLOR;
+                use crate::sim::StashTab;
                 // Build the dense [0..n) tab list. If the
                 // database has no `stash_tabs` rows yet (fresh
                 // character or pre-migration save) we seed at
@@ -192,9 +276,8 @@ impl Server {
                         .map(|t| t.tab_index as usize)
                         .max()
                         .unwrap_or(0);
-                    let mut tabs: Vec<StashTab> = (0..=max_idx)
-                        .map(|i| StashTab::fresh(i))
-                        .collect();
+                    let mut tabs: Vec<StashTab> =
+                        (0..=max_idx).map(|i| StashTab::fresh(i)).collect();
                     for row in &tab_rows {
                         if let Some(t) = tabs.get_mut(row.tab_index as usize) {
                             t.name = row.name.clone();
@@ -228,13 +311,17 @@ impl Server {
                     total_items += 1;
                 }
                 log::info!(
-                    "persistence: loaded {} stash item(s) across {} tab(s) for {from:?}",
+                    "{} loaded {} stash item(s) across {} tab(s)",
+                    self.client_tag(from),
                     total_items,
                     tabs.len(),
                 );
                 self.hub.set_player_stash(from, tabs);
             }
-            Err(e) => log::warn!("persistence: load_stash failed for {from:?}: {e}"),
+            Err(e) => log::warn!(
+                "{} persistence: load_stash failed: {e}",
+                self.client_tag(from)
+            ),
         }
         loaded_items
     }
@@ -300,18 +387,18 @@ impl Server {
             self.send_to(
                 from,
                 Channel::Control,
-                &ServerMsg::CharacterStats { level, xp, xp_to_next },
+                &ServerMsg::CharacterStats {
+                    level,
+                    xp,
+                    xp_to_next,
+                },
             );
         }
         // Initial ability-loadout snapshot so the client's HUD
         // bar shows whatever was persisted (or the default for
         // a brand-new character).
         if let Some(slots) = self.hub.player_loadout_snapshot(from) {
-            self.send_to(
-                from,
-                Channel::Control,
-                &ServerMsg::Loadout { slots },
-            );
+            self.send_to(from, Channel::Control, &ServerMsg::Loadout { slots });
         }
         // Initial shard balance so the HUD readout is correct
         // before the player salvages anything.
@@ -478,10 +565,6 @@ impl Server {
         if let (Some(handle), Some(rec)) = (&self.persistence, saved_record) {
             let _ = handle.save(rec);
         }
-        self.send_to(
-            from,
-            Channel::Control,
-            &ServerMsg::Loadout { slots },
-        );
+        self.send_to(from, Channel::Control, &ServerMsg::Loadout { slots });
     }
 }

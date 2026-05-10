@@ -2,6 +2,7 @@
 name = "rift-net"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # Networking layer for Rift Crawler.
 #

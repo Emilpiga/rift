@@ -6,6 +6,7 @@
 //! here is what the local player sees and interacts with.
 
 pub mod ability;
+pub mod ability_audio;
 pub mod audio;
 pub mod audio_banks;
 pub mod avatar_cosmetics;

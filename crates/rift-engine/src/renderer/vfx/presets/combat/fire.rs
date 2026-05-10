@@ -66,11 +66,7 @@ pub fn fire_wave() -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.55, 0.55),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 0.50),
-                    (0.30, 6.00),
-                    (1.00, 15.00),
-                ]),
+                size: Curve::from_stops([(0.00, 0.50), (0.30, 6.00), (1.00, 15.00)]),
                 color: Gradient::from_stops([
                     (0.00, [6.0, 3.2, 0.6, 1.0]),
                     (0.40, [3.5, 1.2, 0.2, 0.85]),
@@ -105,11 +101,7 @@ pub fn fire_wave() -> Effect {
                         strength: 3.5,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.45),
-                    (0.30, 0.85),
-                    (1.00, 0.30),
-                ]),
+                size: Curve::from_stops([(0.00, 0.45), (0.30, 0.85), (1.00, 0.30)]),
                 color: Gradient::from_stops([
                     (0.00, [5.5, 2.6, 0.6, 1.0]),
                     (0.40, [3.0, 1.0, 0.2, 0.80]),
@@ -138,10 +130,7 @@ pub fn fire_wave() -> Effect {
                         strength: 14.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.13),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.13), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [6.0, 4.0, 1.6, 1.0]),
                     (0.50, [2.5, 1.0, 0.25, 0.9]),
@@ -166,11 +155,7 @@ pub fn fire_wave() -> Effect {
                     },
                     ForceField::Drag { coefficient: 0.5 },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.45),
-                    (0.50, 0.85),
-                    (1.00, 1.20),
-                ]),
+                size: Curve::from_stops([(0.00, 0.45), (0.50, 0.85), (1.00, 1.20)]),
                 color: Gradient::from_stops([
                     (0.00, [0.18, 0.13, 0.10, 0.55]),
                     (0.50, [0.12, 0.09, 0.07, 0.30]),
@@ -193,11 +178,6 @@ pub fn fire_wave() -> Effect {
 ///     so embers don't sit at the spawn point — they actually
 ///     trail behind the fireball, smearing the emission across
 ///     the flight path.
-///   * **High-rate ember stream** using the new `Streak`
-///     sprite. Streaks are anisotropic motion lines, so even a
-///     single ember reads as motion. Combined with velocity
-///     inheritance and the vertex-shader's screen-space
-///     stretch, the trail becomes a continuous ribbon of fire.
 ///   * **Inner core ember halo** using `SoftGlow`, dense and
 ///     hot, hugging the projectile body so the head of the
 ///     trail looks like a nucleus rather than the start of a
@@ -210,6 +190,18 @@ pub fn fire_wave() -> Effect {
 ///     anchor (which is reset to the projectile position every
 ///     frame by `world_sync.rs`).
 ///
+/// An earlier revision also had a high-rate `Streak` ember
+/// layer scattered on a sphere, intended to read as motion
+/// lines. In practice the streaks oriented along each
+/// particle's individual velocity — which, after the small
+/// random sphere component was added to the inherited
+/// projectile velocity, splayed in every direction. Players
+/// (correctly) read this as "stars and lines shooting backward
+/// from the fireball", an effect that fights the projectile's
+/// forward read. Removed in favour of the cleaner two-layer
+/// nucleus + smoke composition: the head glows, a soft trail
+/// hangs behind it, the impact does the dramatic flourish.
+///
 /// Persistent (`duration = 0.0`); despawned when the
 /// projectile detonates.
 pub fn fireball_trail() -> EffectBundle {
@@ -221,18 +213,12 @@ pub fn fireball_trail() -> EffectBundle {
             //    Short lifetime so they hug the projectile body
             //    and read as the *head* of the comet.
             Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Continuous { rate: 280.0 },
-                speed: (0.30, 0.90),
-                lifetime: (0.10, 0.18),
-                forces: vec![
-                    ForceField::Drag { coefficient: 5.5 },
-                ],
-                size: Curve::from_stops([
-                    (0.00, 0.18),
-                    (0.30, 0.14),
-                    (1.00, 0.02),
-                ]),
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Continuous { rate: 320.0 },
+                speed: (0.0, 0.0),
+                lifetime: (0.10, 0.20),
+                forces: vec![ForceField::Drag { coefficient: 5.5 }],
+                size: Curve::from_stops([(0.00, 0.20), (0.30, 0.16), (1.00, 0.03)]),
                 color: Gradient::from_stops([
                     (0.00, [5.5, 4.2, 1.8, 1.0]),
                     (0.40, [3.0, 1.4, 0.35, 0.9]),
@@ -242,70 +228,16 @@ pub fn fireball_trail() -> EffectBundle {
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
-            // 2. Streaking ember tail — the body of the trail.
-            //    Anisotropic Streak sprites, every one of them
-            //    inheriting most of the projectile's velocity.
-            //    Result: a dense, oriented stream of fire
-            //    elongated along the flight path. This is the
-            //    layer that sells the cohesive-plume read.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Continuous { rate: 220.0 },
-                speed: (0.20, 0.80),
-                lifetime: (0.22, 0.40),
-                forces: vec![
-                    ForceField::Drag { coefficient: 3.2 },
-                    ForceField::Gravity {
-                        axis: Vec3::Y,
-                        strength: 1.5,
-                    },
-                ],
-                size: Curve::from_stops([
-                    (0.00, 0.13),
-                    (0.40, 0.16),
-                    (1.00, 0.04),
-                ]),
-                color: Gradient::from_stops([
-                    (0.00, [4.5, 2.8, 0.9, 1.0]),
-                    (0.45, [2.2, 0.9, 0.20, 0.95]),
-                    (1.00, [0.6, 0.10, 0.04, 0.0]),
-                ]),
-                sprite: SpriteShape::Streak,
-                blend: BlendMode::Additive,
-                opacity: 1.0,
-            }),
-            // 3. Smoke wake — slow alpha-blended puffs spawned
-            //    behind the fireball as it moves. Inherits less
-            //    velocity than the embers so it visibly *lags*
-            //    the projectile, drifts up and outward, and
-            //    erodes via the new noise-modulated Smoke
-            //    sprite for a non-circular silhouette.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Sphere,
-                emission: EmissionMode::Continuous { rate: 70.0 },
-                speed: (0.08, 0.45),
-                lifetime: (0.55, 0.95),
-                forces: vec![
-                    ForceField::Drag { coefficient: 1.8 },
-                    ForceField::Gravity {
-                        axis: Vec3::Y,
-                        strength: 0.9,
-                    },
-                ],
-                size: Curve::from_stops([
-                    (0.00, 0.18),
-                    (0.50, 0.32),
-                    (1.00, 0.55),
-                ]),
-                color: Gradient::from_stops([
-                    (0.00, [1.4, 0.55, 0.18, 0.55]),
-                    (0.50, [0.45, 0.18, 0.08, 0.28]),
-                    (1.00, [0.08, 0.06, 0.06, 0.0]),
-                ]),
-                sprite: SpriteShape::Smoke,
-                blend: BlendMode::Alpha,
-                opacity: 1.0,
-            }),
+            // Smoke wake removed entirely. Even with Point
+            // spawn + zero random velocity + heavy drag, smoke
+            // sprites that live up to ~1 s sit visibly behind
+            // the projectile after it has moved several metres
+            // — from a side-on camera that reads as "puffs
+            // flying backward". A pure SoftGlow nucleus is the
+            // cleanest read: the projectile is one tight ball
+            // of light with no lingering particles trailing
+            // behind. The dramatic plume now lives entirely in
+            // `fireball_explosion`, which fires at impact.
         ],
     })
     // Embers inherit most of the projectile's velocity so they
@@ -387,10 +319,7 @@ pub fn fireball_explosion() -> EffectBundle {
                 speed: (0.0, 0.0),
                 lifetime: (0.10, 0.12),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 1.50),
-                    (1.00, 2.40),
-                ]),
+                size: Curve::from_stops([(0.00, 1.50), (1.00, 2.40)]),
                 color: Gradient::from_stops([
                     (0.00, [6.5, 5.8, 3.8, 1.0]),
                     (1.00, [2.0, 1.0, 0.4, 0.0]),
@@ -423,11 +352,7 @@ pub fn fireball_explosion() -> EffectBundle {
                         strength: 14.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.30),
-                    (0.30, 0.60),
-                    (1.00, 0.14),
-                ]),
+                size: Curve::from_stops([(0.00, 0.30), (0.30, 0.60), (1.00, 0.14)]),
                 color: Gradient::from_stops([
                     (0.00, [5.5, 3.4, 1.0, 1.0]),
                     (0.40, [3.0, 1.0, 0.25, 0.85]),
@@ -459,11 +384,7 @@ pub fn fireball_explosion() -> EffectBundle {
                         strength: 8.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.32),
-                    (0.40, 0.75),
-                    (1.00, 1.05),
-                ]),
+                size: Curve::from_stops([(0.00, 0.32), (0.40, 0.75), (1.00, 1.05)]),
                 color: Gradient::from_stops([
                     (0.00, [4.0, 2.0, 0.55, 0.92]),
                     (0.30, [2.2, 0.85, 0.25, 0.78]),
@@ -490,10 +411,7 @@ pub fn fireball_explosion() -> EffectBundle {
                         strength: 14.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.13),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.13), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [5.5, 3.8, 1.6, 1.0]),
                     (0.50, [2.4, 0.9, 0.20, 0.9]),
@@ -513,10 +431,7 @@ pub fn fireball_explosion() -> EffectBundle {
                 speed: (0.0, 0.0),
                 lifetime: (0.35, 0.35),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 0.40),
-                    (1.00, 3.60),
-                ]),
+                size: Curve::from_stops([(0.00, 0.40), (1.00, 3.60)]),
                 color: Gradient::from_stops([
                     (0.00, [3.8, 2.2, 0.6, 0.95]),
                     (1.00, [0.6, 0.20, 0.05, 0.0]),
@@ -548,14 +463,14 @@ pub fn fireball_explosion() -> EffectBundle {
         radius: 9.0,
         intensity: 1.2,
         intensity_curve: Some(Curve::from_stops([
-            (0.00, 1.00),  // peak — all particles freshly spawned
-            (0.10, 0.92),  // brief sustain as the densest core fires
-            (0.25, 0.70),  // initial cooling
+            (0.00, 1.00), // peak — all particles freshly spawned
+            (0.10, 0.92), // brief sustain as the densest core fires
+            (0.25, 0.70), // initial cooling
             (0.45, 0.42),
             (0.65, 0.20),
             (0.82, 0.07),
             (0.95, 0.015),
-            (1.00, 0.00),  // last particle dies
+            (1.00, 0.00), // last particle dies
         ])),
         lifetime: None,
         flicker_amp: 0.08,

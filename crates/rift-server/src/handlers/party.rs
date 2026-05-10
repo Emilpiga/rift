@@ -15,6 +15,24 @@ use rift_net::{Channel, ClientId};
 use crate::party::{AcceptOutcome, InviteOutcome, RemoveOutcome};
 use crate::Server;
 
+/// Maximum number of characters accepted in any party-message
+/// `name` field. Player display names are themselves capped at
+/// 18 by `validate_name` in the session handler; we use a
+/// slightly looser cap here purely as DoS protection so a
+/// modded client can't make us format multi-megabyte error
+/// toasts. Anything that survives this gate gets fed through
+/// `find_session_by_name` next, which only matches real names.
+const PARTY_NAME_MAX: usize = 64;
+
+/// Quick "is this string short enough to be a plausible name"
+/// check. Returns `true` if `value` (after trim) is non-empty
+/// and at most `PARTY_NAME_MAX` chars. Caller is responsible
+/// for emitting a `party_error` on `false`.
+fn name_within_limits(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= PARTY_NAME_MAX
+}
+
 impl Server {
     /// Resolve a character name to its `ClientId`. Case-
     /// insensitive (mirrors how whispers find their target).
@@ -86,7 +104,10 @@ impl Server {
                 members: Vec::new(),
             };
         };
-        let leader = self.sessions.get(party.leader).and_then(|s| s.character_name.clone());
+        let leader = self
+            .sessions
+            .get(party.leader)
+            .and_then(|s| s.character_name.clone());
         let members: Vec<PartyMember> = party
             .members
             .iter()
@@ -158,6 +179,10 @@ impl Server {
     }
 
     pub(crate) fn handle_party_invite(&mut self, from: ClientId, name: String) {
+        if !name_within_limits(&name) {
+            self.party_error(from, "That name isn't valid.");
+            return;
+        }
         let trimmed = name.trim();
         if trimmed.is_empty() {
             self.party_error(from, "Invite who?");
@@ -178,36 +203,24 @@ impl Server {
             return;
         }
         if self.instance_for_client(invitee).is_some() {
-            self.party_error(
-                from,
-                &format!("{trimmed} is currently inside a rift."),
-            );
+            self.party_error(from, &format!("{trimmed} is currently inside a rift."));
             return;
         }
         let inviter_name = self.name_of(from);
-        let outcome = self.parties.record_invite(
-            from,
-            inviter_name.clone(),
-            invitee,
-            Instant::now(),
-        );
+        let outcome =
+            self.parties
+                .record_invite(from, inviter_name.clone(), invitee, Instant::now());
         match outcome {
             InviteOutcome::Recorded | InviteOutcome::Refreshed => {
                 let toast = ServerMsg::PartyInviteIncoming { from: inviter_name };
                 self.send_to(invitee, Channel::Control, &toast);
-                self.emit_system_to(
-                    from,
-                    &format!("Invited {trimmed} to your party."),
-                );
+                self.emit_system_to(from, &format!("Invited {trimmed} to your party."));
             }
             InviteOutcome::AlreadySameParty => {
                 self.party_error(from, &format!("{trimmed} is already in your party."));
             }
             InviteOutcome::InviteeAlreadyInParty => {
-                self.party_error(
-                    from,
-                    &format!("{trimmed} is already in another party."),
-                );
+                self.party_error(from, &format!("{trimmed} is already in another party."));
             }
             InviteOutcome::InviterPartyFull => {
                 self.party_error(from, "Your party is full.");
@@ -215,11 +228,7 @@ impl Server {
         }
     }
 
-    pub(crate) fn handle_party_accept(
-        &mut self,
-        from: ClientId,
-        which: Option<String>,
-    ) {
+    pub(crate) fn handle_party_accept(&mut self, from: ClientId, which: Option<String>) {
         let outcome = self.parties.accept_invite(from, which.as_deref());
         match outcome {
             AcceptOutcome::Joined(party) => {
@@ -235,9 +244,7 @@ impl Server {
                 for cid in &party.members {
                     self.emit_system_to(*cid, &line);
                 }
-                log::info!(
-                    "party: {joiner_name} joined party led by {leader_name}"
-                );
+                log::info!("party: {joiner_name} joined party led by {leader_name}");
             }
             AcceptOutcome::NoSuchInvite => {
                 self.party_error(from, "No pending invite to accept.");
@@ -251,11 +258,7 @@ impl Server {
         }
     }
 
-    pub(crate) fn handle_party_decline(
-        &mut self,
-        from: ClientId,
-        which: Option<String>,
-    ) {
+    pub(crate) fn handle_party_decline(&mut self, from: ClientId, which: Option<String>) {
         let Some(row) = self.parties.decline_invite(from, which.as_deref()) else {
             self.party_error(from, "No pending invite to decline.");
             return;
@@ -304,6 +307,10 @@ impl Server {
     }
 
     pub(crate) fn handle_party_kick(&mut self, from: ClientId, name: String) {
+        if !name_within_limits(&name) {
+            self.party_error(from, "That name isn't valid.");
+            return;
+        }
         let trimmed = name.trim();
         let Some(target) = self.find_session_by_name(trimmed) else {
             self.party_error(from, &format!("No player named {trimmed} is online."));
@@ -349,14 +356,16 @@ impl Server {
         // kicked from would leave them stuck in a party of
         // one (server-side) inside a rift they never picked.
         if self.instance_for_client(target).is_some() {
-            log::info!(
-                "party: kickee {target:?} ({target_name}) was in a rift; returning to hub"
-            );
+            log::info!("party: kickee {target:?} ({target_name}) was in a rift; returning to hub");
             self.move_client_to_hub(target);
         }
     }
 
     pub(crate) fn handle_party_promote(&mut self, from: ClientId, name: String) {
+        if !name_within_limits(&name) {
+            self.party_error(from, "That name isn't valid.");
+            return;
+        }
         let trimmed = name.trim();
         let Some(target) = self.find_session_by_name(trimmed) else {
             self.party_error(from, &format!("No player named {trimmed} is online."));

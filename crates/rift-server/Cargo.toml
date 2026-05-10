@@ -2,6 +2,7 @@
 name = "rift-server"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # Headless dedicated-server binary for Rift Crawler.
 #
@@ -21,3 +22,4 @@ glam = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
+ctrlc = { workspace = true }

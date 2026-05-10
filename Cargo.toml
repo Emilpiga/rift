@@ -26,6 +26,10 @@ renet = "0.0.16"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "1"
+# Cross-platform Ctrl-C / SIGTERM handler used by the dedicated
+# server's graceful-shutdown path so a kill-mid-write doesn't
+# drop pending persistence writes on the floor.
+ctrlc = { version = "3", features = ["termination"] }
 
 # `kira` (and its decoder dependencies) decode audio in the
 # audio thread; built unoptimised it cannot keep up with even a

@@ -204,10 +204,33 @@ pub fn astar_grid<F>(
     from: (i32, i32),
     goal: (i32, i32),
     max_expanded: usize,
-    mut is_walkable: F,
+    is_walkable: F,
 ) -> Option<Vec<(i32, i32)>>
 where
     F: FnMut(i32, i32) -> bool,
+{
+    astar_grid_weighted(from, goal, max_expanded, is_walkable, |_, _| 0)
+}
+
+/// Like [`astar_grid`] but with a per-tile entry cost added on
+/// top of the base step cost of 1. Use for "prefer interior /
+/// avoid wall-hugging" pathfinding — return e.g. 2 for tiles
+/// adjacent to walls so the search picks a slightly longer
+/// route through the room centre over a shorter route that
+/// scrapes along the wall.
+///
+/// Heuristic remains Manhattan distance (admissible because
+/// `extra_cost` is non-negative).
+pub fn astar_grid_weighted<F, C>(
+    from: (i32, i32),
+    goal: (i32, i32),
+    max_expanded: usize,
+    mut is_walkable: F,
+    mut extra_cost: C,
+) -> Option<Vec<(i32, i32)>>
+where
+    F: FnMut(i32, i32) -> bool,
+    C: FnMut(i32, i32) -> i32,
 {
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap};
@@ -261,7 +284,7 @@ where
             if n != goal && !is_walkable(nx, nz) {
                 continue;
             }
-            let tentative = g + 1;
+            let tentative = g + 1 + extra_cost(nx, nz);
             if tentative < *g_score.get(&n).unwrap_or(&i32::MAX) {
                 came_from.insert(n, current);
                 g_score.insert(n, tentative);

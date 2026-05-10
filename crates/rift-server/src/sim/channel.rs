@@ -24,6 +24,7 @@ use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADIUS};
 use super::transforms::{self, ChannelEndSnapshot};
+use rift_dungeon::Floor;
 use rift_game::loot::AbilityVariant;
 
 /// Component added to a player or enemy entity while a channel
@@ -89,6 +90,7 @@ pub struct ServerChannel {
 /// queued during the walk and applied after the borrows end.
 pub fn tick(
     world: &mut hecs::World,
+    floor: &Floor,
     enemies: &[(Entity, Vec3, NetId, f32)],
     players: &[(Entity, Vec3)],
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
@@ -107,8 +109,7 @@ pub fn tick(
     let mut ended: Vec<ChannelEndSnapshot> = Vec::new();
 
     // 1. Player-attached channels.
-    for (entity, (player, channel)) in
-        world.query_mut::<(&mut ServerPlayer, &mut ServerChannel)>()
+    for (entity, (player, channel)) in world.query_mut::<(&mut ServerPlayer, &mut ServerChannel)>()
     {
         // Death / ghost transition ends the channel
         // immediately. Without this the channel keeps ticking
@@ -122,9 +123,7 @@ pub fn tick(
             channel.transform = None;
             channel.remaining = 0.0;
         }
-        if channel.cancel_on_move
-            && player.k.velocity.length_squared() > 0.05 * 0.05
-        {
+        if channel.cancel_on_move && player.k.velocity.length_squared() > 0.05 * 0.05 {
             channel.remaining = 0.0;
         }
         // Per-frame essence drain for held channels (e.g.
@@ -160,6 +159,7 @@ pub fn tick(
                 tick: tick_now,
             });
             collect_hits_for_effect(
+                floor,
                 channel,
                 Some(entity),
                 caster_pos,
@@ -196,17 +196,13 @@ pub fn tick(
     //    pass — refresh aim from the caster's `aim_yaw`,
     //    cancel-on-move from the caster's velocity, queue
     //    visual events + hits, mark expired channels.
-    for (entity, (en, channel)) in
-        world.query_mut::<(&ServerEnemy, &mut ServerChannel)>()
-    {
+    for (entity, (en, channel)) in world.query_mut::<(&ServerEnemy, &mut ServerChannel)>() {
         if en.is_dying() {
             // Treat death as channel cancel so the visual
             // doesn't trail off a corpse.
             channel.remaining = 0.0;
         }
-        if channel.cancel_on_move
-            && en.k.velocity.length_squared() > 0.05 * 0.05
-        {
+        if channel.cancel_on_move && en.k.velocity.length_squared() > 0.05 * 0.05 {
             channel.remaining = 0.0;
         }
         channel.remaining -= dt;
@@ -226,6 +222,7 @@ pub fn tick(
                 tick: tick_now,
             });
             collect_hits_for_effect(
+                floor,
                 channel,
                 Some(entity),
                 caster_pos,
@@ -253,9 +250,7 @@ pub fn tick(
     // 4. Apply queued player-side debuffs (rare path; flag-gated
     //    on `apply_debuff = Some(_)` per channel).
     for (player_entity, debuff_id, caster, ability_id, attacker_kind) in player_debuffs {
-        if let Ok(mut stack) =
-            world.get::<&mut super::effect::EffectStack>(player_entity)
-        {
+        if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(player_entity) {
             stack.apply(debuff_id, None, caster, ability_id, attacker_kind);
         }
     }
@@ -269,12 +264,7 @@ pub fn tick(
     //    channel-end branches. Behavior lives in
     //    `super::transforms`; this site is just the dispatch.
     for snap in ended {
-        transforms::on_channel_end(
-            world,
-            ctx.events,
-            ctx.next_projectile_net_id,
-            &snap,
-        );
+        transforms::on_channel_end(world, ctx.events, ctx.next_projectile_net_id, &snap);
     }
 
     player_damage
@@ -286,6 +276,7 @@ pub fn tick(
 /// against the player snapshot — crit is rolled at hit time so
 /// the player-damage path receives flat damage values.
 fn collect_hits_for_effect(
+    floor: &Floor,
     channel: &ServerChannel,
     caster_entity: Option<Entity>,
     caster_pos: Vec3,
@@ -325,64 +316,83 @@ fn collect_hits_for_effect(
         }
     };
     match channel.effect {
-        ChannelEffect::AuraAroundCaster { radius, damage_per_tick } => {
+        ChannelEffect::AuraAroundCaster {
+            radius,
+            damage_per_tick,
+        } => {
             let r2 = radius * radius;
             match channel.team {
                 Team::Player => {
                     for (en, en_pos, nid, _r) in enemies {
                         let dx = en_pos.x - caster_pos.x;
                         let dz = en_pos.z - caster_pos.z;
-                        if dx * dx + dz * dz <= r2 {
-                            hits.push(Hit {
-                                enemy: *en,
-                                enemy_net_id: *nid,
-                                enemy_pos: *en_pos,
-                                attacker: caster_net_id,
-                                ability_id: channel.ability_id,
-                                damage: damage_per_tick,
-                                crit_chance,
-                                crit_damage,
-                                crit_seed: seed_for(nid.0 as u64),
-                                apply_debuff: channel.apply_debuff,
-                                // Caster→victim radial direction
-                                // — reads as the aura pushing the
-                                // victim outward from the caster.
-                                hit_dir: glam::Vec3::new(
-                                    en_pos.x - caster_pos.x,
-                                    0.0,
-                                    en_pos.z - caster_pos.z,
-                                ),
-                            });
+                        if dx * dx + dz * dz > r2 {
+                            continue;
                         }
+                        // Wall LOS gate: a caster standing in
+                        // a doorway shouldn't tag enemies on
+                        // the other side of an adjacent wall.
+                        if !floor.line_of_sight(caster_pos, *en_pos) {
+                            continue;
+                        }
+                        hits.push(Hit {
+                            enemy: *en,
+                            enemy_net_id: *nid,
+                            enemy_pos: *en_pos,
+                            attacker: caster_net_id,
+                            ability_id: channel.ability_id,
+                            damage: damage_per_tick,
+                            crit_chance,
+                            crit_damage,
+                            crit_seed: seed_for(nid.0 as u64),
+                            apply_debuff: channel.apply_debuff,
+                            // Caster→victim radial direction
+                            // — reads as the aura pushing the
+                            // victim outward from the caster.
+                            hit_dir: glam::Vec3::new(
+                                en_pos.x - caster_pos.x,
+                                0.0,
+                                en_pos.z - caster_pos.z,
+                            ),
+                        });
                     }
                 }
                 Team::Enemy => {
                     for (pe, ppos) in players {
                         let dx = ppos.x - caster_pos.x;
                         let dz = ppos.z - caster_pos.z;
-                        if dx * dx + dz * dz <= r2 {
-                            let mult = roll_crit_mult(seed_for(pe.id() as u64));
-                            player_damage.push(super::combat_ctx::PlayerHit {
-                                target: *pe,
-                                attacker_kind: channel.attacker_kind,
-                                ability_id: channel.ability_id,
-                                amount: damage_per_tick * mult,
-                            });
-                            if let Some(id) = channel.apply_debuff {
-                                player_debuffs.push((
-                                    *pe,
-                                    id,
-                                    caster_entity,
-                                    channel.ability_id,
-                                    channel.attacker_kind,
-                                ));
-                            }
+                        if dx * dx + dz * dz > r2 {
+                            continue;
+                        }
+                        if !floor.line_of_sight(caster_pos, *ppos) {
+                            continue;
+                        }
+                        let mult = roll_crit_mult(seed_for(pe.id() as u64));
+                        player_damage.push(super::combat_ctx::PlayerHit {
+                            target: *pe,
+                            attacker_kind: channel.attacker_kind,
+                            ability_id: channel.ability_id,
+                            amount: damage_per_tick * mult,
+                        });
+                        if let Some(id) = channel.apply_debuff {
+                            player_debuffs.push((
+                                *pe,
+                                id,
+                                caster_entity,
+                                channel.ability_id,
+                                channel.attacker_kind,
+                            ));
                         }
                     }
                 }
             }
         }
-        ChannelEffect::Beam { range, width, damage_per_tick, pierce_targets } => {
+        ChannelEffect::Beam {
+            range,
+            width,
+            damage_per_tick,
+            pierce_targets,
+        } => {
             let aim = channel.aim.normalize_or_zero();
             if aim.length_squared() < 1.0e-4 {
                 return;
@@ -395,17 +405,19 @@ fn collect_hits_for_effect(
                 Team::Player => {
                     let mut candidates: Vec<(f32, Hit)> = Vec::new();
                     for (en, en_pos, nid, _r) in enemies {
-                        let to = Vec3::new(
-                            en_pos.x - caster_pos.x,
-                            0.0,
-                            en_pos.z - caster_pos.z,
-                        );
+                        let to = Vec3::new(en_pos.x - caster_pos.x, 0.0, en_pos.z - caster_pos.z);
                         let along = to.dot(aim);
                         if along < 0.0 || along > range {
                             continue;
                         }
                         let lateral = to.dot(right).abs();
                         if lateral > width {
+                            continue;
+                        }
+                        // Wall LOS gate: a beam can't punch
+                        // through a wall to tag enemies that
+                        // happen to lie within its width.
+                        if !floor.line_of_sight(caster_pos, *en_pos) {
                             continue;
                         }
                         candidates.push((
@@ -425,9 +437,8 @@ fn collect_hits_for_effect(
                             },
                         ));
                     }
-                    candidates.sort_by(|a, b| {
-                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    candidates
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     for (_along, hit) in candidates.into_iter().take(cap) {
                         hits.push(hit);
                     }
@@ -436,11 +447,7 @@ fn collect_hits_for_effect(
                     let player_width = width.max(PLAYER_HIT_RADIUS);
                     let mut candidates: Vec<(f32, Entity)> = Vec::new();
                     for (pe, ppos) in players {
-                        let to = Vec3::new(
-                            ppos.x - caster_pos.x,
-                            0.0,
-                            ppos.z - caster_pos.z,
-                        );
+                        let to = Vec3::new(ppos.x - caster_pos.x, 0.0, ppos.z - caster_pos.z);
                         let along = to.dot(aim);
                         if along < 0.0 || along > range {
                             continue;
@@ -449,11 +456,13 @@ fn collect_hits_for_effect(
                         if lateral > player_width {
                             continue;
                         }
+                        if !floor.line_of_sight(caster_pos, *ppos) {
+                            continue;
+                        }
                         candidates.push((along, *pe));
                     }
-                    candidates.sort_by(|a, b| {
-                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    candidates
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     for (_along, pe) in candidates.into_iter().take(cap) {
                         let mult = roll_crit_mult(seed_for(pe.id() as u64));
                         player_damage.push(super::combat_ctx::PlayerHit {

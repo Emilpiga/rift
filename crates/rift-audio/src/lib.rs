@@ -102,6 +102,15 @@ pub struct SoundSpec {
     /// when they reach the end (torch crackle, portal hum,
     /// projectile trail). One-shots leave this `false`.
     pub looping: bool,
+    /// Playback-rate multiplier (1.0 = authored pitch).
+    /// Doubles as a pitch shift because kira resamples at
+    /// `rate * sample_rate`. Useful for adding believable
+    /// per-play variation to repeated one-shots without
+    /// authoring extra assets: a ±5% range (0.95..1.05)
+    /// is roughly ± a semitone and reads as "the same
+    /// sound, different take" rather than a chipmunked /
+    /// slowed-down version. Negative values reverse-play.
+    pub pitch: f32,
 }
 
 impl SoundSpec {
@@ -114,6 +123,7 @@ impl SoundSpec {
             min_distance: 1.0,
             max_distance: 25.0,
             looping: false,
+            pitch: 1.0,
         }
     }
 
@@ -127,6 +137,7 @@ impl SoundSpec {
             min_distance: 1.0,
             max_distance: 20.0,
             looping: true,
+            pitch: 1.0,
         }
     }
 }
@@ -340,6 +351,15 @@ impl AudioSystem {
             }
         };
         let mut track = track;
+        // Apply optional pitch / playback-rate shift before
+        // play. `StaticSoundData::playback_rate` consumes
+        // self and returns a new (cheaply-cloned) handle so
+        // the cached entry is untouched.
+        let data = if (spec.pitch - 1.0).abs() > 1e-4 {
+            data.playback_rate(spec.pitch as f64)
+        } else {
+            data
+        };
         let sound = match track.play(data) {
             Ok(s) => s,
             Err(e) => {
@@ -383,6 +403,13 @@ impl AudioSystem {
             data.loop_region(..)
         } else {
             data
+        };
+        // Optional pitch shift, applied after loop config so
+        // a looped emitter still de-tunes correctly.
+        let data_to_play = if (spec.pitch - 1.0).abs() > 1e-4 {
+            data_to_play.playback_rate(spec.pitch as f64)
+        } else {
+            data_to_play
         };
         let sound = match track.play(data_to_play) {
             Ok(s) => Some(s),

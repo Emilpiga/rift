@@ -26,13 +26,11 @@ use std::{
 use glam::Vec3;
 use rift_dungeon::{Floor, FloorConfig};
 use rift_engine::Input;
-use rift_net::{
-    decode, encode,
-    messages::InputCmd,
-    open_client, renet, Channel, ClientHandle, ClientId, ClientMsg, NetId, NetSettings, NetTick,
-    ServerMsg, PROTOCOL_VERSION,
-};
 use rift_game::kinematic::Kinematic;
+use rift_net::{
+    decode, encode, messages::InputCmd, open_client, renet, Channel, ClientHandle, ClientId,
+    ClientMsg, NetId, NetSettings, NetTick, ServerMsg, PROTOCOL_VERSION,
+};
 
 use snapshot::RemoteInterp;
 
@@ -153,6 +151,20 @@ pub struct NetClient {
     /// also spawn a one-shot detonation at its last known
     /// position.
     pub(super) projectile_trails: HashMap<NetId, rift_engine::renderer::vfx::EffectId>,
+    /// Per-projectile travel-loop audio emitter. Looking up
+    /// the ability's `audio_for` recipe at spawn and attaching
+    /// a looping `SpatialTrack` that we re-anchor to the
+    /// projectile's render position every frame, so the loop
+    /// follows the flight path. Despawned in the same stale-
+    /// row pass that despawns the trail VFX.
+    pub(super) projectile_audio: HashMap<NetId, rift_audio::EmitterId>,
+    /// Wire id of the ability that spawned each live
+    /// projectile. Used by the despawn pass to look up the
+    /// impact sound (the ability lookup is cheap but it's
+    /// trivially memoised here so the despawn doesn't need
+    /// to chase through `Ability::lookup` for every stale
+    /// row).
+    pub(super) projectile_ability: HashMap<NetId, u8>,
     /// Client-side dead-reckoned render position per projectile.
     /// Snapshots arrive at `SNAPSHOT_HZ` (20 Hz) which is far
     /// too slow for fast straight-line projectiles to look
@@ -199,8 +211,7 @@ pub struct NetClient {
     /// `ServerMsg::PickupRejected`). Drained by the binary so it
     /// can show a warning toast ("Inventory full") and discard
     /// any local prediction tied to the rejected request.
-    pending_pickup_rejections:
-        VecDeque<(NetId, rift_net::messages::PickupRejectReason)>,
+    pending_pickup_rejections: VecDeque<(NetId, rift_net::messages::PickupRejectReason)>,
     /// Full inventory replication for the local player. Sent by
     /// the server on session start (after `Welcome`) and any time
     /// the bag is rewritten authoritatively. Drained by the
@@ -224,8 +235,7 @@ pub struct NetClient {
     /// so a freshly-spawned avatar gets dressed with whatever the
     /// server last told us about that player, not just whatever
     /// changes happen *after* the spawn.
-    pub(super) peer_visuals_mirror:
-        std::collections::HashMap<ClientId, Vec<u16>>,
+    pub(super) peer_visuals_mirror: std::collections::HashMap<ClientId, Vec<u16>>,
     /// Full stash replication for the local player. Sent by the
     /// server in reply to `OpenStash` and after every server-
     /// applied deposit / withdraw / tab edit. Drained by the
@@ -371,6 +381,12 @@ pub struct NetClient {
     /// asked" or "asked but no reply yet". Drained by the binary
     /// once it's been forwarded into the character-select UI.
     pub(super) roster: Option<Vec<rift_net::messages::RosterEntry>>,
+    /// Fatal rejection reason from the server (e.g. protocol
+    /// version mismatch). Set on receipt of [`ServerMsg::Reject`];
+    /// the binary checks this every frame and exits cleanly with
+    /// the message instead of letting the user wonder why the
+    /// connection silently hangs.
+    pub(super) fatal_reject_reason: Option<String>,
 }
 
 impl NetClient {
@@ -395,6 +411,8 @@ impl NetClient {
             enemy_entities: HashMap::new(),
             projectile_objects: HashMap::new(),
             projectile_trails: HashMap::new(),
+            projectile_audio: HashMap::new(),
+            projectile_ability: HashMap::new(),
             projectile_render: HashMap::new(),
             last_positions: HashMap::new(),
             last_velocities: HashMap::new(),
@@ -435,6 +453,7 @@ impl NetClient {
             roster_request: None,
             roster_request_sent: false,
             roster: None,
+            fatal_reject_reason: None,
         })
     }
 
@@ -445,11 +464,7 @@ impl NetClient {
     /// select, menus) shouldn't drive the avatar.
     pub fn step(&mut self, dt: Duration, input: Option<&Input>) {
         // Drive netcode + renet timers.
-        if let Err(e) = self
-            .handle
-            .transport
-            .update(dt, &mut self.handle.client)
-        {
+        if let Err(e) = self.handle.transport.update(dt, &mut self.handle.client) {
             log::warn!("net: transport update: {e:?}");
         }
         self.handle.client.update(dt);
@@ -457,10 +472,7 @@ impl NetClient {
         // Once the underlying handshake completes, send Hello exactly
         // once. After that the connection is fully usable for
         // game traffic.
-        if !self.hello_sent
-            && self.handle.client.is_connected()
-            && self.profile.is_some()
-        {
+        if !self.hello_sent && self.handle.client.is_connected() && self.profile.is_some() {
             self.send_hello();
             self.hello_sent = true;
         }
@@ -476,7 +488,9 @@ impl NetClient {
             if let Some(account_name) = self.roster_request.clone() {
                 self.send(
                     Channel::Control,
-                    &ClientMsg::RequestRoster { account_name: account_name.clone() },
+                    &ClientMsg::RequestRoster {
+                        account_name: account_name.clone(),
+                    },
                 );
                 log::info!("net: requested roster for account {account_name:?}");
                 self.roster_request_sent = true;
@@ -517,11 +531,7 @@ impl NetClient {
         self.correction_error *= decay;
 
         // Flush.
-        if let Err(e) = self
-            .handle
-            .transport
-            .send_packets(&mut self.handle.client)
-        {
+        if let Err(e) = self.handle.transport.send_packets(&mut self.handle.client) {
             log::warn!("net: transport send: {e:?}");
         }
     }
@@ -607,6 +617,7 @@ impl NetClient {
             }
             ServerMsg::Reject { reason } => {
                 log::error!("net: Reject from server: {reason}");
+                self.fatal_reject_reason = Some(reason);
             }
             ServerMsg::Roster { entries } => {
                 log::info!("net: Roster received ({} entries)", entries.len());
@@ -766,7 +777,10 @@ impl NetClient {
                 log::info!("net: EquipmentSync {} slot(s)", slots.len());
                 self.pending_equipment_sync = Some(slots);
             }
-            ServerMsg::PeerEquipmentVisuals { client_id, base_ids } => {
+            ServerMsg::PeerEquipmentVisuals {
+                client_id,
+                base_ids,
+            } => {
                 log::debug!(
                     "net: PeerEquipmentVisuals client={client_id:?} {} item(s)",
                     base_ids.len(),
@@ -774,8 +788,7 @@ impl NetClient {
                 // Mirror the latest list for this peer so a
                 // future avatar spawn can pick it up even if
                 // the message arrives before the avatar exists.
-                self.peer_visuals_mirror
-                    .insert(client_id, base_ids.clone());
+                self.peer_visuals_mirror.insert(client_id, base_ids.clone());
                 // Coalesce: drop any stale pending entry for the
                 // same peer so we only apply the freshest list.
                 self.pending_peer_equipment_visuals
@@ -787,10 +800,12 @@ impl NetClient {
                 log::info!("net: StashSync {} tab(s)", tabs.len());
                 self.pending_stash_sync = Some(tabs);
             }
-            ServerMsg::CharacterStats { level, xp, xp_to_next } => {
-                log::debug!(
-                    "net: CharacterStats level={level} xp={xp}/{xp_to_next}"
-                );
+            ServerMsg::CharacterStats {
+                level,
+                xp,
+                xp_to_next,
+            } => {
+                log::debug!("net: CharacterStats level={level} xp={xp}/{xp_to_next}");
                 self.pending_character_stats = Some((level, xp, xp_to_next));
             }
             ServerMsg::Loadout { slots } => {
@@ -829,7 +844,12 @@ impl NetClient {
                 );
                 self.pending_exit_vote = Some(state);
             }
-            ServerMsg::Chat { channel, sender, target, text } => {
+            ServerMsg::Chat {
+                channel,
+                sender,
+                target,
+                text,
+            } => {
                 self.pending_chats.push_back(PendingChat {
                     channel,
                     sender,
@@ -851,7 +871,12 @@ impl NetClient {
             ServerMsg::PartyError { reason } => {
                 self.pending_party_errors.push_back(reason);
             }
-            ServerMsg::PortalPrompt { proposer, start_floor, mode, seconds_remaining } => {
+            ServerMsg::PortalPrompt {
+                proposer,
+                start_floor,
+                mode,
+                seconds_remaining,
+            } => {
                 self.pending_portal_prompt = Some(Some(PendingPortalPrompt {
                     proposer,
                     start_floor,
@@ -908,9 +933,7 @@ impl NetClient {
     /// Drain the most recent authoritative party-state snapshot
     /// the server pushed (if any). The binary forwards it into
     /// `state.party.ingest_state(...)`.
-    pub fn take_pending_party_state(
-        &mut self,
-    ) -> Option<rift_net::messages::ServerMsg> {
+    pub fn take_pending_party_state(&mut self) -> Option<rift_net::messages::ServerMsg> {
         self.pending_party_state.take()
     }
 
@@ -929,9 +952,7 @@ impl NetClient {
     /// server opened a per-member confirm modal for us;
     /// `Some(None)` means it just closed (timeout / proposer
     /// cancelled / we already resolved).
-    pub fn take_pending_portal_prompt(
-        &mut self,
-    ) -> Option<Option<PendingPortalPrompt>> {
+    pub fn take_pending_portal_prompt(&mut self) -> Option<Option<PendingPortalPrompt>> {
         self.pending_portal_prompt.take()
     }
 
@@ -945,9 +966,7 @@ impl NetClient {
     /// format. Replaced (not accumulated) by the server, so a
     /// frame that sees `None` should keep showing the previous
     /// values.
-    pub fn take_pending_meters(
-        &mut self,
-    ) -> Option<(f32, Vec<rift_net::messages::MeterEntry>)> {
+    pub fn take_pending_meters(&mut self) -> Option<(f32, Vec<rift_net::messages::MeterEntry>)> {
         self.pending_meters.take()
     }
 
@@ -1010,9 +1029,7 @@ impl NetClient {
     /// since the last call. The binary applies it whole-cloth to
     /// `GameState::mp_inventory`, so a partial drain isn't
     /// meaningful — we surface a single `Option`.
-    pub fn drain_inventory_sync(
-        &mut self,
-    ) -> Option<Vec<Option<rift_net::messages::ItemBlob>>> {
+    pub fn drain_inventory_sync(&mut self) -> Option<Vec<Option<rift_net::messages::ItemBlob>>> {
         self.pending_inventory_sync.take()
     }
 
@@ -1021,9 +1038,7 @@ impl NetClient {
     /// in shape: the binary rebuilds [`LootClientState::equipment`]
     /// from the returned slot list whole-cloth. `None` means no
     /// fresh sync.
-    pub fn drain_equipment_sync(
-        &mut self,
-    ) -> Option<Vec<(u8, rift_net::messages::ItemBlob)>> {
+    pub fn drain_equipment_sync(&mut self) -> Option<Vec<(u8, rift_net::messages::ItemBlob)>> {
         self.pending_equipment_sync.take()
     }
 
@@ -1031,9 +1046,7 @@ impl NetClient {
     /// the last call. Returned in arrival order so the binary can
     /// apply them in sequence; coalescing already happened on
     /// receive so each peer appears at most once.
-    pub fn drain_peer_equipment_visuals(
-        &mut self,
-    ) -> Vec<(ClientId, Vec<u16>)> {
+    pub fn drain_peer_equipment_visuals(&mut self) -> Vec<(ClientId, Vec<u16>)> {
         std::mem::take(&mut self.pending_peer_equipment_visuals)
             .into_iter()
             .collect()
@@ -1056,16 +1069,12 @@ impl NetClient {
     /// equipment-visuals dispatcher to pick the gendered model
     /// path when dressing the remote avatar.
     pub fn profile_for_client(&self, client_id: ClientId) -> Option<&RemoteProfile> {
-        self.profiles
-            .values()
-            .find(|p| p.client_id == client_id)
+        self.profiles.values().find(|p| p.client_id == client_id)
     }
 
     /// Take the most recent `StashSync` if one has arrived
     /// since the last call. Returns the dense `[0..n)` tab list.
-    pub fn drain_stash_sync(
-        &mut self,
-    ) -> Option<Vec<rift_net::messages::StashTabBlob>> {
+    pub fn drain_stash_sync(&mut self) -> Option<Vec<rift_net::messages::StashTabBlob>> {
         self.pending_stash_sync.take()
     }
 
@@ -1100,9 +1109,7 @@ impl NetClient {
     /// shape: `(progress, required, boss_spawned, boss_killed,
     /// floor_complete)`. The binary mirrors these into
     /// `RiftState`.
-    pub fn drain_rift_progress(
-        &mut self,
-    ) -> Option<(u32, u32, bool, bool, bool)> {
+    pub fn drain_rift_progress(&mut self) -> Option<(u32, u32, bool, bool, bool)> {
         self.pending_rift_progress.take()
     }
 
@@ -1131,7 +1138,9 @@ impl NetClient {
     /// drive the essence bar; the canonical scalar is on the
     /// server.
     pub fn local_resource_pct(&self) -> f32 {
-        let Some(nid) = self.our_net_id else { return 1.0 };
+        let Some(nid) = self.our_net_id else {
+            return 1.0;
+        };
         self.remote.get(&nid).map(|r| r.resource_pct).unwrap_or(1.0)
     }
 
@@ -1140,7 +1149,9 @@ impl NetClient {
     /// in `profiles`; callers that need to label our row should
     /// fall back to [`Self::character_name`]).
     pub fn name_for_net_id(&self, net_id: NetId) -> Option<&str> {
-        self.profiles.get(&net_id).map(|p| p.character_name.as_str())
+        self.profiles
+            .get(&net_id)
+            .map(|p| p.character_name.as_str())
     }
 
     /// `true` once the latest snapshot flagged our player row with
@@ -1164,5 +1175,14 @@ impl NetClient {
     /// Diagnostic disconnect reason, if renet has decided we're done.
     pub fn disconnect_reason(&self) -> Option<renet::DisconnectReason> {
         self.handle.client.disconnect_reason()
+    }
+
+    /// Fatal `ServerMsg::Reject` reason, if the server told us to
+    /// go away (protocol mismatch, bad credentials in a future
+    /// auth pass, etc.). The binary surfaces this to the user and
+    /// exits cleanly instead of leaving them staring at a frozen
+    /// connect screen.
+    pub fn fatal_reject_reason(&self) -> Option<&str> {
+        self.fatal_reject_reason.as_deref()
     }
 }

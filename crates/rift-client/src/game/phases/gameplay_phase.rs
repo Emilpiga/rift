@@ -44,10 +44,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         .as_ref()
         .map(|v| (v.active, v.cooldown_remaining))
         .unwrap_or((false, 0.0));
-    let (descend_anchor, return_anchor) = state
-        .floor_mgr
-        .portal_anchors
-        .unwrap_or((state.floor_mgr.boss_room_center, state.floor_mgr.boss_room_center));
+    let (descend_anchor, return_anchor) = state.floor_mgr.portal_anchors.unwrap_or((
+        state.floor_mgr.boss_room_center,
+        state.floor_mgr.boss_room_center,
+    ));
     portal_system::tick_exit(
         &mut state.floor.exit_portal,
         &state.world,
@@ -99,12 +99,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
             .exit_vote
             .as_ref()
             .and_then(|v| {
-                our_id.and_then(|nid| {
-                    v.voters
-                        .iter()
-                        .find(|(id, _)| *id == nid)
-                        .map(|(_, c)| *c)
-                })
+                our_id.and_then(|nid| v.voters.iter().find(|(id, _)| *id == nid).map(|(_, c)| *c))
             })
             .map(|c| matches!(c, rift_net::messages::VoteChoice::Pending))
             .unwrap_or(false);
@@ -130,15 +125,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &mut state.net,
         &mut state.loot,
         &mut state.frame.hud_prompt,
+        state.audio.as_mut(),
     );
 
     // Ground loot: hover prompt + F-to-pick.
-    crate::game::loot_system::tick(
-        &state.world,
-        &mut state.loot,
-        &mut state.combat_text,
-        input,
-    );
+    crate::game::loot_system::tick(&state.world, &mut state.loot, &mut state.combat_text, input);
 
     // Drive the per-drop pop / settle animation on any 3D
     // ground meshes attached to live loot drops. Cheap walk
@@ -169,7 +160,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
 
     // ECS systems
     let action_cfg = PlayerActionConfig::default();
-    let accept_input = !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached);
+    let accept_input =
+        !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached);
     player_action_pre_system(&mut state.world, input, dt, &action_cfg, accept_input);
     player_input_system(&mut state.world, input, dt);
     movement_system(&mut state.world, dt, state.floor_mgr.dungeon.as_ref());

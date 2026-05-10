@@ -1,10 +1,13 @@
 pub mod bsp;
 pub mod config;
 pub mod nav;
+pub mod props;
+pub mod props_placement;
 pub mod rooms;
 
 pub use config::FloorConfig;
 pub use nav::NavGrid;
+pub use props::{PlacedProp, PropFootprint, PropId, PropMeta};
 pub use rooms::{Room, RoomShape, RoomTheme, RoomType, SurfaceKind};
 
 use glam::Vec3;
@@ -101,8 +104,38 @@ pub struct Floor {
     /// [`SurfaceKind::Sand`]; rift floors leave it at
     /// [`SurfaceKind::Stone`].
     pub default_surface: SurfaceKind,
+    /// Authoritative prop placements for this floor.
+    /// Populated by [`props_placement::decorate_rift`] /
+    /// [`props_placement::decorate_hub`] during construction
+    /// and consumed by both server (`kinematic::integrate`)
+    /// and client (rendering). Identical on both sides for
+    /// the same `(seed, floor_index)` so collision and
+    /// rendering can never disagree.
+    pub props: Vec<PlacedProp>,
+    /// Per-tile bitmap: `true` when a prop's collision
+    /// footprint covers the tile centre (inflated by
+    /// [`PROP_NAV_INFLATE`] so AI agents with non-zero radius
+    /// don't path through tiles that visually look clear but
+    /// have a barrel jutting in from the next tile over).
+    /// Recomputed at the end of [`Floor::generate`] /
+    /// [`Floor::hub`] after props are placed; consumed by
+    /// [`Floor::path`] and [`Floor::line_of_sight`] so enemy
+    /// nav routes around props the same way it routes around
+    /// walls.
+    pub prop_blocked: Vec<bool>,
     pub config: FloorConfig,
 }
+
+/// Capsule radius (in metres) added around each prop AABB
+/// when building [`Floor::prop_blocked`]. Roughly enemy hit
+/// radius — pick the larger of [`crate`] consumers' radii
+/// (player 0.35, enemy 0.45) plus a small safety margin so
+/// A* prefers a slightly longer detour over a tile that the
+/// agent would clip on entry. Lifting this further also
+/// blocks more tiles, which can wall off narrow doorways
+/// flanked by torches; 0.55 keeps single-tile-wide corridors
+/// passable.
+pub const PROP_NAV_INFLATE: f32 = 0.55;
 
 impl Floor {
     /// World-space Y coordinate of the floor surface at tile
@@ -373,7 +406,7 @@ impl Floor {
             apply_room_elevation(&mut tiles, &mut elevation, width, depth, room, seed);
         }
 
-        Self {
+        let mut floor = Self {
             width,
             depth,
             tiles,
@@ -383,8 +416,17 @@ impl Floor {
             boss_room_center,
             portal_anchors,
             default_surface: SurfaceKind::Stone,
+            props: Vec::new(),
+            prop_blocked: vec![false; width * depth],
             config,
-        }
+        };
+        // Authoritative prop placement runs *after* the
+        // floor is fully constructed because the placement
+        // algorithms need to query `tile_floor_y_at`,
+        // `surface_at`, and the elevated tile grid.
+        floor.props = props_placement::decorate_rift(&floor, seed);
+        floor.rebuild_prop_blocked();
+        floor
     }
 
     pub fn get(&self, x: usize, z: usize) -> Tile {
@@ -412,8 +454,63 @@ impl Floor {
             if gx < 0 || gz < 0 {
                 return true;
             }
-            self.get(gx as usize, gz as usize) == Tile::Wall
+            let (x, z) = (gx as usize, gz as usize);
+            if x >= self.width || z >= self.depth {
+                return true;
+            }
+            self.tiles[z * self.width + x] == Tile::Wall || self.prop_blocked[z * self.width + x]
         })
+    }
+
+    /// Rebuild the [`Self::prop_blocked`] tile bitmap from the
+    /// current `props` list. Cheap (`O(props * affected tiles)`,
+    /// at most a few hundred props per floor each touching a
+    /// 3×3 tile neighbourhood). Called once at floor build;
+    /// expose it `pub` so a future destructible-prop system can
+    /// re-run it after a barrel breaks.
+    pub fn rebuild_prop_blocked(&mut self) {
+        self.prop_blocked.fill(false);
+        for prop in &self.props {
+            let Some((min, max)) = prop.collider_aabb() else {
+                continue;
+            };
+            // Inflate the AABB by an agent radius so tiles
+            // whose centre would be clipped by an agent
+            // standing on them are also blocked. Without the
+            // inflation A* would happily route through a tile
+            // whose centre is 0.49 m from a wall-aligned
+            // barrel, then the kinematic depenetration would
+            // shove the agent back and they'd jitter.
+            let pad = PROP_NAV_INFLATE;
+            let x0 = ((min.x - pad) + 0.5).floor() as i32;
+            let x1 = ((max.x + pad) + 0.5).floor() as i32;
+            let z0 = ((min.z - pad) + 0.5).floor() as i32;
+            let z1 = ((max.z + pad) + 0.5).floor() as i32;
+            for tz in z0..=z1 {
+                for tx in x0..=x1 {
+                    if tx < 0 || tz < 0 {
+                        continue;
+                    }
+                    let (ux, uz) = (tx as usize, tz as usize);
+                    if ux >= self.width || uz >= self.depth {
+                        continue;
+                    }
+                    // Tile centre is at world (tx, tz); the
+                    // prop covers `[min.x, max.x] × [min.z,
+                    // max.z]`. A capsule of radius `pad`
+                    // centred at the tile centre overlaps the
+                    // prop iff the closest point on the AABB
+                    // sits within `pad` of the centre.
+                    let cx = (tx as f32).clamp(min.x, max.x);
+                    let cz = (tz as f32).clamp(min.z, max.z);
+                    let dx = tx as f32 - cx;
+                    let dz = tz as f32 - cz;
+                    if dx * dx + dz * dz < pad * pad {
+                        self.prop_blocked[uz * self.width + ux] = true;
+                    }
+                }
+            }
+        }
     }
 
     /// 4-way A* on the floor's tile grid. Thin wrapper over
@@ -430,13 +527,46 @@ impl Floor {
         goal: (i32, i32),
         max_expanded: usize,
     ) -> Option<Vec<(i32, i32)>> {
-        rift_math::physics::astar_grid(from, goal, max_expanded, |x, z| {
-            x >= 0
-                && z >= 0
-                && (x as usize) < self.width
-                && (z as usize) < self.depth
-                && self.get(x as usize, z as usize).is_walkable()
-        })
+        // Cheap "is this tile blocked for nav?" predicate
+        // shared by `is_walkable` and the wall-proximity cost
+        // below. Out-of-bounds, walls, and prop-occupied
+        // tiles all count as blocked.
+        let blocked = |x: i32, z: i32| -> bool {
+            if x < 0 || z < 0 || (x as usize) >= self.width || (z as usize) >= self.depth {
+                return true;
+            }
+            let i = (z as usize) * self.width + (x as usize);
+            !self.tiles[i].is_walkable() || self.prop_blocked[i]
+        };
+        rift_math::physics::astar_grid_weighted(
+            from,
+            goal,
+            max_expanded,
+            |x, z| !blocked(x, z),
+            // Wall-proximity penalty: any tile with a blocked
+            // 4-neighbour costs more to enter, so the search
+            // prefers a route through the room interior over
+            // a shorter route that scrapes along the wall.
+            // Without this, A*'s tie-breaking happily picks
+            // wall-hugging paths and enemies visibly run with
+            // their shoulder against the geometry on the way
+            // to a player in another room. Cost of 3 means
+            // a wall-adjacent run of N tiles costs `4*N`
+            // while a same-length interior run costs `N`, so
+            // the search will accept up to a ~3x detour to
+            // stay off the wall. In a single door-width
+            // corridor every tile is wall-adjacent so the
+            // cost cancels out and the search still takes
+            // the corridor.
+            |x, z| {
+                if blocked(x - 1, z) || blocked(x + 1, z) || blocked(x, z - 1) || blocked(x, z + 1)
+                {
+                    3
+                } else {
+                    0
+                }
+            },
+        )
     }
 
     /// Get wall positions (only walls adjacent to floor tiles).
@@ -613,7 +743,7 @@ impl Floor {
         config.packs_per_room = 0;
         config.mobs_per_pack = 0;
         let elevation = vec![0 as Elevation; width * depth];
-        Self {
+        let mut floor = Self {
             width,
             depth,
             tiles,
@@ -623,8 +753,24 @@ impl Floor {
             boss_room_center: Vec3::ZERO,
             portal_anchors: None,
             default_surface: SurfaceKind::Sand,
+            props: Vec::new(),
+            prop_blocked: vec![false; width * depth],
             config,
-        }
+        };
+        // Hub stash sits a couple of tiles south-east of the
+        // central portal so it's visible from spawn without
+        // blocking the walk-up. Same anchor + yaw the client
+        // previously hard-coded; lifted here so the server
+        // agrees on the chest's collider.
+        let portal_centre = floor.rooms[0].center_world();
+        let stash_pos = portal_centre + Vec3::new(2.6, 0.0, 2.2);
+        // Hub seed is fixed (the hub is the same every visit
+        // — there's no per-run regeneration), so the
+        // scatter is too. `0xHUB_5EED` chosen to differ from
+        // any rift floor seed the gameplay could pick.
+        floor.props = props_placement::decorate_hub(&floor, 0x4855_5BBE_D0DE_F00D, stash_pos);
+        floor.rebuild_prop_blocked();
+        floor
     }
 
     /// Centre of the first arena-style room — useful for hub layouts to

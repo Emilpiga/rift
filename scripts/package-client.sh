@@ -58,6 +58,24 @@ echo "==> staging binary + assets"
 cp "target/release/$BIN" "$STAGE/"
 cp -R assets "$STAGE/assets"
 
+# Generate (or refresh) the third-party license attribution
+# file and stage it next to the binary. Required by every
+# storefront we'd plausibly publish through, and by the MIT /
+# Apache-2.0 / BSD-* licenses themselves. Skipped with a
+# warning if `cargo-about` isn't installed so a developer
+# without it can still cut a local test build — but a release
+# bundle without `THIRD_PARTY.txt` is not legally
+# distributable.
+if command -v cargo-about >/dev/null 2>&1; then
+    echo "==> regenerating THIRD_PARTY.txt"
+    "$(dirname "$0")/gen-third-party.sh"
+    cp dist/THIRD_PARTY.txt "$STAGE/"
+else
+    echo "WARNING: cargo-about not installed; THIRD_PARTY.txt will be missing"
+    echo "         from this bundle. Run \`cargo install cargo-about\` and"
+    echo "         re-package before distributing."
+fi
+
 if [[ -n "${RIFT_DEFAULT_SERVER:-}" ]]; then
     server_line="Connects automatically to $RIFT_DEFAULT_SERVER."
 else

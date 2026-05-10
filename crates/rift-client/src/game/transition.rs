@@ -208,9 +208,9 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
             // Stream a few gltf assets per tick so the netcode
             // loop keeps running and the server doesn't time us
             // out while the hub forest decodes.
-            let paths = super::props::nature::hub_asset_paths();
+            let paths = super::props::hub_asset_paths();
             let loaded = state.floor_mgr.props.preload_step(&paths, 2);
-            let total = super::props::nature::hub_total_assets();
+            let total = super::props::hub_total_assets();
             let done = state.floor_mgr.props.loaded_count(&paths);
             let next = if done >= total || loaded == 0 {
                 Some(EnterPhase::GenerateHub)
@@ -471,21 +471,58 @@ pub fn rebuild_wall_caches(state: &mut GameState, renderer: &mut Renderer) {
     } else {
         let mut min = glam::Vec2::splat(f32::INFINITY);
         let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
-        let mut floor_y = f32::INFINITY;
         for aabb in &state.floor.wall_aabbs {
             min.x = min.x.min(aabb.min.x);
             min.y = min.y.min(aabb.min.z);
             max.x = max.x.max(aabb.max.x);
             max.y = max.y.max(aabb.max.z);
-            // Floor Y is the lowest wall-base in the level; walls
-            // sit on the floor, so their min.y matches the floor
-            // plane.
-            floor_y = floor_y.min(aabb.min.y);
         }
-        if !floor_y.is_finite() {
-            floor_y = 0.0;
-        }
-        renderer.recreate_blood_field(min, max, floor_y);
+
+        // Derive the walkable Y-range from the dungeon's
+        // elevation grid rather than from wall AABBs: walls
+        // are spawned at a fixed Y=0 regardless of which
+        // platform they border, so they don't reveal the
+        // raised-dais / lowered-pit elevations the renderer
+        // needs. The shader composite uses this band to keep
+        // splats visible on every platform on the floor
+        // (without it, only the base elevation receives
+        // blood).
+        let (floor_y_min, floor_y_max) = match &state.floor_mgr.dungeon {
+            Some(d) if !d.elevation.is_empty() => {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for &e in &d.elevation {
+                    let y = e as f32 * rift_dungeon::ELEVATION_STEP;
+                    if y < lo {
+                        lo = y;
+                    }
+                    if y > hi {
+                        hi = y;
+                    }
+                }
+                if !lo.is_finite() {
+                    (0.0, 0.0)
+                } else {
+                    (lo, hi)
+                }
+            }
+            // No dungeon source (shouldn't happen outside the
+            // hub, which we already short-circuited above) — fall
+            // back to the wall-base Y so the field at least binds
+            // somewhere sensible.
+            _ => {
+                let mut lo = f32::INFINITY;
+                for aabb in &state.floor.wall_aabbs {
+                    lo = lo.min(aabb.min.y);
+                }
+                if !lo.is_finite() {
+                    (0.0, 0.0)
+                } else {
+                    (lo, lo)
+                }
+            }
+        };
+        renderer.recreate_blood_field(min, max, floor_y_min, floor_y_max);
     }
 }
 
@@ -516,6 +553,7 @@ fn spawn_hub_wind(state: &mut GameState) {
         min_distance: 1.0,
         max_distance: 60.0,
         looping: true,
+        pitch: 1.0,
     };
     state.floor_mgr.hub_wind = audio.spawn_emitter(&spec, glam::Vec3::ZERO);
 }

@@ -54,6 +54,24 @@ Write-Host '==> staging binary + assets'
 Copy-Item 'target\release\rift.exe' (Join-Path $stage 'rift.exe')
 Copy-Item -Recurse 'assets' (Join-Path $stage 'assets')
 
+# Generate (or refresh) the third-party license attribution
+# file and stage it next to the binary. Required by every
+# storefront we'd plausibly publish through, and by the MIT /
+# Apache-2.0 / BSD-* licenses themselves. Skipped with a
+# warning if cargo-about isn't installed so a developer
+# without it can still cut a local test build — but a release
+# bundle without THIRD_PARTY.txt is not legally distributable.
+if (Get-Command cargo-about -ErrorAction SilentlyContinue) {
+    Write-Host '==> regenerating THIRD_PARTY.txt'
+    & (Join-Path $PSScriptRoot 'gen-third-party.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "gen-third-party failed" }
+    Copy-Item 'dist\THIRD_PARTY.txt' (Join-Path $stage 'THIRD_PARTY.txt')
+} else {
+    Write-Warning 'cargo-about not installed; THIRD_PARTY.txt will be missing'
+    Write-Warning 'from this bundle. Run `cargo install cargo-about` and'
+    Write-Warning 're-package before distributing.'
+}
+
 $serverLine = if ($Server) {
     "Connects automatically to $Server."
 } else {

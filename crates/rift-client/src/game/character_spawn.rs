@@ -14,14 +14,14 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{
-    AnimationSet, Collider, Health, Player, Renderable, Skinned, Transform, Velocity,
+    AnimationSet, Collider, Health, Player, Renderable, Resource, Skinned, Transform, Velocity,
 };
 use rift_engine::renderer::mesh::SkinnedMesh;
 use rift_engine::{Mesh, Renderer};
 
 use rift_game::character::Gender;
 
-use super::avatar_cosmetics::{self, AvatarCosmeticsCache, is_body_mesh_name};
+use super::avatar_cosmetics::{self, is_body_mesh_name, AvatarCosmeticsCache};
 
 /// Paths to the animation packs we ship. Loaded in order; later
 /// entries override clips with the same (case-insensitive) name
@@ -87,38 +87,36 @@ pub fn spawn_character_entity(
 ) -> anyhow::Result<hecs::Entity> {
     let (mesh_path, tex_path) = rift_game::hero::base_model_paths(cfg.gender);
 
-    let (object_index, skinned_component) = match SkinnedMesh::from_gltf_filtered(
-        mesh_path,
-        |n| is_body_mesh_name(n),
-    ) {
-        Ok(skinned) => {
-            let idx = renderer.add_skinned_mesh(
-                &skinned.bind_vertices,
-                &skinned.vertex_skin,
-                &skinned.indices,
-                Mat4::from_translation(cfg.position),
-                0.0,
-            )?;
-            if let Err(e) = renderer.set_object_texture(
-                idx,
-                rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
-            ) {
-                log::warn!("Character texture load failed: {}", e);
+    let (object_index, skinned_component) =
+        match SkinnedMesh::from_gltf_filtered(mesh_path, |n| is_body_mesh_name(n)) {
+            Ok(skinned) => {
+                let idx = renderer.add_skinned_mesh(
+                    &skinned.bind_vertices,
+                    &skinned.vertex_skin,
+                    &skinned.indices,
+                    Mat4::from_translation(cfg.position),
+                    0.0,
+                )?;
+                if let Err(e) = renderer.set_object_texture(
+                    idx,
+                    rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
+                ) {
+                    log::warn!("Character texture load failed: {}", e);
+                }
+                let comp = Skinned {
+                    mesh: Arc::new(skinned),
+                    scratch: Vec::new(),
+                    joint_worlds: Vec::new(),
+                };
+                (idx, Some(comp))
             }
-            let comp = Skinned {
-                mesh: Arc::new(skinned),
-                scratch: Vec::new(),
-                joint_worlds: Vec::new(),
-            };
-            (idx, Some(comp))
-        }
-        Err(e) => {
-            log::warn!("Falling back to procedural character mesh: {}", e);
-            let cube = Mesh::cube();
-            renderer.add_mesh(&cube, Mat4::from_translation(cfg.position))?;
-            (renderer.objects.len() - 1, None)
-        }
-    };
+            Err(e) => {
+                log::warn!("Falling back to procedural character mesh: {}", e);
+                let cube = Mesh::cube();
+                renderer.add_mesh(&cube, Mat4::from_translation(cfg.position))?;
+                (renderer.objects.len() - 1, None)
+            }
+        };
 
     let entity = world.spawn((
         Transform::from_position(cfg.position),
@@ -139,6 +137,11 @@ pub fn spawn_character_entity(
         },
         Collider::new(0.3, 0.5, 0.3),
         Health::new(cfg.max_hp),
+        // Placeholder essence pool. The bar code reads only
+        // the ratio, and `world_sync` mirrors the snapshot's
+        // `resource_pct` onto `current` each tick, so a
+        // unit max is fine.
+        Resource::new(1.0),
         Renderable { object_index },
     ));
 
@@ -237,7 +240,9 @@ pub fn spawn_character_entity(
         }
         log::debug!("hand joint resolved at index {}", idx);
     } else {
-        log::warn!("no right-hand joint found in player skeleton; beam VFX will fall back to chest");
+        log::warn!(
+            "no right-hand joint found in player skeleton; beam VFX will fall back to chest"
+        );
     }
 
     // Foot joints — used by the terrain-pitch + foot-IK pass
@@ -249,23 +254,25 @@ pub fn spawn_character_entity(
         .map(|s| s.mesh.foot_joints())
         .unwrap_or((None, None));
     if let Ok(mut p) = world.get::<&mut Player>(entity) {
-        if let Some(li) = foot_pair.0 { p.foot_l_joint = li as u32; }
-        if let Some(ri) = foot_pair.1 { p.foot_r_joint = ri as u32; }
+        if let Some(li) = foot_pair.0 {
+            p.foot_l_joint = li as u32;
+        }
+        if let Some(ri) = foot_pair.1 {
+            p.foot_r_joint = ri as u32;
+        }
     }
     if foot_pair.0.is_none() || foot_pair.1.is_none() {
         log::warn!(
             "foot joints partially unresolved (l={:?}, r={:?}); foot IK on ramps will be skipped",
-            foot_pair.0, foot_pair.1,
+            foot_pair.0,
+            foot_pair.1,
         );
     }
     // Persistent foot-IK smoothing state. Attached unconditionally
     // — the IK pass is no-op when the dungeon floor handle isn't
     // available (hub, menu) or when foot joints didn't resolve.
     world
-        .insert_one(
-            entity,
-            rift_engine::ecs::components::FootIkState::default(),
-        )
+        .insert_one(entity, rift_engine::ecs::components::FootIkState::default())
         .ok();
 
     // Dress the avatar with white eyes, eyebrows, and per-gender

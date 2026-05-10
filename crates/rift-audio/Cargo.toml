@@ -2,6 +2,7 @@
 name = "rift-audio"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 # `kira` is a pure-Rust mixer designed for games: lock-free

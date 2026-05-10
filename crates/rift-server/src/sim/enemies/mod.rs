@@ -240,7 +240,11 @@ pub enum AiPhase {
     /// First field is the remaining timer, second is the unit
     /// dash direction snapshotted at wind-up start (so the player
     /// can side-step the lunge).
-    StalkerDash { remaining: f32, dir: Vec3, hit_landed: bool },
+    StalkerDash {
+        remaining: f32,
+        dir: Vec3,
+        hit_landed: bool,
+    },
     /// Post-dash retreat / cooldown. Counts down to zero, then
     /// flips back to `StalkerApproach`.
     StalkerRecover(f32),
@@ -537,6 +541,7 @@ pub fn tick_ai(
             MonsterRole::Stalker => stalker::tick(
                 en,
                 &stalker::SPEC,
+                floor,
                 target,
                 speed_mult,
                 damage_mult,
@@ -752,11 +757,7 @@ fn nearest_visible_player(
 /// Wall-blind by design: spread models hearing a pack-mate's
 /// pain shout, not vision. Visual `AGGRO_RANGE` aggro still
 /// respects LOS via [`nearest_visible_player`].
-pub fn notify_attacked(
-    world: &mut hecs::World,
-    victim: Entity,
-    attacker: Entity,
-) {
+pub fn notify_attacked(world: &mut hecs::World, victim: Entity, attacker: Entity) {
     // 1. Force-aggro the victim onto the attacker. Bypasses the
     //    `pending_aggro` queue — the victim *knows* who hit it.
     let victim_pos = match world.get::<&mut ServerEnemy>(victim) {
@@ -838,7 +839,10 @@ pub(crate) fn enter_windup(
     outcome: &mut AiOutcome,
 ) {
     use rift_net::messages::WorldEvent;
-    en.ai_phase = AiPhase::Windup { kind, remaining: duration };
+    en.ai_phase = AiPhase::Windup {
+        kind,
+        remaining: duration,
+    };
     en.attack_anim_remaining = duration;
     outcome.events.push(WorldEvent::EnemyTelegraph {
         source: en.net_id,
@@ -868,7 +872,10 @@ pub(crate) fn tick_windup(en: &mut ServerEnemy, dt: f32) -> Option<WindupKind> {
         en.ai_phase = AiPhase::Idle;
         Some(kind)
     } else {
-        en.ai_phase = AiPhase::Windup { kind, remaining: next };
+        en.ai_phase = AiPhase::Windup {
+            kind,
+            remaining: next,
+        };
         None
     }
 }
@@ -1042,9 +1049,7 @@ pub fn spawn_for_floor(
                 if is_elite {
                     let roll1 = ((enemy_seed >> 24) as u8) % 5;
                     elite_mods |= 1u8 << roll1;
-                    enemy_seed = enemy_seed
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1);
+                    enemy_seed = enemy_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                     // ~50 % chance of a second affix.
                     if (enemy_seed & 0x1) == 0 {
                         let mut roll2 = ((enemy_seed >> 24) as u8) % 5;
@@ -1052,9 +1057,7 @@ pub fn spawn_for_floor(
                             roll2 = (roll2 + 1) % 5;
                         }
                         elite_mods |= 1u8 << roll2;
-                        enemy_seed = enemy_seed
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(1);
+                        enemy_seed = enemy_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                     }
                 }
                 // Look up role stats through the central

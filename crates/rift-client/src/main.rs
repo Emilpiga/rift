@@ -66,10 +66,17 @@ impl App for RiftApp {
         // listener pose used for spatialisation matches what
         // the player sees on the rendered frame.
         if let Some(audio) = self.state.audio.as_mut() {
-            // Listener at the camera position, oriented along
-            // the look vector. Third-person camera puts the
-            // ear roughly where the eye is, which keeps stereo
-            // panning consistent with screen-space \u2014 a sound
+            // Listener is anchored at the *player*, not the
+            // camera. Third-person camera sits several metres
+            // behind and above the avatar, so using
+            // `cam.position` here would inflate every emitter's
+            // perceived distance by the camera-sit-back,
+            // making short-range cues (chest lid, footsteps,
+            // ability casts) inaudible at normal play distance.
+            // Anchoring at the player keeps distance falloff
+            // matched to the on-screen subject. Orientation
+            // still comes from the camera so left/right stereo
+            // panning continues to track the screen: a sound
             // on the right of the screen pans right.
             let cam = &renderer.camera;
             let forward = (cam.target - cam.position).normalize_or_zero();
@@ -78,7 +85,23 @@ impl App for RiftApp {
             } else {
                 glam::Quat::IDENTITY
             };
-            audio.set_listener(cam.position, orientation);
+            // Find the local player's transform. Fall back to
+            // the camera position when the local avatar isn't
+            // in the world yet (loading screens, character
+            // select) so we still spatialise UI-anchored
+            // sounds.
+            use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
+            let player_pos = self
+                .state
+                .world
+                .query::<(&Transform, &Player, &LocalPlayer)>()
+                .iter()
+                .map(|(_, (t, _, _))| t.position)
+                .next()
+                .unwrap_or(cam.position);
+            // ~1.6 m ear height above the player's foot anchor.
+            let listener_pos = player_pos + glam::Vec3::new(0.0, 1.6, 0.0);
+            audio.set_listener(listener_pos, orientation);
             // Push every entity-bound emitter's transform +
             // intensity into the mixer before the tick. Cheap
             // single-query walk; see
@@ -105,6 +128,22 @@ impl RiftApp {
     fn net_pre_phase(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
+
+        // If the server told us to go away (protocol mismatch,
+        // future auth failure, ...) there's no point continuing
+        // — the simulation will never tick. Print the reason so
+        // the player can see it in stdout / a wrapper script and
+        // exit cleanly. Done at the top of the per-frame net
+        // phase so the message lands before any other state has
+        // a chance to wedge.
+        if let Some(reason) = net.fatal_reject_reason() {
+            eprintln!();
+            eprintln!("=== Connection rejected by server ===");
+            eprintln!("{reason}");
+            eprintln!("=====================================");
+            eprintln!();
+            std::process::exit(2);
+        }
 
         // Forward any pending roster lookup the player just
         // confirmed on the account-entry screen. Must happen
@@ -188,7 +227,7 @@ impl RiftApp {
             &mut state.avatar_cosmetics_cache,
         );
         net.sync_enemies(&mut state.world, renderer, &mut state.floor_mgr.monsters);
-        net.sync_projectiles(renderer, dt);
+        net.sync_projectiles(renderer, state.audio.as_mut(), dt);
 
         // Spawn loot-pillar visuals from snapshot rows. The
         // `LootDropped` event is the fast path for fresh kills

@@ -15,8 +15,17 @@ docs/
 assets/icons
 assets/models
 assets/textures
+assets/audio
 assets/shaders/*.spv
 
 # Local docker volume / dumps
 docker-compose.yml
 *.log
+
+# Playtest-client packaging output and cargo-about config —
+# only consumed by `scripts/package-client.*` and
+# `scripts/gen-third-party.*` on the build host, never by the
+# server image. Keeps the build context tight.
+dist/
+about.toml
+about.hbs

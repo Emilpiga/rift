@@ -32,7 +32,13 @@ impl Sim {
         //    any caster bolts the AI asked for.
         let player_targets = player::target_positions(&self.world);
         let damage_mult = FloorConfig::for_floor(self.floor_index).enemy_damage_mult;
-        let ai_outcome = enemies::tick_ai(&mut self.world, &self.floor, &player_targets, damage_mult, dt);
+        let ai_outcome = enemies::tick_ai(
+            &mut self.world,
+            &self.floor,
+            &player_targets,
+            damage_mult,
+            dt,
+        );
         let melee_damage = ai_outcome.melee_damage;
         // Pipe through any wire events the AI tick produced
         // (currently telegraph SFX cues). Done here so they
@@ -57,13 +63,14 @@ impl Sim {
                     let pos = en.k.position;
                     let nid = en.net_id;
                     drop(en);
-                    self.pending_events.push(rift_net::messages::WorldEvent::Heal {
-                        caster: nid,
-                        target: nid,
-                        amount: healed,
-                        over_time: false,
-                        position: pos.to_array(),
-                    });
+                    self.pending_events
+                        .push(rift_net::messages::WorldEvent::Heal {
+                            caster: nid,
+                            target: nid,
+                            amount: healed,
+                            over_time: false,
+                            position: pos.to_array(),
+                        });
                 }
             }
         }
@@ -93,14 +100,15 @@ impl Sim {
                     dir_x,
                     dir_y,
                 } => {
-                    self.pending_events.push(rift_net::messages::WorldEvent::AbilityCast {
-                        caster: owner,
-                        ability: ability_id as u16,
-                        origin: origin.to_array(),
-                        dir: [dir_x, dir_y],
-                        target: Some(target.to_array()),
-                        start_tick: tick,
-                    });
+                    self.pending_events
+                        .push(rift_net::messages::WorldEvent::AbilityCast {
+                            caster: owner,
+                            ability: ability_id as u16,
+                            origin: origin.to_array(),
+                            dir: [dir_x, dir_y],
+                            target: Some(target.to_array()),
+                            start_tick: tick,
+                        });
                 }
                 enemies::EnemyCast::Resolve {
                     owner,
@@ -251,6 +259,7 @@ impl Sim {
         );
         let enemy_aoe_damage = projectile::tick_aoe(
             &mut self.world,
+            &self.floor,
             &mut self.aoe_zones,
             &enemies,
             &player_targets,
@@ -259,6 +268,7 @@ impl Sim {
         );
         let enemy_channel_damage = channel::tick(
             &mut self.world,
+            &self.floor,
             &enemies,
             &player_targets,
             &mut ctx,
@@ -397,10 +407,8 @@ impl Sim {
             }
         }
         for (entity, position) in risen {
-            self.pending_events.push(WorldEvent::PlayerGhosted {
-                entity,
-                position,
-            });
+            self.pending_events
+                .push(WorldEvent::PlayerGhosted { entity, position });
         }
     }
 
@@ -412,7 +420,6 @@ impl Sim {
     /// rift state changes so the main loop broadcasts a fresh
     /// `RiftProgress` next iteration.
     fn process_kills(&mut self, kills: &[combat_ctx::KillInfo]) {
-
         let mut spawn_boss_now = false;
         for k in kills {
             if k.role == rift_game::monsters::MonsterRole::Boss {
@@ -427,8 +434,7 @@ impl Sim {
                 }
             } else if !self.rift_progress.boss_spawned {
                 if self.rift_progress.required > 0 {
-                    let next = (self.rift_progress.progress + 1)
-                        .min(self.rift_progress.required);
+                    let next = (self.rift_progress.progress + 1).min(self.rift_progress.required);
                     if next != self.rift_progress.progress {
                         self.rift_progress.progress = next;
                         self.progress_dirty = true;
@@ -444,11 +450,8 @@ impl Sim {
         // level for the kill-XP scaling so over-levelled players
         // get diminished returns.
         let monster_level = (self.floor_index as u32).max(1);
-        let player_entities: Vec<(ClientId, Entity)> = self
-            .sessions
-            .iter()
-            .map(|(c, e)| (*c, *e))
-            .collect();
+        let player_entities: Vec<(ClientId, Entity)> =
+            self.sessions.iter().map(|(c, e)| (*c, *e)).collect();
         for (cid, entity) in player_entities {
             let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
                 continue;
@@ -461,7 +464,10 @@ impl Sim {
                 continue;
             }
             let mut total = 0u64;
-            for _ in kills.iter().filter(|k| k.role != rift_game::monsters::MonsterRole::Boss) {
+            for _ in kills
+                .iter()
+                .filter(|k| k.role != rift_game::monsters::MonsterRole::Boss)
+            {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -469,7 +475,10 @@ impl Sim {
             }
             // Boss kills are worth a fat lump of XP \u2014 5\u00d7 a
             // normal kill at the floor's monster level.
-            for _ in kills.iter().filter(|k| k.role == rift_game::monsters::MonsterRole::Boss) {
+            for _ in kills
+                .iter()
+                .filter(|k| k.role == rift_game::monsters::MonsterRole::Boss)
+            {
                 total += rift_game::experience::Experience::xp_for_kill(
                     monster_level,
                     p.experience.level,
@@ -543,13 +552,17 @@ impl Sim {
             path_target_tile: None,
             path_recompute_in: 0.0,
         };
-        self.world
-            .spawn((enemy, effect::EffectStack::default(), enemies::BossState::new(self.floor_index)));
+        self.world.spawn((
+            enemy,
+            effect::EffectStack::default(),
+            enemies::BossState::new(self.floor_index),
+        ));
         self.rift_progress.boss_spawned = true;
         self.progress_dirty = true;
         log::info!(
             "sim: floor {} boss spawned at {:?} (hp={hp:.0})",
-            self.floor_index, boss_pos
+            self.floor_index,
+            boss_pos
         );
     }
 }

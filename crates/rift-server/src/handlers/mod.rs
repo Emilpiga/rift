@@ -24,6 +24,50 @@ pub mod persistence;
 pub mod portal;
 pub mod session;
 
+use std::fmt;
+
+use rift_net::ClientId;
+
+use crate::Server;
+
+/// `Display`-able client tag used to prefix per-client log
+/// lines so multi-player issues are easier to correlate. Renders
+/// as `[cid=N char=Foo]` when the session has a known character
+/// name, or `[cid=N]` when the client is pre-Hello (still
+/// negotiating roster, etc.).
+pub(crate) struct ClientTag<'a> {
+    pub cid: ClientId,
+    pub character: Option<&'a str>,
+}
+
+impl fmt::Display for ClientTag<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.character {
+            Some(name) => write!(f, "[cid={} char={}]", self.cid.0, name),
+            None => write!(f, "[cid={}]", self.cid.0),
+        }
+    }
+}
+
+impl Server {
+    /// Render `[cid=N char=Foo]` for `from`. Cheap (single
+    /// session map lookup, no allocation); use it inline in
+    /// any `log::warn!` / `log::error!` / `log::info!` line
+    /// where a human reading the log will want to know which
+    /// player the message refers to. Falls back to `[cid=N]`
+    /// for pre-Hello connections.
+    pub(crate) fn client_tag(&self, from: ClientId) -> ClientTag<'_> {
+        let character = self
+            .sessions
+            .get(from)
+            .and_then(|s| s.character_name.as_deref());
+        ClientTag {
+            cid: from,
+            character,
+        }
+    }
+}
+
 /// Decode a stored gender column back to the wire enum. Unknown
 /// codes (forward-compat with future variants) fall back to
 /// Female so we never panic on a malformed row.
@@ -51,9 +95,7 @@ pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
 /// the `InventorySync` / `EquipmentSync` builders agree on the
 /// field layout — bumping `Item::to_wire` only needs to be
 /// reflected here.
-pub(crate) fn item_to_blob(
-    item: &rift_game::loot::Item,
-) -> rift_net::messages::ItemBlob {
+pub(crate) fn item_to_blob(item: &rift_game::loot::Item) -> rift_net::messages::ItemBlob {
     let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
     rift_net::messages::ItemBlob {
         base_id,
@@ -74,9 +116,7 @@ pub(crate) fn item_to_blob(
 /// in [`rift_net::messages::ItemBlob`]. Returns `None` for
 /// legacy / unprovenanced items so the receiver can route them
 /// to the self-bind-on-touch path.
-pub(crate) fn provenance_to_wire(
-    item: &rift_game::loot::Item,
-) -> Option<Vec<[u8; 16]>> {
+pub(crate) fn provenance_to_wire(item: &rift_game::loot::Item) -> Option<Vec<[u8; 16]>> {
     item.provenance.as_ref().map(|p| p.eligible.clone())
 }
 
@@ -113,11 +153,7 @@ pub(crate) fn provenance_from_wire(
 pub(crate) fn provenance_from_persisted(
     uuids: Option<Vec<rift_persistence::Uuid>>,
 ) -> Option<rift_game::loot::LootProvenance> {
-    uuids.map(|v| {
-        rift_game::loot::LootProvenance::from_ids(
-            v.into_iter().map(|u| u.into_bytes()),
-        )
-    })
+    uuids.map(|v| rift_game::loot::LootProvenance::from_ids(v.into_iter().map(|u| u.into_bytes())))
 }
 
 /// Insert `item` at `slot_index` in a sparse bag/stash, growing

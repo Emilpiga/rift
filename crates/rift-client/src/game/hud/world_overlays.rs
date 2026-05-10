@@ -6,7 +6,7 @@
 
 use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{
-    Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Transform,
+    Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Resource, Transform,
 };
 use rift_engine::ui::im::{Color, Pos2, Rect, Ui};
 
@@ -206,21 +206,31 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
 /// always draws the bar (even at full HP) since seeing a teammate's
 /// max HP is useful tactical info, unlike enemies where a full bar
 /// is just visual noise.
-pub fn render_remote_player_health_bars(
-    ui: &mut Ui<'_>,
-    world: &hecs::World,
-    view_proj: Mat4,
-) {
+///
+/// A slimmer cyan-blue essence bar is drawn directly under the
+/// HP bar so allies can see how much of the universal ability
+/// resource a teammate has left before pulling the next pack —
+/// same gameplay value as the HP bar, just tracking essence.
+/// The fraction comes from the avatar's [`Resource`] component,
+/// which `world_sync` mirrors from the snapshot's `resource_pct`
+/// each tick (same pattern as the HP mirror above).
+pub fn render_remote_player_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
     use rift_engine::ui::im::WorldUi;
 
     const BAR_W: f32 = 56.0;
     const BAR_H: f32 = 6.0;
+    /// Vertical pixel gap between HP bar bottom and essence bar
+    /// top. Smaller than `BAR_H` so the two bars read as a
+    /// stacked vital-pair rather than two unrelated widgets.
+    const RESOURCE_GAP: f32 = 1.0;
+    /// Essence bar height. Slimmer than the HP bar so health
+    /// stays the dominant readable cue.
+    const RESOURCE_BAR_H: f32 = 4.0;
     const Y_OFFSET: f32 = -32.0;
 
     let mut wui = WorldUi::new(ui, view_proj);
-    for (entity, (transform, _rp, health)) in world
-        .query::<(&Transform, &RemotePlayer, &Health)>()
-        .iter()
+    for (entity, (transform, _rp, health)) in
+        world.query::<(&Transform, &RemotePlayer, &Health)>().iter()
     {
         let hp_pct = (health.current / health.max).clamp(0.0, 1.0);
         let world_pos = transform.position + Vec3::new(0.0, 1.6, 0.0);
@@ -232,6 +242,28 @@ pub fn render_remote_player_health_bars(
             Color::rgba(0.9, 0.25, 0.15, 0.9)
         };
         let bar_rect = wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color);
+
+        // Essence bar — same width as HP, slimmer, anchored
+        // `BAR_H + RESOURCE_GAP` pixels under the HP bar's top
+        // (i.e. `RESOURCE_GAP` under its bottom). Pure cyan-blue
+        // so it can't be confused with the green HP bar at a
+        // glance.
+        if let Ok(resource) = world.get::<&Resource>(entity) {
+            let res_pct = if resource.max > 0.0 {
+                (resource.current / resource.max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            wui.bar_above_world(
+                world_pos,
+                Y_OFFSET + BAR_H + RESOURCE_GAP,
+                BAR_W,
+                RESOURCE_BAR_H,
+                res_pct,
+                Color::rgba(0.30, 0.55, 0.95, 0.9),
+            );
+        }
+
         let effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
             .get::<&Effects>(entity)
             .map(|d| d.effects.clone())

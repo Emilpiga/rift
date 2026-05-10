@@ -10,12 +10,14 @@
 //! local player.
 
 use glam::Vec3;
+use rift_engine::assets::AssetServer;
 use rift_engine::dungeon::{Floor, RoomTheme};
 use rift_engine::renderer::vfx::{presets, EffectId};
 use rift_engine::{PointLight, Renderer};
 
-use super::props::placement::{collect_floor_tiles, tile_centre, SmallRng};
-use super::props::{fantasy::CANDLESTICK_STAND, Props};
+use super::props::render_meta::{render_meta, RenderMeta};
+use rift_dungeon::props::PropId;
+use rift_dungeon::props_placement::SmallRng;
 
 /// Per-theme torch colour + intensity. Returned as
 /// `(rgb, intensity_mul)` so the base radius stays per-floor
@@ -101,68 +103,53 @@ impl TorchSystem {
         }
     }
 
-    /// Walk the floor, place torches on a sparse subset of
-    /// wall-adjacent tiles, and spawn a candlestick prop +
-    /// flame VFX + warm point light at each one.
+    /// Build the per-floor torch list from `floor.props`.
     ///
-    /// `seed` is folded with a fixed salt so torch placement is
-    /// stable for a given floor seed but doesn't collide with
-    /// other prop scatterers.
-    pub fn place(
-        &mut self,
-        floor: &Floor,
-        renderer: &mut Renderer,
-        props: &mut Props,
-        world: &mut hecs::World,
-        seed: u64,
-    ) {
-        // Clear any prior placement (caller should also have
-        // despawned the VFX — see `clear`).
+    /// The dungeon owns torch *placement* — every prop with
+    /// `light = true` is a torch we should attach a flame
+    /// VFX + point light to. The candlestick mesh itself is
+    /// rendered by [`Props::render_floor`] alongside every
+    /// other prop, so all this method does is stand up the
+    /// per-torch flame, light, and (optionally, via
+    /// [`place_audio`]) audio emitter.
+    ///
+    /// `seed` only influences the per-torch flicker phase
+    /// (so a corridor of sconces doesn't pulse in unison);
+    /// the actual placement comes entirely from `floor.props`.
+    /// Idempotent: clears the prior list first. Caller is
+    /// responsible for despawning the previous floor's VFX
+    /// via [`clear`] before re-running.
+    pub fn build(&mut self, floor: &Floor, renderer: &mut Renderer, seed: u64) {
         self.torches.clear();
 
-        let (border, _interior) = collect_floor_tiles(floor);
-        if border.is_empty() {
-            return;
-        }
+        // Stable per-floor flicker phases. Using floor seed
+        // makes the flicker pattern reproducible per floor —
+        // useful when debugging — and decorrelates phases
+        // across torches so a corridor of sconces doesn't
+        // pulse in unison.
+        let mut rng = SmallRng::new(seed ^ 0xF11C_5EED_C0DE_BEEF_u64);
 
-        // Min spacing between torches, in metres squared. The
-        // forward shader caps active point lights at 8, so we
-        // intentionally place torches sparsely enough that a
-        // typical room has ~2–4 of them. Otherwise the
-        // per-frame nearest-8 selection has to swap lights in
-        // and out as the player walks, which reads as a halo
-        // tracking the player rather than static fixtures
-        // anchored to the walls. ~11 m feels right: each
-        // torch's lit area (radius 11) just kisses its
-        // neighbour's, leaving no obvious dark gaps but also
-        // no overlap that would force a swap.
-        const MIN_SPACING_SQ: f32 = 11.0 * 11.0;
+        // Probe the candlestick mesh once. The flame VFX sits
+        // on top of the candle, so we need its height; the
+        // wall-snap delta tells us where the rendered candle
+        // ends up relative to the dungeon's tile-centre
+        // anchor (which is what `placed.pos` actually is).
+        let candle_meta: RenderMeta = render_meta(PropId::CandleStickStand);
+        let bounds = AssetServer::global().mesh_bounds(candle_meta.gltf);
+        let s = candle_meta.asset_scale;
+        let candle_top = bounds.map(|(mn, mx)| (mx.y - mn.y) * s).unwrap_or(1.05);
 
-        let mut rng = SmallRng::new(seed ^ 0xA1B2_C3D4_E5F6_0789_u64);
-        // Shuffle indices via Fisher-Yates so spacing pruning
-        // doesn't bias to one corner.
-        let mut order: Vec<usize> = (0..border.len()).collect();
-        for i in (1..order.len()).rev() {
-            let j = rng.range(0, (i as u32) + 1) as usize;
-            order.swap(i, j);
-        }
+        for placed in floor.props.iter().filter(|p| p.light) {
+            let (ox, oz) = placed
+                .wall_dir
+                .map(|(a, b)| (a as i32, b as i32))
+                .unwrap_or((0, 0));
 
-        for idx in order {
-            let (tx, tz, (ox, oz)) = border[idx];
-            let centre = tile_centre(tx, tz);
-
-            // Probe the candlestick mesh AABB so we can both
-            // size the flame to the model's height and
-            // replicate the WallAligned snap calculation
-            // exactly (so the flame sits on top of where
-            // `props.spawn` actually places the candle).
-            let bounds = props.assets().mesh_bounds(CANDLESTICK_STAND.gltf);
-            let s = CANDLESTICK_STAND.scale;
-            let candle_top = bounds.map(|(mn, mx)| (mx.y - mn.y) * s).unwrap_or(1.05);
-            // Half-extent of the candle along the wall normal,
-            // matching the prop spawner's WallAligned logic.
-            // Falls back to a conservative 0.10 m if bounds
-            // aren't available yet.
+            // Replicate the render layer's wall-snap so the
+            // flame sits on top of where the candle actually
+            // appears, not the un-snapped tile centre. Falls
+            // back to a conservative 0.10 m if bounds aren't
+            // available yet.
             let half_along = bounds
                 .map(|(mn, mx)| {
                     if ox != 0 {
@@ -172,58 +159,20 @@ impl TorchSystem {
                     }
                 })
                 .unwrap_or(0.10);
-            // Distance to push from tile centre toward the
-            // wall. The spawner uses `0.5 - half - 0.04` (4 cm
-            // air gap from the wall face); we add a few extra
-            // cm here so authored candle bases that have a
-            // wider footprint than their bounding box —
-            // sculpted scrollwork, splayed feet — clear the
-            // wall surface cleanly. Previously this was
-            // 0.30 m *plus* the spawner's own snap, which
-            // double-pushed the candle into the wall.
+            // 0.5 m to the wall face minus half the prop's
+            // wall-normal extent, plus a small air gap so
+            // sculpted scrollwork and splayed feet clear
+            // the wall cleanly.
             let push = (0.5 - half_along - 0.08).max(0.0);
-            // Lift to the tile's authored elevation so a
-            // torch sconce on a raised dais or sunken-pit
-            // wall sits on the room's floor surface, not at
-            // y=0. Without this the candle hovers above
-            // (or sinks below) every non-base-elevation
-            // floor tile and its flame VFX renders detached
-            // from the model.
-            let tile_y = floor.tile_floor_y_at(centre.x, centre.z);
             let prop_anchor = Vec3::new(
-                centre.x + ox as f32 * push,
-                tile_y,
-                centre.z + oz as f32 * push,
+                placed.pos.x + ox as f32 * push,
+                placed.pos.y,
+                placed.pos.z + oz as f32 * push,
             );
-            let flame_pos = Vec3::new(prop_anchor.x, tile_y + candle_top + 0.05, prop_anchor.z);
-
-            // Spacing check against already-placed torches.
-            let too_close = self
-                .torches
-                .iter()
-                .any(|t| t.light.position.distance_squared(flame_pos) < MIN_SPACING_SQ);
-            if too_close {
-                continue;
-            }
-
-            // Spawn the candlestick model. Yaw faces the candle
-            // away from the wall (toward the room) so the wick
-            // and any sculpted detail reads at viewer angle.
-            // We pass `wall_dir = (0, 0)` to *suppress* the
-            // spawner's WallAligned snap because we already
-            // computed the correct push above (using the same
-            // formula). Otherwise the snap stacks on top of
-            // our offset and the prop ends up clipped into
-            // the wall.
-            let yaw = (ox as f32).atan2(oz as f32);
-            let _ = props.spawn(
-                world,
-                renderer,
-                &CANDLESTICK_STAND,
-                prop_anchor,
-                yaw,
-                (0, 0),
-                None,
+            let flame_pos = Vec3::new(
+                prop_anchor.x,
+                placed.pos.y + candle_top + 0.05,
+                prop_anchor.z,
             );
 
             let vfx = renderer.vfx_system.spawn(presets::wall_torch(), flame_pos);
@@ -249,7 +198,7 @@ impl TorchSystem {
             self.torches.push(Torch {
                 light,
                 vfx,
-                // Audio emitter spawned below in `place_audio`
+                // Audio emitter spawned by [`place_audio`]
                 // (caller threads the optional `AudioSystem`
                 // separately so this method's signature
                 // stays narrow).
@@ -447,6 +396,7 @@ impl TorchSystem {
             min_distance: 3.0,
             max_distance: 14.0,
             looping: true,
+            pitch: 1.0,
         };
         for t in self.torches.iter_mut() {
             if t.audio.is_some() {

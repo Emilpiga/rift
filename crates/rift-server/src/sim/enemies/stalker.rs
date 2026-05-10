@@ -8,11 +8,10 @@
 
 use glam::Vec3;
 use hecs::Entity;
+use rift_dungeon::Floor;
 use rift_game::kinematic::loco;
 
-use super::{
-    enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy, WindupKind,
-};
+use super::{brute, enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy, WindupKind};
 
 // ---- Spec -----------------------------------------------------
 
@@ -67,6 +66,7 @@ pub static SPEC: Spec = Spec {
 pub fn tick(
     en: &mut ServerEnemy,
     spec: &Spec,
+    floor: &Floor,
     target: Option<(Entity, Vec3, f32)>,
     speed_mult: f32,
     damage_mult: f32,
@@ -102,7 +102,10 @@ pub fn tick(
     // lunge after the telegraph.
     if matches!(
         en.ai_phase,
-        AiPhase::Windup { kind: WindupKind::StalkerDash, .. }
+        AiPhase::Windup {
+            kind: WindupKind::StalkerDash,
+            ..
+        }
     ) {
         if let Some(WindupKind::StalkerDash) = tick_windup(en, dt) {
             let dir = to_target.normalize_or_zero();
@@ -117,16 +120,64 @@ pub fn tick(
 
     match en.ai_phase {
         AiPhase::StalkerApproach => {
-            if dist <= spec.trigger_range {
+            // LOS check: if a wall sits between us and the
+            // target, follow an A* path around it instead of
+            // bee-lining into the geometry. Also gate the
+            // dash commit on LOS — dashing into a wall is
+            // useless and looks broken.
+            let los_clear = floor.line_of_sight(en.k.position, target_pos);
+            if los_clear && dist <= spec.trigger_range {
                 // Lock in the approach by entering the wind-up.
                 // Pad attack_anim_remaining post-windup so the
                 // attack clip carries through the whole
                 // windup+dash window.
+                en.path.clear();
+                en.path_target_tile = None;
                 enter_windup(en, WindupKind::StalkerDash, spec.windup_dur, outcome);
                 en.attack_anim_remaining = spec.windup_dur + spec.dash_dur;
                 return;
             }
-            let dir = to_target.normalize_or_zero();
+            let dir = if !los_clear {
+                // Wall in the way — consume / rebuild a cached
+                // A* path toward the target tile and steer
+                // toward the next waypoint. Same shape as
+                // `brute::tick`'s pathing branch.
+                let target_tile = brute::world_to_tile(target_pos);
+                let need_recompute = en.path.is_empty()
+                    || en.path_target_tile != Some(target_tile)
+                    || en.path_recompute_in <= 0.0;
+                if need_recompute {
+                    let from = brute::world_to_tile(en.k.position);
+                    en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
+                    en.path_target_tile = Some(target_tile);
+                    en.path_recompute_in = brute::PATH_RECOMPUTE_INTERVAL;
+                }
+                while let Some(&(wx, wz)) = en.path.first() {
+                    let dx = wx as f32 - en.k.position.x;
+                    let dz = wz as f32 - en.k.position.z;
+                    if dx * dx + dz * dz < 0.25 {
+                        en.path.remove(0);
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&(wx, wz)) = en.path.first() {
+                    Vec3::new(
+                        wx as f32 - en.k.position.x,
+                        0.0,
+                        wz as f32 - en.k.position.z,
+                    )
+                    .normalize_or_zero()
+                } else {
+                    to_target.normalize_or_zero()
+                }
+            } else {
+                // Clear LOS but still outside trigger range —
+                // bee-line and drop any stale waypoints.
+                en.path.clear();
+                en.path_target_tile = None;
+                to_target.normalize_or_zero()
+            };
             en.k.velocity = dir * en.speed * speed_mult;
             en.k.locomotion = loco::RUN;
         }
@@ -147,12 +198,14 @@ pub fn tick(
             // the target.
             let mut landed = hit_landed;
             if !landed && dist <= spec.attack_range_for_hit {
-                outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
-                    target: target_entity,
-                    attacker_kind: en.role.to_wire_byte(),
-                    ability_id: rift_game::abilities::id::MELEE_ATTACK,
-                    amount: spec.dash_damage * damage_mult,
-                });
+                outcome
+                    .melee_damage
+                    .push(super::super::combat_ctx::PlayerHit {
+                        target: target_entity,
+                        attacker_kind: en.role.to_wire_byte(),
+                        ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                        amount: spec.dash_damage * damage_mult,
+                    });
                 landed = true;
             }
             if next <= 0.0 {

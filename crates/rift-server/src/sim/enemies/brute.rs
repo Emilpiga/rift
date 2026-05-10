@@ -18,8 +18,8 @@ use rift_dungeon::Floor;
 use rift_game::kinematic::loco;
 
 use super::{
-    elite_mod, enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy,
-    WindupKind, ATTACK_ANIM_DUR, ELITE_VAMPIRE_FRAC,
+    elite_mod, enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy, WindupKind,
+    ATTACK_ANIM_DUR, ELITE_VAMPIRE_FRAC,
 };
 
 // ---- Tuning constants ----------------------------------------
@@ -132,7 +132,10 @@ pub fn tick(
         // fairer than a phantom hit on a dead player.
         if matches!(
             en.ai_phase,
-            AiPhase::Windup { kind: WindupKind::BruteMelee, .. }
+            AiPhase::Windup {
+                kind: WindupKind::BruteMelee,
+                ..
+            }
         ) {
             en.ai_phase = AiPhase::Idle;
         }
@@ -154,15 +157,23 @@ pub fn tick(
     // (with a small tolerance), so a player dodging out
     // during the wind-up causes a clean whiff. That's the
     // whole point of the telegraph.
-    if matches!(en.ai_phase, AiPhase::Windup { kind: WindupKind::BruteMelee, .. }) {
+    if matches!(
+        en.ai_phase,
+        AiPhase::Windup {
+            kind: WindupKind::BruteMelee,
+            ..
+        }
+    ) {
         if let Some(WindupKind::BruteMelee) = tick_windup(en, dt) {
             if dist <= spec.attack_range * 1.15 {
-                outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
-                    target: target_entity,
-                    attacker_kind: en.role.to_wire_byte(),
-                    ability_id: rift_game::abilities::id::MELEE_ATTACK,
-                    amount: spec.attack_damage * damage_mult,
-                });
+                outcome
+                    .melee_damage
+                    .push(super::super::combat_ctx::PlayerHit {
+                        target: target_entity,
+                        attacker_kind: en.role.to_wire_byte(),
+                        ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                        amount: spec.attack_damage * damage_mult,
+                    });
                 if (en.elite_mods & elite_mod::VAMPIRIC) != 0 {
                     outcome.vampiric_heals.push((
                         target_entity,
@@ -187,9 +198,7 @@ pub fn tick(
                 || en.path_recompute_in <= 0.0;
             if need_recompute {
                 let from = world_to_tile(en.k.position);
-                en.path = floor
-                    .path(from, target_tile, 64)
-                    .unwrap_or_default();
+                en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
                 en.path_target_tile = Some(target_tile);
                 en.path_recompute_in = PATH_RECOMPUTE_INTERVAL;
             }
@@ -209,8 +218,12 @@ pub fn tick(
             // otherwise fall through to the bee-line — the path
             // either hasn't been computed yet or A* failed.
             if let Some(&(wx, wz)) = en.path.first() {
-                Vec3::new(wx as f32 - en.k.position.x, 0.0, wz as f32 - en.k.position.z)
-                    .normalize_or_zero()
+                Vec3::new(
+                    wx as f32 - en.k.position.x,
+                    0.0,
+                    wz as f32 - en.k.position.z,
+                )
+                .normalize_or_zero()
             } else {
                 to_target_raw.normalize_or_zero()
             }

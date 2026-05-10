@@ -24,9 +24,7 @@ use hecs::Entity;
 use rift_dungeon::Floor;
 use rift_game::kinematic::loco;
 
-use super::{
-    enter_windup, tick_windup, AiOutcome, AiPhase, EnemyCast, ServerEnemy, WindupKind,
-};
+use super::{enter_windup, tick_windup, AiOutcome, AiPhase, EnemyCast, ServerEnemy, WindupKind};
 
 // ---- Spec -----------------------------------------------------
 
@@ -110,7 +108,10 @@ pub fn tick(
     // very-late side-steps still get tracked.
     if matches!(
         en.ai_phase,
-        AiPhase::Windup { kind: WindupKind::CasterBolt, .. }
+        AiPhase::Windup {
+            kind: WindupKind::CasterBolt,
+            ..
+        }
     ) {
         if let Some(WindupKind::CasterBolt) = tick_windup(en, dt) {
             outcome.casts.push(EnemyCast::Resolve {
@@ -145,7 +146,7 @@ pub fn tick(
             || en.path_recompute_in <= 0.0;
         if need_recompute {
             let from = super::brute::world_to_tile(en.k.position);
-            en.path = floor.path(from, target_tile, 64).unwrap_or_default();
+            en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
             en.path_target_tile = Some(target_tile);
             en.path_recompute_in = super::brute::PATH_RECOMPUTE_INTERVAL;
         }
@@ -161,8 +162,12 @@ pub fn tick(
             }
         }
         let approach = if let Some(&(wx, wz)) = en.path.first() {
-            Vec3::new(wx as f32 - en.k.position.x, 0.0, wz as f32 - en.k.position.z)
-                .normalize_or_zero()
+            Vec3::new(
+                wx as f32 - en.k.position.x,
+                0.0,
+                wz as f32 - en.k.position.z,
+            )
+            .normalize_or_zero()
         } else {
             // Path failed (or hasn't built yet) — just bee-line
             // toward the target as a fallback so we still try

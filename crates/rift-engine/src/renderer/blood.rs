@@ -140,10 +140,16 @@ pub struct BloodField {
     /// Set when a floor binds a real field. `Vec4::ZERO` means no
     /// active field; the forward shader treats this as a no-op.
     pub world_xform: Vec4,
-    /// World-Y of the floor plane bound by the active field. Used by
-    /// the forward shader to reject wall-top samples that share an
-    /// XZ projection with a splat below.
+    /// World-Y of the lowest floor plane bound by the active
+    /// field. Combined with [`Self::floor_y_max`] gives the
+    /// fragment-acceptance band the forward shader uses to
+    /// reject wall-top samples that share an XZ projection
+    /// with a splat below. A single-elevation level has
+    /// `floor_y_min == floor_y_max`.
     pub floor_y: f32,
+    /// World-Y of the highest floor plane bound by the
+    /// active field. See [`Self::floor_y`].
+    pub floor_y_max: f32,
     /// `true` once a floor has been bound. Drives whether the splat
     /// pass runs at all.
     pub active: bool,
@@ -360,11 +366,9 @@ impl BloodField {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
-        let mask_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&mask_binding);
-        let mask_set_layout = unsafe {
-            device.create_descriptor_set_layout(&mask_layout_info, None)?
-        };
+        let mask_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&mask_binding);
+        let mask_set_layout =
+            unsafe { device.create_descriptor_set_layout(&mask_layout_info, None)? };
         let mask_pool_size = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 1,
@@ -434,6 +438,7 @@ impl BloodField {
             frame_instance_counts: [0; MAX_FRAMES_IN_FLIGHT],
             world_xform: Vec4::ZERO,
             floor_y: 0.0,
+            floor_y_max: 0.0,
             active: false,
             rng: 0xC0FF_EE13,
             recent_kills: Vec::with_capacity(RECENT_KILLS_CAP),
@@ -442,14 +447,25 @@ impl BloodField {
     }
 
     /// Bind a new floor's world AABB. `min` / `max` are the floor's
-    /// XZ extents in world space; `floor_y` is the world Y at which
-    /// the floor plane sits (used by the forward shader to reject
-    /// wall-top samples that share an XZ projection with a splat
-    /// below). Wipes any pending splats and marks the field for
-    /// clear on the next splat pass. Caller is responsible for
-    /// re-binding the field view to set 0 / binding 4 of the main
-    /// descriptor sets via `UniformBuffers::bind_blood_field`.
-    pub fn bind_floor(&mut self, min_xz: glam::Vec2, max_xz: glam::Vec2, floor_y: f32) {
+    /// XZ extents in world space; `floor_y_min` and `floor_y_max`
+    /// bracket the elevation range of the playable floor surface
+    /// (lowest pit ↔ highest dais). The forward shader uses the
+    /// band `[floor_y_min - eps, floor_y_max + eps]` to decide which
+    /// fragments are eligible to sample the blood field, so a
+    /// rift floor with raised platforms / lowered pits still
+    /// accepts splats on every walkable surface. For a flat floor
+    /// pass the same value for both. Wipes any pending splats and
+    /// marks the field for clear on the next splat pass. Caller is
+    /// responsible for re-binding the field view to set 0 /
+    /// binding 4 of the main descriptor sets via
+    /// `UniformBuffers::bind_blood_field`.
+    pub fn bind_floor(
+        &mut self,
+        min_xz: glam::Vec2,
+        max_xz: glam::Vec2,
+        floor_y_min: f32,
+        floor_y_max: f32,
+    ) {
         let extent = max_xz - min_xz;
         // Pad slightly so splats near the edge of the floor don't
         // wrap or clip — half a metre at each side.
@@ -461,7 +477,8 @@ impl BloodField {
             if size.y > 1e-3 { 1.0 / size.y } else { 0.0 },
         );
         self.world_xform = Vec4::new(origin.x, origin.y, inv_size.x, inv_size.y);
-        self.floor_y = floor_y;
+        self.floor_y = floor_y_min;
+        self.floor_y_max = floor_y_max;
         self.active = true;
         self.needs_clear = true;
         self.pending.clear();
@@ -476,6 +493,7 @@ impl BloodField {
     pub fn unbind(&mut self) {
         self.world_xform = Vec4::ZERO;
         self.floor_y = 0.0;
+        self.floor_y_max = 0.0;
         self.active = false;
         self.pending.clear();
         self.recent_kills.clear();
@@ -537,12 +555,7 @@ impl BloodField {
     /// later splats overwrite older `G` values for any overlapping
     /// texel, so a fresh kill on top of an old pool re-wets the
     /// region.
-    pub fn splat_for_kill(
-        &mut self,
-        ctx: KillContext,
-        time_secs: f32,
-        wall_aabbs: &[Aabb],
-    ) {
+    pub fn splat_for_kill(&mut self, ctx: KillContext, time_secs: f32, wall_aabbs: &[Aabb]) {
         if !self.active {
             return;
         }
@@ -683,7 +696,11 @@ impl BloodField {
             let slice_pick = self.rand01();
             let slice_alt = self.rand01();
             let slice = if slice_pick < 0.7 {
-                if slice_alt < 0.5 { 0 } else { 3 }
+                if slice_alt < 0.5 {
+                    0
+                } else {
+                    3
+                }
             } else {
                 1
             };
@@ -701,15 +718,7 @@ impl BloodField {
             } else {
                 self.rand01() * std::f32::consts::TAU
             };
-            self.emit_at(
-                center,
-                size_m,
-                aspect,
-                rot,
-                slice,
-                intensity,
-                time_secs,
-            );
+            self.emit_at(center, size_m, aspect, rot, slice, intensity, time_secs);
         }
 
         // ---- Layer 4: Wall arcs ----
@@ -721,8 +730,8 @@ impl BloodField {
         let wall_ray_count = 5;
         let wall_max_dist = 3.5 + 2.0 * power;
         for i in 0..wall_ray_count {
-            let t = (i as f32 - (wall_ray_count - 1) as f32 * 0.5)
-                / (wall_ray_count - 1) as f32 * 2.0;
+            let t =
+                (i as f32 - (wall_ray_count - 1) as f32 * 0.5) / (wall_ray_count - 1) as f32 * 2.0;
             // Cubic taper: ray indices near the centre stay close to
             // angle 0; outer rays fan out only mildly. Range ~±20°.
             let cone_a = (t * t * t.signum()) * 0.35;
@@ -743,15 +752,7 @@ impl BloodField {
             let main_size = 0.55 + 0.40 * power;
             let main_jit = self.signed_jitter(0.25);
             let core_jit = self.signed_jitter(0.40);
-            self.emit_at(
-                hit_xz,
-                main_size,
-                1.30,
-                theta + main_jit,
-                2,
-                1.0,
-                time_secs,
-            );
+            self.emit_at(hit_xz, main_size, 1.30, theta + main_jit, 2, 1.0, time_secs);
             self.emit_at(
                 hit_xz,
                 main_size * 0.55,
@@ -844,7 +845,11 @@ impl BloodField {
             let d = dxz.length();
             t.step_accum += d;
             t.last_pos = pos;
-            if d > 1e-3 { dxz / d } else { Vec3::Z }
+            if d > 1e-3 {
+                dxz / d
+            } else {
+                Vec3::Z
+            }
         };
 
         // Soak refill: if the foot is inside any recent kill stain,
@@ -979,12 +984,7 @@ impl BloodField {
         let half_size_uv = half_size_uv.max(min_uv);
         self.queue_splat(SplatInstance {
             center_time_intensity: [uv.x, uv.y, time_secs, intensity.clamp(0.0, 1.0)],
-            size_rot_slice: [
-                half_size_uv,
-                aspect,
-                rotation,
-                atlas_slice as f32,
-            ],
+            size_rot_slice: [half_size_uv, aspect, rotation, atlas_slice as f32],
         });
     }
 
@@ -1110,11 +1110,7 @@ impl BloodField {
                         },
                     });
                 device.cmd_begin_render_pass(cmd, &rp_begin, vk::SubpassContents::INLINE);
-                device.cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.splat_pipeline,
-                );
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.splat_pipeline);
                 device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -1173,8 +1169,8 @@ fn transition_to_shader_read(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cmd = unsafe { device.allocate_command_buffers(&alloc_info)?[0] };
-    let begin = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
         device.begin_command_buffer(cmd, &begin)?;
         let barrier = vk::ImageMemoryBarrier::default()
@@ -1219,8 +1215,11 @@ fn create_splat_pipeline(
     let vert_path = shader_dir.join("blood_splat.vert");
     let vert_source = std::fs::read_to_string(&vert_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", vert_path, e))?;
-    let vert_spv =
-        hot_reload::compile_glsl(&vert_source, "blood_splat.vert", shaderc::ShaderKind::Vertex)?;
+    let vert_spv = hot_reload::compile_glsl(
+        &vert_source,
+        "blood_splat.vert",
+        shaderc::ShaderKind::Vertex,
+    )?;
     let vert_module = pipe::create_shader_module(device, &vert_spv)?;
 
     let frag_path = shader_dir.join("blood_splat.frag");
@@ -1368,10 +1367,10 @@ fn generate_mask_atlas() -> Vec<u8> {
         // Per-slice variation: different blob count + drip count +
         // RNG seed so the four cells read as distinct silhouettes.
         let (blob_count, drip_count, seed) = match slice {
-            0 => (5, 6, 0x9e37_79b9_u32),    // small spray
-            1 => (8, 12, 0xa1b2_c3d4_u32),   // dense splatter
-            2 => (3, 16, 0x1234_5678_u32),   // long-drip pool
-            _ => (6, 4, 0xface_cafe_u32),    // round splat
+            0 => (5, 6, 0x9e37_79b9_u32),  // small spray
+            1 => (8, 12, 0xa1b2_c3d4_u32), // dense splatter
+            2 => (3, 16, 0x1234_5678_u32), // long-drip pool
+            _ => (6, 4, 0xface_cafe_u32),  // round splat
         };
         let mut rng = seed;
         let mut next = || {
@@ -1473,8 +1472,16 @@ fn ray_first_aabb_xz(
         let hi = Vec2::new(aabb.max.x, aabb.max.z);
         // Slab intersect, guarded against divide-by-zero on rays
         // parallel to an axis.
-        let inv_x = if dir.x.abs() > 1e-6 { 1.0 / dir.x } else { f32::INFINITY };
-        let inv_y = if dir.y.abs() > 1e-6 { 1.0 / dir.y } else { f32::INFINITY };
+        let inv_x = if dir.x.abs() > 1e-6 {
+            1.0 / dir.x
+        } else {
+            f32::INFINITY
+        };
+        let inv_y = if dir.y.abs() > 1e-6 {
+            1.0 / dir.y
+        } else {
+            f32::INFINITY
+        };
         let t1 = (lo.x - origin.x) * inv_x;
         let t2 = (hi.x - origin.x) * inv_x;
         let t3 = (lo.y - origin.y) * inv_y;

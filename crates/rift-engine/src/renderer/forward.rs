@@ -7,21 +7,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::hot_reload::{self, HotReloader};
+use crate::renderer::blood;
 use crate::renderer::camera::Camera;
 use crate::renderer::depth::DepthBuffer;
-use crate::renderer::blood;
 use crate::renderer::gpu_skin::{SkinHandle, SkinningSystem};
 use crate::renderer::material::MaterialPool;
 use crate::renderer::mesh::{Mesh, Vertex, VertexSkin};
+use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
+use crate::renderer::post::{BloomConfig, PostProcessing};
 use crate::renderer::shadow::{self, ShadowMap};
 use crate::renderer::shadow_point::{self, PointShadowAtlas};
 use crate::renderer::sky::{SkyConfig, SkyRenderer};
-use crate::renderer::post::{BloomConfig, PostProcessing};
-use crate::renderer::overlay::{OverlayBatch, OverlayRenderer};
-use crate::renderer::vfx::{ParticleVfxRenderer, RibbonRenderer, VfxSystem};
 use crate::renderer::texture::{PbrSource, Texture, TextureSource};
-use std::path::Path;
 use crate::renderer::uniform::{UniformBuffers, UniformData};
+use crate::renderer::vfx::{ParticleVfxRenderer, RibbonRenderer, VfxSystem};
 use crate::vulkan::{
     buffer::{self, GpuBuffer},
     commands::{self, DrawCommand},
@@ -29,6 +28,7 @@ use crate::vulkan::{
     sync::{FrameSync, MAX_FRAMES_IN_FLIGHT},
     Swapchain, VulkanDevice, VulkanInstance,
 };
+use std::path::Path;
 
 pub struct RenderObject {
     pub vertex_buffer: GpuBuffer,
@@ -196,6 +196,14 @@ pub struct Renderer {
     /// over the character. Falls back to the camera position
     /// (camera-anchored fog) until the game writes one.
     pub fog_origin: Vec3,
+    /// Smoothed [0,1] strength of the see-through-wall x-ray
+    /// porthole. Driven by `camera_follow_system`: target = 1.0
+    /// while a wall raycast-occludes the player, 0.0 otherwise.
+    /// Eased toward the target each frame so the porthole
+    /// fades in/out instead of popping the moment the camera
+    /// crosses a wall edge. Pumped to the shader via
+    /// `fogOrigin.w`.
+    pub wall_xray_strength: f32,
     // Dynamic point lights (populated each frame by game code)
     pub point_lights: Vec<PointLight>,
     /// Transient VFX-driven point lights (projectile trails,
@@ -425,7 +433,11 @@ impl Renderer {
             device.graphics_queue,
             command_pool_init,
         )?;
-        uniforms.bind_texture(&device.device, default_texture.view, default_texture.sampler);
+        uniforms.bind_texture(
+            &device.device,
+            default_texture.view,
+            default_texture.sampler,
+        );
 
         // 1×1 zero-valued R16G16_SFLOAT texture (two 16-bit floats
         // encoded as zero = four zero bytes → wet=0, age=0).
@@ -460,9 +472,16 @@ impl Renderer {
             shader_dir,
         )?;
 
-        unsafe { device.device.destroy_command_pool(command_pool_init, None); }
+        unsafe {
+            device.device.destroy_command_pool(command_pool_init, None);
+        }
 
-        Ok((default_texture, default_blood_field, material_pool, blood_field))
+        Ok((
+            default_texture,
+            default_blood_field,
+            material_pool,
+            blood_field,
+        ))
     }
 
     pub fn new(window: &winit::window::Window) -> Result<Self> {
@@ -511,7 +530,11 @@ impl Renderer {
         // HDR offscreen + bloom + composite. Owns the three
         // render passes the rest of the renderer targets.
         let post = PostProcessing::new(
-            &device.device, &allocator, &swapchain, depth_buffer.view, &shader_dir,
+            &device.device,
+            &allocator,
+            &swapchain,
+            depth_buffer.view,
+            &shader_dir,
         )?;
         let render_pass = post.scene_pass;
         let composite_pass = post.composite_pass;
@@ -582,8 +605,13 @@ impl Renderer {
         let camera = Camera::new(aspect);
 
         let overlay = OverlayRenderer::new(
-            &device.device, &allocator, device.graphics_queue, command_pool,
-            composite_pass, swapchain.extent, &shader_dir,
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool,
+            composite_pass,
+            swapchain.extent,
+            &shader_dir,
         )?;
         let mut overlay_batch = OverlayBatch::new();
         // Bind the batch to the renderer's shared icon UV
@@ -595,15 +623,25 @@ impl Renderer {
         overlay_batch.bind_overlay_atlas(overlay.icon_uv_registry(), atlas_w, atlas_h);
 
         let vfx_ribbon_renderer = RibbonRenderer::new(
-            &device.device, &allocator, device.graphics_queue, command_pool,
-            post.translucent_pass, swapchain.extent,
-            uniforms.descriptor_set_layout, post.translucent_set_layout,
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool,
+            post.translucent_pass,
+            swapchain.extent,
+            uniforms.descriptor_set_layout,
+            post.translucent_set_layout,
             &shader_dir,
         )?;
         let vfx_particle_renderer = ParticleVfxRenderer::new(
-            &device.device, &allocator, device.graphics_queue, command_pool,
-            post.translucent_pass, swapchain.extent,
-            uniforms.descriptor_set_layout, post.translucent_set_layout,
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool,
+            post.translucent_pass,
+            swapchain.extent,
+            uniforms.descriptor_set_layout,
+            post.translucent_set_layout,
             &shader_dir,
         )?;
         let vfx_system = VfxSystem::new(8192);
@@ -662,6 +700,7 @@ impl Renderer {
             fog_start: 5.0,
             fog_end: 16.0,
             fog_origin: Vec3::ZERO,
+            wall_xray_strength: 0.0,
             point_lights: Vec::new(),
             vfx_lights: Vec::new(),
             heat_sources: Vec::new(),
@@ -679,20 +718,26 @@ impl Renderer {
             return Ok(()); // Minimized — skip
         }
 
-        unsafe { self.device.device.device_wait_idle()?; }
+        unsafe {
+            self.device.device.device_wait_idle()?;
+        }
 
         // Tear down post-process swapchain-dependent resources
         // (offscreen images, framebuffers, descriptor sets)
         // before the depth buffer that some of them reference.
-        self.post.cleanup_swapchain_dependent(&self.device.device, &self.allocator);
+        self.post
+            .cleanup_swapchain_dependent(&self.device.device, &self.allocator);
 
         // Destroy old depth buffer
-        self.depth_buffer.cleanup(&self.device.device, &self.allocator);
+        self.depth_buffer
+            .cleanup(&self.device.device, &self.allocator);
 
         // Destroy old pipeline
         unsafe {
             self.device.device.destroy_pipeline(self.pipeline, None);
-            self.device.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
         }
 
         // Destroy old swapchain
@@ -711,14 +756,18 @@ impl Renderer {
         )?;
 
         // Recreate depth buffer at new size
-        self.depth_buffer = DepthBuffer::new(&self.device.device, &self.allocator, self.swapchain.extent)?;
+        self.depth_buffer =
+            DepthBuffer::new(&self.device.device, &self.allocator, self.swapchain.extent)?;
 
         // Recreate post-process resources (offscreen images,
         // framebuffers, descriptor sets). Render passes &
         // pipelines stay alive across resize because every post
         // pipeline uses dynamic viewport+scissor.
         self.post.recreate(
-            &self.device.device, &self.allocator, &self.swapchain, self.depth_buffer.view,
+            &self.device.device,
+            &self.allocator,
+            &self.swapchain,
+            self.depth_buffer.view,
         )?;
 
         // Recreate pipeline with new extent
@@ -726,24 +775,38 @@ impl Renderer {
             &self.device.device,
             self.post.scene_pass,
             self.swapchain.extent,
-            &[self.uniforms.descriptor_set_layout, self.material_pool.layout],
+            &[
+                self.uniforms.descriptor_set_layout,
+                self.material_pool.layout,
+            ],
             &self.shader_dir,
         )?;
         self.pipeline = new_pipeline;
         self.pipeline_layout = new_layout;
 
         // Recreate overlay pipeline
-        self.overlay.recreate_pipeline(&self.device.device, self.post.composite_pass, self.swapchain.extent, &self.shader_dir)?;
+        self.overlay.recreate_pipeline(
+            &self.device.device,
+            self.post.composite_pass,
+            self.swapchain.extent,
+            &self.shader_dir,
+        )?;
 
         // Recreate VFX ribbon pipeline alongside.
         self.vfx_ribbon_renderer.recreate_pipeline(
-            &self.device.device, self.post.translucent_pass, self.swapchain.extent,
-            self.uniforms.descriptor_set_layout, self.post.translucent_set_layout,
+            &self.device.device,
+            self.post.translucent_pass,
+            self.swapchain.extent,
+            self.uniforms.descriptor_set_layout,
+            self.post.translucent_set_layout,
             &self.shader_dir,
         )?;
         self.vfx_particle_renderer.recreate_pipeline(
-            &self.device.device, self.post.translucent_pass, self.swapchain.extent,
-            self.uniforms.descriptor_set_layout, self.post.translucent_set_layout,
+            &self.device.device,
+            self.post.translucent_pass,
+            self.swapchain.extent,
+            self.uniforms.descriptor_set_layout,
+            self.post.translucent_set_layout,
             &self.shader_dir,
         )?;
 
@@ -769,7 +832,13 @@ impl Renderer {
     /// shader samples this floor's accumulation image rather than
     /// the placeholder. Call once at floor build time after walls
     /// are populated.
-    pub fn recreate_blood_field(&mut self, min_xz: glam::Vec2, max_xz: glam::Vec2, floor_y: f32) {
+    pub fn recreate_blood_field(
+        &mut self,
+        min_xz: glam::Vec2,
+        max_xz: glam::Vec2,
+        floor_y_min: f32,
+        floor_y_max: f32,
+    ) {
         // The descriptor set at binding 4 is referenced by the
         // forward pipeline's command buffers. Without
         // VK_EXT_descriptor_indexing's UPDATE_AFTER_BIND /
@@ -779,8 +848,11 @@ impl Renderer {
         // is a validation error. Floor transitions are rare
         // and already pay GPU stalls elsewhere (texture
         // uploads, mesh creation), so wait for idle here.
-        unsafe { self.device.device.device_wait_idle().ok(); }
-        self.blood_field.bind_floor(min_xz, max_xz, floor_y);
+        unsafe {
+            self.device.device.device_wait_idle().ok();
+        }
+        self.blood_field
+            .bind_floor(min_xz, max_xz, floor_y_min, floor_y_max);
         self.uniforms.bind_blood_field(
             &self.device.device,
             self.blood_field.field_view,
@@ -797,7 +869,9 @@ impl Renderer {
         // its command buffer is a validation error without
         // descriptor-indexing's UPDATE_AFTER_BIND. Stall once
         // — hub entry is rare.
-        unsafe { self.device.device.device_wait_idle().ok(); }
+        unsafe {
+            self.device.device.device_wait_idle().ok();
+        }
         self.blood_field.unbind();
         self.uniforms.bind_blood_field(
             &self.device.device,
@@ -828,7 +902,9 @@ impl Renderer {
         )?;
 
         // Compute bounding sphere radius from vertices
-        let bounds_radius = mesh.vertices.iter()
+        let bounds_radius = mesh
+            .vertices
+            .iter()
             .map(|v| v.position.length())
             .fold(0.0_f32, f32::max);
 
@@ -896,7 +972,9 @@ impl Renderer {
             "dynamic_vertex_placeholder",
         )?;
 
-        let bounds_radius = mesh.vertices.iter()
+        let bounds_radius = mesh
+            .vertices
+            .iter()
             .map(|v| v.position.length())
             .fold(0.0_f32, f32::max);
 
@@ -996,7 +1074,8 @@ impl Renderer {
             "skinned_vertex_placeholder",
         )?;
 
-        let bounds_radius = rest_vertices.iter()
+        let bounds_radius = rest_vertices
+            .iter()
             .map(|v| v.position.length())
             .fold(0.0_f32, f32::max);
 
@@ -1052,7 +1131,8 @@ impl Renderer {
 
     /// True if this object was created via `add_dynamic_mesh`.
     pub fn is_dynamic_mesh(&self, obj_idx: usize) -> bool {
-        self.objects.get(obj_idx)
+        self.objects
+            .get(obj_idx)
             .map(|o| o.dynamic_vertex_buffers.is_some())
             .unwrap_or(false)
     }
@@ -1065,11 +1145,7 @@ impl Renderer {
     ///
     /// Replaces the previous `set_object_texture` /
     /// `set_object_texture_from_bytes` pair.
-    pub fn set_object_texture(
-        &mut self,
-        obj_idx: usize,
-        src: TextureSource<'_>,
-    ) -> Result<()> {
+    pub fn set_object_texture(&mut self, obj_idx: usize, src: TextureSource<'_>) -> Result<()> {
         if obj_idx >= self.objects.len() {
             return Ok(());
         }
@@ -1080,14 +1156,18 @@ impl Renderer {
             self.command_pool,
             src,
         )?;
-        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        let set = self
+            .material_pool
+            .alloc_set(&self.device.device, &texture)?;
         let obj = &mut self.objects[obj_idx];
         // Only stall the GPU when there's an existing per-object
         // texture to free; first-time binding can skip the wait
         // since the default material set was never written to
         // anything we're about to drop.
         if obj.texture.is_some() {
-            unsafe { self.device.device.device_wait_idle().ok(); }
+            unsafe {
+                self.device.device.device_wait_idle().ok();
+            }
             if let Some(mut old) = obj.texture.take() {
                 old.cleanup(&self.device.device, &self.allocator);
             }
@@ -1120,7 +1200,9 @@ impl Renderer {
             self.command_pool,
             src,
         )?;
-        let set = self.material_pool.alloc_set(&self.device.device, &texture)?;
+        let set = self
+            .material_pool
+            .alloc_set(&self.device.device, &texture)?;
         Ok((texture, set))
     }
 
@@ -1217,16 +1299,21 @@ impl Renderer {
                     use crate::renderer::asset_decode::resolve_asset_path;
                     let metallic_img = if let Some(p) = metallic {
                         Some(image::open(resolve_asset_path(p)?)?.to_luma8())
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let roughness_img = if let Some(p) = roughness {
                         Some(image::open(resolve_asset_path(p)?)?.to_luma8())
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let (w, h) = match (&metallic_img, &roughness_img) {
                         (Some(m), Some(r)) => {
                             if m.dimensions() != r.dimensions() {
                                 return Err(anyhow::anyhow!(
                                     "metallic and roughness map dimensions differ: {:?} vs {:?}",
-                                    m.dimensions(), r.dimensions()
+                                    m.dimensions(),
+                                    r.dimensions()
                                 ));
                             }
                             m.dimensions()
@@ -1237,8 +1324,10 @@ impl Renderer {
                     };
                     let mut packed = vec![0u8; (w * h * 4) as usize];
                     for i in 0..(w * h) as usize {
-                        packed[i * 4 + 0] = metallic_img.as_ref().map(|m| m.as_raw()[i]).unwrap_or(0);
-                        packed[i * 4 + 1] = roughness_img.as_ref().map(|r| r.as_raw()[i]).unwrap_or(255);
+                        packed[i * 4 + 0] =
+                            metallic_img.as_ref().map(|m| m.as_raw()[i]).unwrap_or(0);
+                        packed[i * 4 + 1] =
+                            roughness_img.as_ref().map(|r| r.as_raw()[i]).unwrap_or(255);
                         packed[i * 4 + 2] = 0;
                         packed[i * 4 + 3] = 255;
                     }
@@ -1247,7 +1336,9 @@ impl Renderer {
                         &self.allocator,
                         self.device.graphics_queue,
                         self.command_pool,
-                        w, h, &packed,
+                        w,
+                        h,
+                        &packed,
                         vk::Format::R8G8B8A8_UNORM,
                     )?;
                     owned.push(tex);
@@ -1259,7 +1350,12 @@ impl Renderer {
             }
             PbrSource::Decoded(pack) => {
                 let crate::renderer::asset_decode::DecodedPbrPack {
-                    name: _, basecolor, normal, mr, ao, height,
+                    name: _,
+                    basecolor,
+                    normal,
+                    mr,
+                    ao,
+                    height,
                 } = pack;
                 let upload = |this: &Renderer,
                               d: crate::renderer::asset_decode::DecodedTexture|
@@ -1274,14 +1370,15 @@ impl Renderer {
                 };
                 let mut owned: Vec<Texture> = Vec::with_capacity(5);
                 owned.push(upload(self, basecolor)?);
-                let push_opt = |opt: Option<_>, owned: &mut Vec<Texture>| -> Result<Option<usize>> {
-                    if let Some(d) = opt {
-                        owned.push(upload(self, d)?);
-                        Ok(Some(owned.len() - 1))
-                    } else {
-                        Ok(None)
-                    }
-                };
+                let push_opt =
+                    |opt: Option<_>, owned: &mut Vec<Texture>| -> Result<Option<usize>> {
+                        if let Some(d) = opt {
+                            owned.push(upload(self, d)?);
+                            Ok(Some(owned.len() - 1))
+                        } else {
+                            Ok(None)
+                        }
+                    };
                 let normal_idx = push_opt(normal, &mut owned)?;
                 let mr_idx = push_opt(mr, &mut owned)?;
                 let ao_idx = push_opt(ao, &mut owned)?;
@@ -1306,17 +1403,15 @@ impl Renderer {
     /// Unlike `set_object_texture*`, the renderer does NOT take
     /// ownership of any texture — the caller must keep the underlying
     /// `Texture` alive (typically inside a long-lived asset cache).
-    pub fn set_object_shared_material(
-        &mut self,
-        obj_idx: usize,
-        set: vk::DescriptorSet,
-    ) {
+    pub fn set_object_shared_material(&mut self, obj_idx: usize, set: vk::DescriptorSet) {
         if obj_idx >= self.objects.len() {
             return;
         }
         let obj = &mut self.objects[obj_idx];
         if obj.texture.is_some() {
-            unsafe { self.device.device.device_wait_idle().ok(); }
+            unsafe {
+                self.device.device.device_wait_idle().ok();
+            }
             if let Some(mut old) = obj.texture.take() {
                 old.cleanup(&self.device.device, &self.allocator);
             }
@@ -1331,11 +1426,7 @@ impl Renderer {
     /// of `flags` (numeric value `1.0`) flips the shader into
     /// PBR + normal-mapping mode and starts reading the
     /// material set's normal / MR / AO / height bindings.
-    pub fn set_object_material_params(
-        &mut self,
-        obj_idx: usize,
-        params: [f32; 4],
-    ) {
+    pub fn set_object_material_params(&mut self, obj_idx: usize, params: [f32; 4]) {
         if let Some(obj) = self.objects.get_mut(obj_idx) {
             obj.material_params = params;
         }
@@ -1384,7 +1475,9 @@ impl Renderer {
             "index_buffer",
         )?;
 
-        let bounds_radius = mesh.vertices.iter()
+        let bounds_radius = mesh
+            .vertices
+            .iter()
             .map(|v| v.position.length())
             .fold(0.0_f32, f32::max);
 
@@ -1429,13 +1522,18 @@ impl Renderer {
         // Reset all command buffers so validation doesn't consider buffers "in use"
         for &cmd in &self.command_buffers {
             unsafe {
-                self.device.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).ok();
+                self.device
+                    .device
+                    .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                    .ok();
             }
         }
         // Now safe to destroy immediately + flush any pending deferred deletions
         for mut obj in self.objects.drain(..) {
-            obj.vertex_buffer.cleanup(&self.device.device, &self.allocator);
-            obj.index_buffer.cleanup(&self.device.device, &self.allocator);
+            obj.vertex_buffer
+                .cleanup(&self.device.device, &self.allocator);
+            obj.index_buffer
+                .cleanup(&self.device.device, &self.allocator);
             if let Some(bufs) = obj.dynamic_vertex_buffers.take() {
                 for mut b in bufs {
                     b.cleanup(&self.device.device, &self.allocator);
@@ -1465,7 +1563,9 @@ impl Renderer {
         let allocator = &self.allocator;
         self.deletion_queue.retain_mut(|(retire_frame, buf)| {
             if current >= *retire_frame {
-                unsafe { device.destroy_buffer(buf.buffer, None); }
+                unsafe {
+                    device.destroy_buffer(buf.buffer, None);
+                }
                 if let Some(alloc) = buf.allocation.take() {
                     allocator.lock().unwrap().free(alloc).ok();
                 }
@@ -1504,7 +1604,11 @@ impl Renderer {
         }
         let frame = self.current_frame;
         unsafe {
-            self.device.device.wait_for_fences(&[self.frame_sync.in_flight[frame]], true, u64::MAX)?;
+            self.device.device.wait_for_fences(
+                &[self.frame_sync.in_flight[frame]],
+                true,
+                u64::MAX,
+            )?;
         }
         Ok(())
     }
@@ -1526,9 +1630,13 @@ impl Renderer {
     }
 
     /// Total icons discovered at startup (for progress UI).
-    pub fn total_icons(&self) -> usize { self.overlay.total_icons() }
+    pub fn total_icons(&self) -> usize {
+        self.overlay.total_icons()
+    }
     /// Icons whose decode + upload has completed.
-    pub fn loaded_icons(&self) -> usize { self.overlay.loaded_icons() }
+    pub fn loaded_icons(&self) -> usize {
+        self.overlay.loaded_icons()
+    }
 
     // ---- draw_frame helpers --------------------------------------------
     //
@@ -1565,10 +1673,7 @@ impl Renderer {
     ///
     /// Returns `(merged, light_count, n_shadow)`.
     fn merge_per_frame_lights(&self) -> ([PointLight; MAX_POINT_LIGHTS], usize, usize) {
-        let n_shadow = self
-            .point_lights
-            .len()
-            .min(shadow_point::MAX_POINT_SHADOWS);
+        let n_shadow = self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS);
         // Build the merged light list directly into a stack
         // array — saves the per-frame heap allocation that
         // a `.chain().take(N).collect()` version would do.
@@ -1657,7 +1762,11 @@ impl Renderer {
         let shadow_focus = Vec3::new(self.camera.target.x, 0.0, self.camera.target.z);
         let light_vp = shadow::light_view_proj(
             shadow_focus,
-            Vec3::new(light_dir_normalized.x, light_dir_normalized.y, light_dir_normalized.z),
+            Vec3::new(
+                light_dir_normalized.x,
+                light_dir_normalized.y,
+                light_dir_normalized.z,
+            ),
         );
 
         UniformData {
@@ -1678,14 +1787,36 @@ impl Renderer {
             ),
             fog_color: Vec4::new(self.fog_color[0], self.fog_color[1], self.fog_color[2], 0.0),
             fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 0.0),
-            fog_origin: Vec4::new(self.fog_origin.x, self.fog_origin.y, self.fog_origin.z, 0.0),
+            fog_origin: Vec4::new(
+                self.fog_origin.x,
+                self.fog_origin.y,
+                self.fog_origin.z,
+                self.wall_xray_strength,
+            ),
             point_light_pos,
             point_light_color,
             point_light_count: Vec4::new(light_count as f32, 0.0, 0.0, 0.0),
             light_vp,
             point_shadow_face_vp,
             point_shadow_meta: Vec4::new(point_shadow_count as f32, 0.0, 0.0, 0.0),
-            time: Vec4::new(self.start_time.elapsed().as_secs_f32(), self.blood_field.floor_y, 0.0, 0.0),
+            // `time` packs scalar globals consumed by the
+            // forward fragment shader:
+            //   x = elapsed seconds (used by VFX time-driven
+            //       hashes and the blood splat age curve)
+            //   y = floor_y_min   (lowest walkable plane Y)
+            //   z = floor_y_max   (highest walkable plane Y)
+            //   w = unused
+            // The blood-field shader gate accepts fragments
+            // whose Y is within a small epsilon of
+            // `[floor_y_min, floor_y_max]` so dungeons with
+            // raised platforms / lowered pits still receive
+            // splats on every walkable surface.
+            time: Vec4::new(
+                self.start_time.elapsed().as_secs_f32(),
+                self.blood_field.floor_y,
+                self.blood_field.floor_y_max,
+                0.0,
+            ),
             blood_field_xform: self.blood_field.world_xform,
         }
     }
@@ -1727,7 +1858,10 @@ impl Renderer {
             // the static device-local VB. The skin handle wins over
             // dynamic_vertex_buffers because a freshly converted
             // mesh may briefly carry both during transition.
-            let vb = match obj.skin_handle.and_then(|h| self.skin_system.output_vertex_buffer(h)) {
+            let vb = match obj
+                .skin_handle
+                .and_then(|h| self.skin_system.output_vertex_buffer(h))
+            {
                 Some(b) => b,
                 None => match obj.dynamic_vertex_buffers.as_ref() {
                     Some(bufs) => bufs[frame].buffer,
@@ -1763,7 +1897,10 @@ impl Renderer {
             // Visible-draw list: also gate on the camera
             // frustum so we don't rasterise off-screen geometry
             // into the forward pass.
-            if !self.camera.sphere_in_frustum(&frustum, center, obj.bounds_radius + 1.0) {
+            if !self
+                .camera
+                .sphere_in_frustum(&frustum, center, obj.bounds_radius + 1.0)
+            {
                 continue;
             }
             draws.push(cmd);
@@ -1836,13 +1973,19 @@ impl Renderer {
         let proj = self.camera.projection_matrix();
         let mut best: Option<(f32, [f32; 4])> = None;
         for hs in self.heat_sources.iter() {
-            if hs.strength < 1e-3 { continue; }
+            if hs.strength < 1e-3 {
+                continue;
+            }
 
             let world = Vec4::new(hs.position.x, hs.position.y, hs.position.z, 1.0);
             let view_p = view * world;
-            if view_p.z >= -0.05 { continue; }
+            if view_p.z >= -0.05 {
+                continue;
+            }
             let clip = proj * view_p;
-            if clip.w <= 0.0 { continue; }
+            if clip.w <= 0.0 {
+                continue;
+            }
             let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
             let uv = Vec3::new(ndc.x, ndc.y, 0.0) * 0.5 + Vec3::new(0.5, 0.5, 0.0);
             if uv.x < -0.2 || uv.x > 1.2 || uv.y < -0.2 || uv.y > 1.2 {
@@ -1854,13 +1997,12 @@ impl Renderer {
             // but we only want magnitude.
             let focal_y = proj.col(1).y.abs();
             let radius_uv = (hs.radius / dist) * focal_y * 0.5;
-            if radius_uv < 0.02 { continue; }
+            if radius_uv < 0.02 {
+                continue;
+            }
             let s = hs.strength.clamp(0.0, 1.0);
             if best.map(|(prev, _)| s > prev).unwrap_or(true) {
-                best = Some((
-                    s,
-                    [uv.x, uv.y, radius_uv.min(0.6), s],
-                ));
+                best = Some((s, [uv.x, uv.y, radius_uv.min(0.6), s]));
             }
         }
         best.map(|(_, v)| v).unwrap_or([0.0; 4])
@@ -1875,7 +2017,10 @@ impl Renderer {
     unsafe fn record_dir_shadow_pass(&self, cmd: vk::CommandBuffer, shadow_draws: &[DrawCommand]) {
         let device = &self.device.device;
         let shadow_clear = [vk::ClearValue {
-            depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
         }];
         let shadow_rp_begin = vk::RenderPassBeginInfo::default()
             .render_pass(self.shadow_map.render_pass)
@@ -1889,7 +2034,11 @@ impl Renderer {
             })
             .clear_values(&shadow_clear);
         device.cmd_begin_render_pass(cmd, &shadow_rp_begin, vk::SubpassContents::INLINE);
-        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.shadow_map.pipeline);
+        device.cmd_bind_pipeline(
+            cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.shadow_map.pipeline,
+        );
         // The shadow pipeline reads only the global UBO (set 0),
         // and every draw uses the same per-frame descriptor set.
         // Bind it once for the whole pass instead of once per
@@ -1954,8 +2103,7 @@ impl Renderer {
         // descriptions.
         if point_shadow_count < shadow_point::MAX_POINT_SHADOWS {
             let unused_base = (point_shadow_count * 6) as u32;
-            let unused_count =
-                (shadow_point::MAX_POINT_SHADOWS * 6) as u32 - unused_base;
+            let unused_count = (shadow_point::MAX_POINT_SHADOWS * 6) as u32 - unused_base;
             let barrier = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
@@ -2009,8 +2157,7 @@ impl Renderer {
         // (mirrors the trick used for `draws`) so we can
         // hold a `&self.point_shadow_atlas` borrow and
         // mutate the scratch Vec in the same scope.
-        let mut light_draws =
-            std::mem::take(&mut self.point_shadow_draw_scratch);
+        let mut light_draws = std::mem::take(&mut self.point_shadow_draw_scratch);
         for light_idx in 0..point_shadow_count {
             let pl = &merged_lights[light_idx];
             let lpos = pl.position;
@@ -2023,9 +2170,7 @@ impl Renderer {
             light_draws.clear();
             for draw in shadow_draws.iter() {
                 let center = draw.model_matrix.w_axis.truncate();
-                if (center - lpos).length()
-                    > lrad + draw.bounds_radius
-                {
+                if (center - lpos).length() > lrad + draw.bounds_radius {
                     continue;
                 }
                 light_draws.push(draw.clone());
@@ -2041,7 +2186,7 @@ impl Renderer {
             // the bit patterns is cheap and stable.
             let new_state = {
                 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-                const FNV_PRIME:  u64 = 0x100000001b3;
+                const FNV_PRIME: u64 = 0x100000001b3;
                 let mut h: u64 = FNV_OFFSET;
                 // If any caster has dynamic vertex contents
                 // (CPU ring or GPU skin output), force the
@@ -2059,8 +2204,10 @@ impl Renderer {
                     let m = d.model_matrix;
                     for col in [m.x_axis, m.y_axis, m.z_axis, m.w_axis] {
                         for word in [
-                            col.x.to_bits(), col.y.to_bits(),
-                            col.z.to_bits(), col.w.to_bits(),
+                            col.x.to_bits(),
+                            col.y.to_bits(),
+                            col.z.to_bits(),
+                            col.w.to_bits(),
                         ] {
                             h ^= word as u64;
                             h = h.wrapping_mul(FNV_PRIME);
@@ -2100,9 +2247,7 @@ impl Renderer {
                     // and adjacent lights have offset
                     // epochs (so half refresh on even
                     // frames, half on odd).
-                    let epoch = (self.frame_count
-                        .wrapping_add(light_idx as u64))
-                        >> 1;
+                    let epoch = (self.frame_count.wrapping_add(light_idx as u64)) >> 1;
                     h ^= epoch;
                     h = h.wrapping_mul(FNV_PRIME);
                 }
@@ -2171,11 +2316,7 @@ impl Renderer {
                         },
                     })
                     .clear_values(&psh_clear);
-                device.cmd_begin_render_pass(
-                    cmd,
-                    &rp_begin,
-                    vk::SubpassContents::INLINE,
-                );
+                device.cmd_begin_render_pass(cmd, &rp_begin, vk::SubpassContents::INLINE);
                 if let Some(first) = light_draws.first() {
                     device.cmd_bind_descriptor_sets(
                         cmd,
@@ -2213,18 +2354,8 @@ impl Renderer {
                     if perp > along + r * std::f32::consts::SQRT_2 {
                         continue;
                     }
-                    device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[draw.vertex_buffer],
-                        &[0],
-                    );
-                    device.cmd_bind_index_buffer(
-                        cmd,
-                        draw.index_buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
+                    device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
+                    device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
                     // Push the model + indices payload as
                     // a single 80-byte block. The vert
                     // shader reads `mat4 model` at offset
@@ -2233,28 +2364,17 @@ impl Renderer {
                     // two saves a command-buffer entry per
                     // draw.
                     let mut bytes = [0u8; 80];
-                    bytes[..64].copy_from_slice(bytemuck::bytes_of(
-                        &draw.model_matrix,
-                    ));
-                    let indices: [u32; 4] =
-                        [face_slot as u32, light_idx as u32, 0, 0];
+                    bytes[..64].copy_from_slice(bytemuck::bytes_of(&draw.model_matrix));
+                    let indices: [u32; 4] = [face_slot as u32, light_idx as u32, 0, 0];
                     bytes[64..].copy_from_slice(bytemuck::bytes_of(&indices));
                     device.cmd_push_constants(
                         cmd,
                         self.point_shadow_atlas.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX
-                            | vk::ShaderStageFlags::FRAGMENT,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         0,
                         &bytes,
                     );
-                    device.cmd_draw_indexed(
-                        cmd,
-                        draw.index_count,
-                        1,
-                        0,
-                        0,
-                        0,
-                    );
+                    device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
                 }
                 device.cmd_end_render_pass(cmd);
             }
@@ -2388,13 +2508,17 @@ impl Renderer {
         // Drawn before particles so the spark/glow trails
         // composite on top of the beam core.
         self.vfx_ribbon_renderer.record(
-            frame, device, cmd,
+            frame,
+            device,
+            cmd,
             self.uniforms.descriptor_sets[frame],
             self.post.translucent_in_sets[image_index as usize],
         );
         // VFX particles (world-space, two pipelines).
         self.vfx_particle_renderer.record(
-            frame, device, cmd,
+            frame,
+            device,
+            cmd,
             self.uniforms.descriptor_sets[frame],
             self.post.translucent_in_sets[image_index as usize],
         );
@@ -2439,8 +2563,16 @@ impl Renderer {
         let ssao_strength = 0.7;
 
         self.post.record_composite(
-            device, cmd, image_index, &self.bloom, self.ghost_mix,
-            inv_proj, ssao_strength, sun_screen, sun_color, heat_source,
+            device,
+            cmd,
+            image_index,
+            &self.bloom,
+            self.ghost_mix,
+            inv_proj,
+            ssao_strength,
+            sun_screen,
+            sun_color,
+            heat_source,
         );
 
         // Overlay (HUD)
@@ -2469,10 +2601,9 @@ impl Renderer {
         // referenced buffers are destroyed.
         let cmd = self.command_buffers[frame];
         unsafe {
-            self.device.device.reset_command_buffer(
-                cmd,
-                vk::CommandBufferResetFlags::empty(),
-            )?;
+            self.device
+                .device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
         }
         self.flush_deletions();
 
@@ -2486,10 +2617,7 @@ impl Renderer {
             ) {
                 Ok((index, _suboptimal)) => index,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.recreate_swapchain(
-                        self.window_extent[0],
-                        self.window_extent[1],
-                    )?;
+                    self.recreate_swapchain(self.window_extent[0], self.window_extent[1])?;
                     return Ok(());
                 }
                 Err(e) => return Err(e.into()),
@@ -2502,8 +2630,7 @@ impl Renderer {
         }
 
         // ---- Build per-frame light list, shadow VPs, UBO ----
-        let (merged_lights, light_count, point_shadow_count) =
-            self.merge_per_frame_lights();
+        let (merged_lights, light_count, point_shadow_count) = self.merge_per_frame_lights();
         let point_shadow_face_vp =
             self.build_point_shadow_face_vp(point_shadow_count, &merged_lights);
         let ubo = self.build_uniform_data(
@@ -2560,12 +2687,7 @@ impl Renderer {
             );
 
             self.record_dir_shadow_pass(cmd, &shadow_draws);
-            self.record_point_shadow_pass(
-                cmd,
-                point_shadow_count,
-                &merged_lights,
-                &shadow_draws,
-            );
+            self.record_point_shadow_pass(cmd, point_shadow_count, &merged_lights, &shadow_draws);
 
             // Blood-field splat pass: drains kill splats queued
             // during the gameplay frame into this frame's instance
@@ -2577,12 +2699,8 @@ impl Renderer {
 
             self.record_scene_pass(cmd, image_index, &draws);
             self.record_translucent_pass(cmd, image_index, frame);
-            self.post.record_bloom(
-                &self.device.device,
-                cmd,
-                image_index,
-                &self.bloom,
-            );
+            self.post
+                .record_bloom(&self.device.device, cmd, image_index, &self.bloom);
             self.record_composite_and_overlay(
                 cmd,
                 image_index,
@@ -2635,10 +2753,7 @@ impl Renderer {
             Ok(_) => {}
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
                 self.framebuffer_resized = false;
-                self.recreate_swapchain(
-                    self.window_extent[0],
-                    self.window_extent[1],
-                )?;
+                self.recreate_swapchain(self.window_extent[0], self.window_extent[1])?;
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
@@ -2646,10 +2761,7 @@ impl Renderer {
 
         if self.framebuffer_resized {
             self.framebuffer_resized = false;
-            self.recreate_swapchain(
-                self.window_extent[0],
-                self.window_extent[1],
-            )?;
+            self.recreate_swapchain(self.window_extent[0], self.window_extent[1])?;
             return Ok(());
         }
 
@@ -2663,7 +2775,10 @@ impl Renderer {
 
     /// Get the current screen dimensions in pixels.
     pub fn screen_size(&self) -> (f32, f32) {
-        (self.swapchain.extent.width as f32, self.swapchain.extent.height as f32)
+        (
+            self.swapchain.extent.width as f32,
+            self.swapchain.extent.height as f32,
+        )
     }
 
     /// Check for shader changes and hot-reload the pipeline if needed.
@@ -2675,19 +2790,26 @@ impl Renderer {
             .unwrap_or(false);
 
         if should_reload {
-            unsafe { self.device.device.device_wait_idle().ok(); }
+            unsafe {
+                self.device.device.device_wait_idle().ok();
+            }
 
             match Self::compile_pipeline_from_disk(
                 &self.device.device,
                 self.post.scene_pass,
                 self.swapchain.extent,
-                &[self.uniforms.descriptor_set_layout, self.material_pool.layout],
+                &[
+                    self.uniforms.descriptor_set_layout,
+                    self.material_pool.layout,
+                ],
                 &self.shader_dir,
             ) {
                 Ok((new_pipeline, new_layout)) => {
                     unsafe {
                         self.device.device.destroy_pipeline(self.pipeline, None);
-                        self.device.device.destroy_pipeline_layout(self.pipeline_layout, None);
+                        self.device
+                            .device
+                            .destroy_pipeline_layout(self.pipeline_layout, None);
                     }
                     self.pipeline = new_pipeline;
                     self.pipeline_layout = new_layout;
@@ -2705,11 +2827,14 @@ impl Renderer {
             // just rebuild everything. Cheap relative to the
             // device wait above. Compile failures are
             // non-fatal: the existing pipelines stay live.
-            if let Err(e) = self.post.reload_pipelines(
-                &self.device.device,
-                &self.shader_dir,
-            ) {
-                log::error!("Post-pipeline hot-reload failed (keeping old pipelines): {}", e);
+            if let Err(e) = self
+                .post
+                .reload_pipelines(&self.device.device, &self.shader_dir)
+            {
+                log::error!(
+                    "Post-pipeline hot-reload failed (keeping old pipelines): {}",
+                    e
+                );
             } else {
                 log::info!("Post pipelines hot-reloaded successfully!");
             }
@@ -2731,8 +2856,10 @@ impl Renderer {
         let frag_source = std::fs::read_to_string(&frag_path)
             .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", frag_path, e))?;
 
-        let vert_spv = hot_reload::compile_glsl(&vert_source, "triangle.vert", shaderc::ShaderKind::Vertex)?;
-        let frag_spv = hot_reload::compile_glsl(&frag_source, "triangle.frag", shaderc::ShaderKind::Fragment)?;
+        let vert_spv =
+            hot_reload::compile_glsl(&vert_source, "triangle.vert", shaderc::ShaderKind::Vertex)?;
+        let frag_spv =
+            hot_reload::compile_glsl(&frag_source, "triangle.frag", shaderc::ShaderKind::Fragment)?;
 
         let vert_module = pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = pipeline::create_shader_module(device, &frag_spv)?;
@@ -2764,14 +2891,19 @@ impl Drop for Renderer {
         // Reset all command buffers so validation doesn't flag buffers as "in use"
         for &cmd in &self.command_buffers {
             unsafe {
-                self.device.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).ok();
+                self.device
+                    .device
+                    .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                    .ok();
             }
         }
 
         // Destroy all GPU buffers before freeing command pool/fences
         for obj in &mut self.objects {
-            obj.vertex_buffer.cleanup(&self.device.device, &self.allocator);
-            obj.index_buffer.cleanup(&self.device.device, &self.allocator);
+            obj.vertex_buffer
+                .cleanup(&self.device.device, &self.allocator);
+            obj.index_buffer
+                .cleanup(&self.device.device, &self.allocator);
             if let Some(bufs) = obj.dynamic_vertex_buffers.take() {
                 for mut b in bufs {
                     b.cleanup(&self.device.device, &self.allocator);
@@ -2787,7 +2919,9 @@ impl Drop for Renderer {
         let device = &self.device.device;
         let allocator = &self.allocator;
         for (_, buf) in self.deletion_queue.drain(..) {
-            unsafe { device.destroy_buffer(buf.buffer, None); }
+            unsafe {
+                device.destroy_buffer(buf.buffer, None);
+            }
             if let Some(alloc) = buf.allocation {
                 allocator.lock().unwrap().free(alloc).ok();
             }
@@ -2795,22 +2929,33 @@ impl Drop for Renderer {
 
         self.frame_sync.cleanup(&self.device.device);
         unsafe {
-            self.device.device.destroy_command_pool(self.command_pool, None);
+            self.device
+                .device
+                .destroy_command_pool(self.command_pool, None);
         }
 
         self.uniforms.cleanup(&self.device.device, &self.allocator);
-        self.default_texture.cleanup(&self.device.device, &self.allocator);
-        self.default_blood_field.cleanup(&self.device.device, &self.allocator);
-        self.blood_field.cleanup(&self.device.device, &self.allocator);
-        self.material_pool.cleanup(&self.device.device, &self.allocator);
-        self.shadow_map.cleanup(&self.device.device, &self.allocator);
+        self.default_texture
+            .cleanup(&self.device.device, &self.allocator);
+        self.default_blood_field
+            .cleanup(&self.device.device, &self.allocator);
+        self.blood_field
+            .cleanup(&self.device.device, &self.allocator);
+        self.material_pool
+            .cleanup(&self.device.device, &self.allocator);
+        self.shadow_map
+            .cleanup(&self.device.device, &self.allocator);
         self.point_shadow_atlas
             .cleanup(&self.device.device, &self.allocator);
-        self.depth_buffer.cleanup(&self.device.device, &self.allocator);
+        self.depth_buffer
+            .cleanup(&self.device.device, &self.allocator);
         self.overlay.cleanup(&self.device.device, &self.allocator);
-        self.vfx_ribbon_renderer.cleanup(&self.device.device, &self.allocator);
-        self.vfx_particle_renderer.cleanup(&self.device.device, &self.allocator);
-        self.skin_system.cleanup(&self.device.device, &self.allocator);
+        self.vfx_ribbon_renderer
+            .cleanup(&self.device.device, &self.allocator);
+        self.vfx_particle_renderer
+            .cleanup(&self.device.device, &self.allocator);
+        self.skin_system
+            .cleanup(&self.device.device, &self.allocator);
         self.sky_renderer.cleanup(&self.device.device);
         // Tear down all post-process resources (offscreen
         // images, framebuffers, pipelines, render passes,
@@ -2843,7 +2988,9 @@ fn find_shader_dir() -> PathBuf {
 
     for candidate in &candidates {
         if candidate.exists() && candidate.join("triangle.vert").exists() {
-            return candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+            return candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
         }
     }
 

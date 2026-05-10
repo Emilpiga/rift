@@ -18,8 +18,12 @@ impl Sim {
     /// walk out of range, etc.). Idempotent.
     pub fn set_shrine_channel(&mut self, client_id: ClientId, shrine: Option<NetId>) {
         use rift_net::messages::SHRINE_INTERACT_RADIUS;
-        let Some(&entity) = self.sessions.get(&client_id) else { return };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else { return };
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return;
+        };
         match shrine {
             None => {
                 p.channeling_shrine = None;
@@ -32,7 +36,9 @@ impl Sim {
                 let Some((_, shrine_pos)) = shrine::find(&self.world, id) else {
                     return;
                 };
-                let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else { return };
+                let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+                    return;
+                };
                 let dist_sq = (p.k.position - shrine_pos).length_squared();
                 if dist_sq > SHRINE_INTERACT_RADIUS * SHRINE_INTERACT_RADIUS {
                     return;
@@ -44,7 +50,52 @@ impl Sim {
 
     /// Stash an input from a client — coalesced against any earlier
     /// input still pending for the same client this tick.
-    pub fn ingest_input(&mut self, client_id: ClientId, cmd: InputCmd) {
+    ///
+    /// Sanitises the wire payload before it touches the
+    /// kinematic. The wire is server-authoritative — a modded
+    /// client can send NaN / infinity / arbitrary magnitudes
+    /// for any of these floats, and a single NaN seeping into
+    /// the kinematic permanently corrupts the player's
+    /// position (NaN propagates through every subsequent
+    /// addition). The kinematic itself already clamps
+    /// `move_dir` to unit length so a "wish vector of 100"
+    /// can't directly translate into a 100× movement, but
+    /// non-finite values bypass that clamp by failing the
+    /// `length_squared() > 1.0` check (NaN compares false to
+    /// everything). We zero any non-finite axis up front,
+    /// then drop the whole input if the resulting magnitude
+    /// is wildly past 1 (a sign of either a bug on the client
+    /// side or a deliberate exploit attempt).
+    pub fn ingest_input(&mut self, client_id: ClientId, mut cmd: InputCmd) {
+        // Maximum tolerated magnitude for a `move_dir` /
+        // `aim_dir` vector before we drop the whole input.
+        // Legitimate clients send unit vectors (or zero); a
+        // small headroom covers floating-point round-trips
+        // through the wire format.
+        const MAX_AXIS_MAG_SQ: f32 = 4.0; // = 2.0^2
+
+        fn finite2(v: [f32; 2]) -> [f32; 2] {
+            [
+                if v[0].is_finite() { v[0] } else { 0.0 },
+                if v[1].is_finite() { v[1] } else { 0.0 },
+            ]
+        }
+        cmd.move_dir = finite2(cmd.move_dir);
+        cmd.aim_dir = finite2(cmd.aim_dir);
+        let move_mag_sq = cmd.move_dir[0] * cmd.move_dir[0] + cmd.move_dir[1] * cmd.move_dir[1];
+        let aim_mag_sq = cmd.aim_dir[0] * cmd.aim_dir[0] + cmd.aim_dir[1] * cmd.aim_dir[1];
+        if move_mag_sq > MAX_AXIS_MAG_SQ || aim_mag_sq > MAX_AXIS_MAG_SQ {
+            log::warn!(
+                "input: dropping suspect input from {client_id:?} (move_mag^2={move_mag_sq:.3}, aim_mag^2={aim_mag_sq:.3})"
+            );
+            return;
+        }
+        if let Some(t) = cmd.cast_target {
+            if !t[0].is_finite() || !t[1].is_finite() || !t[2].is_finite() {
+                cmd.cast_target = None;
+            }
+        }
+
         player::merge_pending(&mut self.pending_inputs, client_id, cmd);
     }
 
@@ -59,6 +110,20 @@ impl Sim {
         target_net_id: Option<NetId>,
         tick: NetTick,
     ) {
+        // Sanitise client-supplied coordinates before they
+        // touch the ability dispatch. NaN / infinity in
+        // `client_origin` would bypass the eligibility radius
+        // check (any comparison against NaN is false) and
+        // anchor projectiles at corrupted positions; an
+        // out-of-bounds `placed_target` would let a hostile
+        // client place AoE zones on coordinates the LOS check
+        // can't reason about. Server uses its authoritative
+        // position for the cast in most cases, but the wire
+        // values still flow into events / projectile spawn
+        // math, so we zero the bad axes here rather than
+        // trusting every downstream call site to re-check.
+        let client_origin = sanitise_xyz_or_zero(client_origin);
+        let placed_target = placed_target.and_then(sanitise_xyz_finite);
         let aim = {
             let v = glam::Vec2::from(aim_dir).normalize_or_zero();
             Vec3::new(v.x, 0.0, v.y)
@@ -147,7 +212,9 @@ impl Sim {
                 }
             }
             if effective > 0.0 {
-                self.meters.entry(client_id).add_healing(ability_id, effective);
+                self.meters
+                    .entry(client_id)
+                    .add_healing(ability_id, effective);
             }
             // Patch the trailing Heal event(s) for this target
             // with the post-mult amount. Walk from the back
@@ -156,7 +223,9 @@ impl Sim {
             if (mult - 1.0).abs() > f32::EPSILON {
                 for ev in self.pending_events.iter_mut().rev() {
                     match ev {
-                        WorldEvent::Heal { amount: a, .. } if (*a - amount).abs() < f32::EPSILON => {
+                        WorldEvent::Heal { amount: a, .. }
+                            if (*a - amount).abs() < f32::EPSILON =>
+                        {
                             *a = scaled;
                             break;
                         }
@@ -173,7 +242,9 @@ impl Sim {
     /// if the player isn't channeling that ability so a duplicate
     /// release packet doesn't error.
     pub fn end_channel(&mut self, client_id: ClientId, ability_id: u8) {
-        let Some(&entity) = self.sessions.get(&client_id) else { return };
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return;
+        };
         channel::cancel(
             &mut self.world,
             entity,
@@ -182,4 +253,24 @@ impl Sim {
             &mut self.next_projectile_net_id,
         );
     }
+}
+
+/// Replace any non-finite axis with `0.0`. Used on
+/// client-supplied position payloads before they touch the
+/// kinematic / ability dispatch — see [`Sim::cast_ability`]
+/// for the rationale.
+fn sanitise_xyz_or_zero(v: [f32; 3]) -> [f32; 3] {
+    [
+        if v[0].is_finite() { v[0] } else { 0.0 },
+        if v[1].is_finite() { v[1] } else { 0.0 },
+        if v[2].is_finite() { v[2] } else { 0.0 },
+    ]
+}
+
+/// Drop the whole `Some(_)` if any axis is non-finite. Used
+/// for optional `placed_target` payloads — better to treat a
+/// corrupt target as "no target" than to zero one axis and
+/// silently re-aim the cast at the world origin.
+fn sanitise_xyz_finite(v: [f32; 3]) -> Option<[f32; 3]> {
+    (v[0].is_finite() && v[1].is_finite() && v[2].is_finite()).then_some(v)
 }

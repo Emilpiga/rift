@@ -1,0 +1,59 @@
+# Configuration for `cargo about` (https://github.com/EmbarkStudios/cargo-about).
+#
+# Used by `scripts/gen-third-party.sh` / `.ps1` to produce a
+# `THIRD_PARTY.txt` we ship next to the rift-client binary so we
+# satisfy attribution requirements for every Rust dependency
+# baked into the game.
+#
+# Workflow:
+#   cargo install cargo-about     # one-time, on the build machine
+#   ./scripts/gen-third-party.sh  # writes dist/THIRD_PARTY.txt
+#
+# Pass `--fail` to the gen script (forwarded to cargo-about) to
+# error out on unknown licenses; useful in CI to catch a fresh
+# dep that pulled in something we haven't reviewed yet.
+
+# Allowed license SPDX identifiers. Every dependency must
+# resolve to at least one of these — if a new dep pulls in
+# something that doesn't, `cargo about` errors and we get a
+# chance to review (or to add the license here after vetting it).
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "OpenSSL",
+    # NCSA is an "AND" component of `libfuzzer-sys`'s license
+    # expression `(MIT OR Apache-2.0) AND NCSA`. It's a
+    # permissive BSD-style license written for the LLVM /
+    # University of Illinois project; including its notice in
+    # `THIRD_PARTY.txt` is the compliance path.
+    "NCSA",
+]
+
+# Skip listing the workspace crates themselves — those are our
+# code, not a third-party dependency.
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# Some crates declare a license but don't ship the text. Allow
+# cargo-about to fall back to its bundled SPDX text in those
+# cases so the report stays complete.
+no-clearly-defined = false
+
+# Treat any workspace crate marked `publish = false` (every
+# `crates/rift-*` crate, see their Cargo.toml) as an internal
+# private package and skip it in the report. Without this our
+# own `rift-client` / `rift-engine` / etc. would be flagged
+# as missing a `license` field.
+[private]
+ignore = true

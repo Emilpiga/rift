@@ -12,11 +12,11 @@
 use std::time::Instant;
 
 use glam::{Mat4, Quat, Vec3};
+use rift_engine::animation::Animator;
 use rift_engine::ecs::components::{
     AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
-    Renderable, RemotePlayer, SkinnedAttachments, Transform, Velocity,
+    RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform, Velocity,
 };
-use rift_engine::animation::Animator;
 use rift_engine::Renderer;
 use rift_net::{
     messages::{EntityKind, Gender},
@@ -74,22 +74,46 @@ impl NetClient {
         // return true for a completely unrelated new entity. We
         // verify by checking the entity still carries our
         // `RemotePlayer { net_id }` tag with the expected id.
-        let stale: Vec<NetId> = self
+        //
+        // The `is_leave` flag distinguishes "real" departures
+        // (profile dropped via `PlayerLeft` / disconnect) from
+        // floor-regen-driven world resets, so we only fire the
+        // rapture VFX in the leave case — a regen would otherwise
+        // beam every party member up at every floor transition.
+        let stale: Vec<(NetId, bool)> = self
             .avatar_entities
             .iter()
-            .filter(|(nid, entity)| {
-                if !self.remote.contains_key(nid) || !self.profiles.contains_key(nid) {
-                    return true;
-                }
-                match world.get::<&RemotePlayer>(**entity) {
+            .filter_map(|(nid, entity)| {
+                let profile_gone = !self.profiles.contains_key(nid);
+                let snapshot_gone = !self.remote.contains_key(nid);
+                let entity_reused = match world.get::<&RemotePlayer>(*entity) {
                     Ok(rp) => rp.net_id != nid.0,
                     Err(_) => true,
+                };
+                if profile_gone || snapshot_gone || entity_reused {
+                    // Beam-up cue only on real departures: profile
+                    // dropped is unambiguous, snapshot-only drops
+                    // (without a profile drop) are usually floor
+                    // regens that the avatar will respawn from.
+                    Some((*nid, profile_gone))
+                } else {
+                    None
                 }
             })
-            .map(|(nid, _)| *nid)
             .collect();
-        for net_id in stale {
+        for (net_id, is_leave) in stale {
             if let Some(entity) = self.avatar_entities.remove(&net_id) {
+                // Capture the avatar's last transform position
+                // *before* despawn so we can anchor the rapture
+                // VFX where the body actually was. Falls back to
+                // `last_positions` if the transform was already
+                // wiped (world reset path).
+                let last_pos = world
+                    .get::<&Transform>(entity)
+                    .ok()
+                    .map(|t| t.position)
+                    .or_else(|| self.last_positions.get(&net_id).copied());
+
                 // Hide the renderer slot before despawning so we
                 // don't leak a frame of the old pose. Skip if the
                 // entity is already dead or got reused (world reset).
@@ -122,7 +146,27 @@ impl NetClient {
                     }
                     let _ = world.despawn(entity);
                 }
-                log::info!("net: despawned remote avatar {net_id:?}");
+
+                // Beam-up: a remote player who actually left
+                // (profile dropped) should read as leaving, not
+                // as popping out of the world. Anchor just
+                // above the feet — the body-flash layer is
+                // sized to engulf the avatar silhouette
+                // upward, the SilkStrand pillar shoots from
+                // here toward the sky, and the ground halo
+                // hugs the floor.
+                if is_leave {
+                    if let Some(pos) = last_pos {
+                        renderer.vfx_system.spawn(
+                            rift_engine::renderer::vfx::presets::player_rapture(),
+                            pos + Vec3::new(0.0, 0.2, 0.0),
+                        );
+                    }
+                }
+                log::info!(
+                    "net: despawned remote avatar {net_id:?} \
+                     (leave={is_leave})"
+                );
             }
         }
 
@@ -251,6 +295,15 @@ impl NetClient {
                 if let Ok(mut h) = world.get::<&mut Health>(entity) {
                     h.current = h.max * re.health_pct;
                 }
+                // Same trick for the essence / mana bar — mirror
+                // the snapshot's `resource_pct` onto the remote
+                // avatar's Resource component so the world-space
+                // teammate essence bar can read it the same way
+                // it reads health. `Resource.max` was placeholder
+                // 1.0 at spawn; the bar code reads only the ratio.
+                if let Ok(mut r) = world.get::<&mut Resource>(entity) {
+                    r.current = r.max * re.resource_pct;
+                }
             }
             // Jump: when the snapshot says the remote is airborne,
             // tag its `Player.action = JumpAir` and cross-fade to
@@ -303,9 +356,10 @@ impl NetClient {
                     p.action_timer = rift_game::kinematic::ROLL_DURATION;
                     p.aim_dir = Vec3::new(re.yaw.sin(), 0.0, re.yaw.cos());
                 }
-                let clip = world.get::<&AnimationSet>(entity).ok().and_then(|s| {
-                    s.find_any(&["Roll", "Roll_Forward", "Dodge_Roll", "Dodge"])
-                });
+                let clip = world
+                    .get::<&AnimationSet>(entity)
+                    .ok()
+                    .and_then(|s| s.find_any(&["Roll", "Roll_Forward", "Dodge_Roll", "Dodge"]));
                 if let Some(clip) = clip {
                     if let Ok(mut anim) = world.get::<&mut Animator>(entity) {
                         anim.cross_fade(clip, false, 0.08);
@@ -475,9 +529,7 @@ impl NetClient {
                     );
                 }
                 Err(e) => {
-                    log::warn!(
-                        "net: failed to spawn remote enemy {net_id:?} role={role:?}: {e:?}"
-                    );
+                    log::warn!("net: failed to spawn remote enemy {net_id:?} role={role:?}: {e:?}");
                 }
             }
         }
@@ -533,10 +585,21 @@ impl NetClient {
     ///     snapshots (server hit, expiry, wall collision), so
     ///     the projectile reads as detonating instead of just
     ///     popping out of existence.
-    pub fn sync_projectiles(&mut self, renderer: &mut Renderer, dt: f32) {
+    pub fn sync_projectiles(
+        &mut self,
+        renderer: &mut Renderer,
+        audio: Option<&mut rift_audio::AudioSystem>,
+        dt: f32,
+    ) {
         if self.our_net_id.is_none() {
             return;
         }
+        // Borrow the audio system for the whole pass. We use it
+        // both in the despawn (impact one-shot + travel emitter
+        // teardown) and the spawn (travel loop attach) branches,
+        // so a single `&mut` here is simpler than threading the
+        // option through each helper.
+        let mut audio = audio;
 
         // Despawn vanished projectiles: hide the mesh slot, kill
         // the trail emitter, and detonate at the last known
@@ -555,6 +618,15 @@ impl NetClient {
             }
             if let Some(trail_id) = self.projectile_trails.remove(&net_id) {
                 renderer.vfx_system.despawn(trail_id);
+            }
+            // Tear down the travel-loop emitter (silence the
+            // whoosh) before we play the impact one-shot so
+            // the two cues don't briefly overlap on top of
+            // each other at the same position.
+            let travel_em = self.projectile_audio.remove(&net_id);
+            let ability_id = self.projectile_ability.remove(&net_id);
+            if let (Some(em), Some(audio)) = (travel_em, audio.as_deref_mut()) {
+                audio.despawn_emitter(em);
             }
             if let Some(visual) = self.projectile_render.remove(&net_id) {
                 // Stored at spawn, so no per-ability branch here.
@@ -585,6 +657,20 @@ impl NetClient {
                     visual.render_pos
                 };
                 renderer.vfx_system.spawn_bundle(burst, impact_pos);
+
+                // Impact SFX, anchored at the same back-off-
+                // adjusted position the burst uses so the
+                // sound and the ember shockwave originate
+                // from the same point. Silent for abilities
+                // whose audio table entry has no `impact`.
+                if let (Some(ability_id), Some(audio)) = (ability_id, audio.as_deref_mut()) {
+                    let recipe = crate::game::ability_audio::audio_for(ability_id);
+                    if let Some(path) = recipe.impact {
+                        let mut spec = crate::game::ability_audio::impact_spec(path);
+                        crate::game::ability_audio::jitter_one_shot(&mut spec);
+                        audio.play_one_shot(&spec, impact_pos);
+                    }
+                }
             }
         }
 
@@ -615,7 +701,13 @@ impl NetClient {
             let Some(ab) = rift_game::abilities::lookup(ability as u8) else {
                 continue;
             };
-            let ShapeVisuals::Projectile { mesh, trail, impact, scale } = ab.visuals.shape else {
+            let ShapeVisuals::Projectile {
+                mesh,
+                trail,
+                impact,
+                scale,
+            } = ab.visuals.shape
+            else {
                 continue;
             };
             let mesh_obj = rift_engine::combat::mesh_for_kind(mesh);
@@ -626,6 +718,26 @@ impl NetClient {
                     .vfx_system
                     .spawn_bundle(rift_engine::combat::effect_for_vfx(trail), pos);
                 self.projectile_trails.insert(net_id, trail_id);
+
+                // Travel-loop audio. Looping spatial emitter
+                // anchored at the spawn point — the per-frame
+                // pass below re-anchors it to the dead-reckoned
+                // render position so the loop tracks the
+                // projectile through its flight, not just the
+                // 20 Hz snapshot positions. Cast as `u8`
+                // because `EntityKind::Projectile.ability` is
+                // wire-encoded — same value the abilities
+                // registry uses.
+                self.projectile_ability.insert(net_id, ability as u8);
+                if let Some(audio) = audio.as_deref_mut() {
+                    let recipe = crate::game::ability_audio::audio_for(ability as u8);
+                    if let Some(path) = recipe.travel {
+                        let spec = crate::game::ability_audio::travel_spec(path);
+                        if let Some(em) = audio.spawn_emitter(&spec, pos) {
+                            self.projectile_audio.insert(net_id, em);
+                        }
+                    }
+                }
                 self.projectile_render.insert(
                     net_id,
                     super::ProjectileRender {
@@ -677,6 +789,15 @@ impl NetClient {
             }
             if let Some(&trail_id) = self.projectile_trails.get(&net_id) {
                 renderer.vfx_system.set_anchor(trail_id, visual.render_pos);
+            }
+            // Re-anchor the travel-loop emitter so the whoosh
+            // tracks the projectile's render position, not
+            // its (jittery) raw snapshot position. Audio's
+            // own short tween smooths any per-frame motion.
+            if let (Some(&em), Some(audio)) =
+                (self.projectile_audio.get(&net_id), audio.as_deref_mut())
+            {
+                audio.set_emitter_position(em, visual.render_pos);
             }
         }
     }
@@ -797,9 +918,7 @@ impl NetClient {
         if let Some(our_id) = self.our_net_id {
             if let Some(re) = self.remote.get(&our_id) {
                 let target_pct = re.health_pct;
-                for (_e, (_p, _l, h)) in
-                    world.query_mut::<(&Player, &LocalPlayer, &mut Health)>()
-                {
+                for (_e, (_p, _l, h)) in world.query_mut::<(&Player, &LocalPlayer, &mut Health)>() {
                     h.current = h.max * target_pct;
                 }
                 // Mirror active effects onto the local player's

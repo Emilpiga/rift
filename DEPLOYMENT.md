@@ -1,142 +1,166 @@
-# Deploying Rift
+# Deployment
 
-This repo ships **two binaries** out of one Cargo workspace:
+Operator notes for running the Rift Crawler dedicated server in
+production. Game-design and code-architecture docs live in
+[`ARCHITECTURE.md`](ARCHITECTURE.md); the launch checklist
+lives in [`BEFORE_PUBLISHING.md`](BEFORE_PUBLISHING.md).
 
-| Crate         | Binary                         | Pulls graphics deps? | Where it runs               |
-| ------------- | ------------------------------ | -------------------- | --------------------------- |
-| `rift-server` | `rift-server`                  | **No** (headless)    | Dedicated server / cloud VM |
-| `rift-client` | `rift` (`rift.exe` on Windows) | Yes (Vulkan)         | Player's machine            |
+## TL;DR
 
-The split is enforced at the `Cargo.toml` level: `rift-server`
-intentionally does **not** depend on `rift-engine`, so the server
-image stays tiny and free of Vulkan / winit / shaderc.
-
----
-
-## Server
-
-### Networking
-
-The server uses **netcode.io / renet over UDP**. This rules out any
-PaaS that only exposes inbound HTTP/TCP (Railway, Render, Heroku,
-Cloudflare Workers, Vercel, …).
-
-Hosts that _do_ support raw inbound UDP:
-
-- **Fly.io** — recommended. UDP is a first-class service type, see
-  `fly.toml`.
-- **Hetzner Cloud / DigitalOcean / Vultr / Linode VPS** — open the
-  UDP port in the firewall, run the docker image (or the bare
-  binary) under systemd.
-- **AWS EC2 / GCP Compute / Azure VM** — open the UDP port in the
-  security group.
-
-If a host claims to support "TCP/UDP" but only at the load-balancer
-layer (e.g. AWS NLB), it'll work — point `RIFT_PUBLIC` at the
-load-balancer's public IP:port.
-
-### Configuration
-
-`rift-server` reads both CLI flags and environment variables. Env
-vars are used as defaults so the same image works locally with
-docker-compose and in the cloud:
-
-| Env            | Flag             | Purpose                                                            |
-| -------------- | ---------------- | ------------------------------------------------------------------ |
-| `PORT`         | (n/a)            | Cloud-provider idiom; bound on `0.0.0.0:$PORT`.                    |
-| `RIFT_BIND`    | `--bind`         | Full bind socket address. Overrides `PORT`.                        |
-| `RIFT_PUBLIC`  | `--public`       | Public address baked into connect tokens. **Required behind NAT.** |
-| `DATABASE_URL` | `--database-url` | Postgres URL. Empty / `disabled` skips persistence.                |
-| (none)         | `--no-db`        | Force-disables persistence regardless of env.                      |
-| `RUST_LOG`     | (n/a)            | Standard `env_logger` filter. Defaults to `info`.                  |
-
-### Build & run with Docker
-
-```bash
+```sh
+# Build the server image
 docker build -f Dockerfile.server -t rift-server:latest .
-docker run --rm \
-    -p 34000:34000/udp \
-    -e DATABASE_URL=postgres://rift:rift@host.docker.internal:55432/rift \
-    -e RIFT_PUBLIC=YOUR.PUBLIC.IP:34000 \
+
+# Run it (UDP — netcode/renet is UDP-only)
+docker run --rm -p 34000:34000/udp \
+    -e DATABASE_URL=postgres://rift:rift@db:5432/rift \
+    -e RIFT_PUBLIC=your.public.ip:34000 \
     rift-server:latest
 ```
 
-The `/udp` suffix on `-p` is mandatory — without it Docker only
-forwards TCP and clients silently fail to connect.
+For Fly.io specifically: see [`fly.toml`](fly.toml) — its
+header comment walks through `flyctl launch` / `secrets set` /
+`deploy`.
 
-### Deploy to Fly.io
+## Hosting choice
 
-```bash
-flyctl auth login
-flyctl launch --copy-config --no-deploy        # creates the app
-flyctl postgres create --name rift-db          # provisions Postgres
-flyctl postgres attach rift-db                 # injects DATABASE_URL
-flyctl ips allocate-v4                         # gets a dedicated IP
-flyctl secrets set RIFT_PUBLIC=<that-ip>:34000
-flyctl deploy
+The server uses **UDP** (renet + netcode.io). This rules out
+HTTP-only PaaS (Railway, Render, Heroku, Vercel, etc.) and
+makes the hosting shortlist:
+
+| Host                           | UDP | Notes                                                                         |
+| ------------------------------ | --- | ----------------------------------------------------------------------------- |
+| **Fly.io**                     | ✅  | First-class. `fly.toml` shipped. Cheapest path for a single-region launch.    |
+| Hetzner / DigitalOcean / Vultr | ✅  | Plain VPS. Open the UDP port in the firewall and run the binary or the image. |
+| AWS EC2                        | ✅  | Add a UDP rule to the security group. ALB/NLB needs a UDP target group.       |
+| GCP Compute Engine             | ✅  | Allow UDP in the VPC firewall.                                                |
+| Railway / Render / Heroku      | ❌  | HTTP only. Won't work.                                                        |
+
+## Required runtime configuration
+
+The server reads configuration from **environment variables**
+or matching CLI flags (flag wins on conflict).
+
+| Env var        | Flag             | Default                | Notes                                                                                                               |
+| -------------- | ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `RIFT_BIND`    | `--bind`         | `0.0.0.0:34000`        | Socket the server opens. Use `fly-global-services:34000` on Fly.                                                    |
+| `PORT`         | _(see `--bind`)_ | _(none)_               | Fallback for hosts that only set `PORT`. Bound on `0.0.0.0`.                                                        |
+| `RIFT_PUBLIC`  | `--public`       | _(falls back to bind)_ | Address baked into connect tokens. Must be the player-facing IP:port. Required behind NAT, a load balancer, or Fly. |
+| `DATABASE_URL` | `--database-url` | _(none → in-memory)_   | `postgres://user:pass@host:port/db`. Omit (or pass `--no-db`) for offline testing only.                             |
+| `RUST_LOG`     | n/a              | `info`                 | Standard `env_logger` filter. Bump to `debug` to chase issues.                                                      |
+
+**Required for any real deployment:** `RIFT_PUBLIC` and
+`DATABASE_URL`. `RIFT_BIND` defaults are fine for a single-
+machine VPS; Fly needs the `fly-global-services` override
+(see `fly.toml`).
+
+## Database
+
+Postgres + sqlx. Migrations live in
+`crates/rift-persistence/migrations` and are baked into the
+runtime image. They run automatically on startup against
+`DATABASE_URL` — no manual `sqlx migrate run` needed.
+
+Recommended: provision a managed Postgres (Fly Postgres, Neon,
+Supabase, RDS, etc.) so backups, point-in-time-recovery, and
+replica failover are someone else's problem.
+
+### Backups
+
+**Automated nightly snapshots are a launch blocker** (see
+[`BEFORE_PUBLISHING.md`](BEFORE_PUBLISHING.md) section 0). Until
+the managed backup story is wired in, run a manual
+`pg_dump --format=custom` before every deploy and stash it
+somewhere off the host.
+
+Restore drill:
+
+```sh
+pg_restore --clean --if-exists --no-owner \
+    -d "$DATABASE_URL" path/to/backup.dump
 ```
 
-After deploy, point your client at `<that-ip>:34000`:
+Test the restore drill against a copy of production at least
+once before you need it for real.
 
-```bash
-rift --connect <that-ip>:34000
-```
+## Deploying a new version
 
----
+1. **Tag the build.** `git tag -a v0.1.X -m "..."`,
+   `git push --tags`. The tag becomes the image tag and the
+   rollback target.
+2. **Snapshot the database.** Manual `pg_dump` until the
+   automated nightly is in place.
+3. **Build & push the image.**
+   ```sh
+   docker build -f Dockerfile.server -t rift-server:v0.1.X .
+   # On Fly: `flyctl deploy` builds via the remote builder
+   # and applies the new release atomically.
+   flyctl deploy --image rift-server:v0.1.X
+   ```
+4. **Verify.** Tail logs (`flyctl logs` or `docker logs -f`)
+   and confirm: `rift-server ready on …`, then a clean Hello
+   from a test client.
+5. **Roll back.** `flyctl releases` lists every deploy;
+   `flyctl deploy --image rift-server:v0.1.X-1` restores the
+   previous tag.
 
-## Client
+## Graceful shutdown
 
-### Build a release binary
+The server installs a SIGINT / SIGTERM handler (Ctrl-C, `docker
+stop`, `flyctl deploy` rolling restart) that:
 
-```bash
-cargo build --release -p rift-client
-```
+1. Lets the current sim tick finish.
+2. Runs one final `auto_save_all`.
+3. Calls `PersistenceHandle::shutdown_blocking` so the worker
+   drains its mailbox.
+4. Exits cleanly.
 
-The binary lands at `target/release/rift` (or `rift.exe`).
+A second signal during the drain bypasses the handler and
+hard-kills the process. For real production: prefer
+`flyctl deploy` (rolling restart, one machine at a time) or
+`docker stop --time 30` to give the drain enough headroom.
 
-### Pack a redistributable bundle
+## Networking (current state)
 
-The client needs the binary **plus** `assets/` (icons, models,
-shaders, textures) at runtime. The packaging script collects
-everything into a single zip / tarball:
+`rift-net` currently uses `ServerAuthentication::Unsecure` /
+`ClientAuthentication::Unsecure` — clients are trusted to
+declare their own `client_id`. **Do not consider this secure.**
+Any public deployment is effectively open to impersonation.
 
-```bash
-# Linux / macOS
-./scripts/package-client.sh
+The plan (tracked in
+[`BEFORE_PUBLISHING.md`](BEFORE_PUBLISHING.md) section 0) is
+to graduate to netcode.io's `Secure` mode, which requires:
 
-# Windows (PowerShell)
-.\scripts\package-client.ps1
-```
+- An **auth service** that issues signed connect tokens.
+- A **signing key** shared between the auth service and the
+  game server, loaded from `RIFT_CONNECT_TOKEN_KEY` (32-byte
+  hex string in an env var, never checked into source).
+- A **rotation procedure**: roll the key in two phases (deploy
+  the new key alongside the old, switch the auth service to
+  sign with the new key, retire the old key after the longest
+  outstanding session has expired).
 
-Each script produces `dist/rift-client-<os>-<arch>.zip` containing:
+Until that lands, restrict the public IP to a private playtest
+group via firewall rules or a VPN.
 
-```
-rift-client/
-├── rift(.exe)
-├── assets/
-└── README.txt          ← brief "double-click rift, --connect host:port"
-```
+## Health checks
 
-Send that one zip to a playtester. They unzip, run the binary,
-done. No Cargo, no Rust toolchain, no Vulkan SDK on their side
-(they only need a modern GPU driver with Vulkan support — every
-mainstream 2018+ GPU has this out of the box).
+Fly's HTTP probe doesn't work against a UDP-only service — the
+server has no TCP listener. Today's "is it alive" check is
+the process exit code (Fly auto-restarts on crash) plus log
+inspection. A small TCP `/healthz` sidecar that reports "sim
+is ticking" is on the launch checklist.
 
-### Connecting to a remote server
+## Troubleshooting
 
-```bash
-rift --connect game.example.com:34000
-```
+| Symptom                                                | Likely cause                                                                            |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Client `Connection rejected by server: protocol …`     | Client and server disagree on `PROTOCOL_VERSION`. Roll one to match the other.          |
+| Client hangs at "Connecting…" indefinitely             | UDP firewall block. Verify `nc -u -z host 34000` from the client side.                  |
+| Server logs `transport update: …`                      | Usually a malformed packet, not a bug. Sustained errors → suspect a hostile client.     |
+| `persistence: load_inventory failed for …`             | Postgres unreachable or schema drifted. Check `DATABASE_URL` and migration log on boot. |
+| Rolling deploy drops a player's last few inventory ops | Auto-save is 30 s. Use `flyctl deploy` (rolling) not `flyctl machine restart` (hard).   |
 
-The client exposes the same `--connect` flag on every platform. If
-the server is using a non-default port, include it.
+## Contact
 
----
-
-## Local-only dev workflow (unchanged)
-
-```bash
-docker compose up -d                # start Postgres
-cargo run -p rift-server            # listens on 0.0.0.0:34000
-cargo run -p rift-client            # connects to 127.0.0.1:34000
-```
+Operator escalation: emil@piga.nu

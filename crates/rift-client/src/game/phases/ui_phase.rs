@@ -65,17 +65,21 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     let fps_y = 8.0_f32;
     renderer.overlay_batch.text(
         &fps_text,
-        fps_x + 1.0, fps_y + 1.0,
+        fps_x + 1.0,
+        fps_y + 1.0,
         fps_size,
         [0.0, 0.0, 0.0, 0.6],
-        sw, sh,
+        sw,
+        sh,
     );
     renderer.overlay_batch.text(
         &fps_text,
-        fps_x, fps_y,
+        fps_x,
+        fps_y,
         fps_size,
         [1.0, 1.0, 0.85, 0.95],
-        sw, sh,
+        sw,
+        sh,
     );
 
     let nearest_loot = crate::game::loot_system::nearest_drop(&state.world, &state.loot);
@@ -113,8 +117,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut ui,
         &state.player_state.abilities,
         state.player_state.experience.level,
-        state.player_state.resource_pct
-            * state.player_state.stats().max_resource,
+        state.player_state.resource_pct * state.player_state.stats().max_resource,
         // Highlight whichever slot is mid-targeting so the
         // player has a clear "you're aiming this one" cue.
         state
@@ -156,9 +159,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // Spellbook toggle (B) — open / close the loadout editor.
     // Suppressed while a stash session is active so B doesn't
     // double-bind alongside the inventory drag context.
-    if !state.loot.stash_session
-        && ui.input().key_just_pressed(winit::keyboard::KeyCode::KeyB)
-    {
+    if !state.loot.stash_session && ui.input().key_just_pressed(winit::keyboard::KeyCode::KeyB) {
         state.spellbook.toggle();
     }
     if let Some(action) = state.spellbook.frame(
@@ -190,11 +191,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // vote panel is currently up. Reads the next floor's
     // `FloorConfig` and renders the deltas above the F-prompt.
     let descend_prompt = std::mem::take(&mut state.frame.descend_prompt);
-    let vote_active = state
-        .exit_vote
-        .as_ref()
-        .map(|v| v.active)
-        .unwrap_or(false);
+    let vote_active = state.exit_vote.as_ref().map(|v| v.active).unwrap_or(false);
     if descend_prompt && !vote_active {
         hud::render_descend_tooltip(&mut ui, state.rift.floor);
     }
@@ -236,15 +233,16 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // every other widget but *before* the fade overlay so a
     // black-out hides it. Keys handled before the panel so
     // open/close edges land in the same frame as the draw.
-    state.chat.handle_keys(&mut ui, &mut state.net.pending_chats_out);
+    state
+        .chat
+        .handle_keys(&mut ui, &mut state.net.pending_chats_out);
     state.chat.frame(&mut ui, 0.0);
 
     // Drain any chat slash commands the chat HUD didn't
     // recognise, routing them through the party UI. Anything
     // the party UI also rejects becomes a local "Unknown
     // command" system line so the player gets feedback.
-    let pending: Vec<(String, String)> =
-        std::mem::take(&mut state.chat.pending_slash);
+    let pending: Vec<(String, String)> = std::mem::take(&mut state.chat.pending_slash);
     for (head, body) in pending {
         match state.party.try_handle_slash(&head, &body) {
             Some(Ok(msg)) => state.net.pending_party_msgs.push(msg),
@@ -258,7 +256,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // Party HUD: top-left frames + portal/confirm modals + any
     // toasts. Rendered after chat so its modals sit above the
     // scrollback panel.
-    state.party.frame(&mut ui, &mut state.net, &mut state.chat, &mut state.frame);
+    state
+        .party
+        .frame(&mut ui, &mut state.net, &mut state.chat, &mut state.frame);
 
     // Combat-meter panel (bottom-right). Only renders inside
     // a rift — the hub is meter-free.

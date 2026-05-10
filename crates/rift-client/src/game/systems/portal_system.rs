@@ -437,6 +437,7 @@ pub fn attach_audio(portal: &mut HubPortal, audio: &mut rift_audio::AudioSystem)
         min_distance: 6.0,
         max_distance: 55.0,
         looping: true,
+        pitch: 1.0,
     };
     use rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
     let emitter_pos = portal.position + Vec3::Y * PORTAL_CENTRE_Y;

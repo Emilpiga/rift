@@ -10,7 +10,7 @@ use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 
 use super::environment::EnvTextures;
 use super::monster_assets::MonsterCache;
-use super::props::{self, Props};
+use super::props::Props;
 use super::rift_state::RiftState;
 use super::torches::TorchSystem;
 use crate::game::PlayerState;
@@ -42,7 +42,7 @@ pub struct HubStorm {
     /// random.
     cloud_anchors: Vec<Vec3>,
     state: StormState,
-    rng: super::props::placement::SmallRng,
+    rng: rift_dungeon::props_placement::SmallRng,
 }
 
 enum StormState {
@@ -68,7 +68,7 @@ enum StormState {
 }
 
 impl HubStorm {
-    fn schedule_next(rng: &mut super::props::placement::SmallRng) -> StormState {
+    fn schedule_next(rng: &mut rift_dungeon::props_placement::SmallRng) -> StormState {
         // 4–14 seconds between strikes — enough silence that
         // each fork lands as an event rather than wallpaper.
         StormState::Idle {
@@ -77,7 +77,7 @@ impl HubStorm {
     }
 
     fn begin_flash(
-        rng: &mut super::props::placement::SmallRng,
+        rng: &mut rift_dungeon::props_placement::SmallRng,
         anchors: &[Vec3],
         pulses_left: u8,
         carry_pos: Option<Vec3>,
@@ -526,6 +526,65 @@ impl FloorManager {
             let iz = pos.z as usize;
             floor_pos_by_pack[pack_idx(tile_pack(ix, iz))].push(pos);
         }
+        // Extend each room/corridor's floor underneath its
+        // bordering walls. With the see-through-wall x-ray
+        // porthole now dither-cutting walls between camera
+        // and player, the player can briefly see what sits
+        // below those walls — without floor coverage that's
+        // the empty fog/skybox void, which reads as the walls
+        // "floating in mid-air".
+        //
+        // Each under-wall floor tile is themed by the same
+        // pack the wall itself uses (the pack of the nearest
+        // walkable neighbour), so the corridor stone floor
+        // extends under the corridor's walls and the shrine's
+        // blue-gold floor extends under the shrine's walls —
+        // no theme seam halfway down a hallway.
+        //
+        // Y is forced to 0 to match the wall base regardless
+        // of any neighbouring elevation feature; raised /
+        // sunken sub-regions of a room never touch a wall
+        // tile (verified in `dungeon::wall_positions`), so we
+        // never hide a stair or a pit floor by doing this.
+        //
+        // Restricted to walls listed by `wall_positions()` so
+        // we don't cover the entire void of perimeter walls
+        // beyond the dungeon — only walls actually adjacent
+        // to a walkable tile (i.e. visible from gameplay) get
+        // a floor underneath them.
+        let under_wall_pack = |x: usize, z: usize| -> MatPack {
+            for (dx, dz) in [
+                (-1i32, 0i32),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                let nx = x as i32 + dx;
+                let nz = z as i32 + dz;
+                if nx < 0 || nz < 0 {
+                    continue;
+                }
+                let (nx, nz) = (nx as usize, nz as usize);
+                if nx >= floor.width || nz >= floor.depth {
+                    continue;
+                }
+                let ni = nz * floor.width + nx;
+                if floor.tiles[ni].is_walkable() {
+                    return tile_pack(nx, nz);
+                }
+            }
+            MatPack::Stone
+        };
+        for pos in floor.wall_positions() {
+            let x = pos.x as usize;
+            let z = pos.z as usize;
+            let pack = under_wall_pack(x, z);
+            floor_pos_by_pack[pack_idx(pack)].push(Vec3::new(x as f32, 0.0, z as f32));
+        }
 
         // Floor meshes — one batched draw per non-empty pack.
         let mut floor_obj_indices: [Option<usize>; PACK_COUNT] = [None; PACK_COUNT];
@@ -722,8 +781,18 @@ impl FloorManager {
         // scale because they're seen more head-on, where the
         // POM offset itself is the bigger perceptual win.
         let pbr_flags = f32::from_bits(1u32);
+        // Wall flag bits: bit 0 = PBR shader path (same as
+        // floor), bit 3 = "see-through occluder" — the cel
+        // shader's `main()` reads this to dither-cut a porthole
+        // around the camera→player segment so the player stays
+        // visible even when a wall is between them and the
+        // camera. Replaces the older "snap camera in front of
+        // the nearest wall" hack in `camera_follow_system`,
+        // which produced jolting zoom snaps every time the
+        // player walked behind cover.
+        let wall_flags = f32::from_bits(1u32 | (1u32 << 3));
         let floor_params = [1.0 / 3.0, 0.012, pbr_flags, 0.0];
-        let wall_params = [1.0 / 3.0, 0.02, pbr_flags, 0.0];
+        let wall_params = [1.0 / 3.0, 0.02, wall_flags, 0.0];
 
         // Resolve per-pack descriptor sets, falling back to
         // the default stone pack while themed packs are still
@@ -819,34 +888,22 @@ impl FloorManager {
             ));
         }
 
-        // Wall torches go FIRST so we can hand their world
-        // positions to the prop decorator as exclusion zones.
-        // Without this, theme-palette wall props (barrels,
-        // bookcases, weapon racks) regularly spawned on the
-        // exact same wall tile as a candlestick sconce and
-        // clipped through it. The candlestick prop owns a
-        // ~0.4 m footprint at the wall — using 0.7 m here
-        // gives the prop spawner enough room to slide its
-        // own footprint along the wall to clear the torch.
-        self.torches
-            .place(&floor, renderer, &mut self.props, world, seed);
-        let torch_avoid: Vec<(Vec3, f32)> = self
-            .torches
-            .torches
-            .iter()
-            .map(|t| (t.light.position, 0.7))
-            .collect();
+        // Render every prop the dungeon placed for this floor,
+        // including light-flagged candlestick torches —
+        // `Props::render_floor` doesn't care which is which,
+        // they're all just `PlacedProp` entries with the same
+        // wall-snap pipeline. Placement (including torches)
+        // is owned by `rift_dungeon::props_placement` so the
+        // server's authoritative `kinematic::integrate` collides
+        // the player capsule against the same prop set the
+        // client renders here.
+        self.props.render_floor(renderer, &floor);
 
-        // Decorate rooms with static fantasy props (barrels, benches, candles, …).
-        // Done before enemies spawn so the same seed picks consistent positions.
-        props::fantasy::decorate_dungeon(
-            &mut self.props,
-            world,
-            renderer,
-            &floor,
-            seed,
-            &torch_avoid,
-        );
+        // Now stand up the per-torch flame VFX, point light,
+        // and (later) audio emitter for every prop the
+        // dungeon flagged with `light = true`. The candle mesh
+        // itself was already drawn by `render_floor` above.
+        self.torches.build(&floor, renderer, seed);
 
         // Player — spawned via shared helper so the hub generator can
         // reuse the same skinned-character + animation-set bring-up.
@@ -1184,22 +1241,21 @@ impl FloorManager {
             ));
         }
 
-        // Player stash chest. Sits a couple of tiles to the south-east
-        // of the central portal so it's visible from the spawn point
-        // without blocking the walk-up to the portal. Yaw rotates it
-        // ~30° so the lid faces the spawn approach.
-        let portal_centre = floor.first_room_center();
-        let stash_pos = portal_centre + Vec3::new(2.6, 0.0, 2.2);
-        self.props.spawn(
-            world,
-            renderer,
-            &props::nature::STASH_CHEST,
-            stash_pos,
-            std::f32::consts::FRAC_PI_6 * -1.0,
-            (0, 0),
-            None,
-        );
-        self.stash_chest_pos = Some(stash_pos);
+        // Player stash chest. Placement (position + yaw +
+        // collider) is authoritative on the dungeon side via
+        // `Floor.hub`'s `props_placement::decorate_hub` call.
+        // The chest's world position is needed by the stash
+        // UI (range gating), so we pull it back from the
+        // placed-prop list rather than recomputing.
+        let stash_pos = floor
+            .props
+            .iter()
+            .find(|p| p.id == rift_dungeon::props::PropId::StashChest)
+            .map(|p| p.pos);
+        // Render every prop the dungeon placed (stash chest +
+        // ground scatter).
+        self.props.render_floor(renderer, &floor);
+        self.stash_chest_pos = stash_pos;
 
         let spawn = floor.spawn_pos;
         self.spawn_pos = spawn;

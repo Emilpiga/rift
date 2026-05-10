@@ -348,9 +348,18 @@ impl Input {
         if self.right_mouse_down {
             if let Some(last) = self.last_mouse_pos {
                 let dx = (current.0 - last.0) as f32;
-                let dy = (current.1 - last.1) as f32;
+                // Pitch is locked: the camera holds the
+                // standard top-down ARPG angle (~30°). Yaw
+                // remains free so the player can rotate around
+                // their character with right-mouse drag, and
+                // the scroll wheel still controls zoom. Locking
+                // pitch removes the camera-vs-wall problem
+                // entirely (no low pitches that bury the camera
+                // inside geometry) and keeps combat readable
+                // since every fight is framed at the same
+                // overhead angle.
+                let _ = current.1 - last.1;
                 self.camera_yaw -= dx * 0.005;
-                self.camera_pitch = (self.camera_pitch + dy * 0.005).clamp(0.1, 1.4);
             }
         }
         self.last_mouse_pos = Some(current);

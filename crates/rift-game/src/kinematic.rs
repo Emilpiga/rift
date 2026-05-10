@@ -159,10 +159,18 @@ pub fn apply_input(k: &mut Kinematic, move_dir: [f32; 2], aim_dir: [f32; 2], but
     if wish.length_squared() < 1.0e-4 {
         let mut bx = 0.0;
         let mut bz = 0.0;
-        if buttons & button_bits::MOVE_FORWARD != 0 { bz -= 1.0; }
-        if buttons & button_bits::MOVE_BACK != 0 { bz += 1.0; }
-        if buttons & button_bits::MOVE_LEFT != 0 { bx -= 1.0; }
-        if buttons & button_bits::MOVE_RIGHT != 0 { bx += 1.0; }
+        if buttons & button_bits::MOVE_FORWARD != 0 {
+            bz -= 1.0;
+        }
+        if buttons & button_bits::MOVE_BACK != 0 {
+            bz += 1.0;
+        }
+        if buttons & button_bits::MOVE_LEFT != 0 {
+            bx -= 1.0;
+        }
+        if buttons & button_bits::MOVE_RIGHT != 0 {
+            bx += 1.0;
+        }
         wish = Vec3::new(bx, 0.0, bz);
     }
     if wish.length_squared() > 1.0 {
@@ -232,6 +240,13 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
     let step = k.velocity * dt;
 
     let mut new_pos = k.position;
+
+    // Tile / wall axis-separated step. Tiles are rigid grid
+    // cells with the entire neighbouring cell either fully
+    // walkable or fully blocking, so the cheap "would the
+    // candidate point be inside a wall tile?" predicate is
+    // a fine collision test for them — there's no
+    // sub-tile-precision sliding to do.
     new_pos.x += step.x;
     if tile_at(floor, new_pos.x, k.position.z) == Tile::Wall
         || tile_blocks_capsule(floor, new_pos.x, k.position.z, PLAYER_RADIUS)
@@ -243,6 +258,72 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
         || tile_blocks_capsule(floor, new_pos.x, new_pos.z, PLAYER_RADIUS)
     {
         new_pos.z = k.position.z;
+    }
+
+    // Prop depenetration. Unlike tiles, prop AABBs are
+    // sub-tile-sized and can graze the player's capsule at
+    // *any* angle, so the binary "blocks?" test we use for
+    // tiles introduces ULP-scale jitter when sliding along
+    // a face: tiny float noise flips the predicate each
+    // frame and the position oscillates within a sub-mm
+    // band, which the camera and the footstep system
+    // amplify visibly.
+    //
+    // Instead we accept the candidate position and then
+    // push it back out of any overlapping prop AABB along
+    // the minimum-translation vector. That gives:
+    //
+    //   * **Smooth slide** — moving tangent to a face
+    //     produces a purely-normal push, leaving the
+    //     velocity untouched along the face.
+    //   * **No float-edge jitter** — the push magnitude is
+    //     exactly the penetration depth, so a single
+    //     application clears the overlap to within ULP, and
+    //     the next frame's overlap is again exactly zero.
+    //   * **Self-correction** — if the player ever lands
+    //     inside a prop (spawn, teleport, two overlapping
+    //     props pinching the capsule), they slide out the
+    //     nearest face in one frame instead of jamming.
+    //
+    // Two iterations cover the case where pushing out of
+    // one prop pushes the capsule into another (corner
+    // pinches between adjacent wall props). More than that
+    // is wasted work: if the capsule still overlaps after
+    // two passes, the props themselves are placed too tight
+    // and the placement code is the right thing to fix.
+    for _ in 0..2 {
+        let mut total_dx = 0.0_f32;
+        let mut total_dz = 0.0_f32;
+        let mut hits = 0u32;
+        for p in floor.props.iter() {
+            if let Some((dx, dz)) = p.depenetrate_capsule_xz(new_pos.x, new_pos.z, PLAYER_RADIUS) {
+                total_dx += dx;
+                total_dz += dz;
+                hits += 1;
+            }
+        }
+        if hits == 0 {
+            break;
+        }
+        new_pos.x += total_dx;
+        new_pos.z += total_dz;
+
+        // Bounce-back guard: a depenetration push could
+        // shove the capsule into a wall tile (especially for
+        // wall-aligned props whose face sits right against a
+        // wall). Re-clamp to the pre-push position on each
+        // axis if the new spot is inside a wall, mirroring
+        // the tile axis-separated rejection above.
+        if tile_at(floor, new_pos.x, k.position.z) == Tile::Wall
+            || tile_blocks_capsule(floor, new_pos.x, k.position.z, PLAYER_RADIUS)
+        {
+            new_pos.x -= total_dx;
+        }
+        if tile_at(floor, new_pos.x, new_pos.z) == Tile::Wall
+            || tile_blocks_capsule(floor, new_pos.x, new_pos.z, PLAYER_RADIUS)
+        {
+            new_pos.z -= total_dz;
+        }
     }
 
     // Ground Y under the *tile centre* under the capsule.
@@ -296,12 +377,20 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
     if k.locomotion == loco::IDLE && k.roll_remaining <= 0.0 {
         const FOLLOW_RATE: f32 = 6.0; // 1/τ; τ ≈ 0.17 s
         let mut delta = k.aim_yaw - k.yaw;
-        while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
-        while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+        while delta > std::f32::consts::PI {
+            delta -= std::f32::consts::TAU;
+        }
+        while delta < -std::f32::consts::PI {
+            delta += std::f32::consts::TAU;
+        }
         let alpha = 1.0 - (-FOLLOW_RATE * dt).exp();
         k.yaw += delta * alpha;
-        if k.yaw > std::f32::consts::PI { k.yaw -= std::f32::consts::TAU; }
-        if k.yaw < -std::f32::consts::PI { k.yaw += std::f32::consts::TAU; }
+        if k.yaw > std::f32::consts::PI {
+            k.yaw -= std::f32::consts::TAU;
+        }
+        if k.yaw < -std::f32::consts::PI {
+            k.yaw += std::f32::consts::TAU;
+        }
     } else if k.locomotion == loco::RUN && k.roll_remaining <= 0.0 {
         // Running body-follow: exponentially chase the
         // velocity-derived yaw instead of snapping to it. The
@@ -324,12 +413,20 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
         const RUN_TURN_RATE: f32 = 10.0; // 1/τ; τ ≈ 0.10 s
         let target = k.velocity.x.atan2(k.velocity.z);
         let mut delta = target - k.yaw;
-        while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
-        while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+        while delta > std::f32::consts::PI {
+            delta -= std::f32::consts::TAU;
+        }
+        while delta < -std::f32::consts::PI {
+            delta += std::f32::consts::TAU;
+        }
         let alpha = 1.0 - (-RUN_TURN_RATE * dt).exp();
         k.yaw += delta * alpha;
-        if k.yaw > std::f32::consts::PI { k.yaw -= std::f32::consts::TAU; }
-        if k.yaw < -std::f32::consts::PI { k.yaw += std::f32::consts::TAU; }
+        if k.yaw > std::f32::consts::PI {
+            k.yaw -= std::f32::consts::TAU;
+        }
+        if k.yaw < -std::f32::consts::PI {
+            k.yaw += std::f32::consts::TAU;
+        }
     }
 
     // Tick the dodge-roll timer down. Cleared `action` flips back

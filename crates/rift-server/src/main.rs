@@ -145,7 +145,11 @@ impl Server {
 
         // Drive the renet/netcode layer. Must happen before we
         // consume messages or send any.
-        if let Err(e) = self.handle.transport.update(frame_dt, &mut self.handle.server) {
+        if let Err(e) = self
+            .handle
+            .transport
+            .update(frame_dt, &mut self.handle.server)
+        {
             log::error!("transport update: {e:?}");
         }
         // RenetServer also needs its own per-frame `update` to
@@ -260,13 +264,13 @@ impl Server {
     fn handle_server_event(&mut self, event: renet::ServerEvent) {
         match event {
             renet::ServerEvent::ClientConnected { client_id } => {
-                log::info!("client connected: {client_id}");
                 let cid = ClientId(client_id.raw());
                 self.sessions.insert(ClientSession::new(cid));
+                log::info!("{} connected", self.client_tag(cid));
             }
             renet::ServerEvent::ClientDisconnected { client_id, reason } => {
-                log::info!("client disconnected: {client_id} ({reason:?})");
                 let cid = ClientId(client_id.raw());
+                log::info!("{} disconnected ({reason:?})", self.client_tag(cid));
                 // Pull the session out so we can fire one final
                 // save and broadcast `PlayerLeft` with the net id
                 // it owned. After this point the session row is
@@ -281,12 +285,10 @@ impl Server {
                 // emit a "X has left" system line *after* the
                 // session row is gone but before the
                 // broadcast loops reuse the borrow.
-                let leaver_name = removed
-                    .as_ref()
-                    .and_then(|s| s.character_name.clone());
+                let leaver_name = removed.as_ref().and_then(|s| s.character_name.clone());
                 if let (Some(handle), Some(record)) = (&self.persistence, final_record) {
                     if !handle.save(record) {
-                        log::warn!("persistence: final-save dropped for {cid:?}");
+                        log::warn!("{} persistence: final-save dropped", self.client_tag(cid));
                     }
                 }
                 self.hub.despawn_player(cid);
@@ -389,14 +391,17 @@ impl Server {
             }
             ClientMsg::OpenStash => self.handle_open_stash(from),
             ClientMsg::CloseStash => self.handle_close_stash(from),
-            ClientMsg::DepositToStash { inventory_index, tab_index } => {
-                self.handle_deposit_to_stash(
-                    from,
-                    inventory_index as usize,
-                    tab_index as usize,
-                );
+            ClientMsg::DepositToStash {
+                inventory_index,
+                tab_index,
+            } => {
+                self.handle_deposit_to_stash(from, inventory_index as usize, tab_index as usize);
             }
-            ClientMsg::DepositToStashSlot { inventory_index, tab_index, stash_index } => {
+            ClientMsg::DepositToStashSlot {
+                inventory_index,
+                tab_index,
+                stash_index,
+            } => {
                 self.handle_deposit_to_stash_slot(
                     from,
                     inventory_index as usize,
@@ -404,14 +409,17 @@ impl Server {
                     stash_index as usize,
                 );
             }
-            ClientMsg::WithdrawFromStash { tab_index, stash_index } => {
-                self.handle_withdraw_from_stash(
-                    from,
-                    tab_index as usize,
-                    stash_index as usize,
-                );
+            ClientMsg::WithdrawFromStash {
+                tab_index,
+                stash_index,
+            } => {
+                self.handle_withdraw_from_stash(from, tab_index as usize, stash_index as usize);
             }
-            ClientMsg::WithdrawFromStashSlot { tab_index, stash_index, inventory_index } => {
+            ClientMsg::WithdrawFromStashSlot {
+                tab_index,
+                stash_index,
+                inventory_index,
+            } => {
                 self.handle_withdraw_from_stash_slot(
                     from,
                     tab_index as usize,
@@ -423,12 +431,7 @@ impl Server {
                 self.handle_swap_inventory_slots(from, a as usize, b as usize);
             }
             ClientMsg::SwapStashSlots { tab_index, a, b } => {
-                self.handle_swap_stash_slots(
-                    from,
-                    tab_index as usize,
-                    a as usize,
-                    b as usize,
-                );
+                self.handle_swap_stash_slots(from, tab_index as usize, a as usize, b as usize);
             }
             ClientMsg::BuyStashTab => {
                 self.handle_buy_stash_tab(from);
@@ -457,10 +460,16 @@ impl Server {
                 }
                 self.handle_salvage_inventory_bulk(from, rarity_max);
             }
-            ClientMsg::UnequipToBagSlot { slot, inventory_index } => {
+            ClientMsg::UnequipToBagSlot {
+                slot,
+                inventory_index,
+            } => {
                 self.handle_unequip_to_bag_slot(from, slot, inventory_index as usize);
             }
-            ClientMsg::SetLoadoutSlot { slot_index, ability_id } => {
+            ClientMsg::SetLoadoutSlot {
+                slot_index,
+                ability_id,
+            } => {
                 self.handle_set_loadout_slot(from, slot_index, ability_id);
             }
             ClientMsg::Ack { .. } => { /* phase 4 */ }
@@ -472,11 +481,7 @@ impl Server {
                 // chose Solo at floor 1 in the portal modal.
                 // Real entries arrive via `ProposeRiftEntry`.
                 if self.instance_for_client(from).is_none() {
-                    self.handle_propose_rift_entry(
-                        from,
-                        1,
-                        rift_net::messages::party_mode::SOLO,
-                    );
+                    self.handle_propose_rift_entry(from, 1, rift_net::messages::party_mode::SOLO);
                     return;
                 }
                 use crate::sim::ExitVoteRequest;
@@ -510,8 +515,29 @@ impl Server {
                 }
             }
             ClientMsg::RequestRoster { account_name } => {
-                log::info!("RequestRoster from {from:?}: account={account_name:?}");
-                let entries = self.lookup_roster(&account_name);
+                // Bound the lookup string before it touches the
+                // persistence layer. The login flow rejects
+                // names longer than 18 chars; pre-Hello roster
+                // probes get the same cap so a hostile client
+                // can't make us issue arbitrary-size SQL `LIKE`
+                // probes (or allocate megabyte log lines).
+                let trimmed = account_name.trim();
+                if trimmed.is_empty() || trimmed.chars().count() > 64 {
+                    log::warn!(
+                        "RequestRoster from {from:?}: rejecting suspect account_name (len={})",
+                        trimmed.chars().count()
+                    );
+                    self.send_to(
+                        from,
+                        Channel::Control,
+                        &ServerMsg::Roster {
+                            entries: Vec::new(),
+                        },
+                    );
+                    return;
+                }
+                log::info!("RequestRoster from {from:?}: account={trimmed:?}");
+                let entries = self.lookup_roster(trimmed);
                 self.send_to(from, Channel::Control, &ServerMsg::Roster { entries });
             }
             ClientMsg::RiftExitVoteStart => {
@@ -575,9 +601,14 @@ impl Server {
                 }
             }
             ClientMsg::SetShrineChannel { shrine } => {
-                self.sim_for_client_mut(from).set_shrine_channel(from, shrine);
+                self.sim_for_client_mut(from)
+                    .set_shrine_channel(from, shrine);
             }
-            ClientMsg::ChatSend { channel, target, text } => {
+            ClientMsg::ChatSend {
+                channel,
+                target,
+                text,
+            } => {
                 self.handle_chat_send(from, channel, target, text);
             }
             ClientMsg::ProposeRiftEntry { start_floor, mode } => {
@@ -624,11 +655,7 @@ impl Server {
     /// their current instance.
     pub(crate) fn sim_for_client(&self, cid: ClientId) -> &Sim {
         match self.client_instance.get(&cid) {
-            Some(id) => self
-                .instances
-                .get(*id)
-                .map(|i| &i.sim)
-                .unwrap_or(&self.hub),
+            Some(id) => self.instances.get(*id).map(|i| &i.sim).unwrap_or(&self.hub),
             None => &self.hub,
         }
     }
@@ -713,11 +740,7 @@ impl Server {
     /// `LoadFloor` so their client rebuilds the scene. No-op
     /// if the client is somehow not in the hub or the
     /// instance has been dropped underneath us.
-    pub(crate) fn move_client_to_instance(
-        &mut self,
-        cid: ClientId,
-        instance: RiftInstanceId,
-    ) {
+    pub(crate) fn move_client_to_instance(&mut self, cid: ClientId, instance: RiftInstanceId) {
         let Some((mut player, effects)) = self.hub.extract_player(cid) else {
             log::warn!("move_client_to_instance: {cid:?} has no hub entity");
             return;
@@ -777,13 +800,9 @@ impl Server {
         // wipe, the pre-rift snapshot would still be on disk
         // and a reconnect would silently restore the items
         // the player just took into the rift.
-        if let (Some(handle), Some(rec_id)) =
-            (&self.persistence, self.sessions.record_id(cid))
-        {
+        if let (Some(handle), Some(rec_id)) = (&self.persistence, self.sessions.record_id(cid)) {
             if !handle.reset_character_inventory(rec_id, Vec::new()) {
-                log::warn!(
-                    "persistence: rift-entry inventory wipe dropped for {cid:?}"
-                );
+                log::warn!("persistence: rift-entry inventory wipe dropped for {cid:?}");
             }
         }
         let _net_id = inst.sim.inject_player(cid, player, effects);
@@ -821,10 +840,7 @@ impl Server {
             .get(cid)
             .and_then(|s| s.character_name.clone())
             .unwrap_or_else(|| "A player".to_string());
-        self.emit_system_floor(
-            floor_idx,
-            &format!("{name} entered floor {floor_idx}."),
-        );
+        self.emit_system_floor(floor_idx, &format!("{name} entered floor {floor_idx}."));
         // Cross-world equipment-visual rendezvous: tell
         // `cid` what the existing instance members are
         // wearing, and the existing members what `cid` is
@@ -967,11 +983,7 @@ impl Server {
     /// every client in the instance onto the new floor index
     /// in lockstep — the "shared instance" model where descend
     /// votes affect everyone who's currently in it.
-    pub(crate) fn advance_instance_floor(
-        &mut self,
-        instance: RiftInstanceId,
-        new_index: u32,
-    ) {
+    pub(crate) fn advance_instance_floor(&mut self, instance: RiftInstanceId, new_index: u32) {
         let Some(inst) = self.instances.get_mut(instance) else {
             log::warn!("advance_instance_floor: instance {instance:?} gone");
             return;
@@ -1003,10 +1015,7 @@ impl Server {
         // move the whole party in lockstep, so we only need
         // one announce, not one per mover.
         if !movers.is_empty() {
-            self.emit_system_floor(
-                new_index,
-                &format!("Party descended to floor {new_index}."),
-            );
+            self.emit_system_floor(new_index, &format!("Party descended to floor {new_index}."));
         }
     }
 
@@ -1024,10 +1033,7 @@ impl Server {
         // discoverable when needed.
         let raw = renet::ClientId::from_raw(to.0);
         if !self.handle.server.is_connected(raw) {
-            log::trace!(
-                "send_to: skipping {:?} — client no longer connected",
-                to
-            );
+            log::trace!("send_to: skipping {:?} — client no longer connected", to);
             return;
         }
         let bytes = match encode(msg) {
@@ -1049,9 +1055,7 @@ impl Server {
                 return;
             }
         };
-        self.handle
-            .server
-            .broadcast_message(ch as u8, bytes);
+        self.handle.server.broadcast_message(ch as u8, bytes);
     }
 
     fn simulate_one_tick(&mut self, dt: f32) {
@@ -1059,12 +1063,37 @@ impl Server {
         // Step the hub plus every active instance. Order
         // doesn't matter — they share no entities and gameplay
         // never crosses sim boundaries mid-tick.
-        self.hub.step(dt, self.tick);
-        let instance_ids: Vec<RiftInstanceId> =
-            self.instances.iter().map(|(id, _)| *id).collect();
+        //
+        // Each sim step is wrapped in `catch_unwind` so a panic
+        // in one floor's tick (a logic bug, an out-of-bounds in
+        // a fresh ability, ...) only takes that single sim out
+        // of rotation rather than crashing the process and
+        // dropping every connected player. The poisoned sim's
+        // floor is logged but kept around — its clients keep
+        // their connection and will still receive snapshots
+        // (they'll just be stale until an operator restarts);
+        // a future revision can boot the floor's players to
+        // the hub here.
+        let tick = self.tick;
+        let hub_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.hub.step(dt, tick);
+        }));
+        if hub_panic.is_err() {
+            log::error!(
+                "sim: hub.step panicked at tick {tick:?} (server kept alive; hub may be in a bad state)"
+            );
+        }
+        let instance_ids: Vec<RiftInstanceId> = self.instances.iter().map(|(id, _)| *id).collect();
         for id in &instance_ids {
-            if let Some(inst) = self.instances.get_mut(*id) {
-                inst.sim.step(dt, self.tick);
+            let inst_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(inst) = self.instances.get_mut(*id) {
+                    inst.sim.step(dt, tick);
+                }
+            }));
+            if inst_panic.is_err() {
+                log::error!(
+                    "sim: instance {id:?} step panicked at tick {tick:?} (server kept alive; instance may be in a bad state)"
+                );
             }
         }
 
@@ -1111,10 +1140,7 @@ impl Server {
             // scrollback even if their HUD level pip is
             // off-screen.
             if u.levelled_up {
-                self.emit_system_to(
-                    u.client_id,
-                    &format!("You reached level {}!", u.level),
-                );
+                self.emit_system_to(u.client_id, &format!("You reached level {}!", u.level));
             }
         }
 
@@ -1123,8 +1149,12 @@ impl Server {
         // GLOBAL announcement and bumps every member's
         // `deepest_cleared_floor` once per actual kill.
         for id in &instance_ids {
-            let Some(inst) = self.instances.get_mut(*id) else { continue };
-            let Some(rp) = inst.sim.take_rift_progress_update() else { continue };
+            let Some(inst) = self.instances.get_mut(*id) else {
+                continue;
+            };
+            let Some(rp) = inst.sim.take_rift_progress_update() else {
+                continue;
+            };
             let boss_just_killed = rp.boss_killed && !inst.prev_boss_killed;
             inst.prev_boss_killed = rp.boss_killed;
             let floor = inst.sim.floor_index;
@@ -1140,9 +1170,7 @@ impl Server {
                 },
             );
             if boss_just_killed {
-                self.emit_system_global(&format!(
-                    "The boss of floor {floor} has been slain!"
-                ));
+                self.emit_system_global(&format!("The boss of floor {floor} has been slain!"));
                 // Bump deepest_cleared_floor for every member
                 // currently in the instance.
                 let members = self.clients_in_instance(*id);
@@ -1231,9 +1259,7 @@ impl Server {
                 .get_mut(*id)
                 .and_then(|inst| inst.sim.take_exit_vote_update());
             match outcome {
-                Some(crate::sim::vote::TickOutcome::Passed(
-                    rift_net::messages::VoteKind::Exit,
-                )) => {
+                Some(crate::sim::vote::TickOutcome::Passed(rift_net::messages::VoteKind::Exit)) => {
                     log::info!("vote: party voted to leave instance {id:?}");
                     // Stabilise living party members' unstable
                     // loot first (purified by the group exit
@@ -1410,7 +1436,11 @@ fn parse_args() -> Args {
         }
     }
     let public = public.unwrap_or(bind);
-    Args { bind, public, database_url }
+    Args {
+        bind,
+        public,
+        database_url,
+    }
 }
 
 fn main() -> Result<()> {
@@ -1444,14 +1474,41 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut server = Server::new(args.bind, args.public, persistence)?;    log::info!("rift-server ready on {} (public {})", args.bind, args.public);
+    let mut server = Server::new(args.bind, args.public, persistence)?;
+    log::info!(
+        "rift-server ready on {} (public {})",
+        args.bind,
+        args.public
+    );
+
+    // Graceful shutdown signal. `ctrlc` covers both Ctrl-C
+    // (SIGINT on Unix, console close on Windows) and SIGTERM
+    // (the signal `docker stop` and `fly deploy` send during
+    // rolling restarts). We flip an `AtomicBool` the main loop
+    // polls each iteration so the in-flight tick finishes
+    // cleanly, then we run one final `auto_save_all` and ask
+    // the persistence worker to drain its queue before exit.
+    // Without this, a SIGTERM during an inventory write loses
+    // whatever was queued after the last 30 s auto-save tick.
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            // First signal: request a clean shutdown. Second
+            // signal (set via the default handler reinstating
+            // itself once we exit) just slams the process.
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        }) {
+            log::warn!("ctrlc: failed to install signal handler ({e}); shutdown will be hard");
+        }
+    }
 
     // Tight wall-clock loop. Renet/netcode are non-blocking; we
     // sleep just enough to pace the network update at ~60 Hz so we
     // don't hog a core when idle. The simulation runs at TICK_HZ
     // independently, gated inside `step`.
     let net_period = Duration::from_secs_f32(1.0 / 60.0);
-    loop {
+    while !shutdown.load(std::sync::atomic::Ordering::SeqCst) {
         let start = Instant::now();
         if let Err(e) = server.step() {
             log::error!("step: {e:?}");
@@ -1461,4 +1518,16 @@ fn main() -> Result<()> {
             std::thread::sleep(net_period - elapsed);
         }
     }
+
+    log::info!("shutdown: signal received, flushing persistence...");
+    // Run one final auto-save so anything mutated since the
+    // last 30 s tick lands. This is fire-and-forget into the
+    // persistence worker's mailbox; the `shutdown_blocking`
+    // call below then waits for the worker to drain.
+    server.auto_save_all();
+    if let Some(handle) = server.persistence.as_ref() {
+        handle.shutdown_blocking();
+    }
+    log::info!("shutdown: done");
+    Ok(())
 }

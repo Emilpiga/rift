@@ -2,6 +2,7 @@
 name = "rift-game"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # Declarative gameplay data crate. No renderer, no wire format, no ECS
 # systems. Just types that describe how the game should look and feel.

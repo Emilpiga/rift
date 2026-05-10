@@ -1,132 +1,141 @@
-# Rift Engine — Architecture Plan
+# Rift — Architecture
 
-## Game Concept
+One-page map of how the crates fit together. Update this when
+the dependency graph or top-level responsibilities shift, not
+on every feature.
 
-- Action RPG rift crawler (Diablo/PoE-inspired loop)
-- Timed rifts with scaling difficulty & rewards
-- Item-driven build system amplifying abilities
-- Low-poly / stylized art direction
+## Game
 
-## Tech Stack
+Action-RPG rift crawler in the Diablo / PoE lineage. Run loop:
+descend a procedurally generated multi-floor rift, fight scaled
+enemies, kill the boss, extract loot back to the hub, gear up,
+go again. Multiplayer is server-authoritative.
 
-- **Language:** Rust
-- **Graphics API:** Vulkan (via `ash` raw bindings)
-- **Windowing:** `winit`
-- **Math:** `glam` (fast, game-oriented)
-- **Asset Loading:** `gltf` for models, `image` for textures
-- **ECS:** `hecs` (lightweight) — for game layer later
-- **Build:** Cargo workspace
-
-## Rendering Engine — Phased Plan
-
-### Phase 1: Foundation (Current Focus)
-
-Get a triangle on screen with proper Vulkan infrastructure.
-
-- [ ] Vulkan instance, device, swapchain setup
-- [ ] Render pass & framebuffers
-- [ ] Graphics pipeline (vertex + fragment shaders)
-- [ ] Command buffer recording & submission
-- [ ] Synchronization (fences, semaphores)
-- [ ] Window integration via winit
-- [ ] Basic camera (perspective projection)
-
-### Phase 2: Geometry & Scene
-
-Render actual 3D content.
-
-- [ ] Vertex buffer / Index buffer abstractions
-- [ ] Mesh loading (glTF)
-- [ ] Transform hierarchy (model/view/projection)
-- [ ] Basic material system (albedo color + texture)
-- [ ] Depth buffer
-- [ ] Frustum culling
-
-### Phase 3: Lighting & Shading
-
-Forward rendering with stylized look.
-
-- [ ] Directional light
-- [ ] Point lights (capped count for forward)
-- [ ] Stylized shading (cel/toon options, rim lighting)
-- [ ] Shadow mapping (directional, single cascade)
-- [ ] Ambient occlusion (SSAO or baked)
-
-### Phase 4: Effects & Polish
-
-Make rifts feel impactful.
-
-- [ ] Particle system (GPU-driven)
-- [ ] Post-processing pipeline (bloom, color grading, vignette)
-- [ ] Outline/glow effects (for items, abilities)
-- [ ] Screen-space reflections (optional)
-- [ ] Skeletal animation
-- [ ] Instanced rendering (enemy hordes)
-
-### Phase 5: Performance & Scale
-
-Handle rift density.
-
-- [ ] GPU frustum culling (compute shader)
-- [ ] Level-of-detail (LOD) system
-- [ ] Occlusion culling
-- [ ] Multi-threaded command buffer recording
-- [ ] Memory allocator (GPU memory management via `gpu-allocator`)
-
-## Project Structure
+## Crate map
 
 ```
-rift/
-├── Cargo.toml              # Workspace root
-├── crates/
-│   ├── rift-engine/        # Core rendering engine
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── vulkan/     # Vulkan backend
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── instance.rs
-│   │   │   │   ├── device.rs
-│   │   │   │   ├── swapchain.rs
-│   │   │   │   ├── pipeline.rs
-│   │   │   │   ├── commands.rs
-│   │   │   │   └── sync.rs
-│   │   │   ├── renderer/   # High-level render logic
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── forward.rs
-│   │   │   │   ├── camera.rs
-│   │   │   │   └── mesh.rs
-│   │   │   ├── resources/  # Asset management
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── texture.rs
-│   │   │   │   └── shader.rs
-│   │   │   └── window.rs   # Winit integration
-│   │   └── Cargo.toml
-│   ├── rift-math/          # Math utilities (thin wrapper over glam)
-│   │   ├── src/lib.rs
-│   │   └── Cargo.toml
-│   └── rift-game/          # Game logic (later)
-│       ├── src/lib.rs
-│       └── Cargo.toml
-├── assets/
-│   ├── shaders/            # GLSL → SPIR-V
-│   ├── models/
-│   └── textures/
-├── examples/
-│   └── triangle.rs         # First milestone
-└── ARCHITECTURE.md
+                 +---------------+
+                 |   rift-math   |   pure math + physics primitives
+                 +-------+-------+   (glam wrappers, raycast, A*, LOS)
+                         ^
+                 +-------+-------+
+                 | rift-dungeon  |   procgen: BSP, rooms, props,
+                 +-------+-------+   Floor::path / line_of_sight
+                         ^
+                 +-------+-------+
+                 |   rift-game   |   gameplay rules: stats, items,
+                 +-------+-------+   abilities, kinematics, classes.
+                         ^           No Vulkan, no hecs.
+        +----------------+----------------+
+        |                |                |
++-------+-------+ +------+------+  +------+--------+
+|  rift-net    | | rift-engine | | rift-persist.  |
++--------------+ +-------------+  +---------------+
+| wire types,  | | Vulkan,     |  | Postgres /    |
+| renet setup, | | hecs ECS,   |  | sqlx — saves, |
+| protocol ver | | renderer,   |  | accounts,     |
++------+-------+ | UI, ai nav, |  | inventory,    |
+       |         | input, vfx, |  | stash         |
+       |         | overlay     |  +------+--------+
+       |         +-----+-------+         |
+       |               ^                 |
+       |        +------+-------+         |
+       |        | rift-audio   |         |
+       |        +------+-------+         |
+       |               ^                 |
+       v               |                 |
++--------+--------+    |    +------------+----+
+|   rift-server   |<---+    |   rift-client   |
++-----------------+         +-----------------+
+|  headless sim   |         | window, input,  |
+|  authoritative  |         | renderer driver,|
+|  step + dispatch|         | game state,     |
++-----------------+         | net client      |
+                            +-----------------+
 ```
 
-## Key Design Decisions
+### Edges that matter
 
-1. **Raw `ash` over `wgpu`** — Full Vulkan control, learn the API properly, no abstraction overhead for a custom engine.
-2. **Cargo workspace** — Separate crates for engine, math, game. Clean dependency boundaries.
-3. **Forward rendering first** — Simpler, works well for stylized art with limited light counts. Can evolve to Forward+ later.
-4. **GLSL shaders compiled to SPIR-V** — Use `shaderc` or offline compilation via `glslc`.
-5. **Low-poly stylized** — Faster asset iteration, distinctive look, less demanding on the renderer early on.
+- `rift-server` does **not** depend on `rift-engine` (no
+  Vulkan / winit on the headless build). Enforced by
+  `Cargo.toml`. See `DEPLOYMENT.md`.
+- `rift-net` depends on nothing game-specific. Wire types
+  reference `rift-game` content tables only by stable id /
+  index, never by import.
+- `rift-game` is the single source of truth for gameplay
+  rules. Both server (auth) and client (prediction / display)
+  call into the same functions.
 
-## Immediate Next Steps
+## Tech stack
 
-1. Initialize Cargo workspace with crate structure
-2. Set up Vulkan instance creation + validation layers
-3. Window creation with winit + surface
-4. Get a colored triangle rendering (the "Hello World" of graphics)
+- **Language:** Rust (workspace, edition 2021).
+- **Graphics API:** Vulkan via `ash` raw bindings.
+- **Windowing:** `winit`.
+- **Math:** `glam`.
+- **ECS:** `hecs` (lightweight).
+- **Networking:** `renet` over UDP (netcode.io).
+- **Persistence:** `sqlx` + Postgres.
+- **Audio:** owned `rift-audio` crate (cpal-based).
+- **Asset loading:** `gltf` for models, `image` for textures,
+  GLSL → SPIR-V via `shaderc`.
+
+## Server / client split
+
+`rift-server` is a separate binary (`rift-server`) intended
+for cloud deploy; `rift-client` is the player binary
+(`rift` / `rift.exe`). Both binaries share `rift-game`,
+`rift-net`, `rift-dungeon`, `rift-math` so the simulation runs
+identically on either side. Operations and deploy details live
+in `DEPLOYMENT.md`.
+
+## Authority model
+
+Server-authoritative. Client sends inputs (`ClientMsg`); server
+runs the simulation and broadcasts snapshots + reliable events
+(`ServerMsg`). Client-side prediction is limited to local
+movement; everything else (damage, loot, state transitions) is
+applied on receipt of a server message.
+
+## Rendering pipeline
+
+Forward, single-pass over a depth pre-pass:
+
+1. **Shadow pass** — directional cascade (4096² D32, ortho frustum)
+   plus a point-light cubemap-array atlas with 8-tap rotated
+   Poisson PCF.
+2. **Skin compute** — `skin.comp` writes posed vertices into
+   per-character VBOs.
+3. **Forward opaque** — `triangle.vert` / `triangle.frag` Blinn-
+   Phong + 5×5 separable Gaussian PCF on the directional shadow.
+4. **VFX particles & ribbons** — declarative
+   `Effect = Vec<Layer>` system, additive / alpha blends.
+5. **Sky** — full-screen `sky.vert`/`sky.frag` quad after opaque.
+6. **Post chain** — bloom (`post_bright` → `post_blur`) +
+   composite (`post_composite`) + overlay (UI / icons /
+   damage text) on top.
+
+Lighting / fog parameters are pumped into the per-frame UBO so
+each floor can drive its own atmosphere theme (see
+`BEFORE_PUBLISHING.md` → "Atmosphere — lighting progression").
+
+## Where to look
+
+- `crates/rift-engine/src/renderer/` — Vulkan + render passes.
+- `crates/rift-engine/src/ecs/systems.rs` — frame logic.
+- `crates/rift-game/src/` — pure rules (stats, items,
+  abilities, kinematics, classes).
+- `crates/rift-server/src/sim/` — authoritative tick:
+  `step.rs`, `ability.rs`, `channel.rs`, `projectile.rs`,
+  `enemies/`.
+- `crates/rift-net/src/messages.rs` — wire schema.
+- `crates/rift-dungeon/src/lib.rs` — `Floor`, A\* (`path`),
+  LOS (`line_of_sight`).
+
+## What lives outside the crates
+
+- `assets/` — shaders, models, textures, icons. Loaded
+  relative to the binary's working dir.
+- `migrations/` (under `rift-persistence/`) — sqlx forward-
+  only schema changes.
+- `Dockerfile.server` + `fly.toml` — server image + deploy.
+- `scripts/` — packaging + dev helpers.

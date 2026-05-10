@@ -13,8 +13,7 @@
 //!
 //! Server-authoritative. Clients send [`ClientMsg`]s (mostly inputs);
 //! the server runs the simulation and broadcasts [`ServerMsg`]s
-//! (snapshots + events). See `docs/multiplayer.md` (TODO) for the
-//! design write-up.
+//! (snapshots + events).
 //!
 //! ## Channels
 //!
@@ -44,4 +43,3 @@ pub use transport::{open_client, open_server, ClientHandle, ServerHandle};
 // need to interact with after construction. Keeping rift-net the
 // only crate that names `renet` directly avoids version drift.
 pub use renet;
-
