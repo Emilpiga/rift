@@ -29,6 +29,7 @@ use rift_net::{
 };
 use rift_persistence::PersistenceHandle;
 
+mod auth;
 mod chat;
 mod handlers;
 mod instance;
@@ -103,6 +104,9 @@ struct Server {
     /// non-proposer party members. Drained per-tick by the
     /// portal handler. Empty when nobody is mid-modal.
     pending_portal_proposals: HashMap<ClientId, crate::handlers::portal::PendingProposal>,
+    /// Auth configuration loaded once at startup. Threaded
+    /// into [`auth::resolve`] on every `Hello`.
+    auth_config: auth::AuthConfig,
 }
 
 impl Server {
@@ -133,6 +137,7 @@ impl Server {
             auto_save_accumulator: Duration::ZERO,
             chat: ChatHistory::default(),
             pending_portal_proposals: HashMap::new(),
+            auth_config: auth::AuthConfig::from_env(),
         })
     }
 
@@ -339,18 +344,13 @@ impl Server {
         match msg {
             ClientMsg::Hello {
                 protocol_version,
-                account_name,
+                auth,
+            } => self.handle_hello(from, protocol_version, auth),
+            ClientMsg::EnterWorld {
                 character_name,
                 class_id,
                 gender,
-            } => self.handle_hello(
-                from,
-                protocol_version,
-                account_name,
-                character_name,
-                class_id,
-                gender,
-            ),
+            } => self.handle_enter_world(from, character_name, class_id, gender),
             ClientMsg::Input(cmd) => self.sim_for_client_mut(from).ingest_input(from, cmd),
             ClientMsg::CastAbility {
                 ability_id,
@@ -513,32 +513,6 @@ impl Server {
                 if self.instance_for_client(from).is_some() {
                     self.move_client_to_hub(from);
                 }
-            }
-            ClientMsg::RequestRoster { account_name } => {
-                // Bound the lookup string before it touches the
-                // persistence layer. The login flow rejects
-                // names longer than 18 chars; pre-Hello roster
-                // probes get the same cap so a hostile client
-                // can't make us issue arbitrary-size SQL `LIKE`
-                // probes (or allocate megabyte log lines).
-                let trimmed = account_name.trim();
-                if trimmed.is_empty() || trimmed.chars().count() > 64 {
-                    log::warn!(
-                        "RequestRoster from {from:?}: rejecting suspect account_name (len={})",
-                        trimmed.chars().count()
-                    );
-                    self.send_to(
-                        from,
-                        Channel::Control,
-                        &ServerMsg::Roster {
-                            entries: Vec::new(),
-                        },
-                    );
-                    return;
-                }
-                log::info!("RequestRoster from {from:?}: account={trimmed:?}");
-                let entries = self.lookup_roster(trimmed);
-                self.send_to(from, Channel::Control, &ServerMsg::Roster { entries });
             }
             ClientMsg::RiftExitVoteStart => {
                 use crate::sim::ExitVoteRequest;

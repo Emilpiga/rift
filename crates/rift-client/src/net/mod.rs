@@ -96,7 +96,20 @@ pub struct NetClient {
     /// send until renet reports the underlying netcode handshake is
     /// complete; otherwise the message is queued in renet's buffer
     /// and lost if the connection fails.
-    hello_sent: bool,
+    /// `true` once we've sent the auth-only `Hello` for this
+    /// connection. Gates the auto-send in `step` so we don't
+    /// spam the wire while waiting for `Authenticated`.
+    auth_sent: bool,
+    /// Auth signer used to mint the `AuthCredential` for
+    /// `Hello`. `None` until the binary plumbs one in via
+    /// [`Self::set_signer`]; `send_hello` is a no-op until
+    /// then so a misconfigured client can't ship a placeholder
+    /// credential by accident.
+    signer: Option<crate::auth::Signer>,
+    /// `true` once we've sent `EnterWorld` for the current
+    /// `profile`. Until then we're still in the character-select
+    /// stage post-auth and the avatar isn't spawned server-side.
+    enter_world_sent: bool,
     /// Highest server tick we've seen, sent back as `Ack` so the
     /// server can prune older snapshots from the per-client history.
     pub(super) last_server_tick: NetTick,
@@ -368,19 +381,26 @@ pub struct NetClient {
     /// regeneration mixes in the same per-floor offset the server
     /// does. Stays stable for the lifetime of the connection.
     rift_seed: u64,
-    /// Account name we plan to lookup the roster for. Set by
-    /// `request_roster` from the account-entry screen. Cleared
-    /// once the request has been flushed onto the wire so we
-    /// don't spam the server every frame.
-    pub(super) roster_request: Option<String>,
-    /// Whether we've already shipped a `RequestRoster` for the
-    /// current `roster_request`. Reset whenever a fresh account
-    /// name is queued.
-    pub(super) roster_request_sent: bool,
-    /// Latest roster reply from the server. `None` means "never
-    /// asked" or "asked but no reply yet". Drained by the binary
-    /// once it's been forwarded into the character-select UI.
+    /// Account identity we plan to ship in the next `Hello`.
+    /// Set by `request_roster` from the account-entry screen
+    /// (the field name is legacy from the pre-auth flow). With
+    /// dev auth this is the user-typed identity; with Steam
+    /// it's filled in by the auth resolver. Cleared / re-armed
+    /// when a different identity is queued so we always log in
+    /// as whatever the most recent account-entry confirmed.
+    pub(super) pending_account_for_auth: Option<String>,
+    /// Latest roster reply from the server (carried inside
+    /// `ServerMsg::Authenticated`). `None` means "never
+    /// authenticated" or "authenticated but reply not yet
+    /// forwarded". Drained by the binary once it's been
+    /// forwarded into the character-select UI.
     pub(super) roster: Option<Vec<rift_net::messages::RosterEntry>>,
+    /// Server-canonical display name returned alongside the
+    /// roster in `ServerMsg::Authenticated`. Currently unused
+    /// by the binary; reserved for the post-auth "logged in
+    /// as …" UI that lands with the Steam path.
+    #[allow(dead_code)]
+    pub(super) display_name: Option<String>,
     /// Fatal rejection reason from the server (e.g. protocol
     /// version mismatch). Set on receipt of [`ServerMsg::Reject`];
     /// the binary checks this every frame and exits cleanly with
@@ -398,7 +418,9 @@ impl NetClient {
         let handle = open_client(server, client_id, &NetSettings::default())?;
         Ok(Self {
             handle,
-            hello_sent: false,
+            auth_sent: false,
+            signer: None,
+            enter_world_sent: false,
             last_server_tick: NetTick::default(),
             profile: None,
             our_net_id: None,
@@ -450,9 +472,9 @@ impl NetClient {
             pending_floor: None,
             floor_index: 0,
             rift_seed: 0,
-            roster_request: None,
-            roster_request_sent: false,
+            pending_account_for_auth: None,
             roster: None,
+            display_name: None,
             fatal_reject_reason: None,
         })
     }
@@ -469,32 +491,30 @@ impl NetClient {
         }
         self.handle.client.update(dt);
 
-        // Once the underlying handshake completes, send Hello exactly
-        // once. After that the connection is fully usable for
-        // game traffic.
-        if !self.hello_sent && self.handle.client.is_connected() && self.profile.is_some() {
-            self.send_hello();
-            self.hello_sent = true;
-        }
-
-        // Forward any pending roster request the moment renet
-        // reports the connection is live. We don't wait for
-        // Hello — the roster lookup is a pre-Hello step so the
-        // user can pick which character to log in as.
-        if !self.roster_request_sent
+        // Two-phase handshake:
+        //   1. As soon as renet reports the connection is live
+        //      and we have an account identity queued, ship the
+        //      auth-only `Hello`. Server replies with
+        //      `Authenticated` (carrying the roster) or
+        //      `Reject`.
+        //   2. After the player picks a character (which calls
+        //      `set_profile`), ship `EnterWorld`. Server replies
+        //      with `Welcome` and the avatar spawns.
+        if !self.auth_sent
             && self.handle.client.is_connected()
-            && self.roster_request.is_some()
+            && self.pending_account_for_auth.is_some()
+            && self.signer.is_some()
         {
-            if let Some(account_name) = self.roster_request.clone() {
-                self.send(
-                    Channel::Control,
-                    &ClientMsg::RequestRoster {
-                        account_name: account_name.clone(),
-                    },
-                );
-                log::info!("net: requested roster for account {account_name:?}");
-                self.roster_request_sent = true;
-            }
+            self.send_hello();
+            self.auth_sent = true;
+        }
+        if !self.enter_world_sent
+            && self.auth_sent
+            && self.handle.client.is_connected()
+            && self.profile.is_some()
+        {
+            self.send_enter_world();
+            self.enter_world_sent = true;
         }
 
         // Drain inbound messages from every channel. The renet
@@ -542,11 +562,26 @@ impl NetClient {
     /// after Hello has already been sent is a no-op — the server
     /// uses the first Hello as authoritative for the session.
     pub fn set_profile(&mut self, profile: ClientProfile) {
-        if self.hello_sent {
-            log::warn!("net: set_profile called after Hello — ignored");
+        if self.enter_world_sent {
+            log::warn!("net: set_profile called after EnterWorld — ignored");
             return;
         }
         self.profile = Some(profile);
+    }
+
+    /// Install the auth signer the net client should use for
+    /// the next `Hello`. Idempotent: calling again before
+    /// `Hello` has been sent overwrites the previous signer
+    /// (lets the binary swap dev identities mid-startup if it
+    /// ever needs to). After `Hello` has been sent it logs and
+    /// drops the new signer — the server will only accept the
+    /// first `Hello` per connection anyway.
+    pub fn set_signer(&mut self, signer: crate::auth::Signer) {
+        if self.auth_sent {
+            log::warn!("net: set_signer called after Hello — ignored");
+            return;
+        }
+        self.signer = Some(signer);
     }
 
     /// Our character name, if `set_profile` has run. Used by the
@@ -567,21 +602,48 @@ impl NetClient {
     }
 
     fn send_hello(&mut self) {
+        let Some(account_name) = self.pending_account_for_auth.clone() else {
+            return;
+        };
+        // Mint a fresh credential from the installed signer.
+        // For the dev issuer this is an HMAC of the typed/randomised
+        // identity; the server's `auth::resolve` re-verifies before
+        // letting us into the account row. Without a signer we
+        // refuse to ship a placeholder — the server has no key
+        // to compare against and would just reject us anyway,
+        // and shipping zero-signed traffic risks looking like a
+        // probe.
+        let Some(signer) = self.signer.as_ref() else {
+            log::error!(
+                "net: cannot send Hello — no auth signer installed (RIFT_DEV_AUTH_KEY \
+                 unset and the client was not built with --features steam-auth). \
+                 Holding back the handshake."
+            );
+            return;
+        };
+        let auth = signer.mint();
+        let issuer = signer.identity_hint();
+        let msg = ClientMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            auth,
+        };
+        self.send(Channel::Control, &msg);
+        log::info!("net: sent Hello (issuer={issuer}) for account {account_name:?}");
+    }
+
+    fn send_enter_world(&mut self) {
         let Some(profile) = self.profile.clone() else {
             return;
         };
-        let msg = ClientMsg::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            account_name: profile.account_name.clone(),
+        let msg = ClientMsg::EnterWorld {
             character_name: profile.character_name.clone(),
             class_id: profile.class_id.clone(),
             gender: profile.gender,
         };
         self.send(Channel::Control, &msg);
         log::info!(
-            "net: sent Hello as {:?} on account {:?} ({:?})",
+            "net: sent EnterWorld as {:?} ({:?})",
             profile.character_name,
-            profile.account_name,
             profile.gender,
         );
     }
@@ -619,9 +681,18 @@ impl NetClient {
                 log::error!("net: Reject from server: {reason}");
                 self.fatal_reject_reason = Some(reason);
             }
-            ServerMsg::Roster { entries } => {
-                log::info!("net: Roster received ({} entries)", entries.len());
-                self.roster = Some(entries);
+            ServerMsg::Authenticated {
+                your_client_id,
+                display_name,
+                roster,
+            } => {
+                log::info!(
+                    "net: Authenticated as {display_name:?} client_id={your_client_id:?} roster={} entries",
+                    roster.len()
+                );
+                self.our_client_id = Some(your_client_id);
+                self.display_name = Some(display_name);
+                self.roster = Some(roster);
             }
             ServerMsg::Snapshot(snap) => {
                 self.apply_snapshot(snap);

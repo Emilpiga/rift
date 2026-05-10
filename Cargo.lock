@@ -3085,6 +3085,8 @@ dependencies = [
  "env_logger",
  "glam",
  "hecs",
+ "hex",
+ "hmac",
  "log",
  "rift-audio",
  "rift-dungeon",
@@ -3092,6 +3094,7 @@ dependencies = [
  "rift-game",
  "rift-math",
  "rift-net",
+ "sha2",
  "winit",
 ]
 
@@ -3153,9 +3156,11 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "glam",
+ "hmac",
  "log",
  "renet",
  "serde",
+ "sha2",
  "thiserror 1.0.69",
 ]
 
@@ -3183,11 +3188,15 @@ dependencies = [
  "env_logger",
  "glam",
  "hecs",
+ "hex",
+ "hmac",
  "log",
  "rift-dungeon",
  "rift-game",
  "rift-net",
  "rift-persistence",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]

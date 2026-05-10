@@ -2,7 +2,7 @@
 //! flow split into named phases so each step is short and
 //! independently testable.
 
-use rift_net::{Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
+use rift_net::{AuthCredential, Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
 
 use super::{item_to_blob, place_at_slot_index};
 use crate::Server;
@@ -47,19 +47,23 @@ fn validate_name(value: &str, max_chars: usize, what: &str) -> Result<String, St
 }
 
 impl Server {
-    /// Handle a fresh client's `Hello`: validate protocol, hydrate
-    /// their persisted character + inventory, spawn into the sim,
-    /// and broadcast the join. The heaviest of the dispatch arms;
-    /// kept as its own method so [`Self::handle_client_msg`] reads
-    /// as a flat dispatch table.
+    /// Handle a fresh client's `Hello`: validate protocol, resolve
+    /// the auth credential into an account identity, look up that
+    /// account's character roster, and reply with
+    /// [`ServerMsg::Authenticated`]. Spawning into the simulation
+    /// is deferred to [`Self::handle_enter_world`] (driven by the
+    /// follow-up [`rift_net::ClientMsg::EnterWorld`]) so the
+    /// player can browse and pick from the roster post-auth.
+    ///
+    /// **NOTE (Phase 1):** Credential resolution is currently a
+    /// pass-through — `Dev` identities are accepted as-is and
+    /// `Steam` is rejected with a "not yet wired" reason. Real
+    /// HMAC verification + Steam Web API calls land in Phase 2.
     pub(crate) fn handle_hello(
         &mut self,
         from: ClientId,
         protocol_version: u16,
-        account_name: String,
-        character_name: String,
-        class_id: String,
-        gender: Gender,
+        auth: AuthCredential,
     ) {
         if protocol_version != PROTOCOL_VERSION {
             // User-visible string: the client surfaces this verbatim
@@ -81,32 +85,39 @@ impl Server {
             return;
         }
 
-        // Re-validate every client-supplied string before we let
-        // it touch persistence, the sim, or any broadcast. The
-        // client UI already caps these at 18 chars, but the wire
-        // is server-authoritative — a modded client can send
-        // anything, including empty strings, megabyte payloads,
-        // or embedded control characters that would mangle log
-        // lines and chat fan-out. Failures send a Reject the
-        // client can surface verbatim and exit cleanly.
+        // Phase 2 credential resolution. `auth::resolve` runs
+        // the issuer-appropriate verification (HMAC-SHA256 for
+        // Dev, Steam Web API for Steam — currently a stub) and
+        // returns an issuer-tagged `AccountKey`. Phase 3 will
+        // promote this onto a background task so a slow Steam
+        // round-trip can't stall the sim loop.
+        let account_key = match crate::auth::resolve(&self.auth_config, &auth) {
+            Ok(k) => k,
+            Err(err) => {
+                let reason = err.user_message();
+                log::warn!(
+                    "{} rejecting Hello: auth failed ({err:?})",
+                    self.client_tag(from)
+                );
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+
+        // Persistence is still keyed on the legacy bare
+        // `account_name` string; Phase 4's migration moves it
+        // onto the issuer-tagged storage form. Until then we
+        // pass the legacy form into `lookup_roster` /
+        // `load_player_state` so existing rows keep loading.
+        let account_name = account_key.legacy_account_name();
+
+        // Re-validate the resolved identity before it touches
+        // persistence or any broadcast. Even with auth in place
+        // a hostile or buggy client can ship pathological
+        // identity strings — empty, megabyte-long, or laced
+        // with control characters that would mangle log lines
+        // and chat fan-out.
         let account_name = match validate_name(&account_name, MAX_NAME_CHARS, "Account name") {
-            Ok(s) => s,
-            Err(reason) => {
-                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
-                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
-                return;
-            }
-        };
-        let character_name = match validate_name(&character_name, MAX_NAME_CHARS, "Character name")
-        {
-            Ok(s) => s,
-            Err(reason) => {
-                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
-                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
-                return;
-            }
-        };
-        let class_id = match validate_name(&class_id, MAX_CLASS_ID_CHARS, "Class id") {
             Ok(s) => s,
             Err(reason) => {
                 log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
@@ -116,7 +127,85 @@ impl Server {
         };
 
         log::info!(
-            "{} Hello: account={account_name:?} name={character_name:?} class={class_id:?} gender={gender:?}",
+            "{} Hello: authenticated as account={account_name:?}",
+            self.client_tag(from)
+        );
+
+        // Stash the resolved identity on the session so the
+        // follow-up `EnterWorld` can hydrate the chosen
+        // character without re-running auth.
+        if let Some(s) = self.sessions.get_mut(from) {
+            s.account_name = Some(account_name.clone());
+        }
+
+        let roster = self.lookup_roster(&account_name);
+        let display_name = account_name.clone();
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::Authenticated {
+                your_client_id: from,
+                display_name,
+                roster,
+            },
+        );
+    }
+
+    /// Handle an authenticated client's `EnterWorld`: validate
+    /// the requested character, hydrate persistent state, spawn
+    /// into the live hub sim, and broadcast the join. The
+    /// heaviest of the dispatch arms; kept as its own method so
+    /// [`Self::handle_client_msg`] reads as a flat dispatch
+    /// table.
+    ///
+    /// Refuses with `Reject` if the session has not completed
+    /// the `Hello → Authenticated` round-trip yet (no
+    /// `account_name` stashed). That can only happen with a
+    /// custom or out-of-date client, since the stock client
+    /// gates the EnterWorld send on a received `Authenticated`.
+    pub(crate) fn handle_enter_world(
+        &mut self,
+        from: ClientId,
+        character_name: String,
+        class_id: String,
+        gender: Gender,
+    ) {
+        let Some(account_name) = self.sessions.get(from).and_then(|s| s.account_name.clone())
+        else {
+            let reason = "Cannot enter world: client has not authenticated.".to_string();
+            log::warn!("{} rejecting EnterWorld: {reason}", self.client_tag(from));
+            self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+            return;
+        };
+
+        // Re-validate every client-supplied string before we let
+        // it touch persistence, the sim, or any broadcast. The
+        // client UI already caps these at 18 chars, but the wire
+        // is server-authoritative — a modded client can send
+        // anything, including empty strings, megabyte payloads,
+        // or embedded control characters that would mangle log
+        // lines and chat fan-out. Failures send a Reject the
+        // client can surface verbatim and exit cleanly.
+        let character_name = match validate_name(&character_name, MAX_NAME_CHARS, "Character name")
+        {
+            Ok(s) => s,
+            Err(reason) => {
+                log::warn!("{} rejecting EnterWorld: {reason}", self.client_tag(from));
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+        let class_id = match validate_name(&class_id, MAX_CLASS_ID_CHARS, "Class id") {
+            Ok(s) => s,
+            Err(reason) => {
+                log::warn!("{} rejecting EnterWorld: {reason}", self.client_tag(from));
+                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
+                return;
+            }
+        };
+
+        log::info!(
+            "{} EnterWorld: account={account_name:?} name={character_name:?} class={class_id:?} gender={gender:?}",
             self.client_tag(from)
         );
 

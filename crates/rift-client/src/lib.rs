@@ -17,6 +17,7 @@
 //!   of the visual state — that ownership migrates over here in
 //!   subsequent refactor stages).
 
+pub mod auth;
 pub mod game;
 pub mod net;
 

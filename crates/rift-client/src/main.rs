@@ -1385,19 +1385,56 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = parse_args();
 
+    // Build the auth resolver before we touch netcode so a
+    // missing / malformed `RIFT_DEV_AUTH_KEY` (or absent
+    // `steam-auth` build) fails loud at startup instead of
+    // silently hanging the client at character-select.
+    let auth_config = rift_client::auth::Config::from_env();
+
     let net = if let Some(addr) = args.connect {
+        // We must have an auth signer before we open any
+        // network session — the server will reject our `Hello`
+        // without a valid credential and we'd just sit on a
+        // hung renet handshake. Print the user-facing reason
+        // verbatim so the player knows whether to set an env
+        // var or rebuild with the steam feature.
+        let Some(signer) = auth_config.signer.clone() else {
+            let reason = auth_config
+                .disabled_reason
+                .clone()
+                .unwrap_or_else(|| "no auth issuer configured".to_string());
+            eprintln!();
+            eprintln!("=== Cannot connect: no auth issuer ===");
+            eprintln!("{reason}");
+            eprintln!("Set RIFT_DEV_AUTH_KEY (dev) or rebuild with --features steam-auth.");
+            eprintln!("======================================");
+            eprintln!();
+            std::process::exit(2);
+        };
+
         // Open the connection now so the handshake happens in
         // parallel with character-select. The cosmetic profile is
         // pushed via `set_profile` once the player picks one, which
         // also unblocks Hello.
-        Some(NetClient::connect(addr)?)
+        let mut net = NetClient::connect(addr)?;
+        net.set_signer(signer);
+        Some(net)
     } else {
         None
     };
 
+    let mut state = GameState::new();
+    // If auth resolved at startup, queue the dev/steam identity
+    // straight into the net layer so the binary can skip the
+    // account-entry screen entirely. The net client is gated on
+    // both a queued identity and an installed signer so this is
+    // safe to set even in SP mode (the net layer just won't fire).
+    if let Some(signer) = auth_config.signer.as_ref() {
+        let identity = signer.identity_hint();
+        state.net.roster_request = Some(identity.clone());
+        state.character_select_skip_to_loading(identity);
+    }
+
     let window = Window::new("Rift Crawler", 1280, 720);
-    window.run(RiftApp {
-        state: GameState::new(),
-        net,
-    })
+    window.run(RiftApp { state, net })
 }

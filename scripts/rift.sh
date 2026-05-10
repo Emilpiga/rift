@@ -19,6 +19,26 @@ SERVER_LOG="${RIFT_SERVER_LOG:-info}"
 CLIENT_LOG="${RIFT_CLIENT_LOG:-info}"
 CLIENT_CONNECT="${RIFT_CONNECT:-127.0.0.1:34000}"
 
+# Auto-provision a stable RIFT_DEV_AUTH_KEY for the dev
+# environment if the operator hasn't set one. The key is a
+# 32-byte random hex string written to `.env.dev-auth` at the
+# repo root and reused on every subsequent launch so client
+# and server agree across runs. The file is gitignored. NEVER
+# set RIFT_DEV_AUTH_KEY (or commit this file) on a production
+# server — dev auth must stay disabled there.
+if [[ -z "${RIFT_DEV_AUTH_KEY:-}" ]]; then
+  dev_auth_file=".env.dev-auth"
+  if [[ ! -f "$dev_auth_file" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+      openssl rand -hex 32 > "$dev_auth_file"
+    else
+      head -c 32 /dev/urandom | xxd -p -c 64 > "$dev_auth_file"
+    fi
+    echo "rift: generated dev auth key at $dev_auth_file (gitignored)"
+  fi
+  export RIFT_DEV_AUTH_KEY="$(tr -d '[:space:]' < "$dev_auth_file")"
+fi
+
 cmd="${1:-help}"; shift || true
 sub="${1:-start}"
 case "$sub" in start|build|run) shift || true ;; *) sub="start" ;; esac

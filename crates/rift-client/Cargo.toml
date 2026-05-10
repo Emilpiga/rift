@@ -17,6 +17,17 @@ log = { workspace = true }
 anyhow = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[features]
+# When enabled, the client mints `AuthCredential::Steam`
+# instead of dev credentials. The Phase-5 stub returns a
+# placeholder that the server's matching stub rejects, so the
+# feature exists today only to make the cfg paths legal —
+# real Steamworks integration lands later.
+steam-auth = []
 
 [[bin]]
 name = "rift"

@@ -38,21 +38,92 @@ file).
 
 ### Account & auth
 
-- [ ] Real authentication on `ClientMsg::Hello`. Today the
-      `account_name` string is the identity. Anyone can
-      impersonate anyone, log in as them, and loot their stash.
-      See `crates/rift-net/src/messages.rs` (the explicit
-      `TODO: auth` comment on `Hello`).
-- [ ] Password storage / hashing (argon2 or scrypt) in
-      `rift-persistence`. New `accounts` columns: `password_hash`,
-      `password_salt`, `created_at`, `last_login_at`.
-- [ ] Per-account session tokens so a reconnect doesn't require
-      re-typing the password and the connect-token signing key
-      can rotate without forcing every player to re-auth.
-- [ ] Email-or-equivalent recovery path. Even a manual
-      "contact the dev" channel is better than silent lockout.
-- [ ] Rate-limit `Hello` per source IP to defang credential
-      stuffing.
+The plan is **Steam-only** for the published build — no
+passwords, no email recovery, no in-house credential store.
+Steam's session ticket is the identity; the dev HMAC path
+(see below) exists only for local development.
+
+- [x] Wire-protocol split for authenticated handshake.
+      `Hello { protocol_version, auth: AuthCredential }` →
+      `Authenticated { your_client_id, display_name, roster }`
+      → `EnterWorld { character_name, class_id, gender }` →
+      `Welcome`. `AuthCredential::{ Steam, Dev }` defined in
+      `rift-net::messages`; shared HMAC payload schema lives
+      in `rift-net::auth_dev` so client and server agree
+      byte-for-byte.
+- [x] Server-side auth resolver (`rift-server::auth`) with
+      `AccountKey::{ Steam(u64), Dev(String) }`, an
+      `AuthConfig::from_env()` reader, and a `resolve()`
+      that verifies the HMAC dev path or rejects to a stub
+      Steam path. 8 dev-auth unit tests passing. Loud WARN
+      log when `RIFT_DEV_AUTH_KEY` is set; ERROR on a
+      malformed key.
+- [x] Client-side signer (`rift-client::auth`) with
+      `Signer::{ Dev, Steam }`, env-driven config, and a
+      `mint()` that produces a fresh credential per `Hello`.
+      Dev path uses a random `dev-XXXXXX` identity per
+      process or a stable `RIFT_DEV_USER` override. Connect
+      is hard-refused without a working signer.
+- [x] Persistence migration `20260510000000_account_key.sql`
+      adds `accounts.account_key` (`"steam:..."` /
+      `"dev:..."`) + `accounts.display_name`, backfilled
+      additively. Promoting `account_key` to NOT NULL UNIQUE
+      and rekeying lookups off `name` is a follow-up
+      migration.
+- [x] Dev key bootstrap. `scripts/rift.{sh,ps1}` auto-generate
+      a 32-byte `RIFT_DEV_AUTH_KEY` into `.env.dev-auth`
+      (gitignored) on first run so client + server agree
+      locally without manual setup. `DEPLOYMENT.md` documents
+      the env vars and the production rule (never set the
+      dev key, build with `--features steam-auth`).
+- [ ] **Real Steam ticket verification.** Today
+      `rift-server::auth::steam` is a stub that always
+      rejects. Wire up `STEAM_WEBAPI_KEY` →
+      `ISteamUserAuth/AuthenticateUserTicket` Web API call
+      from the server, validate the ticket, derive the
+      `SteamID` → `AccountKey::Steam(u64)`. Promote
+      `auth::resolve` onto a worker thread + mpsc reply
+      channel polled in `Server::step` once this becomes a
+      real HTTP round-trip (the call site is structured for
+      a local swap; see the module docs in
+      `crates/rift-server/src/auth/mod.rs`).
+- [ ] **Real Steam ticket minting on the client.**
+      `rift-client::auth::steam::mint_stub()` returns a
+      placeholder. Integrate the Steamworks SDK behind
+      `--features steam-auth`, call
+      `ISteamUser::GetAuthSessionTicket`, ship the ticket
+      bytes inside `AuthCredential::Steam`. Until then the
+      `steam-auth` feature is reserved scaffolding only.
+- [ ] **Lock down dev auth in production builds.** Plan: the
+      server's `AuthConfig::from_env()` should refuse to
+      enable the dev path when built with the `steam-auth`
+      feature (and/or when a `RIFT_PRODUCTION=1` env var is
+      set), so a misconfigured prod box can't accidentally
+      accept HMAC creds. Today it's a documentation-only
+      guarantee.
+- [ ] **Switch persistence reads off `accounts.name` and
+      onto `account_key`.** The Phase-4 migration is
+      additive; the server still keys lookups via
+      `account_key.legacy_account_name()`. Follow-up
+      migration: backfill complete → `account_key NOT NULL
+    UNIQUE` → swap `rift-persistence` queries → drop the
+      legacy fallback.
+- [ ] Per-account session tokens / reconnect path. Once the
+      Steam ticket is verified the server should mint a
+      short-lived session token the client can present on
+      reconnect within a grace window without a fresh ticket
+      round-trip.
+- [ ] Rate-limit `Hello` per source IP to defang ticket
+      replay / credential stuffing. The HMAC dev path
+      already enforces a 60 s replay window
+      (`DEV_AUTH_REPLAY_WINDOW_SECS`); the Steam path needs
+      its own anti-replay (cache `(steam_id, ticket_hash)`
+      with a TTL).
+- [ ] Account deletion / right-to-erasure surface. With
+      Steam as the identity provider this is mostly "delete
+      the row keyed on `steam:<id>`", but it needs a
+      reachable UX path (in-game button or a documented
+      contact channel) — see also section 2.
 
 ### Server hardening
 

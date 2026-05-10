@@ -8,7 +8,16 @@
 pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 
 /// Wire-format version. Increment on any breaking message change.
-pub const PROTOCOL_VERSION: u16 = 3;
+///
+/// Version history (most recent first):
+/// - **v4** (2026-05-11): `Hello.account_name` replaced with
+///   `Hello.auth: AuthCredential`; `RequestRoster` removed; the
+///   roster is now bundled into `Welcome.roster` so the client
+///   can render character-select straight after the auth round-
+///   trip.
+/// - v3: previous schema (free-form `account_name` string,
+///   pre-Hello `RequestRoster` lookup).
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Hard cap on simultaneous connected clients per server. Matches the
 /// design target of 4-player co-op (one slot is the host on a listen

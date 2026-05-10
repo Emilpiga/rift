@@ -127,14 +127,23 @@ impl CharacterSelect {
         &self.roster
     }
 
+    /// Skip the in-screen account-entry view and jump straight
+    /// to "loading roster…". Called when the binary's auth
+    /// resolver has already chosen an identity at startup so
+    /// the player never has to type an account name.
+    /// Idempotent: calling again with a different identity
+    /// updates the displayed loading label.
+    pub fn skip_to_loading(&mut self, account_identity: String) {
+        self.account_entry = account_identity.clone();
+        self.account_name = account_identity;
+        self.view = ViewKind::LoadingRoster;
+    }
+
     /// Replace the local roster with a server-supplied one and
     /// move past the `LoadingRoster` gate. Idempotent: callers
     /// can re-invoke after a reconnect without resetting any
     /// other view state.
-    pub fn apply_server_roster(
-        &mut self,
-        entries: Vec<rift_net::messages::RosterEntry>,
-    ) {
+    pub fn apply_server_roster(&mut self, entries: Vec<rift_net::messages::RosterEntry>) {
         self.roster = CharacterRoster::new();
         for e in entries {
             let gender = match e.gender {
@@ -156,12 +165,7 @@ impl CharacterSelect {
     /// Drive the preview avatar (spawn / despawn / rotate /
     /// camera). Pure side-effect on `world` and `renderer`; UI
     /// is handled separately by [`Self::frame`].
-    pub fn tick_preview(
-        &mut self,
-        world: &mut hecs::World,
-        renderer: &mut Renderer,
-        dt: f32,
-    ) {
+    pub fn tick_preview(&mut self, world: &mut hecs::World, renderer: &mut Renderer, dt: f32) {
         self.rotation_t += dt;
         let desired_gender = self.desired_preview_gender();
         self.ensure_preview(world, renderer, desired_gender);
@@ -196,9 +200,7 @@ impl CharacterSelect {
     /// was spawned with. `None` between view changes when
     /// `tick_preview` is about to rebuild it.
     pub fn preview_entity(&self) -> Option<(hecs::Entity, Gender)> {
-        self.preview_state
-            .as_ref()
-            .map(|s| (s.entity, s.gender))
+        self.preview_state.as_ref().map(|s| (s.entity, s.gender))
     }
 
     /// Drop the preview avatar entity and free its render-object
@@ -244,10 +246,9 @@ impl CharacterSelect {
         gender: Gender,
     ) -> Option<hecs::Entity> {
         let (model_path, tex_path) = hero::base_model_paths(gender);
-        let skinned = match SkinnedMesh::from_gltf_filtered(
-            model_path,
-            |n| super::avatar_cosmetics::is_body_mesh_name(n),
-        ) {
+        let skinned = match SkinnedMesh::from_gltf_filtered(model_path, |n| {
+            super::avatar_cosmetics::is_body_mesh_name(n)
+        }) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Preview model load failed ({:?}): {}", gender, e);
@@ -299,7 +300,9 @@ impl CharacterSelect {
         };
         let entity = world.spawn((
             Transform::from_position(podium_pos),
-            Renderable { object_index: obj_idx },
+            Renderable {
+                object_index: obj_idx,
+            },
         ));
         let _ = world.insert_one(entity, comp);
         let _ = world.insert_one(entity, anim_set);
@@ -308,7 +311,9 @@ impl CharacterSelect {
         }
         log::info!(
             "Preview spawned: entity={:?} obj_idx={} gender={:?}",
-            entity, obj_idx, gender
+            entity,
+            obj_idx,
+            gender
         );
         Some(entity)
     }
@@ -423,12 +428,8 @@ impl CharacterSelect {
 
             // Field label + text input.
             label(ui, body.min + Vec2::new(0.0, 100.0 * s), "Account name");
-            let field_rect = Rect::from_xywh(
-                body.x(),
-                body.y() + 122.0 * s,
-                body.width(),
-                50.0 * s,
-            );
+            let field_rect =
+                Rect::from_xywh(body.x(), body.y() + 122.0 * s, body.width(), 50.0 * s);
             let field_id = Id::root("char_select").child("account_field");
             let resp = text_field(
                 ui,
@@ -451,10 +452,7 @@ impl CharacterSelect {
             let btn_y = body.max.y - 50.0 * s;
             let confirm = Button::primary("Continue")
                 .enabled(can_confirm)
-                .show(
-                    ui,
-                    Rect::from_xywh(body.x(), btn_y, 160.0 * s, 50.0 * s),
-                );
+                .show(ui, Rect::from_xywh(body.x(), btn_y, 160.0 * s, 50.0 * s));
             let quit = Button::new("Quit").show(
                 ui,
                 Rect::from_xywh(body.x() + 180.0 * s, btn_y, 120.0 * s, 50.0 * s),
@@ -527,11 +525,7 @@ impl CharacterSelect {
                             theme.fonts.size_lg,
                             theme.colors.text,
                         );
-                        let sub = format!(
-                            "Lv {}  -  {}",
-                            profile.level,
-                            profile.gender.label(),
-                        );
+                        let sub = format!("Lv {}  -  {}", profile.level, profile.gender.label(),);
                         ui.draw_text(
                             inner.min + Vec2::new(8.0 * s, 36.0 * s),
                             &sub,
@@ -562,12 +556,11 @@ impl CharacterSelect {
                     });
                 } else if i == self.roster.len() && !self.roster.is_full() {
                     // "+ Create new" row.
-                    let create = Button::new("+ Create New Character")
-                        .show_with_id(
-                            ui,
-                            Id::root("char_select").child(("create_slot", i)),
-                            row_rect,
-                        );
+                    let create = Button::new("+ Create New Character").show_with_id(
+                        ui,
+                        Id::root("char_select").child(("create_slot", i)),
+                        row_rect,
+                    );
                     if create.clicked {
                         self.create_form = CreateForm::new();
                         self.view = ViewKind::Create;
@@ -579,7 +572,10 @@ impl CharacterSelect {
                         .with_stroke(Stroke::new(1.0, theme.colors.border));
                     dashed.show_only(ui, row_rect);
                     ui.draw_text(
-                        Pos2::new(row_rect.x() + 14.0 * s, row_rect.y() + row_rect.height() * 0.5 - 7.0 * s),
+                        Pos2::new(
+                            row_rect.x() + 14.0 * s,
+                            row_rect.y() + row_rect.height() * 0.5 - 7.0 * s,
+                        ),
                         "(empty slot)",
                         theme.fonts.size_sm,
                         theme.colors.text_muted,
@@ -626,7 +622,12 @@ impl CharacterSelect {
             // Gender row.
             label(ui, body.min + Vec2::new(0.0, 150.0 * s), "Gender");
             let male_rect = Rect::from_xywh(body.x(), body.y() + 172.0 * s, 140.0 * s, 50.0 * s);
-            let female_rect = Rect::from_xywh(body.x() + 150.0 * s, body.y() + 172.0 * s, 140.0 * s, 50.0 * s);
+            let female_rect = Rect::from_xywh(
+                body.x() + 150.0 * s,
+                body.y() + 172.0 * s,
+                140.0 * s,
+                50.0 * s,
+            );
             let male_active = self.create_form.gender == Gender::Male;
             let female_active = self.create_form.gender == Gender::Female;
             let male_btn = if male_active {
@@ -689,12 +690,7 @@ impl CharacterSelect {
         let sc = theme.scale;
         let mw = 460.0 * sc;
         let mh = 200.0 * sc;
-        let modal_rect = Rect::from_xywh(
-            (s.x - mw) * 0.5,
-            (s.y - mh) * 0.5,
-            mw,
-            mh,
-        );
+        let modal_rect = Rect::from_xywh((s.x - mw) * 0.5, (s.y - mh) * 0.5, mw, mh);
         let name = self
             .roster
             .get(idx)
@@ -702,9 +698,10 @@ impl CharacterSelect {
             .unwrap_or_else(|| "?".to_string());
 
         ui.with_layer(rift_engine::ui::im::Layer::Modal, |ui| {
-            Frame::panel(&theme)
-                .with_padding(Pad::all(20.0 * sc))
-                .show(ui, modal_rect, |ui, body| {
+            Frame::panel(&theme).with_padding(Pad::all(20.0 * sc)).show(
+                ui,
+                modal_rect,
+                |ui, body| {
                     let _ = title(ui, body.min, "Delete character?");
                     label(
                         ui,
@@ -728,7 +725,8 @@ impl CharacterSelect {
                     } else if no.clicked {
                         self.view = ViewKind::Roster;
                     }
-                });
+                },
+            );
         });
         SelectAction::None
     }

@@ -142,17 +142,22 @@ impl NetClient {
         }
     }
 
-    /// Queue a roster lookup for `account_name`. The actual
-    /// `RequestRoster` is sent once renet reports the connection
-    /// is live (see `step`). Calling this with a different name
-    /// than is already pending re-arms the send so we always
-    /// look up whatever the most recent account-entry confirmed.
+    /// Queue an account identity for the next `Hello`. The
+    /// actual auth send happens once renet reports the
+    /// connection is live (see `step`). Calling this with a
+    /// different identity than is already pending re-arms the
+    /// send so we always log in as whatever the most recent
+    /// account-entry confirmed.
+    ///
+    /// Field name is legacy from the pre-auth flow when this
+    /// triggered a separate `RequestRoster` packet — the
+    /// roster now arrives bundled with `Authenticated`.
     pub fn request_roster(&mut self, account_name: String) {
-        let same_pending = self.roster_request.as_deref() == Some(account_name.as_str());
+        let same_pending = self.pending_account_for_auth.as_deref() == Some(account_name.as_str());
         if !same_pending {
-            self.roster_request_sent = false;
+            self.auth_sent = false;
         }
-        self.roster_request = Some(account_name);
+        self.pending_account_for_auth = Some(account_name);
     }
 
     /// Drain the most recent roster reply, if any. Returns `None`
@@ -178,9 +183,7 @@ impl NetClient {
     /// party). The reply path is `ServerMsg::PortalPrompt`
     /// for awaiting members and `LoadFloor` for the proposer.
     pub fn request_propose_rift_entry(&mut self, start_floor: u32, mode: u8) {
-        log::info!(
-            "net: -> ProposeRiftEntry(floor={start_floor}, mode={mode})"
-        );
+        log::info!("net: -> ProposeRiftEntry(floor={start_floor}, mode={mode})");
         self.send(
             Channel::Control,
             &ClientMsg::ProposeRiftEntry { start_floor, mode },
@@ -288,7 +291,10 @@ impl NetClient {
         log::debug!("net: -> SetLoadoutSlot slot={slot_index} ability={ability_id}");
         self.send(
             Channel::Control,
-            &ClientMsg::SetLoadoutSlot { slot_index, ability_id },
+            &ClientMsg::SetLoadoutSlot {
+                slot_index,
+                ability_id,
+            },
         );
     }
 
@@ -307,10 +313,7 @@ impl NetClient {
     /// mutates its mirror.
     pub fn request_equip_item(&mut self, inventory_index: u32) {
         log::debug!("net: -> EquipItem idx={inventory_index}");
-        self.send(
-            Channel::Control,
-            &ClientMsg::EquipItem { inventory_index },
-        );
+        self.send(Channel::Control, &ClientMsg::EquipItem { inventory_index });
     }
 
     /// Ask the server to move whatever's currently in `slot`
@@ -343,7 +346,10 @@ impl NetClient {
         log::debug!("net: -> DepositToStash idx={inventory_index} tab={tab_index}");
         self.send(
             Channel::Control,
-            &ClientMsg::DepositToStash { inventory_index, tab_index },
+            &ClientMsg::DepositToStash {
+                inventory_index,
+                tab_index,
+            },
         );
     }
 
@@ -354,7 +360,10 @@ impl NetClient {
         log::debug!("net: -> WithdrawFromStash tab={tab_index} idx={stash_index}");
         self.send(
             Channel::Control,
-            &ClientMsg::WithdrawFromStash { tab_index, stash_index },
+            &ClientMsg::WithdrawFromStash {
+                tab_index,
+                stash_index,
+            },
         );
     }
 
@@ -435,10 +444,7 @@ impl NetClient {
     /// then trim back down.
     pub fn request_swap_inventory_slots(&mut self, a: u32, b: u32) {
         log::debug!("net: -> SwapInventorySlots {a} <-> {b}");
-        self.send(
-            Channel::Control,
-            &ClientMsg::SwapInventorySlots { a, b },
-        );
+        self.send(Channel::Control, &ClientMsg::SwapInventorySlots { a, b });
     }
 
     /// Reorder the stash: swap the items at slots `a` and `b`.
@@ -494,7 +500,10 @@ impl NetClient {
         log::debug!("net: -> UnequipToBagSlot slot={slot} idx={inventory_index}");
         self.send(
             Channel::Control,
-            &ClientMsg::UnequipToBagSlot { slot, inventory_index },
+            &ClientMsg::UnequipToBagSlot {
+                slot,
+                inventory_index,
+            },
         );
     }
 
@@ -505,7 +514,11 @@ impl NetClient {
         log::debug!("net: -> ChatSend channel={channel} target={target:?}");
         self.send(
             Channel::Control,
-            &ClientMsg::ChatSend { channel, target, text },
+            &ClientMsg::ChatSend {
+                channel,
+                target,
+                text,
+            },
         );
     }
 

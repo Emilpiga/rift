@@ -48,23 +48,83 @@ pub enum PickupRejectReason {
     NotEligible,
 }
 
+// ─── Authentication ──────────────────────────────────────────────────────
+
+/// Issuer-tagged credential the client presents in
+/// [`ClientMsg::Hello`]. The server resolves it into a stable
+/// account identity before any other state lookup. Wire-stable:
+/// don't reorder variants, only append new ones.
+///
+/// The two paths are intentionally asymmetric:
+///
+/// * [`AuthCredential::Steam`] is the production path. Players
+///   are already signed into the Steam client; the game asks
+///   Steamworks for an opaque `ticket`, ships it here, and the
+///   server validates it via the Steam Web API. Authoritative
+///   identity comes out of the validation response, not the
+///   `steam_id` hint on this struct.
+/// * [`AuthCredential::Dev`] is the local-iteration path. The
+///   client signs a (identity, nonce, timestamp) tuple with a
+///   shared HMAC key (`RIFT_DEV_AUTH_KEY`); the server verifies
+///   the signature and treats the identity string as the account
+///   key. Refused at runtime if the server isn't configured with
+///   a dev key (`AuthError::DevAuthDisabled`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AuthCredential {
+    /// Real Steam session ticket. Server validates against the
+    /// Steam Web API; failure → `Reject`. The 64-bit `steam_id`
+    /// is included as a hint so the server can short-circuit
+    /// obvious mismatches before the round-trip to Steam, but
+    /// the *authoritative* SteamID is whatever the validation
+    /// response returns.
+    Steam { steam_id: u64, ticket: Vec<u8> },
+    /// Dev / playtest auth. `identity` is a free-form short
+    /// string (typically `"dev-<6 hex>"` or `RIFT_DEV_USER`).
+    /// `signature` is HMAC-SHA256(key, identity || nonce || ts)
+    /// with `nonce` and `ts` fed in as little-endian u64s. The
+    /// server enforces a ±60 s `timestamp_unix` window to make
+    /// captured credentials short-lived.
+    Dev {
+        identity: String,
+        nonce: u64,
+        timestamp_unix: u64,
+        signature: [u8; 32],
+    },
+}
+
 // ─── Client → Server ─────────────────────────────────────────────────────
 
 /// Anything the client sends to the server.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
-    /// First message after the renet connection comes up. Carries the
-    /// authoritative profile the client wants to play as. Server
-    /// validates against the player's account (TODO: auth) and
-    /// responds with [`ServerMsg::Welcome`] or [`ServerMsg::Reject`].
+    /// First message after the renet connection comes up. Carries
+    /// only the auth credential — no character/spawn intent. The
+    /// server resolves the credential, looks up (or creates) the
+    /// account row, and replies with [`ServerMsg::Authenticated`]
+    /// (carrying the roster) or [`ServerMsg::Reject`].
+    ///
+    /// Spawning a specific character into the world is a separate
+    /// step ([`ClientMsg::EnterWorld`]) so the player can browse
+    /// their roster post-auth without having pre-committed to a
+    /// character at connection time.
     Hello {
         protocol_version: u16,
-        /// Account display name (UTF-8, <=18 chars). Server uses
-        /// this to look up / create the persistent `accounts`
-        /// row that owns this client's character roster. For now
-        /// it doubles as a (very) light-weight identity — real
-        /// auth lands in a later phase.
-        account_name: String,
+        auth: AuthCredential,
+    },
+
+    /// Sent after the client has received the post-auth roster in
+    /// [`ServerMsg::Authenticated`] and the player has either
+    /// picked an existing character or filled in the create form.
+    /// The server spawns the chosen character into the live floor
+    /// and replies with [`ServerMsg::Welcome`] (or
+    /// [`ServerMsg::Reject`] on failure — bad name, persistence
+    /// down, slot cap, …).
+    ///
+    /// `class_id` and `gender` are only consulted when the named
+    /// character does not yet exist on the account; for an
+    /// existing character the server uses the persisted values
+    /// and ignores these fields.
+    EnterWorld {
         /// Display name (UTF-8, <=18 chars per character_select). Final
         /// authority lies with the server's account record; this is
         /// what the client *thinks* it's playing as.
@@ -217,19 +277,7 @@ pub enum ClientMsg {
     /// Server cancels the matching active channel (if any). Reliable
     /// on `Channel::Event` so a dropped release doesn't lock the
     /// caster into the channel for its full duration.
-    EndChannel {
-        ability_id: u8,
-    },
-
-    /// Pre-Hello account roster lookup. Sent right after the
-    /// renet connection comes up so the client can populate the
-    /// character-select screen with the account's characters.
-    /// Server replies with [`ServerMsg::Roster`] (or
-    /// [`ServerMsg::Reject`] if the persistence layer is
-    /// unreachable).
-    RequestRoster {
-        account_name: String,
-    },
+    EndChannel { ability_id: u8 },
 
     /// Move the item at `inventory_index` (into the bag mirror
     /// the client renders) into its default equipment slot. The
@@ -239,17 +287,13 @@ pub enum ClientMsg {
     /// `EquipmentSync` so client mirrors stay coherent. Reliable
     /// on `Channel::Control` so a dropped equip never silently
     /// loses the item.
-    EquipItem {
-        inventory_index: u32,
-    },
+    EquipItem { inventory_index: u32 },
 
     /// Move whatever's currently in `slot` back into the bag.
     /// Server replies with the same dual sync as `EquipItem`. No-op
     /// (silently dropped) if the slot is empty or the byte doesn't
     /// match a known [`rift_game::loot::EquipSlot`].
-    UnequipItem {
-        slot: u8,
-    },
+    UnequipItem { slot: u8 },
 
     /// Ask the server to start a stash session. Server validates
     /// the player is in the hub and within interact range of the
@@ -268,10 +312,7 @@ pub enum ClientMsg {
     /// tab). Server validates the index + that a stash session
     /// is open, then replies with both a fresh `InventorySync`
     /// and a fresh `StashSync`. Reliable on `Channel::Control`.
-    DepositToStash {
-        inventory_index: u32,
-        tab_index: u8,
-    },
+    DepositToStash { inventory_index: u32, tab_index: u8 },
 
     /// Like `DepositToStash` but moves the item into a specific
     /// `(tab_index, stash_index)` slot. If the slot is already
@@ -289,10 +330,7 @@ pub enum ClientMsg {
     /// stash session is open, then replies with both a fresh
     /// `InventorySync` and a fresh `StashSync`. Reliable on
     /// `Channel::Control`.
-    WithdrawFromStash {
-        tab_index: u8,
-        stash_index: u32,
-    },
+    WithdrawFromStash { tab_index: u8, stash_index: u32 },
 
     /// Like `WithdrawFromStash` but places the item into a
     /// specific bag slot. Same swap semantics as
@@ -307,10 +345,7 @@ pub enum ClientMsg {
     /// be an empty slot, in which case the filled item moves into
     /// the empty cell). Server replies with a fresh
     /// `InventorySync`. Reliable on `Channel::Control`.
-    SwapInventorySlots {
-        a: u32,
-        b: u32,
-    },
+    SwapInventorySlots { a: u32, b: u32 },
 
     /// Reorder the stash: swap the items at `a` and `b` within
     /// `tab_index`. Either index may be empty (past the
@@ -319,11 +354,7 @@ pub enum ClientMsg {
     /// last filled slot. Server validates a stash session is
     /// open and replies with a fresh `StashSync`. Reliable on
     /// `Channel::Control`.
-    SwapStashSlots {
-        tab_index: u8,
-        a: u32,
-        b: u32,
-    },
+    SwapStashSlots { tab_index: u8, a: u32, b: u32 },
 
     /// Drop the bag item at `inventory_index` onto the ground at
     /// the picker's current position. Server removes the row from
@@ -331,9 +362,7 @@ pub enum ClientMsg {
     /// usual `WorldEvent::LootDropped` so every observer's loot
     /// pillar appears. Replies with a fresh `InventorySync` to
     /// the picker. Reliable on `Channel::Control`.
-    DropInventoryItem {
-        inventory_index: u32,
-    },
+    DropInventoryItem { inventory_index: u32 },
 
     /// Permanently destroy the bag item at `inventory_index` in
     /// exchange for [shards](`ServerMsg::ShardsSync`). Yield is
@@ -343,9 +372,7 @@ pub enum ClientMsg {
     /// their locked drops. Replies with both a fresh
     /// `InventorySync` and `ShardsSync`. Reliable on
     /// `Channel::Control`.
-    SalvageInventoryItem {
-        inventory_index: u32,
-    },
+    SalvageInventoryItem { inventory_index: u32 },
 
     /// Bulk-salvage every non-anchored bag item whose rarity is
     /// at most `rarity_max` (encoded the same as
@@ -354,9 +381,7 @@ pub enum ClientMsg {
     /// ctrl-clicking every slot. Replies with a single fresh
     /// `InventorySync` and `ShardsSync`. Reliable on
     /// `Channel::Control`.
-    SalvageInventoryBulk {
-        rarity_max: u8,
-    },
+    SalvageInventoryBulk { rarity_max: u8 },
 
     /// Spend shards to unlock another stash tab. Server picks
     /// the price from the player's current tab count and
@@ -372,18 +397,12 @@ pub enum ClientMsg {
     /// length cap, replaces leading/trailing whitespace, and
     /// rejects empty strings. On success: fresh `StashSync`.
     /// Reliable on `Channel::Control`.
-    RenameStashTab {
-        tab_index: u8,
-        name: String,
-    },
+    RenameStashTab { tab_index: u8, name: String },
 
     /// Recolor `tab_index`. `color` is packed `0xRRGGBB` and is
     /// applied verbatim. Server replies with a fresh
     /// `StashSync`. Reliable on `Channel::Control`.
-    RecolorStashTab {
-        tab_index: u8,
-        color: u32,
-    },
+    RecolorStashTab { tab_index: u8, color: u32 },
 
     /// Take whatever's currently in `slot` and place it into the
     /// bag at `inventory_index` (extending the bag if the index
@@ -391,10 +410,7 @@ pub enum ClientMsg {
     /// path so the user can pick the destination slot, instead of
     /// always appending to the end as `UnequipItem` does. Server
     /// replies with fresh `InventorySync` + `EquipmentSync`.
-    UnequipToBagSlot {
-        slot: u8,
-        inventory_index: u32,
-    },
+    UnequipToBagSlot { slot: u8, inventory_index: u32 },
 
     /// Mutate one slot of the player's persisted ability loadout.
     /// `slot_index` is the action-bar slot (0..6); `ability_id`
@@ -404,10 +420,7 @@ pub enum ClientMsg {
     /// replies with [`ServerMsg::Loadout`] so every client
     /// stays in sync with what the server thinks is equipped.
     /// Reliable on `Channel::Control`.
-    SetLoadoutSlot {
-        slot_index: u8,
-        ability_id: u8,
-    },
+    SetLoadoutSlot { slot_index: u8, ability_id: u8 },
 
     /// Open the rift exit vote. Sent when a living player
     /// presses F at the rift-spawn portal. Server validates the
@@ -532,7 +545,7 @@ pub enum Gender {
     Female,
 }
 
-/// One row in a [`ServerMsg::Roster`] response. Decoupled from
+/// One row in a [`ServerMsg::Authenticated`] roster. Decoupled from
 /// `rift_persistence::CharacterRecord` so rift-net stays free of a
 /// database dependency — the server fills these in from whatever
 /// storage backend it ends up using.
@@ -652,15 +665,32 @@ pub mod entity_flags {
 /// Anything the server sends to a client.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
-    /// Reply to [`ClientMsg::RequestRoster`]. Lists every
-    /// character that belongs to the supplied account, in
-    /// creation order. Empty for brand-new accounts.
-    Roster {
-        entries: Vec<RosterEntry>,
+    /// Successful response to [`ClientMsg::Hello`]. Confirms the
+    /// auth credential resolved to a known account, and ships the
+    /// account's character roster so the client can render the
+    /// character-select screen without a follow-up round-trip.
+    /// `display_name` is the server-canonical account display name
+    /// (derived from the auth issuer — Steam persona for Steam
+    /// auth, the dev `identity` for dev auth) and is what the
+    /// client should show in any "logged in as …" UI. Empty
+    /// `roster` for brand-new accounts.
+    ///
+    /// The client follows up with [`ClientMsg::EnterWorld`] once
+    /// the player picks (or creates) a character. The actual
+    /// world-spawn arrives in [`ServerMsg::Welcome`].
+    Authenticated {
+        your_client_id: ClientId,
+        display_name: String,
+        roster: Vec<RosterEntry>,
     },
 
-    /// Response to a successful [`ClientMsg::Hello`]. Tells the client
-    /// which net id is theirs and how to set up its world.
+    /// Response to a successful [`ClientMsg::EnterWorld`]. The
+    /// chosen character is now live on the server's current floor;
+    /// the payload tells the client how to set up its world
+    /// mirror. `your_client_id` was already delivered by
+    /// [`ServerMsg::Authenticated`] but we re-include it here so
+    /// the client can defensively re-bind its own id without
+    /// stashing the auth-step value.
     Welcome {
         your_client_id: ClientId,
         your_net_id: NetId,
@@ -695,9 +725,7 @@ pub enum ServerMsg {
     ///
     /// `items[i] == None` means slot `i` is empty. The bag is
     /// sparse so drag-and-drop reorders preserve gaps.
-    InventorySync {
-        items: Vec<Option<ItemBlob>>,
-    },
+    InventorySync { items: Vec<Option<ItemBlob>> },
 
     /// Full equipment replication for the local player. Sent
     /// alongside [`ServerMsg::InventorySync`] on session start
@@ -707,9 +735,7 @@ pub enum ServerMsg {
     /// `slot` is the byte returned by
     /// `rift_game::loot::EquipSlot::to_u8`. Reliable on
     /// `Channel::Control`.
-    EquipmentSync {
-        slots: Vec<(u8, ItemBlob)>,
-    },
+    EquipmentSync { slots: Vec<(u8, ItemBlob)> },
 
     /// Visible-equipment replication for *peers*. Carries the set
     /// of base-item indices currently equipped by some other
@@ -735,16 +761,12 @@ pub enum ServerMsg {
     /// deposit / withdraw / tab edit. Reliable on `Channel::Control`.
     /// Stash is per-character private storage; tabs come back as
     /// the dense `[0..n)` list the player owns.
-    StashSync {
-        tabs: Vec<StashTabBlob>,
-    },
+    StashSync { tabs: Vec<StashTabBlob> },
 
     /// Authoritative shard balance for this client. Sent at
     /// hello time (post-hydration) and after every salvage /
     /// stash-tab purchase. Reliable on `Channel::Control`.
-    ShardsSync {
-        amount: u32,
-    },
+    ShardsSync { amount: u32 },
 
     /// Floor transition. The client clears its local world and
     /// regenerates from `(seed, index)` before applying the next
@@ -773,10 +795,7 @@ pub enum ServerMsg {
     /// Confirmation that a [`ClientMsg::PickUpLoot`] succeeded for
     /// some client. Broadcast to everyone so the loot drop can
     /// disappear from all worlds.
-    LootClaimed {
-        loot: NetId,
-        claimed_by: ClientId,
-    },
+    LootClaimed { loot: NetId, claimed_by: ClientId },
 
     /// Sent only to the requester when their [`ClientMsg::PickUpLoot`]
     /// was refused server-side (e.g. bag full). The drop stays on the
@@ -1334,10 +1353,7 @@ pub enum WorldEvent {
 
     /// Channel ended (duration elapsed or cancelled). Clients stop
     /// any per-channel looping visual / audio.
-    ChannelEnd {
-        caster: NetId,
-        ability: u16,
-    },
+    ChannelEnd { caster: NetId, ability: u16 },
 
     /// A dead player has finished their down-pose timer and risen
     /// as a ghost. Server stops including their row in remote
@@ -1346,10 +1362,7 @@ pub enum WorldEvent {
     /// (otherwise the avatar just pops out of existence). The
     /// owning client suppresses the VFX for themselves so their
     /// own rise doesn't slap them in the face.
-    PlayerGhosted {
-        entity: NetId,
-        position: [f32; 3],
-    },
+    PlayerGhosted { entity: NetId, position: [f32; 3] },
 
     /// One or more ghosts have been revived back to full HP by
     /// a completed revive shrine channel. Each NetId in the
@@ -1367,9 +1380,7 @@ pub enum WorldEvent {
     /// spawn a celebration VFX at each revived position. The
     /// shrine entity itself is despawned in the same tick so
     /// the next snapshot drops its row.
-    PlayersRevived {
-        entities: Vec<NetId>,
-    },
+    PlayersRevived { entities: Vec<NetId> },
 
     /// Healing was applied to a player. Mirrors
     /// [`WorldEvent::Damage`] for the friendly path so clients

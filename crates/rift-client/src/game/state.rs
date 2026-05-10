@@ -344,6 +344,15 @@ impl GameState {
     pub fn apply_server_roster(&mut self, entries: Vec<rift_net::messages::RosterEntry>) {
         crate::game::transition::apply_server_roster(self, entries);
     }
+
+    /// Bypass the in-screen account-entry view and jump straight
+    /// to the "loading roster" placeholder. Called by the binary
+    /// when the auth resolver provides credentials at startup so
+    /// the player never has to type an account name (the dev
+    /// `identity` or Steam persona stands in).
+    pub fn character_select_skip_to_loading(&mut self, account_identity: String) {
+        self.character_select.skip_to_loading(account_identity);
+    }
 }
 
 // Ability / channel / remote-death event handlers live in

@@ -54,6 +54,27 @@ or matching CLI flags (flag wins on conflict).
 machine VPS; Fly needs the `fly-global-services` override
 (see `fly.toml`).
 
+### Authentication
+
+Two auth issuers are supported: **Steam** (production) and
+**Dev** (local iteration / playtest).
+
+| Env var             | Where set   | Notes                                                                                                                                                                                                                           |
+| ------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RIFT_DEV_AUTH_KEY` | dev-only    | 32-byte HMAC key as 64 hex chars. Enables the dev-issuer path on the server. **Never set on production.** `scripts/rift.{ps1,sh}` auto-generates this into `.env.dev-auth` (gitignored) so client and server agree across runs. |
+| `RIFT_DEV_USER`     | dev client  | Optional override of the auto-randomized `dev-XXXXXX` identity. Useful when iterating against a stable save.                                                                                                                    |
+| `STEAM_WEBAPI_KEY`  | prod server | _Reserved._ Will be required once the Steam Web API integration lands. The server must be built with `--features steam-auth` for this path to compile.                                                                          |
+
+Production servers should leave `RIFT_DEV_AUTH_KEY` unset and
+build with `--features steam-auth`. The server logs a loud
+`WARN` line on every startup where dev auth is enabled — if
+you see it on a production box, something is misconfigured.
+
+The dev path is intentionally narrow: anyone with the shared
+key can mint credentials for any identity. Treat the key like
+a password and rotate it (delete `.env.dev-auth`, restart) if
+it leaks.
+
 ## Database
 
 Postgres + sqlx. Migrations live in

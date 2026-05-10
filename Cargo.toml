@@ -31,6 +31,16 @@ thiserror = "1"
 # drop pending persistence writes on the floor.
 ctrlc = { version = "3", features = ["termination"] }
 
+# Auth crypto. `hmac` + `sha2` build the HMAC-SHA256 the dev
+# auth path uses to sign / verify the (identity, nonce, ts)
+# tuple. `subtle` gives us a constant-time comparison so a
+# malicious client can't measure signature mismatches by
+# timing a tight reconnect loop.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+hex = "0.4"
+
 # `kira` (and its decoder dependencies) decode audio in the
 # audio thread; built unoptimised it cannot keep up with even a
 # handful of simultaneous OGG sounds and produces audible
