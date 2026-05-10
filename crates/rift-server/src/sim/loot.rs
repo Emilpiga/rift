@@ -204,6 +204,10 @@ pub fn drop_for_enemy(
             ilvl: ilvl_w,
             affixes,
             anchored,
+            // Ground loot inherits whatever the in-memory item
+            // says — fresh kills always produce stable items;
+            // the unstable flag is only set at pickup-in-rift.
+            unstable: item.unstable,
             provenance: provenance_wire,
         };
 

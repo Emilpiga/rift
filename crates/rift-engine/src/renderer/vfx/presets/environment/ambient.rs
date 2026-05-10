@@ -113,3 +113,156 @@ pub fn wall_torch() -> Effect {
         ],
     }
 }
+
+/// Drifting sand haze — a wide-area ambient layer that sells
+/// "you're standing inside a sandstorm". Anchored on the
+/// player (set via `set_anchor` each frame) so the field of
+/// dust travels with the camera and never feels like a fixed
+/// volumetric panel.
+///
+/// Two stacked layers compose the look:
+///
+/// 1. **Low-drift sand sheets**: large soft alpha smoke
+///    sprites born inside a wide disc around the player at
+///    ankle-to-shoulder height. A strong constant `Wind`
+///    sweeps them past horizontally so the player perceives
+///    motion across the entire arena, not just where they're
+///    looking. Curl noise breaks up the front so the sheets
+///    don't read as a marching wall. Lifetime is short so
+///    the cloud refreshes constantly and never piles up
+///    behind the camera.
+///
+/// 2. **Fast sand streaks**: small `Streak` sprites born on
+///    the same disc but faster and lower (knee height). The
+///    anisotropic streak shape orients along velocity so
+///    these read as individual airborne grains skimming the
+///    ground — cheap detail that hides the bulk sheet's
+///    texture-less softness.
+///
+/// Tan/brown palette pulled from the sandstorm sky horizon
+/// so the haze visually merges with the fog wall instead of
+/// reading as a separate effect. Both layers are alpha-
+/// blended (no HDR boost) — the goal is *occlusion* of the
+/// background, not extra brightness, which preserves the sun
+/// disc and god rays as the brightest things on screen.
+///
+/// Infinite duration; gameplay code despawns it on hub
+/// teardown.
+pub fn sandstorm_haze() -> Effect {
+    Effect {
+        duration: 0.0,
+        layers: vec![
+            // Bulk drifting dust sheets — the main occlusion
+            // layer. Disc spans the visible play arena from
+            // the player's anchor, so the field of haze
+            // travels with the camera.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 22.0 },
+                // Bulk haze emission rate is the dominant
+                // fillrate cost in the hub: each sheet grows
+                // to ~6 m wide and stacks alpha-blended
+                // overdraw across the screen. Dropping from
+                // 22/s -> 8/s keeps a continuous "wall of
+                // dust" feel (the long lifetime + slow drift
+                // means there's always a sheet in frame) but
+                // cuts steady-state count from ~110 to ~40
+                // particles, which is the difference between
+                // 35 and ~55 FPS in the hub.
+                emission: EmissionMode::Continuous { rate: 8.0 },
+                // Speed is the random outward kick from the
+                // disc's spawn shape; we want it small —
+                // most of the motion comes from the constant
+                // `Wind` force below so every sheet drifts
+                // in the *same* direction (a real sandstorm
+                // has a coherent prevailing wind, not a
+                // turbulent expansion).
+                speed: (0.3, 0.7),
+                lifetime: (3.5, 5.5),
+                forces: vec![
+                    // Coherent wind sweep — strong enough
+                    // (~7 m/s) that a sheet crosses the
+                    // 22 m disc in roughly its lifetime, so
+                    // the player sees fresh sheets at the
+                    // upwind side and old fading ones
+                    // downwind. Matches the warm dust angle
+                    // (slight rise) so distant sheets ride
+                    // up off the platform.
+                    ForceField::Wind {
+                        velocity: Vec3::new(6.5, 0.4, 4.0),
+                    },
+                    // Light drag so the wind dominates and
+                    // each particle quickly forgets its
+                    // random spawn velocity.
+                    ForceField::Drag { coefficient: 0.4 },
+                    // Curl noise breaks up the marching
+                    // front so the haze reads as turbulent
+                    // dust, not a sliding texture sheet.
+                    ForceField::Curl {
+                        frequency: 0.18,
+                        strength: 1.4,
+                    },
+                ],
+                // Spawn small (sub-metre puff), grow huge
+                // mid-life (~4 m wide), fade to nothing.
+                // The mid-life size is the visible "looking
+                // through dust" depth cue \u2014 a hair smaller
+                // than the original (~6 m) saves another
+                // ~30 % of the per-particle screen footprint
+                // without losing the sheet feel, and combines
+                // with the lower spawn rate above to bring
+                // hub fillrate back into budget.
+                size: Curve::from_stops([
+                    (0.00, 0.6),
+                    (0.45, 4.0),
+                    (1.00, 5.5),
+                ]),
+                // Tan dust matched to `SkyConfig::sandstorm_hub`
+                // horizon. RGB stays well under 1.0 (no HDR)
+                // so the layer can't outshine the sun disc
+                // or god rays. Alpha curve fades in at birth
+                // and out at death so spawning isn't a hard
+                // pop.
+                color: Gradient::from_stops([
+                    (0.00, [0.78, 0.55, 0.30, 0.00]),
+                    (0.20, [0.82, 0.60, 0.34, 0.18]),
+                    (0.65, [0.78, 0.55, 0.30, 0.14]),
+                    (1.00, [0.70, 0.50, 0.28, 0.00]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+            // Fast low streaks \u2014 individual grains skimming
+            // the ground. Halved emission rate (80 -> 40)
+            // because each streak is a small alpha quad
+            // rendered against the sky/dunes; the visual
+            // cadence at 40/s already reads as "flickering
+            // grain motion" without the fillrate stack.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 14.0 },
+                emission: EmissionMode::Continuous { rate: 40.0 },
+                speed: (1.5, 3.0),
+                lifetime: (0.6, 1.1),
+                forces: vec![
+                    ForceField::Wind {
+                        velocity: Vec3::new(9.0, 0.0, 5.5),
+                    },
+                    ForceField::Drag { coefficient: 0.6 },
+                ],
+                size: Curve::from_stops([
+                    (0.00, 0.04),
+                    (0.50, 0.10),
+                    (1.00, 0.02),
+                ]),
+                color: Gradient::from_stops([
+                    (0.00, [0.95, 0.78, 0.50, 0.00]),
+                    (0.30, [0.92, 0.74, 0.46, 0.55]),
+                    (1.00, [0.78, 0.55, 0.30, 0.00]),
+                ]),
+                sprite: SpriteShape::Streak,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}

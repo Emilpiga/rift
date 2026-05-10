@@ -285,7 +285,10 @@ impl CharacterSelect {
                 return None;
             }
         };
-        if let Err(e) = renderer.set_object_texture(obj_idx, tex_path) {
+        if let Err(e) = renderer.set_object_texture(
+            obj_idx,
+            rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
+        ) {
             log::warn!("Preview texture load failed: {}", e);
         }
 

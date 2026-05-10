@@ -2,17 +2,17 @@
 use rift_engine::ui::CombatTextSystem;
 use rift_engine::{Input, LoadStatus, Renderer};
 
-use rift_game::monsters;
 use super::character_select;
 use super::character_spawn;
 use super::floor::FloorManager;
+use super::inventory;
 use super::loot_system;
 use super::monster_assets::load_role;
-use super::inventory;
 use super::player_state::PlayerState;
 use super::rift_state::RiftState;
 use super::spellbook;
 pub use super::sub_state::*;
+use rift_game::monsters;
 
 /// Top-level game state — the single struct that orchestrates all
 /// rendering / input / UI. Authoritative gameplay (enemies, hits,
@@ -110,6 +110,14 @@ pub struct GameState {
     /// keyed by glTF/GLB path. Populated lazily the first
     /// time a base item with `models` set drops on the floor.
     pub loot_model_cache: super::loot_models::LootModelCache,
+    /// Spatial-audio runtime. `None` when the audio backend
+    /// failed to initialise (no output device available, OS
+    /// audio service down, etc.) — every helper short-circuits
+    /// on `None` so a missing audio device is never fatal.
+    /// Owns a kira `AudioManager`, a single listener, a
+    /// path-keyed sound cache, and a generational emitter
+    /// table. See `rift_audio` for the full API.
+    pub audio: Option<rift_audio::AudioSystem>,
 }
 
 /// Hub entry portal. Visual + interaction state for the glowing ring
@@ -159,15 +167,23 @@ impl GameState {
             app_state: AppState::CharacterSelect,
             character_select: character_select::CharacterSelect::new(),
             anim_cache: character_spawn::AnimLibraryCache::new(),
-            equipment_visual_cache:
-                super::equipment_visuals::EquipmentVisualCache::new(),
-            avatar_cosmetics_cache:
-                super::avatar_cosmetics::AvatarCosmeticsCache::new(),
+            equipment_visual_cache: super::equipment_visuals::EquipmentVisualCache::new(),
+            avatar_cosmetics_cache: super::avatar_cosmetics::AvatarCosmeticsCache::new(),
             loot_model_cache: super::loot_models::LootModelCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
             chat: super::chat::ChatUi::new(),
             party: super::party::PartyUi::new(),
             meters: super::meters::MeterUi::new(),
+            // Audio system: best-effort init. Failures here
+            // leave `audio = None`; every audio call site
+            // tolerates the missing system gracefully.
+            audio: match rift_audio::AudioSystem::new("assets") {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    log::warn!("audio: backend init failed: {e}; running silent");
+                    None
+                }
+            },
         }
     }
 
@@ -254,7 +270,9 @@ impl GameState {
     }
 
     pub fn shutdown(&mut self, renderer: &mut Renderer) {
-        unsafe { renderer.ash_device().device_wait_idle().ok(); }
+        unsafe {
+            renderer.ash_device().device_wait_idle().ok();
+        }
         let device = renderer.ash_device().clone();
         let allocator = renderer.allocator_arc();
         self.floor_mgr.monsters.cleanup_gpu(&device, &allocator);
@@ -286,9 +304,7 @@ impl GameState {
         // uses widget-facing accessors (chars_typed /
         // enter_just_pressed), which the flag intentionally
         // leaves alone.
-        input.set_text_capture(
-            self.chat.is_typing() || self.mp_inventory_ui.wants_text_input(),
-        );
+        input.set_text_capture(self.chat.is_typing() || self.mp_inventory_ui.wants_text_input());
         match self.app_state.clone() {
             AppState::CharacterSelect => {
                 crate::game::transition::update_character_select(self, renderer, input, dt);
@@ -322,14 +338,10 @@ impl GameState {
         }
     }
 
-
     /// Forward a server-supplied roster into the character-select
     /// screen. Called by the binary once the net client receives
     /// `ServerMsg::Roster` after we issued `RequestRoster`.
-    pub fn apply_server_roster(
-        &mut self,
-        entries: Vec<rift_net::messages::RosterEntry>,
-    ) {
+    pub fn apply_server_roster(&mut self, entries: Vec<rift_net::messages::RosterEntry>) {
         crate::game::transition::apply_server_roster(self, entries);
     }
 }

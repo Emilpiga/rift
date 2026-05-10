@@ -66,14 +66,9 @@ impl NetClient {
                 dx += 1.0;
                 buttons |= button_bits::MOVE_RIGHT;
             }
-            // Edge-detected jump request: send the JUMP bit on the
-            // frame Space transitions from up→down. The server treats
-            // this as a request and only acts on it when feet are
-            // planted (matching the SP `player_action_pre_system`
-            // check), so a held key won't auto-bunny-hop.
-            if input.key_just_pressed(KeyCode::Space) {
-                buttons |= button_bits::JUMP;
-            }
+            // Jump input intentionally not bound — see
+            // `player_action_pre_system` in rift-engine for the
+            // rationale (ARPG, no jump in gameplay loop).
         }
 
         // Rotate the raw input axis by camera yaw so "W" means

@@ -527,16 +527,38 @@ impl Server {
                 match req {
                     Some(ExitVoteRequest::Pass) => {
                         log::info!("vote: solo {from:?} exiting rift");
+                        // Order matters:
+                        //   1. `stabilize_inventory` flips
+                        //      every living player's unstable
+                        //      items to stable — the
+                        //      "purified by extraction" beat.
+                        //   2. `wipe_dead_loot` shatters dead
+                        //      players' unstable + non-anchored
+                        //      loot. Corpses don't extract.
+                        //   3. `return_all_to_hub` runs
+                        //      `move_client_to_hub` per voter,
+                        //      which strips any remaining
+                        //      unstable (no-op now) and
+                        //      persists the post-extract bag.
+                        let stabilised = self
+                            .instances
+                            .get_mut(instance_id)
+                            .map(|inst| inst.sim.stabilize_inventory())
+                            .unwrap_or_default();
                         let wiped = self
                             .instances
                             .get_mut(instance_id)
                             .map(|inst| inst.sim.wipe_dead_loot())
                             .unwrap_or_default();
                         self.return_all_to_hub(instance_id);
-                        for cid in wiped {
-                            self.broadcast_inventory_state(cid);
-                            self.persist_inventory_state(cid);
-                        }
+                        // De-dup the union; `move_client_to_hub`
+                        // already broadcasts + persists for
+                        // every mover, so we only need to re-fire
+                        // for any IDs that *weren't* movers (none
+                        // currently — every voter moves — but
+                        // future evictions / partial extracts
+                        // could change that).
+                        let _ = (stabilised, wiped);
                     }
                     Some(ExitVoteRequest::Opened) => {}
                     Some(ExitVoteRequest::Refused) => {
@@ -696,7 +718,7 @@ impl Server {
         cid: ClientId,
         instance: RiftInstanceId,
     ) {
-        let Some((player, effects)) = self.hub.extract_player(cid) else {
+        let Some((mut player, effects)) = self.hub.extract_player(cid) else {
             log::warn!("move_client_to_instance: {cid:?} has no hub entity");
             return;
         };
@@ -707,6 +729,63 @@ impl Server {
             let _ = self.hub.inject_player(cid, player, effects);
             return;
         };
+        // Crossing the rift threshold flips every item the
+        // player carries — bag *and* equipment — into the
+        // unstable state. Until the run extracts, all of it
+        // will shatter on death / disconnect / abandon. This
+        // is what makes the rift an "extraction" run rather
+        // than a free farm: bringing your god-tier gear in
+        // means you might lose your god-tier gear. The hub
+        // never sees an unstable item because we set it here
+        // *after* the player has been lifted off the hub Sim.
+        let mut tagged_bag = 0usize;
+        let mut tagged_eq = 0usize;
+        for slot in player.inventory.iter_mut() {
+            if let Some(it) = slot {
+                if !it.unstable {
+                    it.unstable = true;
+                    tagged_bag += 1;
+                }
+            }
+        }
+        for slot in rift_game::loot::EquipSlot::ALL {
+            if let Some(mut it) = player.equipment.take(slot) {
+                if !it.unstable {
+                    it.unstable = true;
+                    tagged_eq += 1;
+                }
+                player.equipment.set(slot, Some(it));
+            }
+        }
+        if tagged_bag > 0 || tagged_eq > 0 {
+            log::info!(
+                "rift-entry: marked {} bag + {} equipped item(s) unstable for {cid:?}",
+                tagged_bag,
+                tagged_eq,
+            );
+        }
+        // Wipe the persisted inventory snapshot. The in-memory
+        // `player` (now flagged unstable across the board)
+        // carries every item through the run; safe extraction
+        // writes the post-run bag back via
+        // `persist_inventory_state` from
+        // `move_client_to_hub`. Until then the DB row set is
+        // empty, so an Alt-F4 / crash / disconnect mid-rift
+        // hydrates the player back into the hub with *no*
+        // inventory \u2014 which is exactly the "unstable loot
+        // shatters on unsafe exit" contract. Without this
+        // wipe, the pre-rift snapshot would still be on disk
+        // and a reconnect would silently restore the items
+        // the player just took into the rift.
+        if let (Some(handle), Some(rec_id)) =
+            (&self.persistence, self.sessions.record_id(cid))
+        {
+            if !handle.reset_character_inventory(rec_id, Vec::new()) {
+                log::warn!(
+                    "persistence: rift-entry inventory wipe dropped for {cid:?}"
+                );
+            }
+        }
         let _net_id = inst.sim.inject_player(cid, player, effects);
         let floor_idx = inst.sim.floor_index;
         let seed = inst.sim.floor_seed;
@@ -754,19 +833,80 @@ impl Server {
         // until those members changed equipment.
         self.catch_up_peer_equipment_visuals(cid);
         self.broadcast_peer_equipment_visuals(cid);
+        // Re-sync inventory + equipment so the client-side
+        // tooltips immediately reflect the freshly-flipped
+        // `unstable` flags. The hub-side bag the client was
+        // mirroring is now stale (every item there now
+        // reads as unstable on the server).
+        self.broadcast_inventory_state(cid);
     }
 
     /// Move `cid` from whatever rift instance they're in back
     /// to the hub. No-op if `cid` is hub-side already. After
     /// the move, if the instance has no remaining members it
     /// is dissolved.
+    ///
+    /// **Single chokepoint for the "leave rift" lifecycle.** Any
+    /// path that drops a player out of a rift Sim into the
+    /// hub Sim funnels through here: voluntary
+    /// `RequestReturnToHub`, party-kick eviction, post-vote
+    /// `return_all_to_hub`, etc. We always strip unstable
+    /// items from the rift-side `ServerPlayer` *before*
+    /// injecting them into the hub \u2014 the only safe-exit path
+    /// (the Exit vote) calls `Sim::stabilize_inventory` first,
+    /// so by the time we get here every legitimate "purified"
+    /// item is already `unstable = false` and the strip is a
+    /// no-op. Every other path (give-up button, disconnect
+    /// going through eviction) loses unstable loot exactly as
+    /// the "death shatters unstable loot" / "must extract to
+    /// stabilise" contract demands.
     pub(crate) fn move_client_to_hub(&mut self, cid: ClientId) {
         let Some(instance_id) = self.client_instance.remove(&cid) else {
             return;
         };
         let mut maybe_dissolve = false;
+        let mut stripped_unstable = false;
         if let Some(inst) = self.instances.get_mut(instance_id) {
-            if let Some((player, effects)) = inst.sim.extract_player(cid) {
+            if let Some((mut player, effects)) = inst.sim.extract_player(cid) {
+                // Defensive strip: shatter every unstable
+                // item still on the player. The Exit-vote
+                // path stabilises first so this loop is a
+                // no-op for legitimate extractions; every
+                // other entry into `move_client_to_hub` is
+                // by definition an unsafe exit.
+                let bag_before = player.inventory.iter().filter(|s| s.is_some()).count();
+                let mut kept_bag: Vec<Option<rift_game::loot::Item>> = Vec::new();
+                for slot in player.inventory.drain(..) {
+                    match slot {
+                        Some(it) if it.unstable => {} // shatter
+                        Some(it) => kept_bag.push(Some(it)),
+                        None => kept_bag.push(None),
+                    }
+                }
+                while matches!(kept_bag.last(), Some(None)) {
+                    kept_bag.pop();
+                }
+                player.inventory = kept_bag;
+                let bag_after = player.inventory.iter().filter(|s| s.is_some()).count();
+                let mut equip_lost = 0usize;
+                for slot in rift_game::loot::EquipSlot::ALL {
+                    if let Some(it) = player.equipment.take(slot) {
+                        if it.unstable {
+                            equip_lost += 1;
+                        } else {
+                            player.equipment.set(slot, Some(it));
+                        }
+                    }
+                }
+                if bag_before != bag_after || equip_lost > 0 {
+                    player.recompute_stats();
+                    stripped_unstable = true;
+                    log::info!(
+                        "rift-exit: shattered {} bag + {} equipped unstable item(s) for {cid:?}",
+                        bag_before - bag_after,
+                        equip_lost,
+                    );
+                }
                 let _net_id = self.hub.inject_player(cid, player, effects);
             }
             if self.clients_in_instance(instance_id).is_empty() {
@@ -787,6 +927,20 @@ impl Server {
         // mirrored for the hub side.
         self.catch_up_peer_equipment_visuals(cid);
         self.broadcast_peer_equipment_visuals(cid);
+        // Re-sync the bag + equipment now that we've crossed
+        // the hub boundary. The InventorySync flush is needed
+        // unconditionally (server-side `unstable` flags flipped
+        // from true \u2192 false on the extract path, so the
+        // client tooltip would otherwise stick on "\u26a0
+        // Unstable"); the persist flush only fires when we
+        // actually mutated the bag, so it lands on the
+        // back-from-rift snapshot rather than the unchanged
+        // pre-rift one.
+        self.broadcast_inventory_state(cid);
+        self.persist_inventory_state(cid);
+        if stripped_unstable {
+            self.broadcast_peer_equipment_visuals(cid);
+        }
         if maybe_dissolve {
             self.instances.dissolve(instance_id);
         }
@@ -1031,16 +1185,20 @@ impl Server {
                 .unwrap_or(false);
             if armed {
                 log::info!("respawning party to hub after wipe in {id:?}");
+                // Wipe-respawn = forced exit after a party
+                // wipe. Every survivor (if any) loses their
+                // unstable loot via `move_client_to_hub`'s
+                // strip; the dead lose all non-anchored loot
+                // via `wipe_dead_loot` (which now also gates
+                // on `!unstable`). No stabilise here — a
+                // wiped party did not extract.
                 let wiped = self
                     .instances
                     .get_mut(*id)
                     .map(|inst| inst.sim.wipe_dead_loot())
                     .unwrap_or_default();
                 self.return_all_to_hub(*id);
-                for cid in wiped {
-                    self.broadcast_inventory_state(cid);
-                    self.persist_inventory_state(cid);
-                }
+                let _ = wiped;
             }
         }
         let _ = self.hub.take_hub_respawn_request();
@@ -1077,16 +1235,25 @@ impl Server {
                     rift_net::messages::VoteKind::Exit,
                 )) => {
                     log::info!("vote: party voted to leave instance {id:?}");
+                    // Stabilise living party members' unstable
+                    // loot first (purified by the group exit
+                    // vote), then shatter dead players'
+                    // unstable + non-anchored loot, then move
+                    // everyone home. `move_client_to_hub`
+                    // handles the per-client persist /
+                    // broadcast on the way out.
+                    let stabilised = self
+                        .instances
+                        .get_mut(*id)
+                        .map(|inst| inst.sim.stabilize_inventory())
+                        .unwrap_or_default();
                     let wiped = self
                         .instances
                         .get_mut(*id)
                         .map(|inst| inst.sim.wipe_dead_loot())
                         .unwrap_or_default();
                     self.return_all_to_hub(*id);
-                    for cid in wiped {
-                        self.broadcast_inventory_state(cid);
-                        self.persist_inventory_state(cid);
-                    }
+                    let _ = (stabilised, wiped);
                 }
                 Some(crate::sim::vote::TickOutcome::Passed(
                     rift_net::messages::VoteKind::Descend,

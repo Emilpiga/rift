@@ -157,6 +157,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                     ilvl,
                     affixes,
                     anchored,
+                    unstable: loot_row.item.unstable,
                     provenance,
                 },
             },

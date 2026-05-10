@@ -172,14 +172,22 @@ pub fn apply_input(k: &mut Kinematic, move_dir: [f32; 2], aim_dir: [f32; 2], but
     k.velocity.x = wish.x * PLAYER_SPEED * air_factor;
     k.velocity.z = wish.z * PLAYER_SPEED * air_factor;
 
-    if buttons & button_bits::JUMP != 0 && !k.airborne {
-        k.vy = JUMP_VELOCITY;
-        k.airborne = true;
-    }
+    // Jumping is disabled — this is an ARPG with grid-based
+    // locomotion. The JUMP button bit and `JUMP_VELOCITY`
+    // constant are kept so the network wire format and any
+    // legacy save data don't break, but the input is ignored.
+    let _ = buttons & button_bits::JUMP;
 
     let horiz_speed_sq = k.velocity.x * k.velocity.x + k.velocity.z * k.velocity.z;
     if horiz_speed_sq > 1.0e-4 {
-        k.yaw = k.velocity.x.atan2(k.velocity.z);
+        // Body yaw is *not* snapped to velocity here. Instantly
+        // rotating the body whenever the move direction changes
+        // (e.g. switching W → A) reads as a hard pose pop
+        // because all locomotion clips are forward-running and
+        // the renderer has nothing else to soften the
+        // transition. Instead we record the desired yaw and let
+        // `integrate` exponentially chase it with `dt`, which
+        // produces a tight but visibly smooth pivot.
         k.locomotion = loco::RUN;
     } else {
         k.locomotion = loco::IDLE;
@@ -217,7 +225,9 @@ pub fn start_roll(k: &mut Kinematic, dir: Vec3) {
 /// Integrate `velocity * dt` into `position` while resisting wall
 /// tiles. X and Z resolved separately so sliding along a wall keeps
 /// the orthogonal component. Vertical motion (jump arc) integrates
-/// against a flat ground plane at y=0.
+/// against the floor's per-tile elevation, including stair-tile slope
+/// interpolation, so the player walks up daises and down pits at the
+/// expected world Y.
 pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
     let step = k.velocity * dt;
 
@@ -235,18 +245,41 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
         new_pos.z = k.position.z;
     }
 
-    if k.airborne || k.vy.abs() > 1.0e-4 || new_pos.y > 1.0e-4 {
+    // Ground Y under the *tile centre* under the capsule.
+    //
+    // Earlier this took the max over centre+4 cardinal taps at
+    // the capsule radius, intended as a cheap step-up
+    // primitive. That was wrong for this tile grid:
+    // `tile_floor_y_at` returns 0.0 for walls/OOB, so any tap
+    // grazing a wall yanks the result up to 0 — when standing
+    // in a sunken pit the body would wedge half a metre above
+    // the pit floor and the mesh would render half-buried in
+    // the floor it's supposedly standing on.
+    //
+    // Vertical transitions between connected tiles are already
+    // handled by stair tiles (which interpolate their own
+    // floor height across the tile span). Single-tap centre
+    // sampling is the correct primitive here.
+    let ground_y = floor.tile_floor_y_at(new_pos.x, new_pos.z);
+
+    if k.airborne || k.vy.abs() > 1.0e-4 || (new_pos.y - ground_y) > 1.0e-4 {
         k.vy -= GRAVITY * dt;
         new_pos.y += k.vy * dt;
-        if new_pos.y <= 0.0 {
-            new_pos.y = 0.0;
+        if new_pos.y <= ground_y {
+            new_pos.y = ground_y;
             k.vy = 0.0;
             k.airborne = false;
         } else {
             k.airborne = true;
         }
     } else {
-        new_pos.y = 0.0;
+        // Glued to ground: snap to ground_y so walking onto a
+        // raised dais lifts us instantly without leaving a
+        // floating-then-falling artefact, and walking off the
+        // dais into a pit drops us immediately. Vertical step
+        // limit isn't enforced here yet — Phase 2's elevation
+        // generator only ever produces ±1 step neighbours.
+        new_pos.y = ground_y;
         k.vy = 0.0;
         k.airborne = false;
     }
@@ -266,6 +299,34 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
         while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
         while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
         let alpha = 1.0 - (-FOLLOW_RATE * dt).exp();
+        k.yaw += delta * alpha;
+        if k.yaw > std::f32::consts::PI { k.yaw -= std::f32::consts::TAU; }
+        if k.yaw < -std::f32::consts::PI { k.yaw += std::f32::consts::TAU; }
+    } else if k.locomotion == loco::RUN && k.roll_remaining <= 0.0 {
+        // Running body-follow: exponentially chase the
+        // velocity-derived yaw instead of snapping to it. The
+        // animation set is forward-only (no strafe / back-pedal
+        // clips), so a hard yaw flip when the player switches
+        // WASD direction reads as a pose pop — the entire mesh
+        // teleports through 90°+ inside one frame to keep the
+        // forward-run cycle pointing along the new velocity.
+        // Chasing instead pivots the body across ~0.10 s, which
+        // is fast enough to feel responsive but slow enough that
+        // the eye perceives a turn rather than a teleport.
+        //
+        // Rate chosen empirically: τ ≈ 0.10 s lands at the
+        // boundary where 90° direction changes still feel
+        // immediate to the player but the visible mesh no
+        // longer skips frames. Real `dt` keeps server and
+        // client in sync (server fixed tick + client
+        // prediction replay both run integrate with the same
+        // `dt`).
+        const RUN_TURN_RATE: f32 = 10.0; // 1/τ; τ ≈ 0.10 s
+        let target = k.velocity.x.atan2(k.velocity.z);
+        let mut delta = target - k.yaw;
+        while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
+        while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+        let alpha = 1.0 - (-RUN_TURN_RATE * dt).exp();
         k.yaw += delta * alpha;
         if k.yaw > std::f32::consts::PI { k.yaw -= std::f32::consts::TAU; }
         if k.yaw < -std::f32::consts::PI { k.yaw += std::f32::consts::TAU; }

@@ -101,9 +101,7 @@ pub fn update_character_select(
             gender,
         );
         if let Some(base_ids) = state.character_select.preview_equipped_base_ids() {
-            let desired = super::equipment_visuals::desired_visuals_for_base_ids(
-                base_ids, gender,
-            );
+            let desired = super::equipment_visuals::desired_visuals_for_base_ids(base_ids, gender);
             super::equipment_visuals::apply_equipment_visuals(
                 &mut state.world,
                 renderer,
@@ -113,7 +111,12 @@ pub fn update_character_select(
             );
         }
     }
-    rift_engine::ecs::systems::skinning_system(&mut state.world, renderer, dt);
+    rift_engine::ecs::systems::skinning_system(
+        &mut state.world,
+        renderer,
+        dt,
+        state.floor_mgr.dungeon.as_ref(),
+    );
 
     // Fused input + render through the immediate-mode UI stack.
     let (sw, sh) = renderer.screen_size();
@@ -158,7 +161,9 @@ fn start_with_profile(
 ) {
     log::info!(
         "Entering world as '{}' on account '{}' ({:?})",
-        profile.name, account_name, profile.gender,
+        profile.name,
+        account_name,
+        profile.gender,
     );
     state.player_state = PlayerState::with_profile(
         profile.gender,
@@ -175,10 +180,7 @@ fn start_with_profile(
 /// Forward a server-supplied roster into the character-select
 /// screen. Called by the binary once the net client receives
 /// `ServerMsg::Roster` after we issued `RequestRoster`.
-pub fn apply_server_roster(
-    state: &mut GameState,
-    entries: Vec<rift_net::messages::RosterEntry>,
-) {
+pub fn apply_server_roster(state: &mut GameState, entries: Vec<rift_net::messages::RosterEntry>) {
     state.character_select.apply_server_roster(entries);
 }
 
@@ -227,10 +229,15 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
             // `object_index = 0` entries can't stomp the new
             // hub platform's model matrix on the very next
             // frame.
-            crate::game::systems::loot_system::clear_world_visuals(
-                &mut state.loot,
-                renderer,
-            );
+            crate::game::systems::loot_system::clear_world_visuals(&mut state.loot, renderer);
+            // Despawn the previous floor's torch audio
+            // emitters before `generate_hub` drains the
+            // torch table internally. Otherwise the emitter
+            // ids would leak — the torches that owned them
+            // are gone but the kira tracks would keep playing.
+            if let Some(audio) = state.audio.as_mut() {
+                state.floor_mgr.torches.clear_audio(audio);
+            }
             match state.floor_mgr.generate_hub(
                 &mut state.world,
                 renderer,
@@ -243,6 +250,13 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
                 }
                 Err(e) => log::error!("Hub generation failed: {}", e),
             }
+            // Hub sandstorm wind loop: spawn the ambient
+            // emitter that pairs with `hub_haze`. Anchored
+            // on the player every frame in `render_phase`
+            // and modulated by the same gust envelope that
+            // brightens / dims the haze, so the audio and
+            // visuals breathe together.
+            spawn_hub_wind(state);
             // Fresh world / fresh local avatar — the
             // `SkinnedAttachments` component is empty. Mark
             // dirty so the binary's per-frame retry loop
@@ -287,11 +301,7 @@ pub fn queue_net_transition(state: &mut GameState, _renderer: &mut Renderer, ind
 /// step-per-frame so the netcode loop keeps pumping and the
 /// loading overlay is guaranteed to present before any
 /// blocking work runs.
-pub fn tick_net_entering(
-    state: &mut GameState,
-    renderer: &mut Renderer,
-    phase: NetEnterPhase,
-) {
+pub fn tick_net_entering(state: &mut GameState, renderer: &mut Renderer, phase: NetEnterPhase) {
     let (label, progress, next): (&'static str, f32, Option<NetEnterPhase>) = match phase {
         NetEnterPhase::FadeOut { index } => {
             // Re-pin in case the per-frame decay nibbled it.
@@ -322,10 +332,10 @@ pub fn tick_net_entering(
             if index == 0 {
                 state.floor.in_hub = true;
                 state.rift = RiftState::new(1);
-                crate::game::systems::loot_system::clear_world_visuals(
-                    &mut state.loot,
-                    renderer,
-                );
+                crate::game::systems::loot_system::clear_world_visuals(&mut state.loot, renderer);
+                if let Some(audio) = state.audio.as_mut() {
+                    state.floor_mgr.torches.clear_audio(audio);
+                }
                 match state.floor_mgr.generate_hub(
                     &mut state.world,
                     renderer,
@@ -333,20 +343,28 @@ pub fn tick_net_entering(
                     &mut state.anim_cache,
                     &mut state.avatar_cosmetics_cache,
                 ) {
-                    Ok(portal_pos) => portal_system::spawn_hub(
-                        &mut state.floor.hub_portal,
-                        renderer,
-                        portal_pos,
-                    ),
+                    Ok(portal_pos) => {
+                        portal_system::spawn_hub(&mut state.floor.hub_portal, renderer, portal_pos)
+                    }
                     Err(e) => log::error!("Hub regeneration failed: {}", e),
                 }
+                spawn_hub_wind(state);
             } else {
                 state.floor.in_hub = false;
                 state.rift = RiftState::new(index);
-                crate::game::systems::loot_system::clear_world_visuals(
-                    &mut state.loot,
-                    renderer,
-                );
+                crate::game::systems::loot_system::clear_world_visuals(&mut state.loot, renderer);
+                if let Some(audio) = state.audio.as_mut() {
+                    state.floor_mgr.torches.clear_audio(audio);
+                }
+                // Leaving the hub: despawn the wind loop
+                // before the floor manager nulls the handle
+                // in `generate`. Without this the kira
+                // emitter would leak across the rift.
+                if let (Some(audio), Some(em)) =
+                    (state.audio.as_mut(), state.floor_mgr.hub_wind.take())
+                {
+                    audio.despawn_emitter(em);
+                }
                 if let Err(e) = state.floor_mgr.generate(
                     &mut state.world,
                     renderer,
@@ -358,13 +376,15 @@ pub fn tick_net_entering(
                 ) {
                     log::error!("Net floor regeneration failed: {}", e);
                 }
+                // Spawn one looping flame-crackle emitter per
+                // freshly-placed wall torch. No-op if audio
+                // is unavailable or the asset is missing.
+                if let Some(audio) = state.audio.as_mut() {
+                    state.floor_mgr.torches.place_audio(audio);
+                }
             }
             state.frame.transition_fade = 1.0;
-            (
-                "Generating world…",
-                0.70,
-                Some(NetEnterPhase::RebuildWalls),
-            )
+            ("Generating world…", 0.70, Some(NetEnterPhase::RebuildWalls))
         }
         NetEnterPhase::RebuildWalls => {
             rebuild_wall_caches(state, renderer);
@@ -392,6 +412,12 @@ pub fn tick_net_entering(
 /// preserved.
 pub fn reset_for_regeneration(state: &mut GameState, renderer: &mut Renderer) {
     state.frame.reset();
+    // Despawn portal hum loops BEFORE dropping the structs
+    // that hold their emitter ids, otherwise the kira tracks
+    // would leak across the floor regen.
+    if let Some(audio) = state.audio.as_mut() {
+        state.floor.detach_portal_audio(audio);
+    }
     state.floor.reset_portals();
     // Exit-vote state is not cleared on regen: the server
     // re-broadcasts the authoritative `RiftExitVote` whenever
@@ -461,4 +487,35 @@ pub fn rebuild_wall_caches(state: &mut GameState, renderer: &mut Renderer) {
         }
         renderer.recreate_blood_field(min, max, floor_y);
     }
+}
+
+/// Spawn the looping hub-wind ambient emitter. Idempotent:
+/// if a previous emitter is still around (e.g. re-entering
+/// the hub from the rift) it is despawned first so we don't
+/// stack two copies of the same loop. Anchored at the hub
+/// origin as a placeholder; `render_phase` re-anchors it on
+/// the player every frame, which keeps the source effectively
+/// at the listener's position so the loop reads as a coherent
+/// surrounding wind rather than a directional point source.
+fn spawn_hub_wind(state: &mut GameState) {
+    let Some(audio) = state.audio.as_mut() else {
+        return;
+    };
+    if let Some(prev) = state.floor_mgr.hub_wind.take() {
+        audio.despawn_emitter(prev);
+    }
+    // Wide falloff (1 m full -> 60 m silent) plus the
+    // listener-anchored update means the player hears the
+    // wind at full volume regardless of where they walk on
+    // the platform. Volume is intentionally moderate (0.6)
+    // so per-frame gust modulation in `tick_hub_wind` can
+    // dip below it without sounding like the wind died.
+    let spec = rift_audio::SoundSpec {
+        path: "ambient/wind.mp3".into(),
+        volume: 0.6,
+        min_distance: 1.0,
+        max_distance: 60.0,
+        looping: true,
+    };
+    state.floor_mgr.hub_wind = audio.spawn_emitter(&spec, glam::Vec3::ZERO);
 }

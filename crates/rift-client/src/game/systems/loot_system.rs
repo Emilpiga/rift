@@ -281,7 +281,7 @@ pub fn on_loot_dropped(
         &blob.affixes,
         blob.anchored,
         blob.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v)),
-    ) else {
+    ).map(|mut it| { it.unstable = blob.unstable; it }) else {
         log::warn!(
             "loot drop {loot_id:?} has unknown indices base={} affixes={:?}; skipping visual",
             blob.base_id,

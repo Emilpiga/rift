@@ -72,10 +72,14 @@ pub enum ColliderShape {
     None,
     /// Static AABB matching the rotated mesh footprint, shrunk by
     /// `shrink` (0.85 = 15 % smaller) so the player can squeeze past.
-    Aabb { shrink: f32 },
+    Aabb {
+        shrink: f32,
+    },
     /// Square XZ footprint of fixed half-extent (used for tree trunks
     /// where the visual canopy is wide but the trunk is thin).
-    Trunk { half_extent: f32 },
+    Trunk {
+        half_extent: f32,
+    },
 }
 
 /// Placement-time hint consumed by [`Props::spawn`].
@@ -200,8 +204,18 @@ impl Props {
             pos.x += ox as f32 * push;
             pos.z += oz as f32 * push;
         }
-        // Lift so the lowest vertex sits on y = 0.
-        pos.y = -mn.y * s;
+        // Lift so the lowest vertex sits on the *tile's*
+        // ground plane, not world y=0. Callers
+        // (`place_on_walls`, `place_in_room`, the centerpiece
+        // spawners) sample [`Floor::tile_floor_y_at`] before
+        // calling us so `tile_pos.y` already carries the
+        // raised-dais / sunken-pit elevation. Adding the
+        // model's bbox-min offset on top means the lowest
+        // vertex sits *on the slab* at any elevation;
+        // overwriting `pos.y` (the previous behaviour) lifted
+        // every prop back to world y=0 and made dais props
+        // float and pit props clip into the ground.
+        pos.y = tile_pos.y - mn.y * s;
 
         // Compensate for the model's authored origin not matching its
         // bbox centre (otherwise the placement skews).
@@ -217,13 +231,57 @@ impl Props {
             Quat::from_rotation_y(yaw),
             placement,
         );
-        renderer.add_mesh(mesh.as_ref(), model).ok()?;
+        // For shared-texture props, the bound `baseColorMap`
+        // already carries the full albedo. The static gltf
+        // loader bakes the gltf's `baseColorFactor` into the
+        // mesh's vertex colours (and *also* multiplies by the
+        // base-colour texture *only* when the gltf references
+        // it via URI — `.glb` files with the texture in a
+        // buffer view fall back to factor-only). The forward
+        // shader then computes `albedo = texture * fragColor`,
+        // which double-tints the prop and reads as
+        // implausibly dark whenever the gltf's factor is
+        // anything below 1.0 (the chest model authors theirs
+        // around 0.4–0.6, which is what made it look out of
+        // place against the brighter SANDSTORM key + ambient).
+        // Override the vertex colours to white so the bound
+        // texture is the single source of truth for albedo.
+        // Costs one extra GPU mesh upload per spawn — fine,
+        // since the prop spawn path already re-uploads
+        // geometry per-instance (no instancing yet).
+        if matches!(asset.material, Material::SharedTexture(_)) {
+            let mut whitened = rift_engine::Mesh {
+                vertices: mesh.vertices.clone(),
+                indices: mesh.indices.clone(),
+            };
+            for v in &mut whitened.vertices {
+                v.color = glam::Vec3::ONE;
+            }
+            renderer.add_mesh(&whitened, model).ok()?;
+        } else {
+            renderer.add_mesh(mesh.as_ref(), model).ok()?;
+        }
         let idx = renderer.objects.len() - 1;
 
         // Material binding.
         if let Material::SharedTexture(path) = asset.material {
             if let Some(ds) = self.ensure_material(renderer, path) {
                 renderer.set_object_shared_material(idx, ds);
+                // Stay on the legacy cel path (default flags
+                // = 0). The PBR path divides diffuse by π,
+                // which combined with the chest's already-
+                // dark wood albedo produces a noticeably
+                // darker prop than the surrounding sand
+                // ground. The cel path multiplies through
+                // unattenuated, so the same ambient + key
+                // produces visibly more contribution per
+                // sample on dark albedos. The skin / cloth /
+                // leather classifier inside `evalCharLight`
+                // weights out near-zero on warm wood (the
+                // leather mask only fires for *dark* low-
+                // chroma surfaces), so the chest falls
+                // through to the default wrap-Lambert curve
+                // and reads cleanly.
             }
         }
 
@@ -244,7 +302,12 @@ impl Props {
                 ));
             }
             ColliderShape::Trunk { half_extent } => {
-                let collider_pos = Vec3::new(tile_pos.x, half_y, tile_pos.z);
+                // Anchor the trunk collider on the tile's
+                // ground plane (matches the visual placement
+                // logic above) instead of world y=0, so trees
+                // on raised hub borders collide where they
+                // visibly stand.
+                let collider_pos = Vec3::new(tile_pos.x, tile_pos.y + half_y, tile_pos.z);
                 world.spawn((
                     Transform::from_position(collider_pos),
                     Collider::new(half_extent, half_y.max(0.20), half_extent),
@@ -276,7 +339,7 @@ impl Props {
             .map_err(|e| log::warn!("prop material read {:?}: {}", resolved, e))
             .ok()?;
         let (tex, ds) = renderer
-            .upload_shared_texture_from_bytes(&bytes)
+            .upload_shared_texture(rift_engine::TextureSource::Bytes(&bytes))
             .map_err(|e| log::warn!("prop material upload {:?}: {}", resolved, e))
             .ok()?;
         self.material_textures.push(tex);

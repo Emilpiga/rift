@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence"]
+members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence", "crates/rift-audio"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -26,3 +26,26 @@ renet = "0.0.16"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "1"
+
+# `kira` (and its decoder dependencies) decode audio in the
+# audio thread; built unoptimised it cannot keep up with even a
+# handful of simultaneous OGG sounds and produces audible
+# crackling. Forcing opt-level=3 only for these deps trades a
+# small one-time compile cost for clean dev-build audio. Per
+# https://docs.rs/kira/latest/kira/#performance-using-the-dev-profile.
+[profile.dev.package.kira]
+opt-level = 3
+[profile.dev.package.cpal]
+opt-level = 3
+[profile.dev.package.symphonia]
+opt-level = 3
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3

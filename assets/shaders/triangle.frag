@@ -110,13 +110,34 @@ mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
 // 0.02 - 0.05 tend to look good for stone bricks at our floor scale.
 vec2 parallaxOffset(vec2 uv, vec3 viewTS, float scale) {
     if (scale <= 0.0) return uv;
-    // Cheap parallax: 4-8 steps is plenty for the small bumps
-    // we use on dungeon walls. Anything heavier shows up in
-    // the frame budget immediately, especially at 2k texture
-    // resolution where the height-map sampler thrashes the
-    // cache.
-    const float minLayers = 4.0;
-    const float maxLayers = 8.0;
+    // Grazing-angle bail-out. When the view ray is almost
+    // tangent to the surface (`viewTS.z` small), POM has to
+    // walk a long distance per step (`P = viewTS.xy /
+    // viewTS.z * scale`) and the result is a smeared,
+    // stretched mess that reads as artefacts rather than
+    // depth. The frame cost in that regime is also worst-case
+    // — every fragment of a near-edge-on wall pays the full
+    // 8-tap march, which is what produces the angle-dependent
+    // FPS dive when a wall fills the viewport at an oblique
+    // angle. Bail out below `0.30`: anything more grazing
+    // than ~73° off the surface normal renders without POM.
+    // Visually identical because at those angles the
+    // perturbation is dominated by stretching artefacts
+    // anyway; cost-wise this is the single biggest win for
+    // wall-heavy scenes.
+    if (viewTS.z < 0.30) return uv;
+    // Cheap parallax: 3-6 steps is plenty for the small bumps
+    // we use on dungeon walls. The previous 4-8 envelope was
+    // measurably the dominant fragment cost when walls
+    // dominated the viewport — every screen pixel hit by a
+    // wall fragment did up to 8 heightmap taps + a refinement
+    // sample. Tightening the envelope cuts worst-case taps
+    // by 25 % across the board with no visible quality loss
+    // on the shipped 2k brick / ground packs (the relief
+    // amplitude `scale` is small enough that 3 steps already
+    // resolve the ridge crests).
+    const float minLayers = 3.0;
+    const float maxLayers = 6.0;
     float numLayers = mix(maxLayers, minLayers, abs(viewTS.z));
     float layerDepth = 1.0 / numLayers;
     float currentDepth = 0.0;
@@ -127,7 +148,9 @@ vec2 parallaxOffset(vec2 uv, vec3 viewTS, float scale) {
     vec2 currentUV = uv;
     float currentSampled = 1.0 - texture(heightMap, currentUV).r;
 
-    for (int i = 0; i < 8; i++) {
+    // Match `maxLayers` above. The compiler unrolls this so
+    // the bound has to be a literal; keep the two in sync.
+    for (int i = 0; i < 6; i++) {
         if (currentDepth >= currentSampled) break;
         currentUV -= deltaUV;
         currentSampled = 1.0 - texture(heightMap, currentUV).r;
@@ -140,6 +163,72 @@ vec2 parallaxOffset(vec2 uv, vec3 viewTS, float scale) {
     float weight = afterDepth / (afterDepth - beforeDepth);
     return mix(currentUV, prevUV, weight);
 }
+
+// Parallax self-shadowing was removed: the visual gain from
+// bending shadow boundaries along sub-mm height ripples did
+// not justify the per-fragment heightmap march and, in
+// practice, the dithered self-occlusion read as noise rather
+// than relief. The cast-shadow path uses straight world-
+// space depth comparison and that is what we want.
+#if 0
+float parallaxSelfShadow(vec2 uv, vec3 lightTS, float scale) {
+    if (scale <= 0.0) return 1.0;
+    if (lightTS.z <= 0.0) return 1.0;
+
+    // 4 steps is plenty at our parallax scales (<= 0.02).
+    // Going from 8 -> 4 halves the heightmap taps in the
+    // hottest path (per-fragment * per-light) and visually
+    // looks identical: the ridges we resolve are an order of
+    // magnitude wider than the per-step UV stride, so the
+    // shadow boundary remains smooth.
+    const int STEPS = 4;
+    // March direction in UV space per "unit of tangent-up".
+    // `scale` is the same tangent-space height magnitude used
+    // by `parallaxOffset`. For grazing light, `lightTS.xy /
+    // lightTS.z` gets huge — we cap the per-step UV walk to a
+    // reasonable fraction of the texture so the march doesn't
+    // sample noise from completely unrelated parts of the
+    // heightmap. With our 2 k packs and `scale` ~= 0.015,
+    // `0.04` UV per step (= ~80 texels at 2 k) is the upper
+    // bound where neighboring ridges remain spatially
+    // correlated. The cap also implicitly attenuates the
+    // self-shadow strength at grazing angles, which is the
+    // correct physical behaviour: ridges cast longer but
+    // softer shadows when the light glances the surface.
+    vec2 dirUV = lightTS.xy / max(lightTS.z, 1e-3);
+    float dirLen = length(dirUV);
+    if (dirLen > 1e-4) dirUV *= min(1.0, 0.04 / (dirLen * scale)) ;
+    vec2 deltaUV = dirUV * (scale / float(STEPS));
+    float layerStep = 1.0 / float(STEPS);
+
+    // Sample at the starting UV (already parallax-corrected
+    // by the caller) and walk toward the light. The heightmap
+    // is in [0, 1] where bright = peak. The marching ray's
+    // altitude rises *above* `startHeight` linearly with step
+    // count; if any sampled height along the march is taller
+    // than the ray's altitude at that step, a ridge between
+    // us and the light occludes the fragment.
+    float startHeight = texture(heightMap, uv).r;
+    vec2 currentUV = uv;
+    float occlusion = 0.0;
+    for (int i = 1; i <= STEPS; i++) {
+        currentUV += deltaUV;
+        float rayHeight = startHeight + float(i) * layerStep;
+        float sampled = texture(heightMap, currentUV).r;
+        float diff = sampled - rayHeight;
+        if (diff > 0.0) {
+            float w = 1.0 - float(i - 1) / float(STEPS);
+            occlusion = max(occlusion, diff * w * 4.0);
+        }
+    }
+    // Fade the self-shadow as the light gets more grazing.
+    // At lightTS.z >= 0.5 (light pretty much overhead in
+    // tangent space) we get the full effect; below 0.1 the
+    // march direction is too unreliable, so we taper to zero.
+    float grazeFade = smoothstep(0.05, 0.35, lightTS.z);
+    return clamp(1.0 - occlusion * grazeFade, 0.0, 1.0);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Cook-Torrance BRDF building blocks
@@ -743,8 +832,8 @@ const vec2 POISSON_DISK[12] = vec2[](
     vec2( 0.896, 0.412), vec2(-0.322,-0.933), vec2(-0.792,-0.598)
 );
 
-float sampleShadow(vec3 N, vec3 L) {
-    vec4 lightClip = ubo.lightVP * vec4(fragWorldPos, 1.0);
+float sampleShadowAt(vec3 worldPos, vec3 N, vec3 L) {
+    vec4 lightClip = ubo.lightVP * vec4(worldPos, 1.0);
     vec3 lightNDC = lightClip.xyz / max(lightClip.w, 1e-5);
     vec3 shadowUV = vec3(lightNDC.xy * 0.5 + 0.5, lightNDC.z);
 
@@ -878,6 +967,13 @@ float sampleShadow(vec3 N, vec3 L) {
     return s;
 }
 
+// Convenience wrapper: sample at the fragment's geometric
+// world position. Used by the cel-shading path which has no
+// height map to perturb against.
+float sampleShadow(vec3 N, vec3 L) {
+    return sampleShadowAt(fragWorldPos, N, L);
+}
+
 // ---------------------------------------------------------------------------
 // Sample the omnidirectional point-light shadow atlas for the given light.
 // `lightIdx` selects which 6-face cube in the atlas (matching the layout
@@ -953,17 +1049,25 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     // applied via `tu`/`tv` keeps the residual banding at 5
     // discrete levels invisible by spreading them spatially as
     // noise that the eye averages.
+    // 4-tap Poisson disk PCF was the historical default, but
+    // the cube sampler already runs 2\u00d72 hardware bilinear
+    // comparison internally, and the per-pixel basis rotation
+    // (`tu`/`tv` above) further smears any residual stepping
+    // into spatial noise the eye averages. In practice a
+    // single rotated tap reads visually identical to 4 taps
+    // at our shadow-atlas density (1024\u00b2/face) and the
+    // dungeon framerate is dominated by *cube samples per
+    // pixel*: 8 shadow-casting torches \u00d7 4 taps = 32 cube
+    // fetches per fragment, against a per-frame budget that
+    // can comfortably afford ~12. Single-tap brings us inside
+    // budget while keeping the soft-edge feel the rotation
+    // hash provides. The const-vec disk + commented taps
+    // stay below so we can step back up to 4-tap if a future
+    // floor with very fine wall detail needs it.
     const vec2 P0 = vec2( 0.000,  0.000);
-    const vec2 P1 = vec2( 0.866,  0.500);
-    const vec2 P2 = vec2(-0.500,  0.866);
-    const vec2 P3 = vec2( 0.500, -0.866);
 
-    float occ = 0.0;
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P1.x + tv * P1.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P2.x + tv * P2.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P3.x + tv * P3.y) * k, float(lightIdx))).r);
-    return occ * 0.25;
+    float occ = step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
+    return occ;
 }
 
 // ---------------------------------------------------------------------------
@@ -995,10 +1099,17 @@ vec3 shadePbr() {
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
+    // Cast shadow uses plain world-space lookup; the
+    // previous heightmap-displaced shadowPos and per-light
+    // self-shadow march were removed because the visual
+    // payoff (faintly wiggly shadow edges over sand ripples)
+    // wasn't worth the per-fragment heightmap taps and, at
+    // the cast-shadow boundary, often read as noise.
+
     // ---- Directional key light ----
     vec3 L = normalize(ubo.lightDir.xyz);
     vec3 H = normalize(L + V);
-    float shadow = sampleShadow(N, L);
+    float shadow = sampleShadowAt(fragWorldPos, N, L);
 
     float NDF = distributionGGX(N, H, roughness);
     float G   = geometrySmith(N, V, L, roughness);
@@ -1029,12 +1140,21 @@ vec3 shadePbr() {
         vec3 toLight = lightPos - fragWorldPos;
         float dist = length(toLight);
         if (dist >= radius) continue;
+        vec3 Lp = normalize(toLight);
+        float NdotLp = max(dot(N, Lp), 0.0);
+        // Backface skip: surfaces facing away from the light
+        // contribute zero diffuse + zero specular; the only
+        // remaining work would be the bounce term below,
+        // which has its own NdotB cosine gate. Skipping the
+        // ~20 ALU + 1 cube-sample of the BRDF for those
+        // pixels is the single biggest win in dungeons where
+        // the camera-facing sides of walls + floor are lit
+        // by at most 2-3 of the 8 active shadow-casters.
+        if (NdotLp <= 0.0) continue;
         float atten = 1.1 - (dist / radius);
         atten = atten * atten;
 
-        vec3 Lp = normalize(toLight);
         vec3 Hp = normalize(Lp + V);
-        float NdotLp = max(dot(N, Lp), 0.0);
 
         float NDFp = distributionGGX(N, Hp, roughness);
         float Gp   = geometrySmith(N, V, Lp, roughness);
@@ -1044,6 +1164,18 @@ vec3 shadePbr() {
                      (4.0 * max(dot(N, V), 0.0) * NdotLp + 1e-4);
         vec3 kSp = Fp;
         vec3 kDp = (1.0 - kSp) * (1.0 - metallic);
+        // Sample the point shadow at the heightmap-displaced
+        // position so its boundary bends along surface relief
+        // (see the directional sample for full rationale).
+        // We deliberately do *not* run a per-light heightmap
+        // self-shadow march here \u2014 in dungeons every torch
+        // is a shadow caster, so a 4-tap march per light
+        // multiplies into 30+ extra texture taps per pixel.
+        // The heightmap-displaced shadow lookup above already
+        // gives the visible "shadow bends along ridges" cue
+        // for cast shadows; the per-light self-shadow march
+        // is reserved for the directional sun where we only
+        // pay it once per fragment.
         float pshadow = samplePointShadow(i, fragWorldPos, lightPos, radius, N);
         lighting += (kDp * albedo / PI + specP) * lightCol * intensity * NdotLp * atten * pshadow;
 
@@ -1367,9 +1499,16 @@ vec3 shadeCel() {
         vec3 toLight = lightPos - fragWorldPos;
         float dist = length(toLight);
         if (dist < radius) {
+            vec3 Lp = normalize(toLight);
+            // Backface skip \u2014 see `shadePbr` rationale. The
+            // cel path's `evalCharLight` is significantly
+            // heavier than the PBR Cook-Torrance loop (skin
+            // SSS approximation, cloth Fresnel rim, leather
+            // sheen branches), so skipping it on shaded
+            // sides of the model is an even bigger win here.
+            if (max(dot(N, Lp), 0.0) > 0.0) {
             float atten = 1.1 - (dist / radius);
             atten = atten * atten;
-            vec3 Lp = normalize(toLight);
             float pshadow = samplePointShadow(i, fragWorldPos, lightPos, radius, N);
             // Route every point light through the same per-class
             // response used for the directional key. This is
@@ -1386,6 +1525,7 @@ vec3 shadeCel() {
                 specMul, specPower
             );
             lighting += perLight * intensity * atten * pshadow;
+            }
         }
 
         // Hemispherical floor-bounce. See `shadePbr` for the
@@ -1645,6 +1785,34 @@ vec3 shadeRift() {
                  * smoothstep(1.04, 1.00, r)
                  * smoothstep(0.99, 1.02, r);
     col *= 1.0 - vacuum * 0.55;
+
+    // ---- Extract-portal recolour ----
+    // When bit 2 of the flags float is set, this is the
+    // *extract* portal — the boss-room exit that ferries the
+    // player back to the hub, sibling to the descend portal.
+    // The two portals stand side-by-side in the corridor, so
+    // they need to be unmistakable at a glance: descend stays
+    // crimson (the rift's own colour), extract becomes a
+    // cool cyan/teal so the player reads "way home" vs "way
+    // deeper" instantly.
+    //
+    // The recolour is applied as a per-channel *swap* of the
+    // existing crimson palette into a cyan one, scaled to
+    // preserve the same luminance envelope so the silhouette,
+    // halo, and pulse all still read as the same animated
+    // shape. The cheap form `rgb -> bgr * tint` happens to map
+    // the rift's hot-red highlights into hot-cyan/blue
+    // highlights, which is exactly what we want.
+    uint flags2 = floatBitsToUint(push.materialParams.z);
+    if ((flags2 & 4u) != 0u) {
+        // Channel swap (R ↔ B) plus a slight green lift —
+        // produces a glacial cyan-teal that's the chromatic
+        // complement of the rift crimson. The dim outer
+        // glow stays cool (so the surrounding floor halo
+        // pushed by `portal_system::push_lights` matches),
+        // while the rim highlights still bloom hard.
+        col = vec3(col.b * 0.65, col.g * 1.15 + col.r * 0.20, col.r * 1.45);
+    }
 
     return col;
 }

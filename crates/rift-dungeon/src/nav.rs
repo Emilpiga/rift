@@ -3,7 +3,7 @@
 //! "is this tile walkable" lookup without re-scanning
 //! `Floor::tiles`.
 
-use crate::{Floor, Tile};
+use crate::Floor;
 
 #[derive(Clone)]
 pub struct NavGrid {
@@ -14,7 +14,7 @@ pub struct NavGrid {
 
 impl NavGrid {
     pub fn from_floor(floor: &Floor) -> Self {
-        let walkable: Vec<bool> = floor.tiles.iter().map(|t| *t == Tile::Floor).collect();
+        let walkable: Vec<bool> = floor.tiles.iter().map(|t| t.is_walkable()).collect();
         Self {
             width: floor.width,
             depth: floor.depth,

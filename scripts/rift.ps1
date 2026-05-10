@@ -19,6 +19,8 @@ param(
     [ValidateSet("start", "build", "run")]
     [string]$Sub = "start",
 
+    [switch]$Release,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -31,10 +33,18 @@ $ClientCnx    = if ($env:RIFT_CONNECT)     { $env:RIFT_CONNECT }     else { "127
 $ServerLog    = if ($env:RIFT_SERVER_LOG)  { $env:RIFT_SERVER_LOG }  else { "info" }
 $ClientLog    = if ($env:RIFT_CLIENT_LOG)  { $env:RIFT_CLIENT_LOG }  else { "info" }
 
-function Build-Server { cargo build -p rift-server }
-function Build-Client { cargo build -p rift-client }
-function Run-Server   { $env:RUST_LOG = $ServerLog; & .\target\debug\rift-server.exe --bind $ServerBind @Rest }
-function Run-Client   { $env:RUST_LOG = $ClientLog; & .\target\debug\rift.exe --connect $ClientCnx @Rest }
+$BuildProfile = if ($Release) { "release" } else { "debug" }
+
+function Invoke-Cargo {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    if ($Release) { & cargo build --release @Args } else { & cargo build @Args }
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
+}
+
+function Build-Server { Invoke-Cargo -p rift-server }
+function Build-Client { Invoke-Cargo -p rift-client }
+function Run-Server   { $env:RUST_LOG = $ServerLog; & ".\target\$BuildProfile\rift-server.exe" --bind $ServerBind @Rest }
+function Run-Client   { $env:RUST_LOG = $ClientLog; & ".\target\$BuildProfile\rift.exe" --connect $ClientCnx @Rest }
 
 switch ($Command) {
     "server" {
@@ -50,17 +60,17 @@ switch ($Command) {
         if ($Sub -eq "run") { Run-Client }
     }
     "both" {
-        cargo build --workspace
+        Invoke-Cargo --workspace
         $prevLog = $env:RUST_LOG
         $env:RUST_LOG = $ServerLog
         $srv = Start-Process -PassThru -NoNewWindow `
-            -FilePath ".\target\debug\rift-server.exe" `
+            -FilePath ".\target\$BuildProfile\rift-server.exe" `
             -ArgumentList "--bind", $ServerBind
         $env:RUST_LOG = $prevLog
         Start-Sleep -Milliseconds 500
         try { Run-Client } finally { if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force } }
     }
-    "build" { cargo build --workspace }
+    "build" { Invoke-Cargo --workspace }
     default {
         Write-Host @"
 rift dev launcher

@@ -132,6 +132,60 @@ pub fn tile_centre(tx: i32, tz: i32) -> Vec3 {
     Vec3::new(tx as f32, 0.0, tz as f32)
 }
 
+/// `true` when tile `(tx, tz)` is a walkable floor tile whose
+/// 4-cardinal neighbours all share the same authored elevation
+/// (or are out-of-bounds / walls). Used to gate prop spawns so
+/// barrels, candles, statues, etc. only land on flat plateaus
+/// — never on the lip of a raised dais, the crest of a sunken
+/// pit, or a stair tile (whose surface is sloped). Without
+/// this gate a prop placed at the *centre* of an edge tile
+/// reads as "lifted to the right Y", but its rendered footprint
+/// straddles the elevation step and visually clips into / hovers
+/// over the adjacent dais wall skirt.
+fn is_flat_plateau(floor: &Floor, tx: i32, tz: i32) -> bool {
+    if tx < 0 || tz < 0 {
+        return false;
+    }
+    let (ix, iz) = (tx as usize, tz as usize);
+    if ix >= floor.width || iz >= floor.depth {
+        return false;
+    }
+    let i = iz * floor.width + ix;
+    // Stair tiles are sloped surfaces — props on them would
+    // tilt or hover. Always reject.
+    if !matches!(floor.tiles[i], Tile::Floor) {
+        return false;
+    }
+    let my_elev = floor.elevation[i];
+    for &(ox, oz) in &WALL_DIRS {
+        let nx = tx + ox;
+        let nz = tz + oz;
+        if nx < 0 || nz < 0 {
+            continue;
+        }
+        let (nix, niz) = (nx as usize, nz as usize);
+        if nix >= floor.width || niz >= floor.depth {
+            continue;
+        }
+        let ni = niz * floor.width + nix;
+        match floor.tiles[ni] {
+            // Walls are fine — the prop's wall-side edge is
+            // already snapped flush in `Props::spawn`.
+            Tile::Wall => {}
+            // A neighbour stair leans up or down from this
+            // tile; placing a prop here puts its footprint
+            // on the lip of the ramp.
+            Tile::Stair { .. } => return false,
+            Tile::Floor => {
+                if floor.elevation[ni] != my_elev {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Pick one asset from `assets` by `weight`.
 pub fn weighted_pick<'a>(assets: &'a [PropAsset], rng: &mut SmallRng) -> &'a PropAsset {
     let total: u32 = assets.iter().map(|a| a.weight).sum();
@@ -185,15 +239,28 @@ pub struct WallPlacement<'a> {
 }
 
 /// Spawn props along the wall-edge `candidates`. Consumes the vec.
+///
+/// `floor` is consulted per-spawn to lift the prop's Y to the
+/// tile's authored elevation (raised daises, sunken pits) so a
+/// prop lands on the visible floor surface rather than always
+/// at y=0. Without this, props placed inside a pit or on a
+/// dais hover above (or sink into) the slab.
 pub fn place_on_walls(
     props: &mut Props,
     world: &mut hecs::World,
     renderer: &mut Renderer,
+    floor: &Floor,
     mut candidates: Vec<WallTile>,
     rng: &mut SmallRng,
     p: &WallPlacement,
 ) {
     candidates.retain(|(tx, tz, _)| {
+        // Reject tiles that border an elevation step or stair
+        // — props placed on the dais lip end up half-buried
+        // in the dais skirt or hovering over the lower floor.
+        if !is_flat_plateau(floor, *tx, *tz) {
+            return false;
+        }
         let pos = tile_centre(*tx, *tz);
         !p.avoid.iter().any(|(c, r)| pos.distance(*c) < *r)
     });
@@ -210,10 +277,22 @@ pub fn place_on_walls(
         let (tx, tz, wall_dir) = candidates.swap_remove(i);
         let (ox, oz) = wall_dir;
 
-        let pos = match p.anchor {
+        let mut pos = match p.anchor {
             WallAnchor::OnFloorTile => tile_centre(tx, tz),
             WallAnchor::OnWallTile => tile_centre(tx + ox, tz + oz),
         };
+        // Lift to the tile's authored elevation. For
+        // `OnFloorTile` we sample the floor tile itself;
+        // for `OnWallTile` (hub forest border) the wall
+        // tile reports y=0, so we sample the *adjacent*
+        // floor tile instead so trees that replace the
+        // wall sit on the same step as the floor they
+        // border.
+        let (sx, sz) = match p.anchor {
+            WallAnchor::OnFloorTile => (pos.x, pos.z),
+            WallAnchor::OnWallTile => (tx as f32, tz as f32),
+        };
+        pos.y = floor.tile_floor_y_at(sx, sz);
 
         if p.min_spacing > 0.0
             && placed.iter().any(|q| q.distance_squared(pos) < min_sq)
@@ -250,10 +329,14 @@ pub struct ScatterPlacement<'a> {
 }
 
 /// Scatter free-standing props across `tiles`.
+///
+/// `floor` is sampled per-spawn to lift the prop's Y to the
+/// tile's authored elevation — see [`place_on_walls`].
 pub fn scatter_on_tiles(
     props: &mut Props,
     world: &mut hecs::World,
     renderer: &mut Renderer,
+    floor: &Floor,
     tiles: &[(i32, i32)],
     rng: &mut SmallRng,
     p: &ScatterPlacement,
@@ -267,11 +350,20 @@ pub fn scatter_on_tiles(
 
     for _ in 0..p.count {
         let (tx, tz) = tiles[(rng.next() as usize) % tiles.len()];
-        let pos = Vec3::new(
+        // Same flat-plateau gate as `place_on_walls`: no
+        // scatter on dais lips, pit edges, or stair tiles.
+        if !is_flat_plateau(floor, tx, tz) {
+            continue;
+        }
+        let mut pos = Vec3::new(
             tx as f32 + rng.frange(-j, j),
             0.0,
             tz as f32 + rng.frange(-j, j),
         );
+        // Sample the elevation under the (jittered) world
+        // position so a scatter that crosses a tile
+        // boundary still lands on the right step.
+        pos.y = floor.tile_floor_y_at(pos.x, pos.z);
         if p.avoid.iter().any(|(c, r)| pos.distance(*c) < *r) {
             continue;
         }

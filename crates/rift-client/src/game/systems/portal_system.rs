@@ -63,11 +63,7 @@ fn facing_yaw(world: &hecs::World, portal_pos: Vec3) -> f32 {
 /// as a slowly turning swirl. The VFX emitter's orientation is
 /// also given the Z-spin so the orbiting halo sparks share the
 /// disc's reference frame.
-fn apply_facing(
-    portal: &HubPortal,
-    world: &hecs::World,
-    renderer: &mut Renderer,
-) {
+fn apply_facing(portal: &HubPortal, world: &hecs::World, renderer: &mut Renderer) {
     /// Radians/sec the disc rotates around its own normal. Slow
     /// enough to read as "the other side is alive" without
     /// reading as a fan blade.
@@ -102,10 +98,36 @@ fn apply_facing(
         .set_orientation(portal.emitter_idx, billboard * local_spin);
 }
 
-/// Visual + interaction state for a single portal (hub entry or
-/// boss-room exit). The two are structurally identical; we keep
-/// them as separate `Option<HubPortal>` fields on `GameState` so
-/// they can coexist (boss-room exit + hypothetical hub return).
+/// Which destination a portal leads to. Drives both the disc's
+/// baked sky palette (set at spawn time via `SkyConfig`) and
+/// the per-frame point-light colour pushed by `push_lights`.
+/// Keeping the two in lock-step is essential — the player
+/// reads the *same chromatic signature* from both the disc and
+/// the surrounding ground spill, so the at-a-glance "is this
+/// the way deeper or the way home?" decision works at any
+/// camera angle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortalKind {
+    /// Hub → rift entry. Crimson rift palette, intended to
+    /// read as "you are about to enter danger". Same chroma
+    /// as `Descend` — they share the visual language of
+    /// "deeper into the rift".
+    HubEntry,
+    /// Rift boss room → next floor. Crimson rift palette,
+    /// matching `HubEntry` so the player learns "red portal
+    /// = deeper".
+    Descend,
+    /// Rift boss room → hub. Cool cyan/teal palette, the
+    /// chromatic *opposite* of the descend portal so the two
+    /// portals standing side-by-side in the boss-room corridor
+    /// can never be confused at a glance.
+    Extract,
+}
+
+/// Visual + interaction state for a single portal (hub entry,
+/// descend, or extract). The three are structurally identical
+/// apart from `kind`, which drives both the spawn-time disc
+/// palette and the per-frame light colour.
 pub struct HubPortal {
     /// World-space position of the portal centre.
     pub position: Vec3,
@@ -115,8 +137,19 @@ pub struct HubPortal {
     pub obj_idx: usize,
     /// Particle emitter index for the swirling vortex.
     pub emitter_idx: rift_engine::renderer::vfx::EffectId,
+    /// Looping portal-hum audio emitter. `None` when the
+    /// audio system is unavailable or the asset is missing.
+    /// Volume is driven each frame by [`tick_audio`] from
+    /// the same breathing/spasm pulse that modulates the
+    /// portal light, so the hum throbs in lockstep with
+    /// the visible disc.
+    pub audio: Option<rift_audio::EmitterId>,
     /// Seconds since the portal was spawned. Drives rotation.
     pub age: f32,
+    /// Destination class. Selects the per-frame light colour
+    /// in `push_lights` so the disc and the ground halo always
+    /// share the same chroma.
+    pub kind: PortalKind,
 }
 
 /// Push a hot-crimson point light at every active portal so the
@@ -131,15 +164,14 @@ pub struct HubPortal {
 ///     Lifted to disc-centre height so the falloff illuminates
 ///     the floor *around* the portal pillar rather than only
 ///     directly underneath it.
-///   * **Color**: deep crimson with a hint of orange, HDR-
-///     boosted so bloom amplifies it. Matches the rift's
-///     emissive palette so light spilling onto the chest /
-///     player reads as "lit by the rift" rather than a
-///     decorative sconce.
-///   * **Radius**: 9 m. Reaches the chest (~2 m away) and the
-///     player when standing nearby (~3 m), but falls off well
-///     before any nearby torch's pool — the rift owns its
-///     immediate environment, not the whole room.
+///   * **Color**: deep crimson, HDR-boosted hard so it
+///     actually paints over the sandstorm hub's warm
+///     ambient fill. Matches the rift's emissive palette so
+///     light spilling onto the chest / player reads as "lit
+///     by the rift" rather than a decorative sconce.
+///   * **Radius**: 16 m. Reaches well past the portal pillar
+///     base so the surrounding sand picks up a visible halo,
+///     not just the immediate dais.
 ///   * **Intensity**: synced with the shader's breathing pulse
 ///     and intermittent destabilisation spasm so the light
 ///     visibly throbs in lock-step with the visible disc. The
@@ -150,11 +182,7 @@ pub struct HubPortal {
 /// The 8-light renderer cap means this function is the only
 /// place that should push portal lights — having two portals
 /// active (e.g. exit + hub-return) costs 2 of the 8 slots.
-pub fn push_lights(
-    renderer: &mut Renderer,
-    portals: &[Option<&HubPortal>],
-    elapsed: f32,
-) {
+pub fn push_lights(renderer: &mut Renderer, portals: &[Option<&HubPortal>], elapsed: f32) {
     use rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
 
     let t = elapsed;
@@ -172,15 +200,93 @@ pub fn push_lights(
 
     for portal in portals.iter().copied().flatten() {
         let pos = portal.position + Vec3::Y * PORTAL_CENTRE_Y;
-        renderer.point_lights.push(rift_engine::PointLight {
-            position: pos,
-            // Saturated crimson with a touch of orange. R is
-            // pushed past 1.0 so HDR bloom amplifies the
-            // ground spill into the surrounding pixels.
-            color: Vec3::new(2.40, 0.30, 0.12),
-            radius: 9.0,
-            intensity: 4.5 * pulse,
-        });
+        // Per-kind chroma. The disc bakes the destination
+        // sky's palette at spawn time; the per-frame light
+        // colour has to match or the player gets a chromatic
+        // mismatch ("the disc is cyan but the floor under it
+        // is red") that breaks the at-a-glance "deeper vs
+        // home" read.
+        //
+        // All values are HDR-boosted hard. In the rift,
+        // shadow-casting torches each push ~10 W of warm
+        // orange across a 7–10 m radius and the renderer's
+        // 8-light cap means the *first* lights pushed are
+        // the shadow-casters — i.e. the torches usually win
+        // the slot lottery before the portal light is
+        // pushed (`push_lights` runs after the torch
+        // system). Pushing the portal at a chromatic value
+        // that bloom-blooms past `1.0` on every channel
+        // ensures the portal still reads as the dominant
+        // local light source even when it's competing with
+        // four torch sconces around the boss room.
+        let (color, radius) = match portal.kind {
+            PortalKind::HubEntry | PortalKind::Descend => (
+                // Crimson — same chroma family as torches,
+                // but pushed harder on red and noticeably
+                // hotter on the highlight so it dominates
+                // any torch overlap. The faint green / blue
+                // headroom keeps bloom from desaturating
+                // into pink mush.
+                Vec3::new(5.50, 0.65, 0.22),
+                16.0,
+            ),
+            PortalKind::Extract => (
+                // Cool cyan-teal — chromatic complement of
+                // the descend portal so the two side-by-
+                // side in the boss-room corridor are
+                // unmistakable. HDR-boosted on G/B; the
+                // tiny R component prevents an unnatural
+                // pure-cyan cast under the player and reads
+                // as "this is a way out, not the rift".
+                Vec3::new(0.35, 3.20, 4.80),
+                16.0,
+            ),
+        };
+        // Insert at the *front* of `point_lights` so the
+        // portal occupies one of the shadow-caster slots
+        // (`point_lights[0..N_SHADOW]`) rather than landing
+        // in the unshadowed additive tail. Without this the
+        // portal's 16 m radius leaks through every wall in
+        // its bubble — most visibly as a brief flash on
+        // backside walls during the `spasm` pulse spike,
+        // which is the "spills through walls for one frame
+        // as I approach" symptom.
+        //
+        // The previous worry about spending a 6-face cube
+        // render every frame on a static-vs-static occlusion
+        // pair was unfounded: the renderer's per-slot dirty
+        // check (`PointShadowSlotState`) hashes the light's
+        // pose + every caster within radius. Both portal
+        // and walls are static, so after the first frame in
+        // a given room the hash matches the cached value and
+        // the 6 face renders are skipped entirely. Even when
+        // a monster wanders into the radius the staggered
+        // every-other-frame refresh keeps the cost bounded.
+        //
+        // Cost: bumps the *farthest* of the 8 shadow-casting
+        // torches (already heavily rank-faded — see
+        // `torches::update_lights`'s RANK_FULL=12 / RANK_CAP=14
+        // smoothstep) out of the shadow set into the
+        // additive tail. That torch was already at near-zero
+        // intensity by the time it reached slot 7, so losing
+        // its self-shadow is invisible. The portal's
+        // wall-occlusion read, meanwhile, is the dominant
+        // visual feature of the boss-room corridor.
+        renderer.point_lights.insert(
+            0,
+            rift_engine::PointLight {
+                position: pos,
+                color,
+                radius,
+                // Pulse-modulated intensity. Headroom raised so
+                // the breathing/spasm peaks read as a visible
+                // throb on the ground, not just the ring itself.
+                // Bumped from 8 → 11 in the rift specifically so
+                // the portal doesn't get visually drowned by
+                // adjacent torches' warm orange spill.
+                intensity: 11.0 * pulse,
+            },
+        );
     }
 }
 
@@ -198,6 +304,7 @@ pub fn spawn_hub(hub_portal: &mut Option<HubPortal>, renderer: &mut Renderer, po
         pos,
         "hub portal",
         rift_engine::SkyConfig::rift(),
+        PortalKind::HubEntry,
     );
 }
 
@@ -216,6 +323,7 @@ pub fn spawn_exit(exit_portal: &mut Option<HubPortal>, renderer: &mut Renderer, 
         pos,
         "exit portal",
         rift_engine::SkyConfig::rift(),
+        PortalKind::Descend,
     );
 }
 
@@ -231,6 +339,7 @@ pub fn spawn_return_to_hub(slot: &mut Option<HubPortal>, renderer: &mut Renderer
         pos,
         "hub return portal",
         rift_engine::SkyConfig::meadow(),
+        PortalKind::Extract,
     );
 }
 
@@ -240,6 +349,7 @@ fn spawn(
     pos: Vec3,
     label: &str,
     destination: rift_engine::SkyConfig,
+    kind: PortalKind,
 ) {
     use rift_engine::renderer::mesh::Mesh;
 
@@ -263,23 +373,134 @@ fn spawn(
     // and lighting are bypassed for portal pixels. See
     // `assets/shaders/triangle.frag` and
     // `Mesh::portal_with_palette` for the full contract.
-    let rift_flags = f32::from_bits(2u32);
+    //
+    // Bit 2 (extract portal) tells `shadeRift` to swap its
+    // crimson palette for a cool cyan/teal so the descend
+    // and extract portals standing side-by-side in the
+    // boss-room corridor read as opposite signals at a
+    // glance: red = deeper, cyan = home.
+    let mut flag_bits: u32 = 2; // bit 1: rift shading
+    if matches!(kind, PortalKind::Extract) {
+        flag_bits |= 4; // bit 2: extract recolour
+    }
+    let rift_flags = f32::from_bits(flag_bits);
     renderer.set_object_material_params(obj_idx, [1.0, 0.0, rift_flags, 0.0]);
+    // Opt the disc out of every shadow pass. The portal
+    // light (pushed each frame by `push_lights`) sits at
+    // disc centre, so leaving the disc as a shadow caster
+    // makes it occlude its own light from below — the floor
+    // directly under the portal would render dark instead of
+    // glowing. The disc also sits inside the cube atlas
+    // slot's near-plane on most faces, so its self-shadow
+    // would be a near-uniform black wherever the disc's
+    // back-face faces the cube face origin.
+    renderer.set_object_casts_shadow(obj_idx, false);
     // Anchor the VFX at the *centre* of the mesh ring, not at
     // floor level — the Strange-style halo orbits a vertical
     // axis, so the emitter has to sit where the visible ring
     // is. See `PORTAL_CENTRE_Y` for the offset constant.
-    let emitter_pos = pos
-        + Vec3::Y * rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
-    let emitter_id = renderer
-        .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::portal_vortex(), emitter_pos);
+    let emitter_pos =
+        pos + Vec3::Y * rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
+    let emitter_id = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::portal_vortex(),
+        emitter_pos,
+    );
     *slot = Some(HubPortal {
         position: pos,
         obj_idx,
         emitter_idx: emitter_id,
+        audio: None,
         age: 0.0,
+        kind,
     });
+}
+
+/// Spawn a looping `ambient/portal_hum.wav` emitter for
+/// `portal` and stash its id on the struct. Idempotent: if the
+/// portal already has an emitter, the previous one is freed
+/// first so re-attaching can't leak. No-op when the asset is
+/// missing or the audio system rejects the spawn.
+///
+/// Falloff is wider than torches (2 m full → 24 m silent) so
+/// the hum is audible from across the hub platform but still
+/// localises to the portal pillar when the player gets close.
+pub fn attach_audio(portal: &mut HubPortal, audio: &mut rift_audio::AudioSystem) {
+    if let Some(prev) = portal.audio.take() {
+        audio.despawn_emitter(prev);
+    }
+    let spec = rift_audio::SoundSpec {
+        path: "ambient/portal_hum.wav".into(),
+        // Held at moderate volume so per-frame pulse
+        // modulation in `tick_audio` can dip below it
+        // without sounding like the hum cuts out.
+        volume: 0.55,
+        min_distance: 6.0,
+        max_distance: 55.0,
+        looping: true,
+    };
+    use rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
+    let emitter_pos = portal.position + Vec3::Y * PORTAL_CENTRE_Y;
+    portal.audio = audio.spawn_emitter(&spec, emitter_pos);
+}
+
+/// Despawn this portal's looping audio emitter (if any). Call
+/// from the floor-teardown path BEFORE the portal struct is
+/// dropped so the emitter slot recycles cleanly.
+pub fn detach_audio(portal: &mut HubPortal, audio: &mut rift_audio::AudioSystem) {
+    if let Some(em) = portal.audio.take() {
+        audio.despawn_emitter(em);
+    }
+}
+
+/// Per-frame: drive each portal's hum volume from the same
+/// breathing/spasm pulse that modulates the portal light
+/// (see [`push_lights`]). Phase-locked by construction — both
+/// derivations read the same `elapsed` and use identical
+/// constants — so the audio swell tracks the visible disc
+/// throb exactly.
+///
+/// Also lazily attaches the looping hum to any portal that
+/// doesn't have one yet — this is the single integration
+/// point for portal audio so the lazy-spawn paths
+/// (`tick_exit`, `tick_rift_spawn`) don't have to thread
+/// `&mut AudioSystem` through their already-busy signatures.
+pub fn tick_audio(
+    portals: &mut [Option<&mut HubPortal>],
+    audio: &mut rift_audio::AudioSystem,
+    elapsed: f32,
+) {
+    let t = elapsed;
+    // Mirrors the maths in `push_lights` so the hum and the
+    // light pulse together.
+    let breathe = 0.88 + 0.12 * (t * 0.85).sin();
+    let spasm_phase = (t * 0.14).fract();
+    let spasm = ((spasm_phase / 0.08).clamp(0.0, 1.0))
+        .min(1.0 - ((spasm_phase - 0.18) / 0.10).clamp(0.0, 1.0))
+        .max(0.0);
+    let tremor_phase = (t * 0.37 + 0.21).fract();
+    let tremor = ((tremor_phase / 0.05).clamp(0.0, 1.0))
+        .min(1.0 - ((tremor_phase - 0.10) / 0.06).clamp(0.0, 1.0))
+        .max(0.0);
+    // Visual pulse goes ~1.0..1.55. Map to a tighter audio
+    // band (~0.85..1.20) so the hum throbs audibly without
+    // the spasm spikes shouting over the rest of the
+    // soundscape.
+    let pulse_v = breathe + spasm * 0.40 + tremor * 0.15;
+    let volume = 0.85 + (pulse_v - 1.0).clamp(0.0, 0.6) * 0.6;
+
+    for portal in portals.iter_mut().flatten() {
+        if portal.audio.is_none() {
+            attach_audio(portal, audio);
+        }
+        let Some(em) = portal.audio else { continue };
+        // Keep the source pinned at the disc centre — portals
+        // don't move, but `set_emitter_position` is cheap and
+        // ensures the spatial track stays put even if a
+        // future system mutates `portal.position`.
+        use rift_engine::renderer::vfx::presets::environment::portal::PORTAL_CENTRE_Y;
+        audio.set_emitter_position(em, portal.position + Vec3::Y * PORTAL_CENTRE_Y);
+        audio.set_emitter_volume(em, volume);
+    }
 }
 
 /// Per-frame hub-portal tick: spin the mesh and let the local
@@ -472,10 +693,13 @@ pub fn tick_rift_spawn(
             pos,
             "rift exit portal",
             rift_engine::SkyConfig::meadow(),
+            PortalKind::Extract,
         );
     }
 
-    let Some(portal) = portal_slot.as_mut() else { return };
+    let Some(portal) = portal_slot.as_mut() else {
+        return;
+    };
     portal.age += dt;
     apply_facing(portal, world, renderer);
 
@@ -533,7 +757,9 @@ fn tick(
 ) {
     use winit::keyboard::KeyCode;
 
-    let Some(portal) = portal_slot.as_mut() else { return };
+    let Some(portal) = portal_slot.as_mut() else {
+        return;
+    };
     let _ = portal.emitter_idx;
     portal.age += dt;
     apply_facing(portal, world, renderer);

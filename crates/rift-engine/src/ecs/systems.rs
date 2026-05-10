@@ -86,23 +86,80 @@ pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
 }
 
 /// Apply velocity to transform.
-pub fn movement_system(world: &mut World, dt: f32) {
+///
+/// `floor` is the dungeon's analytic heightfield used for
+/// per-tile ground follow + step-up resolution. When `None`
+/// (e.g. menu / loading), we fall back to a y=0 plane.
+pub fn movement_system(world: &mut World, dt: f32, floor: Option<&rift_dungeon::Floor>) {
     // Players need vertical-velocity integration (jumping). Other
     // entities stay flat on y=0.
     const GRAVITY: f32 = 22.0;
+
+    // Ground sample: just the tile under the player's centre.
+    //
+    // Earlier iterations took the max over a 5-tap capsule
+    // footprint (centre + 4 cardinal radii) on the theory that
+    // it would pre-emptively lift the body the moment the
+    // capsule edge overlapped a higher neighbouring tile.
+    // That's correct in theory for arbitrary geometry, but
+    // wrong for *this* tile grid:
+    //
+    //   * `tile_floor_y_at` returns 0.0 for walls and OOB
+    //     samples, so any capsule tap that grazes a wall
+    //     pulls the result up to 0 even when the body is
+    //     standing in a sunken pit at -0.5. The body snaps
+    //     up by half a metre, the visible mesh ends up half
+    //     buried in the actual floor, and the IK pass —
+    //     using the same elevated reference plane — can't
+    //     recover.
+    //   * Vertical transitions between connected tiles are
+    //     already handled by stair tiles, which interpolate
+    //     their own floor height. The locomotion layer
+    //     doesn't need a second mechanism on top.
+    //
+    // Single-tap is the correct primitive for tile-grid
+    // navigation: ground = floor of the tile under the
+    // capsule centre, full stop. If a step-up across a hard
+    // ledge is ever needed, it should be implemented as an
+    // explicit "if destination tile is higher and Δ ≤
+    // step_height, snap up" rule, not as a side-effect of a
+    // max over neighbouring samples.
+    let support_y = |x: f32, z: f32| -> f32 {
+        match floor {
+            Some(f) => f.tile_floor_y_at(x, z),
+            None => 0.0,
+        }
+    };
+
     for (_id, (transform, velocity, player, net)) in world.query_mut::<(&mut Transform, &mut Velocity, &mut Player, Option<&super::components::NetControlled>)>() {
         // Networked players: horizontal motion is owned by the
         // net client's prediction loop, but we still let vertical
         // jump physics run locally (Phase 4.2 doesn't sync jumps).
         let net_controlled = net.is_some();
+        // Net-controlled players: kinematic owns full XYZ
+        // including ground follow and gravity. Skipping the
+        // movement integrator entirely for them avoids two
+        // separate Y solvers fighting (one snapping to 0, the
+        // other tracking per-tile elevation), which manifested
+        // as the avatar hovering above sunken-pit floors.
+        if net_controlled {
+            continue;
+        }
         // Horizontal motion (XZ).
         let horiz = Vec3::new(velocity.linear.x, 0.0, velocity.linear.z);
-        if !net_controlled && horiz.length_squared() > 0.001 {
+        if horiz.length_squared() > 0.001 {
             transform.position += horiz * dt;
             let target_yaw = horiz.x.atan2(horiz.z);
             let target_rot = Quat::from_rotation_y(target_yaw);
             transform.rotation = transform.rotation.slerp(target_rot, (dt * 10.0).min(1.0));
         }
+        // Ground height under the (post-XZ-step) capsule.
+        let ground_y = support_y(transform.position.x, transform.position.z);
+        // Expose the authoritative grounded plane so foot IK
+        // can use it as its reference even while
+        // `transform.position.y` is mid-lerp catching up after
+        // a sudden lift onto a raised tile.
+        player.grounded_y = ground_y;
         // Vertical motion (gravity + jump). Integrated at a
         // FIXED 120 Hz substep, with leftover frame time banked
         // in `player.vy_accum`. With variable frame dt the
@@ -115,7 +172,8 @@ pub fn movement_system(world: &mut World, dt: f32) {
         // deterministic regardless of render rate; any leftover
         // (sub-step) time is consumed on the next frame.
         const FIXED_DT: f32 = 1.0 / 120.0;
-        if player.airborne || player.vy.abs() > 0.001 || transform.position.y > 0.001 {
+        let above_ground = transform.position.y - ground_y;
+        if player.airborne || player.vy.abs() > 0.001 || above_ground > 0.001 {
             player.vy_accum += dt;
             // Cap the catch-up so a single-frame stall (debugger
             // pause, alt-tab) doesn't dump a whole second of
@@ -126,8 +184,8 @@ pub fn movement_system(world: &mut World, dt: f32) {
             while player.vy_accum >= FIXED_DT {
                 player.vy -= GRAVITY * FIXED_DT;
                 transform.position.y += player.vy * FIXED_DT;
-                if transform.position.y <= 0.0 {
-                    transform.position.y = 0.0;
+                if transform.position.y <= ground_y {
+                    transform.position.y = ground_y;
                     player.vy = 0.0;
                     player.airborne = false;
                     player.vy_accum = 0.0;
@@ -138,7 +196,30 @@ pub fn movement_system(world: &mut World, dt: f32) {
                 player.vy_accum -= FIXED_DT;
             }
         } else {
-            transform.position.y = 0.0;
+            // Glued to ground: smoothly chase the per-tile
+            // support height instead of snapping. The ground
+            // sample (a max over four cardinal capsule taps)
+            // changes discontinuously by `ELEVATION_STEP` the
+            // moment the capsule edge crosses a ledge — if we
+            // wrote that straight into the transform the body
+            // would teleport up half a metre. Exponential
+            // chase with a short tau gives a perceptually
+            // continuous lift while still settling fast
+            // enough that the avatar reads as "on the
+            // platform" within a few frames.
+            //
+            // Big jumps (e.g. spawn / floor-load / portal)
+            // skip the smoothing — anything more than a
+            // metre is treated as a teleport and snapped.
+            const Y_SMOOTH_TAU: f32 = 0.12; // ~95 % converged in 0.36 s
+            const Y_TELEPORT_THRESHOLD: f32 = 1.5;
+            let delta = ground_y - transform.position.y;
+            if delta.abs() > Y_TELEPORT_THRESHOLD {
+                transform.position.y = ground_y;
+            } else {
+                let alpha = 1.0 - (-(dt / Y_SMOOTH_TAU)).exp();
+                transform.position.y += delta * alpha;
+            }
             player.airborne = false;
             player.vy = 0.0;
             player.vy_accum = 0.0;
@@ -156,7 +237,7 @@ pub fn movement_system(world: &mut World, dt: f32) {
             // is authored with its origin at the feet, so y=0 sits on the
             // floor (procedural cube meshes are centered, see movement of
             // those entities elsewhere if they need a different offset).
-            transform.position.y = 0.0;
+            transform.position.y = support_y(transform.position.x, transform.position.z);
             // Smoothly rotate to face movement direction — but only for
             // the player and other non-enemy movers.  Enemies have their
             // facing controlled by the AI system (so they keep looking at
@@ -328,7 +409,21 @@ pub fn enemy_anim_system(world: &mut World, dt: f32) {
 
 /// Advance every base Animator (and any active SpellCast layer) and re-skin
 /// each mesh into the renderer's per-frame dynamic vertex buffer.
-pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
+///
+/// `floor` (when supplied) drives terrain-aware foot IK on the
+/// local player: each foot's vertical position is sampled
+/// against the dungeon's per-tile elevation grid and the foot
+/// bone in the bone palette is translated by the delta so that
+/// the foot plants on raised daises, sunken pits, and stair
+/// tile slopes instead of floating on the baked clip's
+/// flat-ground assumption. Pass `None` for menus / hub / any
+/// surface where the flat-ground assumption holds.
+pub fn skinning_system(
+    world: &mut World,
+    renderer: &mut Renderer,
+    dt: f32,
+    floor: Option<&rift_dungeon::Floor>,
+) {
     // CPU skinning + clip sampling is the most expensive per-frame work
     // for skinned characters. We always process the player, but for any
     // other skinned entity we bail out early when:
@@ -342,7 +437,7 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
     let frustum = renderer.camera.frustum_planes();
 
     let mut palette: Vec<glam::Mat4> = Vec::new();
-    for (_id, (renderable, skinned, animator, transform, mut cast, player, atts)) in world
+    for (_id, (renderable, skinned, animator, transform, mut cast, player, atts, foot_ik)) in world
         .query_mut::<(
             &Renderable,
             &mut Skinned,
@@ -351,6 +446,7 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
             Option<&mut super::components::SpellCast>,
             Option<&Player>,
             Option<&mut super::components::SkinnedAttachments>,
+            Option<&mut super::components::FootIkState>,
         )>()
     {
         let is_player = player.is_some();
@@ -414,6 +510,32 @@ pub fn skinning_system(world: &mut World, renderer: &mut Renderer, dt: f32) {
             animation::build_bone_palette(
                 animator, &skinned.mesh.joints, &mut palette,
                 Some(&mut skinned.joint_worlds),
+            );
+        }
+
+        // Terrain-aware foot IK pass. Runs after the bone
+        // palette has been built from animation; corrects each
+        // foot to the dungeon's per-tile elevation while
+        // preserving the swing-phase arc of the baked clip.
+        // Skipped for entities without a `FootIkState` component
+        // and on floors with no elevation features (the cost
+        // dominated by the per-foot ground sample is negligible
+        // either way at single-character scale).
+        if let (Some(p), Some(floor), Some(ik)) = (player, floor, foot_ik) {
+            let host_xform = transform.matrix();
+            let foot_l = if p.foot_l_joint == u32::MAX { None } else { Some(p.foot_l_joint as usize) };
+            let foot_r = if p.foot_r_joint == u32::MAX { None } else { Some(p.foot_r_joint as usize) };
+            crate::foot_ik::apply_foot_ik(
+                &skinned.mesh.joints,
+                &mut skinned.joint_worlds,
+                &mut palette,
+                &host_xform,
+                p.grounded_y,
+                foot_l,
+                foot_r,
+                &floor,
+                ik,
+                dt,
             );
         }
         // Skin the base body every frame. We never hide it under outfits:
@@ -1117,21 +1239,16 @@ pub fn player_action_pre_system(
         PlayerAction::JumpAir | PlayerAction::None => {}
     }
 
-    // Space → JumpStart (debounced by `key_just_pressed`).
-    let space_pressed = input.key_just_pressed(winit::keyboard::KeyCode::Space);
-    if space_pressed
-        && matches!(new_action, PlayerAction::None)
-        && !airborne
-    {
-        new_action = PlayerAction::JumpStart;
-        new_timer = cfg.jump_start_dur;
-        next_clip = Some(cfg.jump_start_clips);
-        next_loop = false;
-        if let Ok(mut p) = world.get::<&mut Player>(player_id) {
-            p.vy = cfg.jump_velocity;
-            p.airborne = true;
-        }
-    }
+    // Jumping is intentionally disabled — this is an ARPG with
+    // grid-based locomotion, jumping adds nothing to the
+    // gameplay loop and the legacy bindings just got in the
+    // way of the new step-up resolution. The PlayerAction
+    // variants and animation hookup are kept so the network
+    // protocol and clip table don't have to be reshuffled,
+    // but the trigger is gone. Falling (walking off a ledge
+    // into a sunken pit) still works through gravity in
+    // `movement_system` — it just can't be initiated by the
+    // player.
 
     if new_action != action || (new_timer - action_timer).abs() > f32::EPSILON {
         if let Ok(mut p) = world.get::<&mut Player>(player_id) {

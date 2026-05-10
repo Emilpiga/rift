@@ -55,9 +55,31 @@ impl FloorState {
     /// sets them explicitly to the new floor's values
     /// immediately afterwards, and a stale-then-correct pair of
     /// writes would only make ordering bugs harder to spot.
+    ///
+    /// Audio cleanup is the caller's responsibility: call
+    /// [`detach_portal_audio`] BEFORE this so the looping hum
+    /// emitters are despawned before the `HubPortal` structs
+    /// holding their ids are dropped.
     pub fn reset_portals(&mut self) {
         self.hub_portal = None;
         self.exit_portal = None;
         self.rift_spawn_portal = None;
+    }
+
+    /// Despawn every portal's looping audio emitter. Pair with
+    /// [`Self::reset_portals`] on the floor-teardown path so
+    /// the kira tracks free up before the slot ids are
+    /// dropped.
+    pub fn detach_portal_audio(&mut self, audio: &mut rift_audio::AudioSystem) {
+        for slot in [
+            self.hub_portal.as_mut(),
+            self.exit_portal.as_mut(),
+            self.rift_spawn_portal.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::game::portal_system::detach_audio(slot, audio);
+        }
     }
 }

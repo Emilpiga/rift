@@ -213,6 +213,19 @@ impl NetClient {
                 t.position = display_pos;
                 t.rotation = Quat::from_rotation_y(display_yaw);
             }
+            // Foot-IK reference plane for remote avatars. The
+            // server sends position with the resolved ground Y
+            // already baked in, so `display_pos.y` is the
+            // grounded plane (modulo airborne windows, which
+            // the IK gates off via swing-phase weight anyway).
+            // Remote players don't have a kinematic running
+            // locally so this is the only place their
+            // `grounded_y` ever gets written.
+            if matches!(re.kind, EntityKind::Player { .. }) {
+                if let Ok(mut p) = world.get::<&mut Player>(entity) {
+                    p.grounded_y = display_pos.y;
+                }
+            }
             // Velocity drives `locomotion_anim_system`'s
             // Idle/Walk/Jog/Sprint pick. Server already sends
             // world-space horizontal velocity. Take the latest
@@ -683,7 +696,7 @@ impl NetClient {
     ///
     /// SP code keeps owning `Player.action`, animations,
     /// abilities, equipment, etc.
-    pub fn sync_local_player(&self, world: &mut hecs::World) {
+    pub fn sync_local_player(&mut self, world: &mut hecs::World) {
         if !self.predicted_ready {
             return;
         }
@@ -702,27 +715,73 @@ impl NetClient {
         // gravity sim and we don't want this XZ-only smoothing
         // to perturb it.
         extrap.y = 0.0;
-        let visible = self.predicted.position + self.correction_error + extrap;
+        let mut visible = self.predicted.position + self.correction_error + extrap;
+
+        // Vertical smoothing: the kinematic snaps to per-tile
+        // floor elevation instantly (so collision and projectile
+        // arcs use the authoritative height), but the visible
+        // mesh + camera are driven through `visual_y` which
+        // exponentially chases the kinematic Y. Stepping onto
+        // a raised dais then reads as a smooth lift over a
+        // few frames instead of a teleport. While airborne we
+        // disable the smoothing — the gravity arc is already
+        // continuous, and lerping toward it would visibly lag
+        // the jump apex.
+        const Y_SMOOTH_TAU: f32 = 0.12; // ~95 % converged in 0.36 s
+        const Y_TELEPORT_THRESHOLD: f32 = 1.5; // step taller than this = portal/respawn
+        let target_y = visible.y;
+        let smoothed_y = match self.visual_y {
+            Some(prev) => {
+                let dt = extrap_dt.max(1.0e-4);
+                if (target_y - prev).abs() > Y_TELEPORT_THRESHOLD || self.predicted.airborne {
+                    target_y
+                } else {
+                    let alpha = 1.0 - (-(dt / Y_SMOOTH_TAU)).exp();
+                    prev + (target_y - prev) * alpha
+                }
+            }
+            None => target_y,
+        };
+        self.visual_y = Some(smoothed_y);
+        visible.y = smoothed_y;
+
         let yaw = self.predicted.yaw;
-        // Lazy-attach `NetControlled` to the local player so
-        // `movement_system` and `collision_system` skip its
-        // horizontal integration — we own that via the prediction
-        // loop. Done in a second pass since hecs disallows
-        // structural changes during a query.
+        // Authoritative grounded plane Y for the foot-IK pass.
+        // For net-controlled players `movement_system` skips
+        // vertical integration entirely (the prediction loop
+        // owns it), which means `Player.grounded_y` would
+        // otherwise stay frozen at its spawn value. The IK
+        // reads `grounded_y` as its reference plane, so a
+        // stale value translates directly into a constant
+        // vertical offset where the avatar appears wedged
+        // half a metre into the ground (one elevation step).
+        // The kinematic's `predicted.position.y` is exactly
+        // the resolved ground height when not airborne — use
+        // it directly. While airborne we still write through
+        // so a falling player keeps a sensible reference (the
+        // last grounded plane), but the IK pass already gates
+        // off via swing-phase weight so the value won't be
+        // applied wrongly.
+        let predicted_y = self.predicted.position.y;
         let mut needs_marker: Vec<hecs::Entity> = Vec::new();
-        for (entity, (transform, _player, _local, marker)) in world.query_mut::<(
+        for (entity, (transform, player, _local, marker)) in world.query_mut::<(
             &mut Transform,
-            &Player,
+            &mut Player,
             &LocalPlayer,
             Option<&NetControlled>,
         )>() {
-            // Override XZ from the predicted state. Y is left
-            // alone so SP-owned jump physics (`movement_system`'s
-            // gravity branch, which still runs for net players)
-            // can keep playing locally.
+            // Override XZ + Y from the predicted state. The
+            // kinematic now owns vertical motion too: gravity
+            // + per-tile ground follow including stair-tile
+            // slope interpolation. Letting `movement_system`
+            // run its own y=0 clamp instead would warp the
+            // avatar back up out of sunken pits and snap it
+            // off raised daises.
             transform.position.x = visible.x;
+            transform.position.y = visible.y;
             transform.position.z = visible.z;
             transform.rotation = Quat::from_rotation_y(yaw);
+            player.grounded_y = predicted_y;
             if marker.is_none() {
                 needs_marker.push(entity);
             }

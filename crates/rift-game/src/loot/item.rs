@@ -70,8 +70,7 @@ impl RolledAffix {
                     format!("{:+.0}", self.value)
                 }
             }
-            AffixEffect::AmplifyAbilityDamage(_)
-            | AffixEffect::ReduceAbilityCooldown(_) => {
+            AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_) => {
                 format!("{:+.0}%", self.value * 100.0)
             }
             AffixEffect::ExtraProjectiles(_) => format!("+{}", self.value.round() as i32),
@@ -107,6 +106,21 @@ pub struct Item {
     /// [`ANCHORED_CHANCE`] inside [`Item::roll`]. Purely
     /// additive — no stat impact, just persistence.
     pub anchored: bool,
+    /// `true` while this item is "unstable rift loot" — picked
+    /// up inside an active rift instance and not yet stabilised
+    /// by extraction. Unstable items live only in the
+    /// authoritative `ServerPlayer.inventory` / `equipment`
+    /// snapshots; they are *never* written to persistence and
+    /// are stripped from a player's bag + equipment whenever the
+    /// player leaves a rift through any path other than the
+    /// extraction vote (death-by-rift-exit, return-to-hub,
+    /// disconnect). Walking a successful extraction flips this
+    /// to `false` ("purified"), at which point the item behaves
+    /// like every other piece of loot — persisted, equippable,
+    /// stash-able. The flag is the diegetic surface for the
+    /// "loot acquired in a rift is unstable, must be purified by
+    /// extraction, death shatters unstable loot" fantasy.
+    pub unstable: bool,
     /// Eligibility lineage for ground-loot pickup. Snapshotted
     /// once at the moment the item is first generated (monster
     /// kill in a rift) and **carried with the item forever** —
@@ -206,12 +220,7 @@ impl Item {
     /// The result: every item is readable top-down — Vitality,
     /// slot signature, then the bonus block — and a Legendary
     /// always carries one truly build-changing line on top.
-    pub fn roll(
-        base: &'static BaseItem,
-        rarity: Rarity,
-        ilvl: u32,
-        rng: &mut LootRng,
-    ) -> Self {
+    pub fn roll(base: &'static BaseItem, rarity: Rarity, ilvl: u32, rng: &mut LootRng) -> Self {
         let mut rolled: Vec<RolledAffix> = Vec::new();
 
         // ── Phase 1: signature injection ────────────────────────
@@ -279,8 +288,7 @@ impl Item {
             // bonus pool, but a future refactor might overlap).
             effect_candidates.retain(|(a, _)| !rolled.iter().any(|r| r.def.id == a.id));
             if !effect_candidates.is_empty() {
-                let weights: Vec<u32> =
-                    effect_candidates.iter().map(|(_, w)| *w).collect();
+                let weights: Vec<u32> = effect_candidates.iter().map(|(_, w)| *w).collect();
                 if let Some(pick) = rng.weighted_index(&weights) {
                     let def = effect_candidates[pick].0;
                     let value = roll_value(def, ilvl, rng);
@@ -302,6 +310,13 @@ impl Item {
             ilvl,
             affixes: rolled,
             anchored,
+            // Freshly-rolled items are stable by default. The
+            // server flips `unstable = true` at pickup time iff
+            // the picker is in a rift (see
+            // `Sim::try_pickup_loot`). Roll-time tests, debug
+            // seeding, and any future hub-spawn drops therefore
+            // come out stable for free.
+            unstable: false,
             // Caller (server `drop_for_enemy`) is responsible for
             // attaching provenance after the roll — it owns the
             // current Sim's character roster, which `rift-game`
@@ -351,11 +366,15 @@ impl Item {
     }
 
     pub fn display_name(&self) -> String {
-        if self.anchored {
-            format!("Anchored {} {}", self.rarity.name(), self.base.name)
-        } else {
-            format!("{} {}", self.rarity.name(), self.base.name)
-        }
+        // Prefix order: Unstable > Anchored > plain. Unstable
+        // is the most action-relevant tag ("will shatter on
+        // death") so it leads.
+        let prefix = match (self.unstable, self.anchored) {
+            (true, _) => "Unstable ",
+            (false, true) => "Anchored ",
+            (false, false) => "",
+        };
+        format!("{}{} {}", prefix, self.rarity.name(), self.base.name)
     }
 
     /// Multi-line tooltip ready for UI rendering.
@@ -384,6 +403,12 @@ impl Item {
         out.push(self.display_name());
         out.push(format!("Item Level {}", self.ilvl));
         out.push(format!("Requires Level {}", self.required_level()));
+        if self.unstable {
+            // Highest-priority warning line — players need to
+            // see this before they decide to dive deeper or
+            // extract.
+            out.push("⚠ Unstable — extract to stabilise".to_string());
+        }
         if self.anchored {
             // Tagged so the renderer can colour this line
             // distinctly from regular flavour text.
@@ -403,8 +428,7 @@ impl Item {
         // `signature_count`); we render them with a deliberate
         // primary \u2192 Vitality \u2192 secondary order so every item's
         // headline stat is the topmost line of the stat block.
-        let sig_n = super::affixes::signature_count(self.base.equip_slot)
-            .min(self.affixes.len());
+        let sig_n = super::affixes::signature_count(self.base.equip_slot).min(self.affixes.len());
         let (raw_signatures, rest) = self.affixes.split_at(sig_n);
         // Defensive filter: skip any legendary effect that
         // somehow lands in the first N positions (older
@@ -487,8 +511,7 @@ impl Item {
             .filter(|a| {
                 matches!(
                     a.def.effect,
-                    AffixEffect::AmplifyAbilityDamage(_)
-                        | AffixEffect::ReduceAbilityCooldown(_)
+                    AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_)
                 )
             })
             .collect();
@@ -555,84 +578,58 @@ impl Item {
         // a `&mut Vec` capturing closure here because each affix
         // arm needs its own predicate, and chaining mutable
         // captures runs into borrow-checker overlap.
-        let push_match = |out: &mut Vec<String>,
-                          label: &str,
-                          pred: fn(&crate::abilities::Ability) -> bool| {
-            for (i, ab) in &slotted {
-                if pred(ab) {
-                    out.push(format!(
-                        "→ Boosts {} (slot {}) [{}]",
-                        ab.name,
-                        i + 1,
-                        label
-                    ));
+        let push_match =
+            |out: &mut Vec<String>, label: &str, pred: fn(&crate::abilities::Ability) -> bool| {
+                for (i, ab) in &slotted {
+                    if pred(ab) {
+                        out.push(format!("→ Boosts {} (slot {}) [{}]", ab.name, i + 1, label));
+                    }
                 }
-            }
-        };
+            };
 
         for a in &self.affixes {
             match a.def.effect {
-                AffixEffect::Stat(Stat::WeaponDamage) => push_match(
-                    &mut out,
-                    "Weapon",
-                    |x| matches!(x.scaling, Scaling::Weapon),
-                ),
-                AffixEffect::Stat(Stat::SpellDamage) => push_match(
-                    &mut out,
-                    "Spell",
-                    |x| matches!(x.scaling, Scaling::Spell),
-                ),
-                AffixEffect::Stat(Stat::PhysicalDamage) => push_match(
-                    &mut out,
-                    "Physical",
-                    |x| matches!(x.element, Element::Physical),
-                ),
-                AffixEffect::Stat(Stat::FireDamage) => push_match(
-                    &mut out,
-                    "Fire",
-                    |x| matches!(x.element, Element::Fire),
-                ),
-                AffixEffect::Stat(Stat::IceDamage) => push_match(
-                    &mut out,
-                    "Ice",
-                    |x| matches!(x.element, Element::Ice),
-                ),
-                AffixEffect::Stat(Stat::LightningDamage) => push_match(
-                    &mut out,
-                    "Lightning",
-                    |x| matches!(x.element, Element::Lightning),
-                ),
-                AffixEffect::Stat(Stat::ProjectileDamage) => push_match(
-                    &mut out,
-                    "Projectile",
-                    |x| matches!(x.archetype, Archetype::Projectile),
-                ),
-                AffixEffect::Stat(Stat::BeamDamage) => push_match(
-                    &mut out,
-                    "Beam",
-                    |x| matches!(x.archetype, Archetype::Beam),
-                ),
-                AffixEffect::Stat(Stat::AoeDamage) => push_match(
-                    &mut out,
-                    "AoE",
-                    |x| matches!(x.archetype, Archetype::Aoe),
-                ),
-                AffixEffect::Stat(Stat::MeleeDamage) => push_match(
-                    &mut out,
-                    "Melee",
-                    |x| matches!(x.archetype, Archetype::Melee),
-                ),
+                AffixEffect::Stat(Stat::WeaponDamage) => {
+                    push_match(&mut out, "Weapon", |x| matches!(x.scaling, Scaling::Weapon))
+                }
+                AffixEffect::Stat(Stat::SpellDamage) => {
+                    push_match(&mut out, "Spell", |x| matches!(x.scaling, Scaling::Spell))
+                }
+                AffixEffect::Stat(Stat::PhysicalDamage) => push_match(&mut out, "Physical", |x| {
+                    matches!(x.element, Element::Physical)
+                }),
+                AffixEffect::Stat(Stat::FireDamage) => {
+                    push_match(&mut out, "Fire", |x| matches!(x.element, Element::Fire))
+                }
+                AffixEffect::Stat(Stat::IceDamage) => {
+                    push_match(&mut out, "Ice", |x| matches!(x.element, Element::Ice))
+                }
+                AffixEffect::Stat(Stat::LightningDamage) => {
+                    push_match(&mut out, "Lightning", |x| {
+                        matches!(x.element, Element::Lightning)
+                    })
+                }
+                AffixEffect::Stat(Stat::ProjectileDamage) => {
+                    push_match(&mut out, "Projectile", |x| {
+                        matches!(x.archetype, Archetype::Projectile)
+                    })
+                }
+                AffixEffect::Stat(Stat::BeamDamage) => {
+                    push_match(&mut out, "Beam", |x| matches!(x.archetype, Archetype::Beam))
+                }
+                AffixEffect::Stat(Stat::AoeDamage) => {
+                    push_match(&mut out, "AoE", |x| matches!(x.archetype, Archetype::Aoe))
+                }
+                AffixEffect::Stat(Stat::MeleeDamage) => push_match(&mut out, "Melee", |x| {
+                    matches!(x.archetype, Archetype::Melee)
+                }),
                 AffixEffect::AmplifyAbilityDamage(id)
                 | AffixEffect::ReduceAbilityCooldown(id)
                 | AffixEffect::ExtraProjectiles(id)
                 | AffixEffect::TransformAbility(id, _) => {
                     for (i, ab) in &slotted {
                         if ab.id == id {
-                            out.push(format!(
-                                "→ Affects {} (slot {})",
-                                ab.name,
-                                i + 1
-                            ));
+                            out.push(format!("→ Affects {} (slot {})", ab.name, i + 1));
                         }
                     }
                 }
@@ -672,11 +669,26 @@ impl Item {
                 (id, a.value)
             })
             .collect();
-        (base_id, self.rarity as u8, self.ilvl as u16, affixes, self.anchored)
+        (
+            base_id,
+            self.rarity as u8,
+            self.ilvl as u16,
+            affixes,
+            self.anchored,
+        )
     }
 
     /// Inverse of [`Item::to_wire`]. Returns `None` if any index is
     /// out of bounds (mismatched build / corrupted save).
+    ///
+    /// `unstable` is **not** part of `to_wire`'s tuple because
+    /// the field was added later and we want the existing
+    /// (base, rarity, ilvl, affixes, anchored) signature to keep
+    /// working unchanged for every call-site. Wire / blob-level
+    /// transports thread `unstable` separately (see
+    /// `ItemBlob::unstable`); the constructed item starts
+    /// stable and the caller flips the flag if the carrier
+    /// payload says so.
     pub fn from_wire(
         base_id: u16,
         rarity_byte: u8,
@@ -704,6 +716,12 @@ impl Item {
             ilvl: ilvl as u32,
             affixes: rolled,
             anchored,
+            // `unstable` is not encoded in `to_wire`'s tuple to
+            // keep the existing 5-arity contract; the carrier
+            // (`ItemBlob`) sets it post-construction. Default
+            // here is `false` so blob-less reconstructions
+            // (tests, debug paths) come out stable.
+            unstable: false,
             provenance,
         })
     }
@@ -755,10 +773,7 @@ impl Item {
         let mut rolled = Vec::with_capacity(affixes.len());
         for (id, value) in affixes {
             let def = AFFIX_POOL.iter().find(|d| d.id == id.as_str())?;
-            rolled.push(RolledAffix {
-                def,
-                value: *value,
-            });
+            rolled.push(RolledAffix { def, value: *value });
         }
         Some(Self {
             base,
@@ -766,6 +781,12 @@ impl Item {
             ilvl: ilvl as u32,
             affixes: rolled,
             anchored,
+            // Persisted items are by definition stable — the
+            // unstable lifecycle ends at extraction, which is
+            // the gate that allows persistence in the first
+            // place. Any row in the DB therefore reads back as
+            // stable, full stop.
+            unstable: false,
             provenance,
         })
     }
@@ -800,6 +821,7 @@ mod tests {
             affixes: Vec::new(),
             anchored: false,
             provenance: None,
+            unstable: false,
         };
         assert_eq!(item.required_level(), 1);
     }
@@ -816,6 +838,7 @@ mod tests {
             affixes: Vec::new(),
             anchored: false,
             provenance: None,
+            unstable: false,
         };
         assert_eq!(item.required_level(), 30);
     }
@@ -825,9 +848,10 @@ mod tests {
         // Pick any two affixes with distinct min_ilvls and verify
         // the requirement tracks the highest one when it exceeds
         // the item's ilvl.
-        let a_low = AFFIX_POOL.iter().find(|a| a.min_ilvl == 1).expect(
-            "AFFIX_POOL should contain at least one min_ilvl=1 entry",
-        );
+        let a_low = AFFIX_POOL
+            .iter()
+            .find(|a| a.min_ilvl == 1)
+            .expect("AFFIX_POOL should contain at least one min_ilvl=1 entry");
         let a_high = AFFIX_POOL
             .iter()
             .filter(|a| a.min_ilvl > 1)
@@ -839,11 +863,18 @@ mod tests {
             // ilvl deliberately low so the affix term wins.
             ilvl: 1,
             affixes: vec![
-                RolledAffix { def: a_low, value: 0.0 },
-                RolledAffix { def: a_high, value: 0.0 },
+                RolledAffix {
+                    def: a_low,
+                    value: 0.0,
+                },
+                RolledAffix {
+                    def: a_high,
+                    value: 0.0,
+                },
             ],
             anchored: false,
             provenance: None,
+            unstable: false,
         };
         assert_eq!(item.required_level(), a_high.min_ilvl.max(1));
     }
@@ -863,9 +894,13 @@ mod tests {
             base: base("staff_basic"),
             rarity: Rarity::Common,
             ilvl: 20,
-            affixes: vec![RolledAffix { def: a_low, value: 0.0 }],
+            affixes: vec![RolledAffix {
+                def: a_low,
+                value: 0.0,
+            }],
             anchored: false,
             provenance: None,
+            unstable: false,
         };
         assert_eq!(item_a.required_level(), 20);
 
@@ -875,9 +910,13 @@ mod tests {
                 base: base("staff_basic"),
                 rarity: Rarity::Common,
                 ilvl: 20,
-                affixes: vec![RolledAffix { def: high, value: 0.0 }],
+                affixes: vec![RolledAffix {
+                    def: high,
+                    value: 0.0,
+                }],
                 anchored: false,
                 provenance: None,
+                unstable: false,
             };
             assert_eq!(item_b.required_level(), high.min_ilvl);
         }

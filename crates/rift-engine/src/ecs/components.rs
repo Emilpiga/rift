@@ -20,7 +20,10 @@ impl Default for Transform {
 
 impl Transform {
     pub fn from_position(position: Vec3) -> Self {
-        Self { position, ..Default::default() }
+        Self {
+            position,
+            ..Default::default()
+        }
     }
 
     pub fn matrix(&self) -> Mat4 {
@@ -116,9 +119,14 @@ impl AnimationSet {
         None
     }
     /// Look up the first clip whose name matches any of `candidates` (case-insensitive).
-    pub fn find_any(&self, candidates: &[&str]) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
+    pub fn find_any(
+        &self,
+        candidates: &[&str],
+    ) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
         for c in candidates {
-            if let Some(clip) = self.get(c) { return Some(clip); }
+            if let Some(clip) = self.get(c) {
+                return Some(clip);
+            }
         }
         None
     }
@@ -200,7 +208,9 @@ impl SpellCast {
             channeling: false,
         }
     }
-    pub fn is_active(&self) -> bool { self.phase != SpellPhase::Idle }
+    pub fn is_active(&self) -> bool {
+        self.phase != SpellPhase::Idle
+    }
 
     /// Begin a new cast. Captures the ability + aim + damage so the
     /// projectile can be spawned later when we reach the Shoot phase.
@@ -212,7 +222,12 @@ impl SpellCast {
     /// upper-body feedback. This makes LMB / Multishot feel snappy:
     /// the cast pose appears the same frame the click lands instead
     /// of after the wind-up clip's full duration.
-    pub fn begin(&mut self, ability: rift_game::abilities::Ability, aim_dir: glam::Vec3, damage: f32) {
+    pub fn begin(
+        &mut self,
+        ability: rift_game::abilities::Ability,
+        aim_dir: glam::Vec3,
+        damage: f32,
+    ) {
         self.phase = SpellPhase::Shooting;
         self.pending_ability = Some(ability);
         self.pending_aim_dir = aim_dir;
@@ -242,7 +257,9 @@ impl SpellCast {
     /// another cast/action, the request is ignored so we don't interrupt
     /// it mid-swing.
     pub fn play_oneshot(&mut self, clip: std::sync::Arc<crate::animation::BoundClip>) {
-        if self.phase != SpellPhase::Idle { return; }
+        if self.phase != SpellPhase::Idle {
+            return;
+        }
         self.phase = SpellPhase::OneShot;
         self.pending_oneshot = Some(clip);
         self.fired = false;
@@ -255,7 +272,9 @@ impl SpellCast {
     /// prevents the animation from re-triggering every frame while
     /// the player is in melee contact.
     pub fn play_hit(&mut self, clip: std::sync::Arc<crate::animation::BoundClip>) {
-        if self.hit_cooldown > 0.0 { return; }
+        if self.hit_cooldown > 0.0 {
+            return;
+        }
         self.phase = SpellPhase::OneShot;
         // Force a fresh animator so cross_fade doesn't blend back from
         // the spell-cast pose if we're interrupting one mid-swing.
@@ -270,7 +289,9 @@ impl SpellCast {
     /// out of the channeled pose immediately. Used when a channel
     /// is cancelled (button release / movement / server end).
     pub fn cancel(&mut self) {
-        if self.phase == SpellPhase::Idle { return; }
+        if self.phase == SpellPhase::Idle {
+            return;
+        }
         self.phase = SpellPhase::Exiting;
         self.fired = true;
         self.pending_ability = None;
@@ -295,6 +316,16 @@ pub struct Player {
     /// hand-held VFX (Frost Ray beam, etc.). `u32::MAX` if the
     /// rig has no detectable hand joint.
     pub hand_joint: u32,
+    /// Indices of the left and right foot joints for terrain-aware
+    /// foot IK. Set at character spawn by name-matching against
+    /// the rig (`*foot_l*` / `*foot_r*`). The skinning system
+    /// uses these to pin each foot to the dungeon floor's per-tile
+    /// elevation when standing on stair / dais / pit tiles, so
+    /// running up a ramp doesn't leave feet floating mid-air or
+    /// punching through the geometry. `u32::MAX` if the rig has
+    /// no detectable foot joint.
+    pub foot_l_joint: u32,
+    pub foot_r_joint: u32,
     /// Active full-body action (jump / roll). Drives whether `player_input_system`
     /// and `locomotion_anim_system` should leave the entity alone, and lets
     /// game-side code know which clip to play.
@@ -315,12 +346,81 @@ pub struct Player {
     /// during the ~0.4 s airborne window. Anything below the
     /// fixed step gets banked here and consumed next frame.
     pub vy_accum: f32,
+    /// Authoritative ground-tile Y under the player (post step-up
+    /// resolution). Used as the foot-IK reference plane so it
+    /// keeps planting feet against the *real* ground even while
+    /// `transform.position.y` is mid-lerp catching up after a
+    /// sudden lift onto a raised tile. Set every frame by
+    /// `movement_system`.
+    pub grounded_y: f32,
 }
 
 // `PlayerAction` lives in `rift_game::components`; re-exported here
 // so existing `crate::ecs::components::PlayerAction` paths in engine
 // systems still resolve.
 pub use rift_game::components::PlayerAction;
+
+/// Persistent per-foot smoothing state for terrain-aware foot IK.
+/// Attach to any skinned entity whose feet should plant on the
+/// dungeon's per-tile elevation (raised daises, sunken pits,
+/// stair-tile slopes). Without persistent state the IK pass would
+/// snap the correction every frame, producing the classic
+/// "vibrating feet" / stair-popping artefact.
+///
+/// Stored in skel-local space because the IK solver runs there.
+/// `correction_y` eases toward the per-frame raycast result;
+/// `surface_normal` smooths the foot orientation across tile
+/// boundaries so a foot crossing from flat onto a ramp doesn't
+/// pop instantly upright.
+#[derive(Clone, Copy, Debug)]
+pub struct FootIkState {
+    pub left_correction_y: f32,
+    pub right_correction_y: f32,
+    pub left_normal: glam::Vec3,
+    pub right_normal: glam::Vec3,
+    /// Smoothed pelvis lowering (skel-local Y, always ≤ 0). Lets
+    /// the hips drop when a foot is stepping into a pit so the
+    /// upper leg doesn't have to over-stretch.
+    pub pelvis_offset_y: f32,
+    /// True while the corresponding foot is in contact with the
+    /// ground (animated foot Y is below the plant threshold).
+    /// Hysteresis is applied in [`crate::foot_ik::apply_foot_ik`]
+    /// so a foot mid-swing doesn't chatter between planted/lifted.
+    pub left_planted: bool,
+    pub right_planted: bool,
+    /// Monotonically increasing counter that bumps every time
+    /// the corresponding foot transitions from airborne to
+    /// planted. Consumers (footstep audio, dust VFX) cache the
+    /// last-seen value and fire one event per delta. Survives
+    /// `u32` wraparound by virtue of equality comparison.
+    pub left_plant_seq: u32,
+    pub right_plant_seq: u32,
+    /// World-space position the foot was at the moment of its
+    /// most recent plant. Sampled once on the airborne→planted
+    /// transition and held until the next plant, so consumers
+    /// can spatialise the audio at the foot rather than the
+    /// body origin.
+    pub left_plant_pos: glam::Vec3,
+    pub right_plant_pos: glam::Vec3,
+}
+
+impl Default for FootIkState {
+    fn default() -> Self {
+        Self {
+            left_correction_y: 0.0,
+            right_correction_y: 0.0,
+            left_normal: glam::Vec3::Y,
+            right_normal: glam::Vec3::Y,
+            pelvis_offset_y: 0.0,
+            left_planted: false,
+            right_planted: false,
+            left_plant_seq: 0,
+            right_plant_seq: 0,
+            left_plant_pos: glam::Vec3::ZERO,
+            right_plant_pos: glam::Vec3::ZERO,
+        }
+    }
+}
 
 /// Marker indicating this entity's kinematics are owned by an
 /// external authority (e.g. the multiplayer client's prediction
@@ -477,7 +577,12 @@ pub struct Attack {
 
 impl Attack {
     pub fn new(damage: f32, range: f32, cooldown: f32) -> Self {
-        Self { damage, range, cooldown, timer: 0.0 }
+        Self {
+            damage,
+            range,
+            cooldown,
+            timer: 0.0,
+        }
     }
 
     pub fn ready(&self) -> bool {

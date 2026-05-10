@@ -61,6 +61,10 @@ pub(crate) fn item_to_blob(
         ilvl,
         affixes,
         anchored,
+        // Threaded straight through from the in-memory item;
+        // the unstable flag is set at pickup-in-rift time and
+        // cleared when the run extracts.
+        unstable: item.unstable,
         provenance: provenance_to_wire(item),
     }
 }

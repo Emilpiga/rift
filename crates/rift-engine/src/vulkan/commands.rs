@@ -50,6 +50,13 @@ pub struct DrawCommand {
     /// `flags` bit 0 = enable PBR + normal mapping (otherwise the
     /// shader stays on the legacy cel-shaded diffuse path).
     pub material_params: [f32; 4],
+    /// True when this draw's vertex buffer contents are
+    /// regenerated every frame (CPU dynamic ring or GPU
+    /// skinning compute output). The model matrix and
+    /// bounding sphere stay constant for these objects but
+    /// their silhouette can change every frame, so the
+    /// shadow-slot cache must treat them as always-dirty.
+    pub dynamic_vertices: bool,
 }
 
 pub fn record_render_pass(

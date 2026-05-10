@@ -11,10 +11,12 @@ pub use rift_math::physics;
 pub mod ui;
 pub mod combat;
 pub mod animation;
+pub mod foot_ik;
 
 pub use renderer::Renderer;
 pub use renderer::forward::{HeatSource, PointLight};
 pub use renderer::forward::KeyLight;
+pub use renderer::texture::{PbrSource, TextureSource};
 pub use renderer::sky::SkyConfig;
 pub use renderer::post::BloomConfig;
 pub use ash;

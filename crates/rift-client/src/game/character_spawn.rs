@@ -99,7 +99,10 @@ pub fn spawn_character_entity(
                 Mat4::from_translation(cfg.position),
                 0.0,
             )?;
-            if let Err(e) = renderer.set_object_texture(idx, tex_path) {
+            if let Err(e) = renderer.set_object_texture(
+                idx,
+                rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
+            ) {
                 log::warn!("Character texture load failed: {}", e);
             }
             let comp = Skinned {
@@ -125,11 +128,14 @@ pub fn spawn_character_entity(
             aim_dir: Vec3::Z,
             spine_joint: u32::MAX,
             hand_joint: u32::MAX,
+            foot_l_joint: u32::MAX,
+            foot_r_joint: u32::MAX,
             action: rift_engine::ecs::components::PlayerAction::default(),
             action_timer: 0.0,
             vy: 0.0,
             airborne: false,
             vy_accum: 0.0,
+            grounded_y: cfg.position.y,
         },
         Collider::new(0.3, 0.5, 0.3),
         Health::new(cfg.max_hp),
@@ -233,6 +239,34 @@ pub fn spawn_character_entity(
     } else {
         log::warn!("no right-hand joint found in player skeleton; beam VFX will fall back to chest");
     }
+
+    // Foot joints — used by the terrain-pitch + foot-IK pass
+    // in `skinning_system` to plant each foot on the dungeon
+    // floor's per-tile elevation when standing on a ramp / dais
+    // / pit tile.
+    let foot_pair = world
+        .get::<&Skinned>(entity)
+        .map(|s| s.mesh.foot_joints())
+        .unwrap_or((None, None));
+    if let Ok(mut p) = world.get::<&mut Player>(entity) {
+        if let Some(li) = foot_pair.0 { p.foot_l_joint = li as u32; }
+        if let Some(ri) = foot_pair.1 { p.foot_r_joint = ri as u32; }
+    }
+    if foot_pair.0.is_none() || foot_pair.1.is_none() {
+        log::warn!(
+            "foot joints partially unresolved (l={:?}, r={:?}); foot IK on ramps will be skipped",
+            foot_pair.0, foot_pair.1,
+        );
+    }
+    // Persistent foot-IK smoothing state. Attached unconditionally
+    // — the IK pass is no-op when the dungeon floor handle isn't
+    // available (hub, menu) or when foot joints didn't resolve.
+    world
+        .insert_one(
+            entity,
+            rift_engine::ecs::components::FootIkState::default(),
+        )
+        .ok();
 
     // Dress the avatar with white eyes, eyebrows, and per-gender
     // hair before returning. Idempotent + cached, so cheap on

@@ -479,6 +479,11 @@ impl Mesh {
             let u1 = pos.x + 0.5;
             let v1 = pos.z + 0.5;
 
+            // pos.y carries the tile's elevation (set by
+            // dungeon::Floor::floor_positions); we lay the
+            // quad at that height so raised daises and sunken
+            // pits land at the right Y without per-tile
+            // transforms.
             vertices.push(Vertex {
                 position: *pos + Vec3::new(-0.5, 0.0, -0.5),
                 normal: Vec3::Y,
@@ -503,6 +508,254 @@ impl Mesh {
                 color,
                 uv: Vec2::new(u0, v1),
             });
+
+            indices.extend_from_slice(&[
+                base_idx, base_idx + 2, base_idx + 1,
+                base_idx, base_idx + 3, base_idx + 2,
+            ]);
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Vertical "skirt" geometry along elevation discontinuities
+    /// between adjacent flat floor tiles. Without these, a
+    /// raised dais or sunken pit shows a thin gap right through
+    /// the world wherever its lip meets a floor at a different
+    /// elevation — the upper tile's quad sits at one Y and the
+    /// neighbouring lower tile's quad sits at another, with
+    /// nothing connecting them.
+    ///
+    /// Stair tiles are deliberately **excluded** from skirt
+    /// generation: their slanted quad already bridges the
+    /// elevation difference along the slope axis, and emitting
+    /// a skirt at the stair's leading edge would z-fight with
+    /// the ramp surface. Walls also don't get skirts because
+    /// the wall mesh itself extends from y=0 upward.
+    ///
+    /// Each emitted quad is double-sided (two opposed
+    /// triangles) so it reads correctly whether the player
+    /// stands above or below the lip — the engine renders
+    /// with backface culling and we may see the skirt from
+    /// either direction depending on camera angle.
+    pub fn dungeon_floor_skirts(
+        floor: &rift_dungeon::Floor,
+        floor_num: u32,
+    ) -> Self {
+        Self::dungeon_floor_skirts_filtered(floor, floor_num, |_, _| true)
+    }
+
+    /// Like [`Self::dungeon_floor_skirts`] but only emits a
+    /// skirt quad for adjacent tile pairs `(a, b)` where the
+    /// caller's `accept((ax, az), (bx, bz))` predicate returns
+    /// `true`. Used by the per-room texture-pack split: the
+    /// client builds one skirt mesh per material pack and
+    /// asks for only the elevation seams whose two endpoints
+    /// both belong to that pack, so each skirt strip carries
+    /// the same authored material as the floor it bridges
+    /// instead of always falling back to the default stone
+    /// pack.
+    pub fn dungeon_floor_skirts_filtered(
+        floor: &rift_dungeon::Floor,
+        floor_num: u32,
+        accept: impl Fn((usize, usize), (usize, usize)) -> bool,
+    ) -> Self {
+        use rift_dungeon::{Tile, ELEVATION_STEP};
+
+        // Same palette as `dungeon_floor` but slightly darker
+        // so the vertical face reads as receding into shadow,
+        // even before the lighting pass kicks in. Skirts sit
+        // in cavities where the key light rarely hits at
+        // grazing angles, so darkening them here prevents
+        // them from reading as a disconnected shelf in the
+        // ambient term.
+        let base_color = match floor_num % 4 {
+            0 => Vec3::new(0.45, 0.40, 0.35),
+            1 => Vec3::new(0.35, 0.45, 0.28),
+            2 => Vec3::new(0.50, 0.25, 0.20),
+            _ => Vec3::new(0.28, 0.38, 0.50),
+        };
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let height_at = |i: usize| -> Option<f32> {
+            match floor.tiles[i] {
+                Tile::Floor => Some(floor.elevation[i] as f32 * ELEVATION_STEP),
+                _ => None, // walls and stairs handled elsewhere
+            }
+        };
+
+        let mut emit_quad = |a: Vec3, b: Vec3, low_y: f32, high_y: f32, normal: Vec3| {
+            // Quad spans (a..b) horizontally at low_y to high_y
+            // vertically. Two triangles, double-sided so the
+            // skirt is visible from both faces.
+            let base = vertices.len() as u32;
+            // World-space UVs along the strip — keep the
+            // shipped ground-tile texture wrapping naturally.
+            let u0 = a.x + a.z;
+            let u1 = b.x + b.z;
+            let v0 = low_y;
+            let v1 = high_y;
+            let p_al = Vec3::new(a.x, low_y,  a.z);
+            let p_bl = Vec3::new(b.x, low_y,  b.z);
+            let p_bh = Vec3::new(b.x, high_y, b.z);
+            let p_ah = Vec3::new(a.x, high_y, a.z);
+            let push = |v: &mut Vec<Vertex>, p: Vec3, n: Vec3, uv: Vec2| {
+                v.push(Vertex { position: p, normal: n, color: base_color, uv });
+            };
+            // Front face (normal pointing toward the lower
+            // tile — the side a player on the lower floor
+            // sees).
+            push(&mut vertices, p_al, normal, Vec2::new(u0, v0));
+            push(&mut vertices, p_bl, normal, Vec2::new(u1, v0));
+            push(&mut vertices, p_bh, normal, Vec2::new(u1, v1));
+            push(&mut vertices, p_ah, normal, Vec2::new(u0, v1));
+            indices.extend_from_slice(&[
+                base, base + 1, base + 2,
+                base, base + 2, base + 3,
+            ]);
+            // Back face (opposite normal). Same vertex
+            // positions, opposite winding + flipped normal.
+            let back = vertices.len() as u32;
+            push(&mut vertices, p_al, -normal, Vec2::new(u0, v0));
+            push(&mut vertices, p_bl, -normal, Vec2::new(u1, v0));
+            push(&mut vertices, p_bh, -normal, Vec2::new(u1, v1));
+            push(&mut vertices, p_ah, -normal, Vec2::new(u0, v1));
+            indices.extend_from_slice(&[
+                back, back + 2, back + 1,
+                back, back + 3, back + 2,
+            ]);
+        };
+
+        // East-west adjacencies (compare tile (x, z) with (x+1, z)).
+        for z in 0..floor.depth {
+            for x in 0..floor.width.saturating_sub(1) {
+                let i_a = z * floor.width + x;
+                let i_b = z * floor.width + (x + 1);
+                if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
+                    if (ya - yb).abs() > 1.0e-4 {
+                        if !accept((x, z), (x + 1, z)) { continue; }
+                        let edge_x = (x as f32) + 0.5; // shared edge X
+                        let z_lo = (z as f32) - 0.5;
+                        let z_hi = (z as f32) + 0.5;
+                        let low = ya.min(yb);
+                        let high = ya.max(yb);
+                        // Normal points from the higher tile
+                        // toward the lower one (so the front
+                        // face is what a player standing on
+                        // the lower side sees).
+                        let nx = if ya > yb { 1.0 } else { -1.0 };
+                        emit_quad(
+                            Vec3::new(edge_x, 0.0, z_lo),
+                            Vec3::new(edge_x, 0.0, z_hi),
+                            low, high,
+                            Vec3::new(nx, 0.0, 0.0),
+                        );
+                    }
+                }
+            }
+        }
+
+        // North-south adjacencies (compare tile (x, z) with (x, z+1)).
+        for z in 0..floor.depth.saturating_sub(1) {
+            for x in 0..floor.width {
+                let i_a = z * floor.width + x;
+                let i_b = (z + 1) * floor.width + x;
+                if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
+                    if (ya - yb).abs() > 1.0e-4 {
+                        if !accept((x, z), (x, z + 1)) { continue; }
+                        let edge_z = (z as f32) + 0.5;
+                        let x_lo = (x as f32) - 0.5;
+                        let x_hi = (x as f32) + 0.5;
+                        let low = ya.min(yb);
+                        let high = ya.max(yb);
+                        let nz = if ya > yb { 1.0 } else { -1.0 };
+                        emit_quad(
+                            Vec3::new(x_lo, 0.0, edge_z),
+                            Vec3::new(x_hi, 0.0, edge_z),
+                            low, high,
+                            Vec3::new(0.0, 0.0, nz),
+                        );
+                    }
+                }
+            }
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Slanted ramp quads for [`rift_dungeon::Tile::Stair`]
+    /// tiles. Each input is a `(base_pos, dir)` pair where
+    /// `base_pos.y` is the low end's world Y. The high end
+    /// rises by `step_y`. Geometry is a single quad per stair
+    /// tile, normal recomputed from the slope so lighting
+    /// reads as a ramp rather than a flat tile.
+    pub fn dungeon_stairs(
+        positions: &[(Vec3, rift_dungeon::StairDir)],
+        floor_num: u32,
+        step_y: f32,
+    ) -> Self {
+        use rift_dungeon::StairDir;
+        let mut vertices = Vec::with_capacity(positions.len() * 4);
+        let mut indices = Vec::with_capacity(positions.len() * 6);
+
+        let base_color = match floor_num % 4 {
+            0 => Vec3::new(0.55, 0.50, 0.45),
+            1 => Vec3::new(0.45, 0.55, 0.38),
+            2 => Vec3::new(0.60, 0.35, 0.30),
+            _ => Vec3::new(0.38, 0.48, 0.60),
+        };
+
+        for (i, (pos, dir)) in positions.iter().enumerate() {
+            let base_idx = (i * 4) as u32;
+            let ix = pos.x as u32;
+            let iz = pos.z as u32;
+            let hash = ((ix.wrapping_mul(7) ^ iz.wrapping_mul(13)) % 100) as f32 / 800.0;
+            let color = base_color + Vec3::splat(hash);
+
+            // Offsets per corner before lift. We label the
+            // four corners by the cardinal side they sit on.
+            // posX corner = (+0.5, _, ±0.5); negX = (-0.5,
+            // _, ±0.5); etc. The lift is +step_y on the two
+            // corners that sit on the rising side, 0 on the
+            // others.
+            let lift = |sx: f32, sz: f32| -> f32 {
+                let on_rise = match dir {
+                    StairDir::PosX => sx > 0.0,
+                    StairDir::NegX => sx < 0.0,
+                    StairDir::PosZ => sz > 0.0,
+                    StairDir::NegZ => sz < 0.0,
+                };
+                if on_rise { step_y } else { 0.0 }
+            };
+
+            // Slope normal: cross product of along-slope and
+            // across-slope tangents. For a +X-rising ramp:
+            // along = (1, step_y, 0), across = (0, 0, 1)
+            // → normal = (-step_y, 1, 0).normalised.
+            let normal = match dir {
+                StairDir::PosX => Vec3::new(-step_y, 1.0, 0.0).normalize(),
+                StairDir::NegX => Vec3::new( step_y, 1.0, 0.0).normalize(),
+                StairDir::PosZ => Vec3::new(0.0, 1.0, -step_y).normalize(),
+                StairDir::NegZ => Vec3::new(0.0, 1.0,  step_y).normalize(),
+            };
+
+            let corners = [
+                (-0.5_f32, -0.5_f32),
+                ( 0.5,     -0.5),
+                ( 0.5,      0.5),
+                (-0.5,      0.5),
+            ];
+            for (sx, sz) in corners {
+                let p = *pos + Vec3::new(sx, lift(sx, sz), sz);
+                vertices.push(Vertex {
+                    position: p,
+                    normal,
+                    color,
+                    uv: Vec2::new(p.x - 0.5, p.z - 0.5),
+                });
+            }
 
             indices.extend_from_slice(&[
                 base_idx, base_idx + 2, base_idx + 1,
@@ -1948,6 +2201,38 @@ impl SkinnedMesh {
                 || n.contains("rhand");
             if is_hand && is_right { Some(i) } else { None }
         })
+    }
+
+    /// Find left and right foot joints by name. Returns
+    /// `(left_idx, right_idx)`, each `None` if the rig has no
+    /// detectable foot joint on that side. Used for terrain-
+    /// aware foot IK so each foot plants on the dungeon floor's
+    /// per-tile elevation when walking on stair / dais / pit
+    /// tiles instead of the baked clip's flat-ground assumption.
+    pub fn foot_joints(&self) -> (Option<usize>, Option<usize>) {
+        let lc = |s: &str| s.to_ascii_lowercase();
+        let mut left = None;
+        let mut right = None;
+        for (i, j) in self.joints.iter().enumerate() {
+            let n = lc(&j.name);
+            let is_foot = n.contains("foot")
+                && !n.contains("toe")
+                && !n.contains("ball");
+            if !is_foot { continue; }
+            let is_left = n.contains("left")
+                || n.ends_with("_l")
+                || n.contains(".l")
+                || n.contains("_l_")
+                || n.contains("lfoot");
+            let is_right = n.contains("right")
+                || n.ends_with("_r")
+                || n.contains(".r")
+                || n.contains("_r_")
+                || n.contains("rfoot");
+            if is_left && left.is_none() { left = Some(i); }
+            if is_right && right.is_none() { right = Some(i); }
+        }
+        (left, right)
     }
 
     /// Index of the lowest joint in the spine chain — the joint where a

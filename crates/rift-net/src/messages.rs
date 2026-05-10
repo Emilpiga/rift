@@ -1219,6 +1219,14 @@ pub struct ItemBlob {
     /// builds deserialise as non-anchored.
     #[serde(default)]
     pub anchored: bool,
+    /// `true` while the item is "unstable rift loot" — picked
+    /// up inside an active rift instance and not yet stabilised
+    /// by extracting the run. Server-authoritative; the client
+    /// uses it to surface the "⚠ Unstable — extract to
+    /// stabilise" tooltip line. Defaults to `false` so legacy
+    /// payloads decode as stable.
+    #[serde(default)]
+    pub unstable: bool,
     /// Optional pickup-eligibility lineage. `Some` carries the
     /// 16-byte UUIDs of every character that shared the
     /// originating expedition; `None` is the legacy state

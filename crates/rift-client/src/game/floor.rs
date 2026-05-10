@@ -1,17 +1,20 @@
 use glam::{Mat4, Vec3};
 use rift_dungeon::NavGrid;
+use rift_dungeon::RoomTheme;
+use rift_engine::ash::vk;
 use rift_engine::ecs::components::{
-    Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, Renderable, Skinned, Static, Transform, Velocity,
+    Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, Renderable, Skinned,
+    Static, Transform, Velocity,
 };
 use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 
 use super::environment::EnvTextures;
 use super::monster_assets::MonsterCache;
-use rift_game::monsters::MonsterRole;
-use crate::game::PlayerState;
 use super::props::{self, Props};
 use super::rift_state::RiftState;
 use super::torches::TorchSystem;
+use crate::game::PlayerState;
+use rift_game::monsters::MonsterRole;
 
 /// Hub thunderstorm driver. Lives on [`FloorManager`] for the
 /// duration of the player's stay in the hub and is dropped on
@@ -68,7 +71,9 @@ impl HubStorm {
     fn schedule_next(rng: &mut super::props::placement::SmallRng) -> StormState {
         // 4–14 seconds between strikes — enough silence that
         // each fork lands as an event rather than wallpaper.
-        StormState::Idle { cooldown: rng.frange(4.0, 14.0) }
+        StormState::Idle {
+            cooldown: rng.frange(4.0, 14.0),
+        }
     }
 
     fn begin_flash(
@@ -127,7 +132,13 @@ impl HubStorm {
                 if cd <= 0.0 {
                     // 1 = single pop, 2–3 = forked multi-pulse.
                     let pulses = 1 + (self.rng.range(0, 3) as u8);
-                    Self::begin_flash(&mut self.rng, &self.cloud_anchors, pulses.saturating_sub(1), None, None)
+                    Self::begin_flash(
+                        &mut self.rng,
+                        &self.cloud_anchors,
+                        pulses.saturating_sub(1),
+                        None,
+                        None,
+                    )
                 } else {
                     StormState::Idle { cooldown: cd }
                 }
@@ -170,16 +181,33 @@ impl HubStorm {
             } => {
                 let r = remaining - dt;
                 if r <= 0.0 {
-                    Self::begin_flash(&mut self.rng, &self.cloud_anchors, pulses_left, Some(pos), Some(color))
+                    Self::begin_flash(
+                        &mut self.rng,
+                        &self.cloud_anchors,
+                        pulses_left,
+                        Some(pos),
+                        Some(color),
+                    )
                 } else {
-                    StormState::Gap { remaining: r, pos, color, pulses_left }
+                    StormState::Gap {
+                        remaining: r,
+                        pos,
+                        color,
+                        pulses_left,
+                    }
                 }
             }
         };
         self.state = next;
 
         // Apply the visual contribution of an active flash.
-        if let StormState::Flash { intensity, pos, color, .. } = self.state {
+        if let StormState::Flash {
+            intensity,
+            pos,
+            color,
+            ..
+        } = self.state
+        {
             let i = intensity.clamp(0.0, 3.0);
             // Lift the directional + ambient toward the bolt
             // color so the whole platform catches the strike,
@@ -228,6 +256,14 @@ pub struct FloorManager {
     /// floor that has no portal room.
     pub portal_anchors: Option<(Vec3, Vec3)>,
     pub nav_grid: NavGrid,
+    /// Live dungeon tile grid for the current floor. Owned
+    /// here so client-side systems that need per-tile
+    /// elevation (terrain-pitch animation, future foot IK)
+    /// don't have to reach into the network layer's
+    /// `predict_floor`. Regenerated on every floor change.
+    /// `None` only at the moment between `FloorManager::new`
+    /// and the first `generate` / `generate_hub`.
+    pub dungeon: Option<rift_dungeon::Floor>,
     pub monsters: MonsterCache,
     pub props: Props,
     pub env: EnvTextures,
@@ -251,6 +287,21 @@ pub struct FloorManager {
     /// them, and the cloud-anchor positions used as strike
     /// origins.
     pub hub_storm: Option<HubStorm>,
+    /// Hub-only sandstorm haze emitter. Spawned at hub
+    /// generation, anchored on the player every frame so the
+    /// dust field travels with the camera. `None` outside the
+    /// hub. Stored as an opaque `EffectId` so the renderer
+    /// owns the actual particle state.
+    pub hub_haze: Option<rift_engine::renderer::vfx::EffectId>,
+    /// Hub-only looping wind audio emitter. Lives in lockstep
+    /// with `hub_haze`: spawned at hub generation, despawned
+    /// on rift entry / hub teardown, anchored on the player
+    /// every frame. Its volume is driven by the same gust
+    /// envelope that modulates the haze brightness so the
+    /// soundscape and the visual sandstorm pulse together.
+    /// `None` when the audio system is unavailable or the
+    /// `ambient/wind.mp3` asset failed to load.
+    pub hub_wind: Option<rift_audio::EmitterId>,
 }
 
 impl FloorManager {
@@ -260,6 +311,7 @@ impl FloorManager {
             boss_room_center: Vec3::ZERO,
             portal_anchors: None,
             nav_grid: NavGrid::from_floor(&floor),
+            dungeon: None,
             monsters: MonsterCache::default(),
             props: Props::new(),
             env: EnvTextures::default(),
@@ -267,6 +319,8 @@ impl FloorManager {
             stash_chest_pos: None,
             spawn_pos: Vec3::ZERO,
             hub_storm: None,
+            hub_haze: None,
+            hub_wind: None,
         }
     }
 
@@ -290,6 +344,20 @@ impl FloorManager {
         // storm driver so it doesn't keep stomping on the
         // dungeon's torch lights / fog tint.
         self.hub_storm = None;
+        // Drop the hub's drifting sand haze. Its `EffectId`
+        // belonged to the previous hub instance and the
+        // renderer-side particle system is wiped during
+        // floor regen anyway; clearing the handle prevents
+        // a stale `set_anchor` call from stomping a fresh
+        // emitter that happens to land on the same slot.
+        self.hub_haze = None;
+        // The wind emitter id is dropped here too; the
+        // audio crate's own teardown is owned by the caller
+        // (see `transition.rs` — it must run before this
+        // `generate` so the emitter is freed cleanly. We
+        // just clear the local handle so we don't try to
+        // poke a recycled slot.
+        self.hub_wind = None;
         // Despawn the previous floor's torch VFX before we
         // regenerate. Their `EffectId`s belong to the old
         // particle system slots; leaving them around would
@@ -335,14 +403,230 @@ impl FloorManager {
         // Cave-dark key + low ambient so torches drive the look.
         renderer.key_light = rift_engine::KeyLight::DUNGEON;
 
-        // Floor mesh — only walkable tiles, batched into one draw
-        let floor_positions = floor.floor_positions();
-        let floor_mesh = Mesh::dungeon_floor(&floor_positions, rift.floor);
-        renderer.add_mesh(&floor_mesh, Mat4::IDENTITY)?;
-        let floor_obj_idx = renderer.objects.len() - 1;
+        // -----------------------------------------------------------
+        // Per-room texture-pack split.
+        //
+        // Every floor tile gets bucketed into one of three
+        // material packs based on the [`RoomTheme`] of its
+        // owning room. Corridor tiles (which sit outside
+        // every BSP rectangle) inherit the theme of the
+        // *nearest reachable room* via a multi-source BFS
+        // seeded from every in-room walkable tile. The
+        // resulting Voronoi-by-walking-distance partition
+        // means each corridor segment adopts whichever
+        // themed room is closer along its actual path —
+        // avoiding the previous "stone corridor between two
+        // shrines" jarring transition. A 50:50 corridor
+        // (equidistant from both rooms) gets split across
+        // the two packs at its midpoint, which reads as the
+        // material gradually changing along the corridor as
+        // the player walks through.
+        //
+        // Wall tiles (no neighbouring walkable lookup) reuse
+        // the same Voronoi map: they take the theme of the
+        // nearest walkable tile they touch, so a wall on
+        // the room side adopts the room's theme and a wall
+        // on the corridor side adopts whichever room
+        // claimed that corridor stretch.
+        //
+        // Stair/skirt geometry (raised daises, sunken pits)
+        // remains on the default Stone pack — these are
+        // small bridging surfaces, mixing them per-room
+        // would cost an extra mesh build for ~tens of
+        // triangles' worth of pixels.
+        #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+        enum MatPack {
+            Stone,
+            Temple,
+            Wood,
+        }
+        const PACK_COUNT: usize = 3;
+        let pack_of = |theme: RoomTheme| match theme {
+            RoomTheme::Shrine => MatPack::Temple,
+            RoomTheme::Barracks | RoomTheme::Library | RoomTheme::Storage => MatPack::Wood,
+            _ => MatPack::Stone,
+        };
+        let pack_idx = |p: MatPack| match p {
+            MatPack::Stone => 0,
+            MatPack::Temple => 1,
+            MatPack::Wood => 2,
+        };
 
-        // Walls — batched into a single draw call, themed per floor
-        // (dark + slightly desaturated; torches will warm them up).
+        // Multi-source BFS over walkable tiles. Each room's
+        // interior walkable tiles seed the queue at distance
+        // 0 carrying that room's id; the BFS propagates
+        // outward through every walkable neighbour, and the
+        // first room to reach a corridor tile claims it.
+        // Walls are not traversed (they're not walkable);
+        // they inherit a theme from the nearest walkable
+        // neighbour as a separate per-wall lookup below.
+        let n_tiles = floor.width * floor.depth;
+        let mut owner: Vec<Option<usize>> = vec![None; n_tiles];
+        let mut bfs: std::collections::VecDeque<(usize, usize, usize)> =
+            std::collections::VecDeque::new();
+        for (rid, room) in floor.rooms.iter().enumerate() {
+            for z in room.z..(room.z + room.depth) {
+                for x in room.x..(room.x + room.width) {
+                    if x >= floor.width || z >= floor.depth {
+                        continue;
+                    }
+                    let i = z * floor.width + x;
+                    if !floor.tiles[i].is_walkable() {
+                        continue;
+                    }
+                    if owner[i].is_some() {
+                        continue;
+                    }
+                    owner[i] = Some(rid);
+                    bfs.push_back((x, z, rid));
+                }
+            }
+        }
+        while let Some((x, z, rid)) = bfs.pop_front() {
+            for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i32 + dx;
+                let nz = z as i32 + dz;
+                if nx < 0 || nz < 0 {
+                    continue;
+                }
+                let (nx, nz) = (nx as usize, nz as usize);
+                if nx >= floor.width || nz >= floor.depth {
+                    continue;
+                }
+                let ni = nz * floor.width + nx;
+                if !floor.tiles[ni].is_walkable() {
+                    continue;
+                }
+                if owner[ni].is_some() {
+                    continue;
+                }
+                owner[ni] = Some(rid);
+                bfs.push_back((nx, nz, rid));
+            }
+        }
+        // Theme lookup: returns the BFS-assigned owner room's
+        // theme, or `Generic` for a walkable tile that no
+        // room could reach (shouldn't happen on connected
+        // floors, but keep the fallback for robustness).
+        let tile_pack = |x: usize, z: usize| -> MatPack {
+            if x >= floor.width || z >= floor.depth {
+                return MatPack::Stone;
+            }
+            let i = z * floor.width + x;
+            match owner[i] {
+                Some(rid) => pack_of(floor.rooms[rid].theme),
+                None => MatPack::Stone,
+            }
+        };
+
+        // Bucket floor positions by pack.
+        let mut floor_pos_by_pack: [Vec<Vec3>; PACK_COUNT] = Default::default();
+        for pos in floor.floor_positions() {
+            let ix = pos.x as usize;
+            let iz = pos.z as usize;
+            floor_pos_by_pack[pack_idx(tile_pack(ix, iz))].push(pos);
+        }
+
+        // Floor meshes — one batched draw per non-empty pack.
+        let mut floor_obj_indices: [Option<usize>; PACK_COUNT] = [None; PACK_COUNT];
+        for (i, positions) in floor_pos_by_pack.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            let mesh = Mesh::dungeon_floor(positions, rift.floor);
+            renderer.add_mesh(&mesh, Mat4::IDENTITY)?;
+            floor_obj_indices[i] = Some(renderer.objects.len() - 1);
+        }
+        // Used downstream for shadow-cast suppression /
+        // collision iteration. The first non-empty floor
+        // pack acts as the "primary" floor object index for
+        // legacy code that references a single handle.
+        let floor_obj_idx = floor_obj_indices
+            .iter()
+            .find_map(|o| *o)
+            .expect("dungeon must have at least one floor tile");
+
+        // Stair / ramp mesh — slanted quads bridging tiles at
+        // adjacent elevations. Built per material pack so
+        // each ramp inherits the floor texture of its
+        // owning room (a wood-floor barracks dais climbs on
+        // wood planks; a shrine dais climbs on blue-gold
+        // tiles). The ramp tile sits at the *low* end of
+        // the elevation step, so we bucket by the high end's
+        // pack — same convention as the skirts — to keep
+        // the ramp's surface consistent with the platform
+        // it climbs onto.
+        let stair_positions = floor.stair_positions();
+        let mut stair_pos_by_pack: [Vec<(Vec3, rift_dungeon::StairDir)>; PACK_COUNT] =
+            Default::default();
+        for (pos, dir) in &stair_positions {
+            // The high end of a ramp sits one tile in the
+            // direction `dir` from the ramp tile. Sample
+            // the pack of that destination tile so the
+            // ramp's surface matches the platform it leads
+            // onto.
+            let (hx, hz) = match dir {
+                rift_dungeon::StairDir::PosX => (pos.x + 1.0, pos.z),
+                rift_dungeon::StairDir::NegX => (pos.x - 1.0, pos.z),
+                rift_dungeon::StairDir::PosZ => (pos.x, pos.z + 1.0),
+                rift_dungeon::StairDir::NegZ => (pos.x, pos.z - 1.0),
+            };
+            let hxi = hx.round().max(0.0) as usize;
+            let hzi = hz.round().max(0.0) as usize;
+            let pack = tile_pack(hxi, hzi);
+            stair_pos_by_pack[pack_idx(pack)].push((*pos, *dir));
+        }
+        let mut stair_obj_indices: [Option<usize>; PACK_COUNT] = [None; PACK_COUNT];
+        for (i, group) in stair_pos_by_pack.iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let stair_mesh = Mesh::dungeon_stairs(group, rift.floor, rift_dungeon::ELEVATION_STEP);
+            renderer.add_mesh(&stair_mesh, Mat4::IDENTITY)?;
+            stair_obj_indices[i] = Some(renderer.objects.len() - 1);
+        }
+
+        // Vertical "skirt" geometry between adjacent flat
+        // floor tiles at different elevations (e.g. the lip
+        // of a sunken pit, the outer rim of a raised dais).
+        // Without these, the player can see straight through
+        // the world at every elevation discontinuity. Empty
+        // when the floor is uniformly flat.
+        //
+        // Built per material pack and filtered to seams
+        // whose two endpoints share that pack so each strip
+        // carries the same authored material as the floor it
+        // bridges. Cross-pack seams (where the pit lip
+        // straddles a Voronoi boundary between, say, a
+        // shrine and a wood-floor barracks) get assigned to
+        // whichever pack the *higher* tile belongs to — a
+        // raised dais's vertical face reads as the dais's
+        // material more naturally than the floor below it.
+        let mut skirt_obj_indices: [Option<usize>; PACK_COUNT] = [None; PACK_COUNT];
+        for pack_i in 0..PACK_COUNT {
+            let skirt_mesh =
+                Mesh::dungeon_floor_skirts_filtered(&floor, rift.floor, |(ax, az), (bx, bz)| {
+                    use rift_dungeon::ELEVATION_STEP;
+                    let ya = floor.elevation[az * floor.width + ax] as f32 * ELEVATION_STEP;
+                    let yb = floor.elevation[bz * floor.width + bx] as f32 * ELEVATION_STEP;
+                    let (hx, hz) = if ya >= yb { (ax, az) } else { (bx, bz) };
+                    pack_idx(tile_pack(hx, hz)) == pack_i
+                });
+            if skirt_mesh.indices.is_empty() {
+                continue;
+            }
+            renderer.add_mesh(&skirt_mesh, Mat4::IDENTITY)?;
+            skirt_obj_indices[pack_i] = Some(renderer.objects.len() - 1);
+        }
+
+        // Walls — per-pack batches.
+        // A wall tile inherits the pack of its nearest
+        // walkable neighbour (which itself was Voronoi'd to
+        // a room above). 4-cardinal scan with the first hit
+        // winning matches the corridor's local owner so the
+        // wall reads as "belonging to the corridor stretch
+        // it borders" — no more theme seam halfway down a
+        // hallway.
         let wall_color = match rift.floor % 4 {
             0 => Vec3::new(0.18, 0.16, 0.14), // damp weathered stone
             1 => Vec3::new(0.13, 0.18, 0.11), // deep mossy green
@@ -352,16 +636,62 @@ impl FloorManager {
         let wall_mesh = Mesh::wall_colored(wall_color);
         let wall_positions = floor.wall_positions();
 
-        // Batch all walls into one big mesh for rendering
-        let batched_walls = Mesh::batch_at_positions(&wall_mesh, &wall_positions);
-        renderer.add_mesh(&batched_walls, Mat4::IDENTITY)?;
-        let wall_obj_idx = renderer.objects.len() - 1;
+        let wall_pack_for = |pos: &Vec3| -> MatPack {
+            let x = pos.x as i32;
+            let z = pos.z as i32;
+            for (dx, dz) in [
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                let nx = x + dx;
+                let nz = z + dz;
+                if nx < 0 || nz < 0 {
+                    continue;
+                }
+                let (nx, nz) = (nx as usize, nz as usize);
+                if nx >= floor.width || nz >= floor.depth {
+                    continue;
+                }
+                let ni = nz * floor.width + nx;
+                if floor.tiles[ni].is_walkable() {
+                    return tile_pack(nx, nz);
+                }
+            }
+            MatPack::Stone
+        };
+
+        let mut wall_pos_by_pack: [Vec<Vec3>; PACK_COUNT] = Default::default();
+        for pos in &wall_positions {
+            let pack = wall_pack_for(pos);
+            wall_pos_by_pack[pack_idx(pack)].push(*pos);
+        }
+
+        let mut wall_obj_indices: [Option<usize>; PACK_COUNT] = [None; PACK_COUNT];
+        for (i, positions) in wall_pos_by_pack.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            let batched = Mesh::batch_at_positions(&wall_mesh, positions);
+            renderer.add_mesh(&batched, Mat4::IDENTITY)?;
+            wall_obj_indices[i] = Some(renderer.objects.len() - 1);
+        }
 
         // Bind authored PBR materials to floor and walls. We
         // still call `ensure(...)` to keep the procedural sets
         // available as a fallback when an asset fails to load,
         // but prefer the authored brick / ground tile maps when
-        // they're ready.
+        // they're ready. The themed packs (white_bricks +
+        // blue_gold floor for shrines, wood planks for
+        // barracks/library/storage) are pre-warmed by the
+        // background decode worker; they fall back to the
+        // default stone pack if their decode hasn't landed by
+        // the time the dungeon binds.
         self.env.ensure(renderer);
         self.env.ensure_ground_tiles(renderer);
         self.env.ensure_bricks_wall(renderer);
@@ -381,24 +711,103 @@ impl FloorManager {
         // the apparent scale of the shipped 2k brick + ground
         // tile maps.
         //
-        // Parallax stays small (and zero on floors viewed from
-        // a steep top-down angle barely benefits from it) to
-        // keep the per-fragment cost down.
+        // Parallax is kept small but non-zero on both floors
+        // and walls. The floor is the main surface lit by
+        // torches at grazing-to-side angles, where the
+        // height-map self-shadow pass really sells the
+        // ground-tile relief — without it, the torch's
+        // shadow boundary cuts a knife edge across the
+        // bumpy floor instead of feathering along its grout
+        // lines and chips. Walls get a slightly stronger
+        // scale because they're seen more head-on, where the
+        // POM offset itself is the bigger perceptual win.
         let pbr_flags = f32::from_bits(1u32);
-        let floor_params = [1.0 / 3.0, 0.0,  pbr_flags, 0.0];
-        let wall_params  = [1.0 / 3.0, 0.02, pbr_flags, 0.0];
+        let floor_params = [1.0 / 3.0, 0.012, pbr_flags, 0.0];
+        let wall_params = [1.0 / 3.0, 0.02, pbr_flags, 0.0];
 
-        if let Some(set) = self.env.ground_tiles_set {
-            renderer.set_object_shared_material(floor_obj_idx, set);
-            renderer.set_object_material_params(floor_obj_idx, floor_params);
-        } else if let Some(set) = self.env.floor_set {
-            renderer.set_object_shared_material(floor_obj_idx, set);
+        // Resolve per-pack descriptor sets, falling back to
+        // the default stone pack while themed packs are still
+        // decoding in the background.
+        let stone_floor = self.env.ground_tiles_set;
+        let stone_wall = self.env.bricks_wall_set;
+        let pack_floor = |i: usize| -> Option<vk::DescriptorSet> {
+            match i {
+                1 => self.env.blue_gold_floor_set.or(stone_floor),
+                2 => self.env.wood_planks_set.or(stone_floor),
+                _ => stone_floor,
+            }
+        };
+        let pack_wall = |i: usize| -> Option<vk::DescriptorSet> {
+            match i {
+                1 => self.env.white_bricks_wall_set.or(stone_wall),
+                _ => stone_wall,
+            }
+        };
+
+        for (i, obj) in floor_obj_indices.iter().enumerate() {
+            let Some(idx) = *obj else {
+                continue;
+            };
+            if let Some(set) = pack_floor(i) {
+                renderer.set_object_shared_material(idx, set);
+                renderer.set_object_material_params(idx, floor_params);
+            } else if let Some(set) = self.env.floor_set {
+                renderer.set_object_shared_material(idx, set);
+            }
         }
-        if let Some(set) = self.env.bricks_wall_set {
-            renderer.set_object_shared_material(wall_obj_idx, set);
-            renderer.set_object_material_params(wall_obj_idx, wall_params);
-        } else if let Some(set) = self.env.wall_set {
-            renderer.set_object_shared_material(wall_obj_idx, set);
+        // Stairs and skirts get bound per pack so each ramp
+        // / elevation lip carries the floor texture of the
+        // platform it climbs onto / drops from.
+        for (i, obj) in stair_obj_indices.iter().enumerate() {
+            let Some(idx) = *obj else {
+                continue;
+            };
+            if let Some(set) = pack_floor(i) {
+                renderer.set_object_shared_material(idx, set);
+                renderer.set_object_material_params(idx, floor_params);
+            } else if let Some(set) = self.env.floor_set {
+                renderer.set_object_shared_material(idx, set);
+            }
+        }
+        for (i, obj) in skirt_obj_indices.iter().enumerate() {
+            let Some(idx) = *obj else {
+                continue;
+            };
+            if let Some(set) = pack_floor(i) {
+                renderer.set_object_shared_material(idx, set);
+                renderer.set_object_material_params(idx, floor_params);
+            } else if let Some(set) = self.env.floor_set {
+                renderer.set_object_shared_material(idx, set);
+            }
+        }
+
+        for (i, obj) in wall_obj_indices.iter().enumerate() {
+            let Some(idx) = *obj else {
+                continue;
+            };
+            if let Some(set) = pack_wall(i) {
+                renderer.set_object_shared_material(idx, set);
+                renderer.set_object_material_params(idx, wall_params);
+            } else if let Some(set) = self.env.wall_set {
+                renderer.set_object_shared_material(idx, set);
+            }
+        }
+        // Floor is a giant flat slab \u2014 it would only contribute
+        // self-shadow against the directional light, which is
+        // already handled by the heightmap self-shadow + height-
+        // map-displaced shadow lookup in the lit pass. Keeping
+        // it out of the shadow draw list saves rasterising
+        // ~thousands of triangles per dir-shadow + per cube
+        // face of every shadow-casting torch in range.
+        for obj in floor_obj_indices.iter().flatten() {
+            renderer.set_object_casts_shadow(*obj, false);
+        }
+        let _ = floor_obj_idx; // kept for legacy single-handle reads
+        for obj in stair_obj_indices.iter().flatten() {
+            renderer.set_object_casts_shadow(*obj, false);
+        }
+        for obj in skirt_obj_indices.iter().flatten() {
+            renderer.set_object_casts_shadow(*obj, false);
         }
 
         // Still need individual ECS entities for collision
@@ -410,16 +819,34 @@ impl FloorManager {
             ));
         }
 
+        // Wall torches go FIRST so we can hand their world
+        // positions to the prop decorator as exclusion zones.
+        // Without this, theme-palette wall props (barrels,
+        // bookcases, weapon racks) regularly spawned on the
+        // exact same wall tile as a candlestick sconce and
+        // clipped through it. The candlestick prop owns a
+        // ~0.4 m footprint at the wall — using 0.7 m here
+        // gives the prop spawner enough room to slide its
+        // own footprint along the wall to clear the torch.
+        self.torches
+            .place(&floor, renderer, &mut self.props, world, seed);
+        let torch_avoid: Vec<(Vec3, f32)> = self
+            .torches
+            .torches
+            .iter()
+            .map(|t| (t.light.position, 0.7))
+            .collect();
+
         // Decorate rooms with static fantasy props (barrels, benches, candles, …).
         // Done before enemies spawn so the same seed picks consistent positions.
-        props::fantasy::decorate_dungeon(&mut self.props, world, renderer, &floor, seed);
-
-        // Wall torches: candlestick prop + looping flame VFX
-        // (HDR additive → blooms) + a warm point light at each
-        // sconce. The renderer caps active lights at 8, but
-        // `TorchSystem::update_lights` is called every frame to
-        // keep the nearest 8 to the player active.
-        self.torches.place(&floor, renderer, &mut self.props, world, seed);
+        props::fantasy::decorate_dungeon(
+            &mut self.props,
+            world,
+            renderer,
+            &floor,
+            seed,
+            &torch_avoid,
+        );
 
         // Player — spawned via shared helper so the hub generator can
         // reuse the same skinned-character + animation-set bring-up.
@@ -436,6 +863,11 @@ impl FloorManager {
             floor.rooms.len(),
             rift.progress_required,
         );
+
+        // Stash the live floor so render-side systems (terrain
+        // pitch, future foot-IK) can sample per-tile elevation
+        // without going through the network layer.
+        self.dungeon = Some(floor);
 
         Ok(())
     }
@@ -454,6 +886,21 @@ impl FloorManager {
     ) -> anyhow::Result<Vec3> {
         *world = hecs::World::new();
         renderer.clear_objects();
+        // Despawn any previous floor's torch VFX + drop their
+        // cached `PointLight` entries. Without this, the
+        // dungeon's wall-torch positions would keep being
+        // pushed into `point_lights` every frame by
+        // `TorchSystem::update_lights`, scattering stale lights
+        // across the hub at random dungeon coordinates.
+        self.torches.clear(renderer);
+        // Wipe the per-frame light vecs so no leftover entries
+        // from the previous floor (torch sconces, vfx trails)
+        // can paint a single stray frame in the hub before the
+        // per-frame systems repopulate. `update_lights` and the
+        // vfx pass clear these every frame, but doing it here
+        // closes the one-frame window during the regen.
+        renderer.point_lights.clear();
+        renderer.vfx_lights.clear();
 
         let floor = Floor::hub();
         self.boss_room_center = Vec3::ZERO;
@@ -472,16 +919,19 @@ impl FloorManager {
         // horizon instead of showing a darker rust-coloured
         // ring against a lighter sky.
         renderer.fog_color = [0.78, 0.55, 0.30];
-        // Tight fog limits the player's view: the dust
-        // wall closes in within ~18 m so the platform reads
-        // as a small island in a roaring storm rather than
-        // a wide-open arena. Past the wall is fully veiled.
-        renderer.fog_start = 4.0;
-        renderer.fog_end = 18.0;
-        // Default camera far plane is fine — fog swallows
-        // everything past 28 m, so geometry past that won't
-        // contribute even if it existed.
-        renderer.camera.far = 80.0;
+        // Loose-but-still-veiling fog. We want the player to
+        // sense a vast desert beyond the immediate clear
+        // zone — dune silhouettes barely visible through the
+        // haze — without ever being able to see a hard edge
+        // of the world. The visible platform extends well
+        // past `fog_end`, so distant dunes silhouette into
+        // the dust horizon and the platform "feels infinite".
+        renderer.fog_start = 8.0;
+        renderer.fog_end = 55.0;
+        // Camera far plane needs to clear the dune ring
+        // (~180 m max radius) so distant silhouettes don't
+        // pop out at oblique camera angles.
+        renderer.camera.far = 260.0;
 
         // Sandstorm sky preset. Warm tan dome, no sun disc
         // (fully veiled by dust), drifting dust streaks
@@ -502,12 +952,8 @@ impl FloorManager {
         // a disc at exactly y=0 reads as "the character is
         // floating". Two cm of lift hides the gap without
         // looking like a step.
-        let hub_centre = Vec3::new(
-            (floor.width / 2) as f32,
-            0.02,
-            (floor.depth / 2) as f32,
-        );
-        const PLATFORM_RADIUS: f32 = 16.0;
+        let hub_centre = Vec3::new((floor.width / 2) as f32, 0.02, (floor.depth / 2) as f32);
+        const PLATFORM_RADIUS: f32 = 64.0;
         let platform = Mesh::ground_disc(
             hub_centre,
             PLATFORM_RADIUS,
@@ -554,33 +1000,117 @@ impl FloorManager {
             // the 2 k sand maps spans 2 m of world space (the
             // mesh emits world-space UVs pre-multiplied by
             // that factor, so passing `1.0` here yields the
-            // intended 2 m / tile coverage). Parallax stays
-            // off — the disc is viewed nearly top-down at the
-            // hub camera angle, where parallax detail isn't
-            // visible and would just burn fragment shader
-            // cycles.
+            // intended 2 m / tile coverage). Small parallax
+            // scale enables both POM (visible bump-depth
+            // when the player walks across the disc) and
+            // height-map self-shadowing along the cast
+            // shadow boundary — the shadow line bends
+            // along the sand's ripples instead of cutting
+            // straight across them. 0.015 is small enough
+            // that the parallax march cost stays negligible
+            // at our top-down view angle.
             let pbr_flags = f32::from_bits(1u32);
-            renderer.set_object_material_params(
-                platform_obj_idx,
-                [1.0, 0.0, pbr_flags, 0.0],
-            );
+            renderer.set_object_material_params(platform_obj_idx, [1.0, 0.015, pbr_flags, 0.0]);
         } else {
             self.env.ensure_crimson_stone(renderer);
             if let Some(set) = self.env.crimson_stone_set {
                 renderer.set_object_shared_material(platform_obj_idx, set);
             }
         }
-        // Thin glowing crimson rim along the platform edge so
-        // the floating-island silhouette reads when the player
-        // walks toward it.
-        let rim = Mesh::ring(
-            hub_centre + Vec3::new(0.0, 0.012, 0.0),
-            PLATFORM_RADIUS - 0.25,
-            PLATFORM_RADIUS,
-            128,
-            Vec3::new(2.4, 0.35, 0.20),
+        // The platform disc is a giant flat receiver — it
+        // doesn't cast meaningful shadows on anything (the
+        // shadow it would cast goes off the visible scene
+        // into the abyss). Excluding it from the shadow
+        // passes saves ~10k triangles per dir-shadow + per
+        // cube face of the portal point light. The lit-pass
+        // heightmap self-shadow + heightmap-displaced shadow
+        // lookup already handle the visible micro-shadows.
+        renderer.set_object_casts_shadow(platform_obj_idx, false);
+        // No glowing rim: the platform now extends well past
+        // the fog wall (`fog_end = 55 m`, platform radius =
+        // 64 m), so the disc's edge is never visible to the
+        // player. A bright crimson ring at the rim would only
+        // silhouette through the haze as a hard "edge of the
+        // world" line, breaking the desired "infinite desert"
+        // feel. Distant dune silhouettes (added below) pick
+        // up the framing job instead.
+
+        // Sand-dune ring beyond the platform. The dunes start
+        // a couple of metres inside the platform's outer edge
+        // (so the seam is hidden under the disc's PBR sand
+        // material) and march out to ~180 m where camera-far
+        // and fog completely swallow them. Inside the play
+        // arena the disc is dead flat — the dunes only ramp
+        // up well past the playable zone, then taper back to
+        // the disc's Y at the outer fog wall so the ring
+        // doesn't read as a solid mountain horizon.
+        //
+        // Peak heights are intentionally low (~3 m) so this
+        // reads as desert dunes rather than the dungeon
+        // crate's mountain ring; broader noise frequency
+        // (low value) groups peaks into rolling crests
+        // instead of jagged spires.
+        let dune_params = rift_math::terrain::MountainRingParams {
+            inner_radius: PLATFORM_RADIUS - 2.0,
+            outer_radius: 180.0,
+            // Sit the dune base flush with the platform top
+            // so the inner edge meets the disc cleanly; the
+            // radial taper inside `mountain_terrain` already
+            // pinches heights to zero at the inner edge so
+            // there's no visible step.
+            base_y: hub_centre.y,
+            peak_height: 3.5,
+            angular_segments: 192,
+            radial_segments: 28,
+            // Broad rolling dunes, not narrow spikes.
+            noise_frequency: 0.025,
+            // Pure fBm — dunes are smooth, not ridged.
+            ridged_blend: 0.0,
+            seed: 0xD0_5E_5A_4D_5A_4D_5A_4D,
+        };
+        let dunes = Mesh::mountain_terrain(
+            &dune_params,
+            hub_centre,
+            // Warm sand tint, modulated by the bound PBR
+            // basecolor texture below. Slightly desaturated
+            // so the desert_rocks pack drives the actual hue.
+            Vec3::new(1.0, 0.92, 0.78),
+            // One tile of the 2 k sand pack per ~6 m of
+            // dune surface — fine enough to avoid obvious
+            // repeats at the camera distance, coarse enough
+            // that the mip pyramid doesn't thrash on the
+            // 192×28 vertex band.
+            6.0,
         );
-        renderer.add_mesh(&rim, Mat4::IDENTITY)?;
+        renderer.add_mesh(&dunes, Mat4::IDENTITY)?;
+        let dunes_obj_idx = renderer.objects.len() - 1;
+        // Reuse the same sandy_cliff_rocks PBR pack the
+        // platform binds — the dunes are an extension of the
+        // same desert surface, just elevated.
+        if let Some(set) = self.env.desert_rocks_set {
+            renderer.set_object_shared_material(dunes_obj_idx, set);
+            let pbr_flags = f32::from_bits(1u32);
+            // `uv_world_scale` above already produced a
+            // tiling UV; pass `1.0` for the per-object
+            // multiplier so the bake-in scale is honoured.
+            // Tiny parallax scale (0.01) drives height-map
+            // self-shadowing so the dune face's grain detail
+            // shadow-feathers under the strong directional
+            // sun. View-angle is grazing on the far dunes
+            // where the offset itself reads as artefacts, so
+            // we keep the scale very small — just enough to
+            // give the self-shadow march something to work
+            // with.
+            renderer.set_object_material_params(dunes_obj_idx, [1.0, 0.01, pbr_flags, 0.0]);
+        }
+        // Dunes ring spans 60–180 m at low elevation; their
+        // cast shadow on each other is dwarfed by the
+        // heightmap self-shadow already in the lit pass, and
+        // they're outside every shadow-casting torch's
+        // radius anyway. Excluding them from the shadow
+        // draw list saves rasterising ~5k vertices across
+        // the directional shadow pass every frame.
+        renderer.set_object_casts_shadow(dunes_obj_idx, false);
 
         // No underside geometry: the platform reads as a
         // floating disc above an unbounded abyss. Anything
@@ -604,82 +1134,27 @@ impl FloorManager {
         // when `hub_storm` is `None`.
         self.hub_storm = None;
 
-        // Sky-anchored point light: a single warm sun-source.
-        // The dungeon's dramatic shadows come from two
-        // separate properties of the torch lights:
-        //
-        //   1. They sit *low* relative to the caster, so
-        //      rays rake across the floor at a shallow angle
-        //      and project shadows several metres long.
-        //   2. They have a tight radius (~11 m), so the
-        //      shadow look is only visible while the caster
-        //      is within range.
-        //
-        // Property (1) is what produces the dramatic look;
-        // property (2) is just a consequence of dungeon
-        // geometry. For the hub we keep (1) — the anchor
-        // sits low and well to the side — and *drop* (2):
-        // the radius is bumped to fully cover the playable
-        // disc so the player gets the same effect anywhere
-        // on the platform, not just within 11 m of one
-        // fixture. The cube-shadow pass produces equally
-        // crisp shadows at any radius (the PCF kernel is in
-        // normalised direction space, so softness is
-        // constant); larger radius only means the cube's far
-        // plane = radius, which still gives plenty of depth
-        // precision for the small-scale casters here.
-        renderer.point_lights.clear();
-        // Low-angle sun: a horizontal-heavy axis (small Y)
-        // so the shadow rays sweep ACROSS the platform
-        // rather than punching down through it.
-        let sun_axis = Vec3::new(0.70, 0.32, 0.65).normalize();
-        let sun_anchor = hub_centre + sun_axis * 32.0;
-        renderer.point_lights.push(rift_engine::PointLight {
-            position: sun_anchor,
-            color: Vec3::new(1.50, 1.00, 0.55),
-            // Covers the full 16 m disc — player worst-case
-            // distance from the sun anchor is ~16 m + 32 m =
-            // 48 m, well inside.
-            radius: 60.0,
-            intensity: 4.0,
-        });
+        // Drifting sand haze: a wide-area particle layer
+        // spawned once at hub-gen and anchored on the player
+        // every frame (see `phases::render_phase`). Two
+        // stacked sublayers (slow soft sheets + fast low
+        // streaks) sell "you're standing inside a sandstorm"
+        // without occluding the sun disc / god rays. Spawned
+        // at the hub centre as a placeholder anchor; the
+        // per-frame retarget will move it to the player on
+        // the very next tick.
+        self.hub_haze = Some(renderer.vfx_system.spawn(
+            rift_engine::renderer::vfx::presets::sandstorm_haze(),
+            hub_centre,
+        ));
 
-        // Portal point light: the rift portal is a hot red
-        // emissive ring, so we anchor a saturated crimson
-        // light at its centre. Two jobs:
-        //   1. Throw a red rim onto the platform stones so
-        //      the disc catches the portal's glow as the
-        //      player approaches — it reads as a heat
-        //      source in the haze, not just a sticker.
-        //   2. Cast cube-mapped shadows: anything between
-        //      the portal and the camera (the player, the
-        //      stash chest, dropped loot) silhouettes
-        //      against the red light. Combined with the
-        //      warm sun light's shadows from the opposite
-        //      side this gives every prop a two-tone rim.
-        // Position is at the portal centre (`first_room_center`
-        // matches the `portal_pos` returned at the bottom of
-        // this function) lifted to disc height (~1 m), so the
-        // light sits in the middle of the visible ring. The
-        // bloom pass picks up the saturated red core and the
-        // portal's own emissive vertices for a strong glow.
-        let portal_centre_xz = floor.first_room_center();
-        let portal_light_pos =
-            portal_centre_xz + Vec3::new(0.0, 1.55, 0.0);
-        renderer.point_lights.push(rift_engine::PointLight {
-            position: portal_light_pos,
-            // Strong saturated red — push past 1.0 on the
-            // red channel so HDR bloom catches it cleanly
-            // even when the warm sun light is washing the
-            // platform.
-            color: Vec3::new(2.50, 0.20, 0.10),
-            // Tight radius so the falloff is steep and the
-            // red glow only paints a clear pool around the
-            // portal disc; outside ~6 m it fades to nothing
-            // and the warm sun light dominates again.
-            radius: 7.0,
-            intensity: 8.0,
-        });
+        // No baked hub point lights. The only light in the
+        // hub is the rift portal's own crimson glow, which
+        // `portal_system::push_lights` republishes every frame
+        // (synced with the shader's breathing/spasm pulse).
+        // `TorchSystem::update_lights` clears `point_lights`
+        // at the top of every frame, so anything we'd push
+        // here would be wiped on the next tick anyway.
 
         // Wall colliders only — no wall mesh. Instead of the
         // dungeon grid wall ring, we ring the platform edge
@@ -695,8 +1170,7 @@ impl FloorManager {
         // like it should still be walkable.
         let collider_ring_radius = PLATFORM_RADIUS - 0.6;
         for i in 0..COLLIDER_RING_SEGMENTS {
-            let a = (i as f32 / COLLIDER_RING_SEGMENTS as f32)
-                * std::f32::consts::TAU;
+            let a = (i as f32 / COLLIDER_RING_SEGMENTS as f32) * std::f32::consts::TAU;
             let p = hub_centre
                 + Vec3::new(
                     a.cos() * collider_ring_radius,
@@ -733,6 +1207,12 @@ impl FloorManager {
 
         let portal_pos = floor.first_room_center() + Vec3::new(0.0, 0.5, 0.0);
         log::info!("Hub generated. Portal at {:?}", portal_pos);
+        // Stash the live floor for render-side elevation
+        // sampling (terrain pitch, foot IK). The hub is flat
+        // so this currently never produces a non-zero pitch,
+        // but we still want a populated `dungeon` so consumers
+        // don't have to special-case the hub.
+        self.dungeon = Some(floor);
         Ok(portal_pos)
     }
 
@@ -809,7 +1289,11 @@ pub fn spawn_remote_enemy_entity(
     if let Some(set) = shared_set {
         renderer.set_object_shared_material(obj_index, set);
     }
-    let skinned = Skinned { mesh: asset.mesh.clone(), scratch: Vec::new(), joint_worlds: Vec::new() };
+    let skinned = Skinned {
+        mesh: asset.mesh.clone(),
+        scratch: Vec::new(),
+        joint_worlds: Vec::new(),
+    };
     let initial_clip = asset
         .anims
         .find_any(&["Idle", "Idle_Loop"])
@@ -821,7 +1305,9 @@ pub fn spawn_remote_enemy_entity(
     builder.add(Transform::from_position(position));
     builder.add(Velocity::default());
     builder.add(Health::new(hp_max));
-    builder.add(Renderable { object_index: obj_index });
+    builder.add(Renderable {
+        object_index: obj_index,
+    });
     builder.add(NetControlled);
     // Tag as `Enemy` so the HUD pass picks it up for floating health
     // bars + boss arrow. Speed/progress_value are server-authoritative

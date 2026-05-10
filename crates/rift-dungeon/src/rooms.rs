@@ -17,6 +17,134 @@ pub enum RoomType {
     Corridor,
 }
 
+/// The narrative / decoration character of a room. Distinct
+/// from [`RoomType`] (which is a layout role): a room can be
+/// an `Arena` *and* a `Crypt`, or a `BossRoom` *and* a
+/// `Shrine`. Drives prop-palette selection on the client and
+/// optional theme-specific lighting tints.
+///
+/// Themes are assigned deterministically at floor-gen time
+/// from the floor seed + room index so client and server
+/// agree without any extra wire data — reconstructing the
+/// floor from the seed yields the same theme assignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomTheme {
+    /// Default / unthemed. Mixed prop palette, used as a
+    /// fallback when no specific theme fits a room's
+    /// dimensions.
+    Generic,
+    /// Burial chamber. Sarcophagi, urns, candle stands,
+    /// dead trees, scattered bones; cold lighting.
+    Crypt,
+    /// Soldiers' quarters / armory. Beds, weapon racks,
+    /// anvils, barrels, training dummies.
+    Barracks,
+    /// Books, scrolls, scriptorium props. Bookcases lining
+    /// walls, reading tables with chairs and candles.
+    Library,
+    /// Altar room / sanctum. A central altar centerpiece,
+    /// candle stands flanking it, benches facing inward,
+    /// warm bright lighting.
+    Shrine,
+    /// Cellar / storeroom. Rows of barrels and crates,
+    /// cabinets, sacks, cages.
+    Storage,
+    /// Holding cells. Cages, cot beds, buckets, chains.
+    /// Dim lighting.
+    Prison,
+}
+
+/// Ground-material classification for a tile, used by
+/// gameplay systems that key off of surface type rather than
+/// visual theme — footstep audio is the canonical case
+/// (sand vs stone vs wood vs metal grate), but the same
+/// query is the right hook for surface-aware blood splat
+/// colour, fall-impact one-shots, and any future "what am I
+/// standing on?" lookup.
+///
+/// Distinct from [`RoomTheme`] because theme is about *visual
+/// dressing* (palette, prop set, lighting tint) while surface
+/// is about *physical material* — two themes can share a
+/// surface (Library and Crypt are both Stone), and one theme
+/// can have multiple surfaces if a room ever carries a
+/// per-tile override (a wooden bridge across a stone floor).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurfaceKind {
+    /// Loose sand / dust. Hub default. Soft, scuffing
+    /// footfalls.
+    Sand,
+    /// Cut stone, flagstones, dressed masonry. The default
+    /// for rift floors.
+    #[default]
+    Stone,
+    /// Wooden planks / boards. Hollow, resonant footfalls.
+    Wood,
+    /// Metal grates, plates, chain mail underfoot. Sharp,
+    /// ringing footfalls.
+    Metal,
+    /// Soft turf / damp moss. Muffled footfalls.
+    Grass,
+    /// Bone-strewn / loose-rubble. Crunchy, brittle
+    /// footfalls.
+    Bone,
+}
+
+impl RoomTheme {
+    /// Default surface material for a room of this theme.
+    /// Per-tile overrides (if/when [`crate::Tile`] carries
+    /// them) take precedence over this; this is the room-
+    /// level fallback.
+    pub fn default_surface(self) -> SurfaceKind {
+        match self {
+            // Generic fall-back: every rift floor is built
+            // on dressed stone unless something more
+            // specific overrides it.
+            RoomTheme::Generic => SurfaceKind::Stone,
+            // Cold burial chambers: stone slabs.
+            RoomTheme::Crypt => SurfaceKind::Stone,
+            // Soldier quarters tend to have wooden plank
+            // mezzanines; reads warmer than the corridors.
+            RoomTheme::Barracks => SurfaceKind::Wood,
+            // Libraries: parquet/wood reading floors.
+            RoomTheme::Library => SurfaceKind::Wood,
+            // Altar rooms: polished stone.
+            RoomTheme::Shrine => SurfaceKind::Stone,
+            // Cellars: stone over packed earth, but stone
+            // is the dominant audible surface for booted
+            // feet.
+            RoomTheme::Storage => SurfaceKind::Stone,
+            // Prison: dirty stone, with bone debris in
+            // many cells. Future floors can override per-
+            // tile to Bone if we want crunchier audio in
+            // the cells themselves.
+            RoomTheme::Prison => SurfaceKind::Stone,
+        }
+    }
+}
+
+/// The interior silhouette of a room. Pure tile-grid edits on
+/// top of the BSP rectangle, applied during floor generation
+/// before any prop placement so wall/floor mesh building and
+/// prop placement both see the carved tiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomShape {
+    /// Plain BSP rectangle (the historical default).
+    Rectangular,
+    /// Regular grid of interior pillars (4-9 wall tiles in
+    /// the room's interior). Reads as a colonnade.
+    Pillared,
+    /// Recessed alcoves cut into the perimeter walls. Wider
+    /// rooms get more alcoves; each alcove is 2-3 tiles deep
+    /// and 2 tiles wide.
+    Alcoved,
+    /// Cross/plus-shaped: corner squares walled off. Only
+    /// applied to rooms where both dimensions are >= 9.
+    Cross,
+    /// Approximately round: corner tiles walled off in a
+    /// stepped pattern. Reads as a rotunda.
+    Round,
+}
+
 /// A room with position, dimensions, type, and spawn metadata.
 #[derive(Clone, Debug)]
 pub struct Room {
@@ -25,6 +153,24 @@ pub struct Room {
     pub width: usize,
     pub depth: usize,
     pub room_type: RoomType,
+    /// Decorative theme, see [`RoomTheme`]. Defaults to
+    /// `Generic` until the theme assignment pass runs in
+    /// [`generate_bsp`]; clients should treat that as
+    /// "use mixed palette".
+    pub theme: RoomTheme,
+    /// Interior silhouette, see [`RoomShape`]. Defaults to
+    /// `Rectangular`. Carving happens in `Floor::generate`
+    /// after the BSP rectangle is laid down but before the
+    /// floor is finalised, so the resulting tile grid is
+    /// authoritative.
+    pub shape: RoomShape,
+    /// Optional ground-material override. When `Some`, wins
+    /// over [`RoomTheme::default_surface`] in
+    /// [`crate::Floor::surface_at`]. Used by
+    /// [`crate::Floor::hub`] to force `Sand` regardless of
+    /// the synthetic hub room's `Generic` theme; rift-floor
+    /// rooms leave this `None` and let the theme dispatch.
+    pub surface: Option<SurfaceKind>,
 }
 
 impl Room {
@@ -61,10 +207,7 @@ impl Room {
         let dx = max_off.min(3.0).max(1.5);
         let cx = cx as f32;
         let cz = cz as f32;
-        (
-            Vec3::new(cx - dx, 0.0, cz),
-            Vec3::new(cx + dx, 0.0, cz),
-        )
+        (Vec3::new(cx - dx, 0.0, cz), Vec3::new(cx + dx, 0.0, cz))
     }
 
     /// Get random floor positions inside the room for spawning entities.
@@ -83,16 +226,23 @@ impl Room {
 
     /// Spawn clustered packs of enemies. Returns (pack_center, positions) pairs.
     /// Each pack has `mobs_per_pack` enemies clustered within ~2 tiles of the pack center.
-    pub fn spawn_packs(&self, num_packs: u32, mobs_per_pack: u32, seed: u64) -> Vec<(Vec3, Vec<Vec3>)> {
+    pub fn spawn_packs(
+        &self,
+        num_packs: u32,
+        mobs_per_pack: u32,
+        seed: u64,
+    ) -> Vec<(Vec3, Vec<Vec3>)> {
         let mut rng = super::SimpleRng::new(seed);
         let mut packs = Vec::new();
 
         for _ in 0..num_packs {
             // Pick a pack center somewhere inside the room (with margin)
             let margin = 2.0;
-            let cx = self.x as f32 + margin
+            let cx = self.x as f32
+                + margin
                 + rng.range(0, ((self.width as f32 - margin * 2.0).max(1.0)) as u32) as f32;
-            let cz = self.z as f32 + margin
+            let cz = self.z as f32
+                + margin
                 + rng.range(0, ((self.depth as f32 - margin * 2.0).max(1.0)) as u32) as f32;
             let center = Vec3::new(cx, 0.5, cz);
 

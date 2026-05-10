@@ -329,6 +329,15 @@ pub struct NetClient {
     /// off from a recent server correction. Decays exponentially
     /// each frame so big snaps don't visibly teleport the camera.
     pub(super) correction_error: Vec3,
+    /// Visual Y position for the local player, smoothed toward
+    /// the kinematic Y each frame. The kinematic snaps instantly
+    /// to the per-tile floor elevation (so collision and
+    /// projectile arcs use the authoritative height), but the
+    /// avatar mesh + camera are driven by `visual_y` so stepping
+    /// onto a raised dais glides up over a few frames instead
+    /// of teleporting. `None` until first prediction frame so we
+    /// don't lerp from origin.
+    pub(super) visual_y: Option<f32>,
     /// Latest aim direction (XZ, world-space) the binary has handed
     /// us via `set_aim`. Shipped on the next outbound `InputCmd` so
     /// the server can replicate it to remote observers and keep
@@ -418,6 +427,7 @@ impl NetClient {
             input_history: VecDeque::new(),
             predict_floor: None,
             correction_error: Vec3::ZERO,
+            visual_y: None,
             pending_aim: [0.0, 0.0],
             pending_floor: None,
             floor_index: 0,

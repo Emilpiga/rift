@@ -164,7 +164,7 @@ impl MonsterAsset {
             return Some(set);
         }
         let bytes = self.texture_bytes.as_ref()?;
-        match renderer.upload_shared_texture_from_bytes(bytes) {
+        match renderer.upload_shared_texture(rift_engine::TextureSource::Bytes(bytes)) {
             Ok((tex, set)) => {
                 self.shared_texture = Some(tex);
                 self.shared_set = Some(set);

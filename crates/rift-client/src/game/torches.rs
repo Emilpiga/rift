@@ -10,14 +10,61 @@
 //! local player.
 
 use glam::Vec3;
+use rift_engine::dungeon::{Floor, RoomTheme};
 use rift_engine::renderer::vfx::{presets, EffectId};
 use rift_engine::{PointLight, Renderer};
-use rift_engine::dungeon::Floor;
 
 use super::props::placement::{collect_floor_tiles, tile_centre, SmallRng};
-use super::props::{
-    fantasy::CANDLESTICK_STAND, Props,
-};
+use super::props::{fantasy::CANDLESTICK_STAND, Props};
+
+/// Per-theme torch colour + intensity. Returned as
+/// `(rgb, intensity_mul)` so the base radius stays per-floor
+/// uniform (lighting density and game pacing depend on it)
+/// while the visual character of each room reads cleanly.
+///
+/// Colours are HDR and not normalised — channels above 1.0
+/// drive the bloom pass for a more saturated read on the
+/// brighter themes.
+fn theme_torch_lighting(theme: RoomTheme) -> (Vec3, f32) {
+    match theme {
+        // Cold blue-grey ghostlight. Subtle, dim — the crypt
+        // shouldn't feel hospitable.
+        RoomTheme::Crypt => (Vec3::new(0.55, 0.80, 1.20), 0.85),
+        // Default warm amber. Soldiers' quarters read as
+        // "lived in by humans".
+        RoomTheme::Barracks => (Vec3::new(1.60, 0.85, 0.40), 1.00),
+        // Slightly cooler reading-lamp yellow. Dimmer so
+        // shadows from book stacks read against the warm
+        // amber elsewhere.
+        RoomTheme::Library => (Vec3::new(1.50, 1.05, 0.60), 0.95),
+        // Bright golden — the climactic chamber. Boss rooms
+        // are always Shrine, so this is what the player walks
+        // *toward* down a corridor.
+        RoomTheme::Shrine => (Vec3::new(1.80, 1.15, 0.60), 1.35),
+        // Standard amber, slightly dim. Storage cellars are
+        // utility spaces, not destinations.
+        RoomTheme::Storage => (Vec3::new(1.45, 0.80, 0.40), 0.85),
+        // Sickly green-yellow. Prison cells should feel off.
+        RoomTheme::Prison => (Vec3::new(1.00, 0.95, 0.50), 0.70),
+        // Default warm — used for portal room + corridors.
+        RoomTheme::Generic => (Vec3::new(1.60, 0.85, 0.40), 1.00),
+    }
+}
+
+/// Find which room (if any) contains the given world XZ
+/// position. Returns `None` for tiles in corridors.
+fn room_at(floor: &Floor, x: f32, z: f32) -> Option<&rift_engine::dungeon::Room> {
+    let gx = (x + 0.5).floor() as isize;
+    let gz = (z + 0.5).floor() as isize;
+    if gx < 0 || gz < 0 {
+        return None;
+    }
+    let (gx, gz) = (gx as usize, gz as usize);
+    floor
+        .rooms
+        .iter()
+        .find(|r| gx >= r.x && gx < r.x + r.width && gz >= r.z && gz < r.z + r.depth)
+}
 
 /// One placed torch: the warm point light it casts and the live
 /// VFX effect id, kept around so we can despawn it on floor change.
@@ -25,6 +72,16 @@ use super::props::{
 pub struct Torch {
     pub light: PointLight,
     pub vfx: EffectId,
+    /// Per-torch audio emitter for the looping flame crackle.
+    /// `None` when the audio system is unavailable or the
+    /// asset failed to load (the torch otherwise behaves
+    /// exactly the same — silent). Despawned in [`clear`]
+    /// alongside the VFX. Volume is driven each frame by
+    /// [`update_lights`] from the same flicker + distance +
+    /// rank fade as the light itself, so the torch sounds
+    /// audibly louder when it visually brightens and fades
+    /// out cleanly when it slips past the rank cap.
+    pub audio: Option<rift_audio::EmitterId>,
     /// Random phase offset in seconds, used to decorrelate
     /// flicker between torches so a corridor lined with sconces
     /// doesn't pulse in unison.
@@ -39,7 +96,9 @@ pub struct TorchSystem {
 
 impl TorchSystem {
     pub fn new() -> Self {
-        Self { torches: Vec::new() }
+        Self {
+            torches: Vec::new(),
+        }
     }
 
     /// Walk the floor, place torches on a sparse subset of
@@ -92,39 +151,57 @@ impl TorchSystem {
             let (tx, tz, (ox, oz)) = border[idx];
             let centre = tile_centre(tx, tz);
 
-            // Probe the candlestick mesh height so the flame can
-            // sit on top of the actual model rather than a magic
-            // 1.7 m. `mesh_bounds` returns the gltf-local AABB;
-            // we apply the asset's scale to get world height.
-            // Falls back to a sensible default if the mesh fails
-            // to load (e.g. on first frame before the asset
-            // server has resolved it).
-            let candle_top = props
-                .assets()
-                .mesh_bounds(CANDLESTICK_STAND.gltf)
-                .map(|(mn, mx)| (mx.y - mn.y) * CANDLESTICK_STAND.scale)
-                .unwrap_or(1.05);
-
-            // Flame position: directly above the candle's top.
-            // Push the prop slightly toward the wall (the prop
-            // spawner's WallAligned hint snaps it the rest of
-            // the way) and lift the flame ~5 cm above the
-            // candle's wax for the wick.
+            // Probe the candlestick mesh AABB so we can both
+            // size the flame to the model's height and
+            // replicate the WallAligned snap calculation
+            // exactly (so the flame sits on top of where
+            // `props.spawn` actually places the candle).
+            let bounds = props.assets().mesh_bounds(CANDLESTICK_STAND.gltf);
+            let s = CANDLESTICK_STAND.scale;
+            let candle_top = bounds.map(|(mn, mx)| (mx.y - mn.y) * s).unwrap_or(1.05);
+            // Half-extent of the candle along the wall normal,
+            // matching the prop spawner's WallAligned logic.
+            // Falls back to a conservative 0.10 m if bounds
+            // aren't available yet.
+            let half_along = bounds
+                .map(|(mn, mx)| {
+                    if ox != 0 {
+                        (mx.x - mn.x) * 0.5 * s
+                    } else {
+                        (mx.z - mn.z) * 0.5 * s
+                    }
+                })
+                .unwrap_or(0.10);
+            // Distance to push from tile centre toward the
+            // wall. The spawner uses `0.5 - half - 0.04` (4 cm
+            // air gap from the wall face); we add a few extra
+            // cm here so authored candle bases that have a
+            // wider footprint than their bounding box —
+            // sculpted scrollwork, splayed feet — clear the
+            // wall surface cleanly. Previously this was
+            // 0.30 m *plus* the spawner's own snap, which
+            // double-pushed the candle into the wall.
+            let push = (0.5 - half_along - 0.08).max(0.0);
+            // Lift to the tile's authored elevation so a
+            // torch sconce on a raised dais or sunken-pit
+            // wall sits on the room's floor surface, not at
+            // y=0. Without this the candle hovers above
+            // (or sinks below) every non-base-elevation
+            // floor tile and its flame VFX renders detached
+            // from the model.
+            let tile_y = floor.tile_floor_y_at(centre.x, centre.z);
             let prop_anchor = Vec3::new(
-                centre.x + ox as f32 * 0.30,
-                0.0,
-                centre.z + oz as f32 * 0.30,
+                centre.x + ox as f32 * push,
+                tile_y,
+                centre.z + oz as f32 * push,
             );
-            let flame_pos = Vec3::new(
-                prop_anchor.x,
-                candle_top + 0.05,
-                prop_anchor.z,
-            );
+            let flame_pos = Vec3::new(prop_anchor.x, tile_y + candle_top + 0.05, prop_anchor.z);
 
             // Spacing check against already-placed torches.
-            let too_close = self.torches.iter().any(|t| {
-                t.light.position.distance_squared(flame_pos) < MIN_SPACING_SQ
-            });
+            let too_close = self
+                .torches
+                .iter()
+                .any(|t| t.light.position.distance_squared(flame_pos) < MIN_SPACING_SQ);
             if too_close {
                 continue;
             }
@@ -132,9 +209,12 @@ impl TorchSystem {
             // Spawn the candlestick model. Yaw faces the candle
             // away from the wall (toward the room) so the wick
             // and any sculpted detail reads at viewer angle.
-            // `WallAligned` placement in the asset table snaps
-            // the back face to the wall; we just supply the
-            // wall direction.
+            // We pass `wall_dir = (0, 0)` to *suppress* the
+            // spawner's WallAligned snap because we already
+            // computed the correct push above (using the same
+            // formula). Otherwise the snap stacks on top of
+            // our offset and the prop ends up clipped into
+            // the wall.
             let yaw = (ox as f32).atan2(oz as f32);
             let _ = props.spawn(
                 world,
@@ -142,26 +222,38 @@ impl TorchSystem {
                 &CANDLESTICK_STAND,
                 prop_anchor,
                 yaw,
-                (ox, oz),
+                (0, 0),
                 None,
             );
 
             let vfx = renderer.vfx_system.spawn(presets::wall_torch(), flame_pos);
 
-            // Warm amber light. Generous radius so a single
-            // torch lights its host wall + a chunk of floor;
-            // the per-frame nearest-8 selection in
-            // `update_lights` then fades the outermost torch
-            // smoothly so swaps don't pop as the player walks.
+            // Themed light. Look up the torch tile's parent
+            // room (if any) and tint the point light by its
+            // theme: cool blue in crypts, warm gold in
+            // shrines, dim sickly green in prisons, etc. The
+            // VFX flame stays the default warm sprite — only
+            // the cast-light colour shifts, which keeps the
+            // visible flame consistent across the floor while
+            // the room itself reads with its own palette.
+            let theme = room_at(floor, flame_pos.x, flame_pos.z)
+                .map(|r| r.theme)
+                .unwrap_or(RoomTheme::Generic);
+            let (color, intensity_mul) = theme_torch_lighting(theme);
             let light = PointLight {
                 position: flame_pos + Vec3::new(0.0, 0.05, 0.0),
-                color: Vec3::new(1.60, 0.85, 0.40),
+                color,
                 radius: 11.0,
-                intensity: 1.55,
+                intensity: 1.55 * intensity_mul,
             };
             self.torches.push(Torch {
                 light,
                 vfx,
+                // Audio emitter spawned below in `place_audio`
+                // (caller threads the optional `AudioSystem`
+                // separately so this method's signature
+                // stays narrow).
+                audio: None,
                 // Spread phases over a wide range so the
                 // flicker sum-of-sines (with periods 0.7..3.1 s)
                 // is fully decorrelated across torches.
@@ -219,18 +311,28 @@ impl TorchSystem {
 
         // Number of candidates to consider; we'll rank-fade
         // anything above `RANK_FULL` and drop everything past
-        // `RANK_CAP`. Matches the renderer's
-        // `MAX_POINT_LIGHTS = 16`. VFX-driven lights live in
-        // a separate `vfx_lights` pool that's packed first,
-        // so torches no longer need to leave headroom for
-        // projectile trails.
-        const RANK_CAP: usize = 16;
-        const RANK_FULL: usize = 14;
+        // `RANK_CAP`. Stays under the renderer's
+        // `MAX_POINT_LIGHTS = 16` to leave headroom for the
+        // portal system's per-frame light pushes (descend +
+        // extract portal can each grab a slot in the boss
+        // room corridor) and for the lightning-storm flash
+        // light in the hub. VFX-driven projectile lights live
+        // in a separate `vfx_lights` pool that's packed first
+        // in the renderer merge, so torches don't need to
+        // leave room for those.
+        const RANK_CAP: usize = 14;
+        const RANK_FULL: usize = 12;
 
         let mut scored: Vec<(f32, PointLight, f32)> = self
             .torches
             .iter()
-            .map(|t| (t.light.position.distance_squared(player_pos), t.light, t.flicker_phase))
+            .map(|t| {
+                (
+                    t.light.position.distance_squared(player_pos),
+                    t.light,
+                    t.flicker_phase,
+                )
+            })
             .filter(|(d2, _, _)| *d2 <= max_d2)
             .collect();
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -275,8 +377,7 @@ impl TorchSystem {
             let fast = (t * 11.3).sin() * 0.5
                 + (t * 17.7 + 1.3).sin() * 0.3
                 + (t * 23.1 + 2.7).sin() * 0.2;
-            let slow = (t * 1.9).sin() * 0.5
-                + (t * 3.1 + 0.7).sin() * 0.5;
+            let slow = (t * 1.9).sin() * 0.5 + (t * 3.1 + 0.7).sin() * 0.5;
             // Combined modulation in roughly [-1, 1]; scale
             // to ±15% intensity so the flicker is obviously
             // alive without strobing into the next slot's
@@ -305,7 +406,136 @@ impl TorchSystem {
     pub fn clear(&mut self, renderer: &mut Renderer) {
         for t in self.torches.drain(..) {
             renderer.vfx_system.despawn(t.vfx);
+            // Audio emitters belong to a separate system; the
+            // caller (FloorManager) owns the bridge call.
+            // We just drop the id by clearing the vector.
         }
         renderer.point_lights.clear();
+    }
+
+    /// Despawn every torch's audio emitter via `audio`. Split
+    /// from [`clear`] so callers that don't have audio access
+    /// (tools, tests) can still tear down lights + VFX.
+    pub fn clear_audio(&mut self, audio: &mut rift_audio::AudioSystem) {
+        for t in self.torches.iter_mut() {
+            if let Some(id) = t.audio.take() {
+                audio.despawn_emitter(id);
+            }
+        }
+    }
+
+    /// Spawn one looping flame-crackle emitter per torch. Call
+    /// once after [`Self::place`]. Idempotent: torches that
+    /// already have an emitter are skipped, so re-running
+    /// after a partial failure is safe.
+    ///
+    /// Audio is intentionally not spawned inside `place` so
+    /// the placement code stays decoupled from the audio
+    /// crate — callers that don't have audio (tests, tools)
+    /// can still build a torch system with lights + VFX.
+    pub fn place_audio(&mut self, audio: &mut rift_audio::AudioSystem) {
+        // Authored once per call — every torch shares the same
+        // source spec, so the underlying `StaticSoundData` is
+        // loaded once and the cache hands out cheap clones.
+        // Falloff is short (3 m full → 14 m silent): the player
+        // should hear the nearest sconce clearly and have the
+        // farther ones fade into ambience. Going wider would
+        // turn a corridor of torches into a wash.
+        let spec = rift_audio::SoundSpec {
+            path: "ambient/torch_crackle.wav".into(),
+            volume: 0.35,
+            min_distance: 3.0,
+            max_distance: 14.0,
+            looping: true,
+        };
+        for t in self.torches.iter_mut() {
+            if t.audio.is_some() {
+                continue;
+            }
+            t.audio = audio.spawn_emitter(&spec, t.light.position);
+        }
+    }
+
+    /// Per-frame: drive each torch's audio-emitter volume from
+    /// the same distance + rank + flicker curves the visual
+    /// light uses. The volume scaling intentionally mirrors
+    /// [`Self::update_lights`] so the player hears what they
+    /// see — a torch that just brightened is also louder, and
+    /// one that's fading past the rank cap is also quieter.
+    /// Call after `update_lights` each frame.
+    pub fn tick_audio(
+        &self,
+        audio: &mut rift_audio::AudioSystem,
+        player_pos: Vec3,
+        time: f32,
+        fog_start: f32,
+        fog_end: f32,
+    ) {
+        if self.torches.is_empty() {
+            return;
+        }
+        let cutoff = fog_end + 2.0;
+        let max_d2 = cutoff * cutoff;
+
+        // Same RANK_CAP / RANK_FULL as `update_lights` so the
+        // audible set tracks the visible set.
+        const RANK_CAP: usize = 14;
+        const RANK_FULL: usize = 12;
+
+        let mut scored: Vec<(f32, usize)> = self
+            .torches
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.light.position.distance_squared(player_pos), i))
+            .filter(|(d2, _)| *d2 <= max_d2)
+            .collect();
+        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Track which torches were in the active set so the
+        // rest can be muted (kept playing but at zero volume —
+        // cheaper than stop/restart, and preserves the loop's
+        // phase so a torch returning to audible range fades
+        // back in mid-crackle rather than restarting).
+        let mut audible = vec![false; self.torches.len()];
+
+        for (rank, (d2, idx)) in scored.into_iter().take(RANK_CAP).enumerate() {
+            let t = &self.torches[idx];
+            let Some(em) = t.audio else { continue };
+            let d = d2.sqrt();
+            let fog_range = (fog_end - fog_start).max(0.001);
+            let raw = ((fog_end - d) / fog_range).clamp(0.0, 1.0);
+            let dist_s = rift_math::smoothstep(raw);
+            let rank_s = if rank < RANK_FULL {
+                1.0
+            } else {
+                let span = (RANK_CAP - RANK_FULL) as f32;
+                let r = (rank - RANK_FULL) as f32 + 1.0;
+                let ts = (1.0 - (r / span)).clamp(0.0, 1.0);
+                rift_math::smoothstep(ts)
+            };
+            let phase = t.flicker_phase;
+            let tt = time + phase;
+            let fast = (tt * 11.3).sin() * 0.5
+                + (tt * 17.7 + 1.3).sin() * 0.3
+                + (tt * 23.1 + 2.7).sin() * 0.2;
+            let slow = (tt * 1.9).sin() * 0.5 + (tt * 3.1 + 0.7).sin() * 0.5;
+            let flicker = fast * 0.10 + slow * 0.05;
+            let volume = (dist_s * rank_s * (1.0 + flicker)).max(0.0);
+            audio.set_emitter_position(em, t.light.position);
+            audio.set_emitter_volume(em, volume);
+            audible[idx] = true;
+        }
+
+        // Mute everything outside the active set so a torch
+        // that just fell off the rank cap doesn't keep
+        // bleeding through at full volume.
+        for (i, t) in self.torches.iter().enumerate() {
+            if audible[i] {
+                continue;
+            }
+            if let Some(em) = t.audio {
+                audio.set_emitter_volume(em, 0.0);
+            }
+        }
     }
 }

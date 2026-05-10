@@ -66,6 +66,21 @@ pub struct EnvTextures {
     /// light real bite, and parallax sells the sense of
     /// depth on the closer flanks.
     pub cliff_rocks_set: Option<vk::DescriptorSet>,
+    /// Bright marble-like wall pack used for "shrine"-themed
+    /// rooms so they read as sacred / temple space against
+    /// the default oxblood brick. Lazy-loaded; falls back to
+    /// `bricks_wall_set` when the decode hasn't completed.
+    pub white_bricks_wall_set: Option<vk::DescriptorSet>,
+    /// Ornate gilded-tile floor pack used for shrine /
+    /// boss-room interiors. Lazy-loaded; falls back to
+    /// `ground_tiles_set` when not ready.
+    pub blue_gold_floor_set: Option<vk::DescriptorSet>,
+    /// Wood plank floor pack used for "barracks", "library",
+    /// and "storage" rooms — gives quartered, lived-in
+    /// rooms a different surface read from the stone
+    /// corridors. Lazy-loaded; falls back to
+    /// `ground_tiles_set` when not ready.
+    pub wood_planks_set: Option<vk::DescriptorSet>,
     textures: Vec<Texture>,
     /// Background-decode worker for authored material packs.
     /// Lazily spawned the first time `tick_world_preload` is
@@ -92,6 +107,9 @@ impl Default for EnvTextures {
             ground_tiles_set: None,
             desert_rocks_set: None,
             cliff_rocks_set: None,
+            white_bricks_wall_set: None,
+            blue_gold_floor_set: None,
+            wood_planks_set: None,
             textures: Vec::new(),
             decode_worker: None,
         }
@@ -107,7 +125,9 @@ impl EnvTextures {
     pub fn ensure(&mut self, renderer: &mut Renderer) {
         if self.floor_set.is_none() {
             let pixels = generate_floor(FLOOR_SIZE);
-            match renderer.upload_shared_texture_from_rgba(FLOOR_SIZE, FLOOR_SIZE, &pixels) {
+            match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
+                width: FLOOR_SIZE, height: FLOOR_SIZE, pixels: &pixels,
+            }) {
                 Ok((tex, set)) => {
                     self.textures.push(tex);
                     self.floor_set = Some(set);
@@ -117,7 +137,9 @@ impl EnvTextures {
         }
         if self.wall_set.is_none() {
             let pixels = generate_wall(WALL_SIZE);
-            match renderer.upload_shared_texture_from_rgba(WALL_SIZE, WALL_SIZE, &pixels) {
+            match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
+                width: WALL_SIZE, height: WALL_SIZE, pixels: &pixels,
+            }) {
                 Ok((tex, set)) => {
                     self.textures.push(tex);
                     self.wall_set = Some(set);
@@ -139,6 +161,10 @@ impl EnvTextures {
         self.bricks_wall_set = None;
         self.ground_tiles_set = None;
         self.desert_rocks_set = None;
+        self.cliff_rocks_set = None;
+        self.white_bricks_wall_set = None;
+        self.blue_gold_floor_set = None;
+        self.wood_planks_set = None;
     }
 
     /// Lazy-initialise the grass tile used by the outdoor hub.
@@ -149,7 +175,9 @@ impl EnvTextures {
             return;
         }
         let pixels = generate_grass(FLOOR_SIZE);
-        match renderer.upload_shared_texture_from_rgba(FLOOR_SIZE, FLOOR_SIZE, &pixels) {
+        match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
+            width: FLOOR_SIZE, height: FLOOR_SIZE, pixels: &pixels,
+        }) {
             Ok((tex, set)) => {
                 self.textures.push(tex);
                 self.grass_floor_set = Some(set);
@@ -166,9 +194,9 @@ impl EnvTextures {
         if self.demon_ground_set.is_some() {
             return;
         }
-        match renderer.upload_shared_texture_from_file(
-            "assets/textures/demon_ground_01.jpg",
-        ) {
+        match renderer.upload_shared_texture(rift_engine::TextureSource::File(
+            std::path::Path::new("assets/textures/demon_ground_01.jpg"),
+        )) {
             Ok((tex, set)) => {
                 self.textures.push(tex);
                 self.demon_ground_set = Some(set);
@@ -194,7 +222,9 @@ impl EnvTextures {
         // we need more detail to keep features crisp.
         const CRIMSON_SIZE: u32 = 512;
         let pixels = generate_crimson_stone(CRIMSON_SIZE);
-        match renderer.upload_shared_texture_from_rgba(CRIMSON_SIZE, CRIMSON_SIZE, &pixels) {
+        match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
+            width: CRIMSON_SIZE, height: CRIMSON_SIZE, pixels: &pixels,
+        }) {
             Ok((tex, set)) => {
                 self.textures.push(tex);
                 self.crimson_stone_set = Some(set);
@@ -216,14 +246,14 @@ impl EnvTextures {
             return;
         }
         use std::path::Path;
-        let result = renderer.upload_shared_pbr_material_split_mr(
-            Path::new("assets/textures/bricks_wall/bricks_wall_07_baseColor_2k.png"),
-            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png")),
-            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png")),
-            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png")),
-            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png")),
-            Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_height_2k.png")),
-        );
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/bricks_wall/bricks_wall_07_baseColor_2k.png"),
+            normal: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png")),
+            metallic: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png")),
+            roughness: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png")),
+            height: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_height_2k.png")),
+        });
         match result {
             Ok((mut texs, set)) => {
                 self.textures.append(&mut texs);
@@ -241,14 +271,14 @@ impl EnvTextures {
             return;
         }
         use std::path::Path;
-        let result = renderer.upload_shared_pbr_material_split_mr(
-            Path::new("assets/textures/ground_tiles/ground_tiles_25_basecolor_2k.png"),
-            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png")),
-            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png")),
-            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png")),
-            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png")),
-            Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_height_2k.png")),
-        );
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/ground_tiles/ground_tiles_25_basecolor_2k.png"),
+            normal: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png")),
+            metallic: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png")),
+            roughness: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png")),
+            height: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_height_2k.png")),
+        });
         match result {
             Ok((mut texs, set)) => {
                 self.textures.append(&mut texs);
@@ -276,14 +306,14 @@ impl EnvTextures {
             return;
         }
         use std::path::Path;
-        let result = renderer.upload_shared_pbr_material_split_mr(
-            Path::new("assets/textures/sand/sand_04_color_2k.png"),
-            Some(Path::new("assets/textures/sand/sand_04_normal_gl_2k.png")),
-            None,
-            Some(Path::new("assets/textures/sand/sand_04_roughness_2k.png")),
-            Some(Path::new("assets/textures/sand/sand_04_ambient_occlusion_2k.png")),
-            Some(Path::new("assets/textures/sand/sand_04_height_2k.png")),
-        );
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/sand/sand_04_color_2k.png"),
+            normal: Some(Path::new("assets/textures/sand/sand_04_normal_gl_2k.png")),
+            metallic: None,
+            roughness: Some(Path::new("assets/textures/sand/sand_04_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/sand/sand_04_ambient_occlusion_2k.png")),
+            height: Some(Path::new("assets/textures/sand/sand_04_height_2k.png")),
+        });
         match result {
             Ok((mut texs, set)) => {
                 log::info!("env: bound sand PBR pack (hub platform)");
@@ -305,20 +335,93 @@ impl EnvTextures {
             return;
         }
         use std::path::Path;
-        let result = renderer.upload_shared_pbr_material_split_mr(
-            Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_color_2k.png"),
-            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png")),
-            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png")),
-            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png")),
-            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png")),
-            Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png")),
-        );
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_color_2k.png"),
+            normal: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png")),
+            metallic: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png")),
+            roughness: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png")),
+            height: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png")),
+        });
         match result {
             Ok((mut texs, set)) => {
                 self.textures.append(&mut texs);
                 self.cliff_rocks_set = Some(set);
             }
             Err(e) => log::warn!("env sandy_cliff_rocks PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the bright marble-like wall pack used
+    /// for shrine-themed rooms. Same channel layout as
+    /// [`Self::ensure_bricks_wall`].
+    pub fn ensure_white_bricks_wall(&mut self, renderer: &mut Renderer) {
+        if self.white_bricks_wall_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_color_2k.png"),
+            normal: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_normal_gl_2k.png")),
+            metallic: None,
+            roughness: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_ambient_occlusion_2k.png")),
+            height: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_height_2k.png")),
+        });
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.white_bricks_wall_set = Some(set);
+            }
+            Err(e) => log::warn!("env white_bricks_wall PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the gilded blue+gold floor tile pack
+    /// used for shrine-themed rooms.
+    pub fn ensure_blue_gold_floor(&mut self, renderer: &mut Renderer) {
+        if self.blue_gold_floor_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Base_Color_2k.png"),
+            normal: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Normal_gl_2k.png")),
+            metallic: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Metallic_2k.png")),
+            roughness: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Ambient_Occlusion_2k.png")),
+            height: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Height_2k.png")),
+        });
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.blue_gold_floor_set = Some(set);
+            }
+            Err(e) => log::warn!("env blue_gold_floor PBR upload failed: {}", e),
+        }
+    }
+
+    /// Lazy-initialise the wood plank floor pack used for
+    /// barracks / library / storage themed rooms.
+    pub fn ensure_wood_planks(&mut self, renderer: &mut Renderer) {
+        if self.wood_planks_set.is_some() {
+            return;
+        }
+        use std::path::Path;
+        let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
+            basecolor: Path::new("assets/textures/wood_planks/wood_planks_07_color_2k.png"),
+            normal: Some(Path::new("assets/textures/wood_planks/wood_planks_07_normal_gl_2k.png")),
+            metallic: None,
+            roughness: Some(Path::new("assets/textures/wood_planks/wood_planks_07_roughness_2k.png")),
+            ao: Some(Path::new("assets/textures/wood_planks/wood_planks_07_ambient_occlusion_2k.png")),
+            height: Some(Path::new("assets/textures/wood_planks/wood_planks_07_height_2k.png")),
+        });
+        match result {
+            Ok((mut texs, set)) => {
+                self.textures.append(&mut texs);
+                self.wood_planks_set = Some(set);
+            }
+            Err(e) => log::warn!("env wood_planks PBR upload failed: {}", e),
         }
     }
 
@@ -354,7 +457,7 @@ impl EnvTextures {
             match done {
                 DecodeOutput::DesertRocks(pack) => {
                     if self.desert_rocks_set.is_none() {
-                        match renderer.upload_shared_pbr_material_decoded(pack) {
+                        match renderer.upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack)) {
                             Ok((mut texs, set)) => {
                                 self.textures.append(&mut texs);
                                 self.desert_rocks_set = Some(set);
@@ -367,7 +470,7 @@ impl EnvTextures {
                         }
                     }
                 }
-                DecodeOutput::Pbr(name, pack) => match renderer.upload_shared_pbr_material_decoded(pack)
+                DecodeOutput::Pbr(name, pack) => match renderer.upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
                 {
                     Ok((mut texs, set)) => {
                         self.textures.append(&mut texs);
@@ -385,6 +488,21 @@ impl EnvTextures {
                             "bricks_wall" => {
                                 if self.bricks_wall_set.is_none() {
                                     self.bricks_wall_set = Some(set);
+                                }
+                            }
+                            "white_bricks_wall" => {
+                                if self.white_bricks_wall_set.is_none() {
+                                    self.white_bricks_wall_set = Some(set);
+                                }
+                            }
+                            "blue_gold_floor" => {
+                                if self.blue_gold_floor_set.is_none() {
+                                    self.blue_gold_floor_set = Some(set);
+                                }
+                            }
+                            "wood_planks" => {
+                                if self.wood_planks_set.is_none() {
+                                    self.wood_planks_set = Some(set);
                                 }
                             }
                             other => log::warn!(
@@ -453,6 +571,9 @@ impl DecodeWorker {
             Box::new(|| decode_pbr_pack("cliff_rocks", &CLIFF_ROCKS_PATHS)),
             Box::new(|| decode_pbr_pack("ground_tiles", &GROUND_TILES_PATHS)),
             Box::new(|| decode_pbr_pack("bricks_wall", &BRICKS_WALL_PATHS)),
+            Box::new(|| decode_pbr_pack("wood_planks", &WOOD_PLANKS_PATHS)),
+            Box::new(|| decode_pbr_pack("white_bricks_wall", &WHITE_BRICKS_WALL_PATHS)),
+            Box::new(|| decode_pbr_pack("blue_gold_floor", &BLUE_GOLD_FLOOR_PATHS)),
         ];
         let (tx, rx) = mpsc::channel();
         let in_flight = jobs.len();
@@ -522,6 +643,35 @@ const BRICKS_WALL_PATHS: PbrPackPaths = PbrPackPaths {
     roughness: Some("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png"),
     ao: Some("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png"),
     height: Some("assets/textures/bricks_wall/bricks_wall_07_height_2k.png"),
+};
+
+const WHITE_BRICKS_WALL_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/white_bricks_wall/white_bricks_wall_01_color_2k.png",
+    normal: Some("assets/textures/white_bricks_wall/white_bricks_wall_01_normal_gl_2k.png"),
+    // No metallic map shipped — pure dielectric stone.
+    metallic: None,
+    roughness: Some("assets/textures/white_bricks_wall/white_bricks_wall_01_roughness_2k.png"),
+    ao: Some("assets/textures/white_bricks_wall/white_bricks_wall_01_ambient_occlusion_2k.png"),
+    height: Some("assets/textures/white_bricks_wall/white_bricks_wall_01_height_2k.png"),
+};
+
+const BLUE_GOLD_FLOOR_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Base_Color_2k.png",
+    normal: Some("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Normal_gl_2k.png"),
+    metallic: Some("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Metallic_2k.png"),
+    roughness: Some("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Roughness_2k.png"),
+    ao: Some("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Ambient_Occlusion_2k.png"),
+    height: Some("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Height_2k.png"),
+};
+
+const WOOD_PLANKS_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/wood_planks/wood_planks_07_color_2k.png",
+    normal: Some("assets/textures/wood_planks/wood_planks_07_normal_gl_2k.png"),
+    // Wood is dielectric — no metallic map.
+    metallic: None,
+    roughness: Some("assets/textures/wood_planks/wood_planks_07_roughness_2k.png"),
+    ao: Some("assets/textures/wood_planks/wood_planks_07_ambient_occlusion_2k.png"),
+    height: Some("assets/textures/wood_planks/wood_planks_07_height_2k.png"),
 };
 
 fn decode_pbr_pack(name: &'static str, paths: &PbrPackPaths) -> DecodeOutput {

@@ -57,6 +57,35 @@ impl App for RiftApp {
                 self.apply_server_pushed_state(renderer);
             }
         }
+
+        // Audio housekeeping: refresh the listener pose from
+        // the player's camera, then tick the mixer so finished
+        // one-shots are reaped and dead emitters recycle their
+        // slots. Done after every gameplay system has had a
+        // chance to spawn / move emitters this frame, so the
+        // listener pose used for spatialisation matches what
+        // the player sees on the rendered frame.
+        if let Some(audio) = self.state.audio.as_mut() {
+            // Listener at the camera position, oriented along
+            // the look vector. Third-person camera puts the
+            // ear roughly where the eye is, which keeps stereo
+            // panning consistent with screen-space \u2014 a sound
+            // on the right of the screen pans right.
+            let cam = &renderer.camera;
+            let forward = (cam.target - cam.position).normalize_or_zero();
+            let orientation = if forward.length_squared() > 1e-6 {
+                glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, forward)
+            } else {
+                glam::Quat::IDENTITY
+            };
+            audio.set_listener(cam.position, orientation);
+            // Push every entity-bound emitter's transform +
+            // intensity into the mixer before the tick. Cheap
+            // single-query walk; see
+            // `rift_client::game::audio::tick_audio_emitters`.
+            rift_client::game::audio::tick_audio_emitters(&self.state.world, audio);
+            audio.tick();
+        }
     }
 
     fn shutdown(&mut self, renderer: &mut Renderer) {
@@ -152,12 +181,13 @@ impl RiftApp {
         let Some(net) = net.as_mut() else { return };
 
         net.sync_local_player(&mut state.world);
-        net.sync_avatars(&mut state.world, renderer, &mut state.anim_cache, &mut state.avatar_cosmetics_cache);
-        net.sync_enemies(
+        net.sync_avatars(
             &mut state.world,
             renderer,
-            &mut state.floor_mgr.monsters,
+            &mut state.anim_cache,
+            &mut state.avatar_cosmetics_cache,
         );
+        net.sync_enemies(&mut state.world, renderer, &mut state.floor_mgr.monsters);
         net.sync_projectiles(renderer, dt);
 
         // Spawn loot-pillar visuals from snapshot rows. The
@@ -193,34 +223,22 @@ impl RiftApp {
         // progress + channel counts; we mirror the set so a
         // fresh joiner sees an existing shrine and a completed
         // shrine vanishes the tick its row drops out.
-        let shrine_rows: std::collections::HashMap<
-            rift_net::NetId,
-            (glam::Vec3, f32, u8, u8),
-        > = net
-            .remote
-            .values()
-            .filter_map(|re| match re.kind {
-                rift_net::messages::EntityKind::ReviveShrine {
-                    progress,
-                    channelers,
-                    required,
-                } => Some((
-                    re.net_id,
-                    (
-                        re.position,
-                        progress as f32 / 255.0,
+        let shrine_rows: std::collections::HashMap<rift_net::NetId, (glam::Vec3, f32, u8, u8)> =
+            net.remote
+                .values()
+                .filter_map(|re| match re.kind {
+                    rift_net::messages::EntityKind::ReviveShrine {
+                        progress,
                         channelers,
                         required,
-                    ),
-                )),
-                _ => None,
-            })
-            .collect();
-        rift_client::game::shrine_system::sync_visuals(
-            &mut state.shrines,
-            renderer,
-            &shrine_rows,
-        );
+                    } => Some((
+                        re.net_id,
+                        (re.position, progress as f32 / 255.0, channelers, required),
+                    )),
+                    _ => None,
+                })
+                .collect();
+        rift_client::game::shrine_system::sync_visuals(&mut state.shrines, renderer, &shrine_rows);
         // Drop the local channel intent if the shrine we were
         // channeling no longer exists (completion / floor change).
         if let Some(target) = state.shrines.local_intent {
@@ -250,29 +268,49 @@ impl RiftApp {
         }
     }
 
-    fn handle_world_event(
-        &mut self,
-        ev: rift_net::messages::WorldEvent,
-        renderer: &mut Renderer,
-    ) {
+    fn handle_world_event(&mut self, ev: rift_net::messages::WorldEvent, renderer: &mut Renderer) {
         use rift_net::messages::WorldEvent;
         match ev {
-            WorldEvent::Damage { target, amount, crit, position } => {
+            WorldEvent::Damage {
+                target,
+                amount,
+                crit,
+                position,
+            } => {
                 self.handle_damage_event(target, amount, crit, position, renderer);
             }
-            WorldEvent::Death { entity, hit_dir, .. } => {
+            WorldEvent::Death {
+                entity, hit_dir, ..
+            } => {
                 self.handle_death_event(entity, hit_dir, renderer);
             }
-            WorldEvent::AbilityCast { caster, ability, dir, target, origin, .. } => {
+            WorldEvent::AbilityCast {
+                caster,
+                ability,
+                dir,
+                target,
+                origin,
+                ..
+            } => {
                 self.handle_ability_cast_event(caster, ability, dir, target, origin, renderer);
             }
             WorldEvent::Hit { target, .. } => {
                 log::debug!("net: Hit target={target:?}");
             }
-            WorldEvent::LootDropped { loot, item, position } => {
+            WorldEvent::LootDropped {
+                loot,
+                item,
+                position,
+            } => {
                 self.handle_loot_dropped_event(loot, item, position, renderer);
             }
-            WorldEvent::ChannelTick { caster, ability, position, dir, .. } => {
+            WorldEvent::ChannelTick {
+                caster,
+                ability,
+                position,
+                dir,
+                ..
+            } => {
                 self.handle_channel_tick_event(caster, ability, position, dir);
             }
             WorldEvent::ChannelEnd { caster, ability } => {
@@ -284,17 +322,25 @@ impl RiftApp {
             WorldEvent::PlayersRevived { entities } => {
                 self.handle_players_revived_event(entities, renderer);
             }
-            WorldEvent::Heal { caster, target, amount, over_time, position } => {
+            WorldEvent::Heal {
+                caster,
+                target,
+                amount,
+                over_time,
+                position,
+            } => {
                 self.handle_heal_event(caster, target, amount, over_time, position, renderer);
             }
-            WorldEvent::EnemyTelegraph { source, kind, position } => {
+            WorldEvent::EnemyTelegraph {
+                source,
+                kind,
+                position,
+            } => {
                 // Stub: a future audio system will play a
                 // role-specific wind-up cue keyed on `kind`.
                 // Logging at trace keeps the console quiet
                 // unless you actually want to debug telegraphs.
-                log::trace!(
-                    "net: EnemyTelegraph source={source:?} kind={kind} pos={position:?}"
-                );
+                log::trace!("net: EnemyTelegraph source={source:?} kind={kind} pos={position:?}");
                 let _ = (source, kind, position, renderer);
             }
         }
@@ -303,7 +349,14 @@ impl RiftApp {
     /// Spawn floating combat text for damage we just took or
     /// dealt. Direct hits go through `spawn_player_damage` so
     /// they're styled distinctly from damage we dealt out.
-    fn handle_damage_event(&mut self, target: rift_net::NetId, amount: f32, crit: bool, position: [f32; 3], renderer: &mut Renderer) {
+    fn handle_damage_event(
+        &mut self,
+        target: rift_net::NetId,
+        amount: f32,
+        crit: bool,
+        position: [f32; 3],
+        renderer: &mut Renderer,
+    ) {
         let Self { state, net } = self;
         let Some(net) = net.as_mut() else { return };
         let world_pos = Vec3::from_array(position);
@@ -389,7 +442,10 @@ impl RiftApp {
             let kill_dir = if event_dir.length_squared() > 1e-4 {
                 event_dir
             } else {
-                net.last_velocities.get(&entity).copied().unwrap_or(Vec3::ZERO)
+                net.last_velocities
+                    .get(&entity)
+                    .copied()
+                    .unwrap_or(Vec3::ZERO)
             };
             // Approximate "how violent was this kill?" from the
             // square-magnitude of the impulse. Trash mobs cap
@@ -406,7 +462,9 @@ impl RiftApp {
             // accumulation texture by the splat pass and sampled
             // by the forward shader as a real wet/dry material.
             let now = renderer.elapsed_secs();
-            renderer.blood_field.splat_for_kill(ctx, now, &state.floor.wall_aabbs);
+            renderer
+                .blood_field
+                .splat_for_kill(ctx, now, &state.floor.wall_aabbs);
             // Big visceral burst on top of it. Anchored at
             // chest height so the upward cone reads as the kill
             // shot rather than ground splatter. A tiny
@@ -489,10 +547,9 @@ impl RiftApp {
             return;
         }
         let pos = Vec3::from_array(position) + Vec3::new(0.0, 1.0, 0.0);
-        renderer.vfx_system.spawn(
-            rift_engine::renderer::vfx::presets::ghost_rise(),
-            pos,
-        );
+        renderer
+            .vfx_system
+            .spawn(rift_engine::renderer::vfx::presets::ghost_rise(), pos);
     }
 
     /// Players have been revived by a completed shrine channel.
@@ -556,9 +613,7 @@ impl RiftApp {
                 let radius = dir[0].max(0.5);
                 let duration = dir[1].max(0.05);
                 renderer.vfx_system.spawn(
-                    rift_engine::renderer::vfx::presets::ground_slam_telegraph(
-                        radius, duration,
-                    ),
+                    rift_engine::renderer::vfx::presets::ground_slam_telegraph(radius, duration),
                     centre + Vec3::new(0.0, 0.05, 0.0),
                 );
                 return;
@@ -640,13 +695,7 @@ impl RiftApp {
         log::trace!("net: ChannelTick caster={caster:?} ability={ability}");
         let pos = Vec3::from_array(position);
         let aim = Vec3::new(dir[0], 0.0, dir[1]);
-        rift_client::game::state::on_channel_tick(
-            &mut self.state,
-            caster,
-            ability as u8,
-            pos,
-            aim,
-        );
+        rift_client::game::state::on_channel_tick(&mut self.state, caster, ability as u8, pos, aim);
     }
 
     /// Tear down the cast pose on remote avatars (and on us if
@@ -788,7 +837,10 @@ impl RiftApp {
                 EquipRequest::SalvageBulk { rarity_max } => {
                     net.request_salvage_inventory_bulk(rarity_max);
                 }
-                EquipRequest::UnequipToSlot { slot, inventory_index } => {
+                EquipRequest::UnequipToSlot {
+                    slot,
+                    inventory_index,
+                } => {
                     net.request_unequip_to_bag_slot(slot, inventory_index);
                 }
             }
@@ -796,7 +848,12 @@ impl RiftApp {
 
         // Stash session toggles. Pushed by the F-prompt at the
         // hub chest. `true` opens, `false` closes.
-        for open in state.net.stash_session_requests.drain(..).collect::<Vec<_>>() {
+        for open in state
+            .net
+            .stash_session_requests
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
             if open {
                 net.request_open_stash();
             } else {
@@ -912,10 +969,16 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             match req {
-                StashRequest::Deposit { inventory_index, tab_index } => {
+                StashRequest::Deposit {
+                    inventory_index,
+                    tab_index,
+                } => {
                     net.request_deposit_to_stash(inventory_index, tab_index);
                 }
-                StashRequest::Withdraw { tab_index, stash_index } => {
+                StashRequest::Withdraw {
+                    tab_index,
+                    stash_index,
+                } => {
                     net.request_withdraw_from_stash(tab_index, stash_index);
                 }
                 StashRequest::Swap { tab_index, a, b } => {
@@ -926,18 +989,14 @@ impl RiftApp {
                     tab_index,
                     stash_index,
                 } => {
-                    net.request_deposit_to_stash_slot(
-                        inventory_index, tab_index, stash_index,
-                    );
+                    net.request_deposit_to_stash_slot(inventory_index, tab_index, stash_index);
                 }
                 StashRequest::WithdrawToSlot {
                     tab_index,
                     stash_index,
                     inventory_index,
                 } => {
-                    net.request_withdraw_from_stash_slot(
-                        tab_index, stash_index, inventory_index,
-                    );
+                    net.request_withdraw_from_stash_slot(tab_index, stash_index, inventory_index);
                 }
                 StashRequest::BuyTab => {
                     net.request_buy_stash_tab();
@@ -995,8 +1054,21 @@ impl RiftApp {
                 .into_iter()
                 .map(|opt| {
                     opt.and_then(|b| {
-                        let prov = b.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v));
-                        rift_game::loot::Item::from_wire(b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov)
+                        let prov = b
+                            .provenance
+                            .clone()
+                            .map(|v| rift_game::loot::LootProvenance::from_ids(v));
+                        // `from_wire` always reconstructs a
+                        // stable item; layer the blob's
+                        // unstable flag on top so server
+                        // state survives the round-trip.
+                        rift_game::loot::Item::from_wire(
+                            b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov,
+                        )
+                        .map(|mut it| {
+                            it.unstable = b.unstable;
+                            it
+                        })
                     })
                 })
                 .collect();
@@ -1019,8 +1091,14 @@ impl RiftApp {
                     blob.ilvl,
                     &blob.affixes,
                     blob.anchored,
-                    blob.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v)),
-                ) else {
+                    blob.provenance
+                        .clone()
+                        .map(|v| rift_game::loot::LootProvenance::from_ids(v)),
+                )
+                .map(|mut it| {
+                    it.unstable = blob.unstable;
+                    it
+                }) else {
                     continue;
                 };
                 equip.set(slot, Some(item));
@@ -1039,9 +1117,7 @@ impl RiftApp {
             // dirty and let the frame loop retry once the avatar
             // exists.
             state.loot.equipment_visuals_dirty = true;
-            rift_client::game::equipment_visuals::apply_local_equipment_visuals(
-                state, renderer,
-            );
+            rift_client::game::equipment_visuals::apply_local_equipment_visuals(state, renderer);
             if rift_client::game::equipment_visuals::has_local_player(&state.world) {
                 state.loot.equipment_visuals_dirty = false;
             }
@@ -1061,10 +1137,17 @@ impl RiftApp {
                         .into_iter()
                         .map(|opt| {
                             opt.and_then(|b| {
-                                let prov = b.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v));
+                                let prov = b
+                                    .provenance
+                                    .clone()
+                                    .map(|v| rift_game::loot::LootProvenance::from_ids(v));
                                 rift_game::loot::Item::from_wire(
                                     b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov,
                                 )
+                                .map(|mut it| {
+                                    it.unstable = b.unstable;
+                                    it
+                                })
                             })
                         })
                         .collect();
@@ -1089,8 +1172,7 @@ impl RiftApp {
             let prev_level = state.player_state.experience.level;
             state.player_state.experience.level = level.max(1);
             state.player_state.experience.current_xp = xp;
-            state.player_state.experience.total_xp =
-                state.player_state.experience.total_xp.max(xp);
+            state.player_state.experience.total_xp = state.player_state.experience.total_xp.max(xp);
             state.player_state.experience.set_xp_to_next(xp_to_next);
             if prev_level != level {
                 state.player_state.recompute_stats(&state.loot.equipment);
@@ -1189,9 +1271,7 @@ impl RiftApp {
         if state.loot.equipment_visuals_dirty
             && rift_client::game::equipment_visuals::has_local_player(&state.world)
         {
-            rift_client::game::equipment_visuals::apply_local_equipment_visuals(
-                state, renderer,
-            );
+            rift_client::game::equipment_visuals::apply_local_equipment_visuals(state, renderer);
             state.loot.equipment_visuals_dirty = false;
         }
     }
@@ -1246,11 +1326,7 @@ fn parse_args() -> Args {
     if connect.is_none() && !explicit_offline {
         if let Ok(env_addr) = std::env::var("RIFT_SERVER") {
             if !env_addr.is_empty() {
-                connect = Some(
-                    env_addr
-                        .parse()
-                        .expect("invalid RIFT_SERVER address"),
-                );
+                connect = Some(env_addr.parse().expect("invalid RIFT_SERVER address"));
             }
         }
     }

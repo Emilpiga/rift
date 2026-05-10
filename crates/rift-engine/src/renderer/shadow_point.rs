@@ -43,13 +43,21 @@ use crate::vulkan::pipeline as pipe;
 /// and off as the player walks past sconces.
 pub const MAX_POINT_SHADOWS: usize = 8;
 
-/// Per-face resolution of the cube atlas. 1024² gives crisp contact
-/// shadows up close: each texel covers ~5 mm at 5 m with the 90°
-/// per-face FoV, so the shadow-map texel grid is no longer visible
-/// as pixelation when the player walks right up to a torch-lit
-/// wall. Memory cost: 8 lights × 6 faces × 1024² × 4 bytes ≈
-/// 192 MiB color + 4 MiB depth — acceptable on any GPU we ship to.
-pub const POINT_SHADOW_SIZE: u32 = 1024;
+/// Per-face resolution of the cube atlas. 512² is the sweet
+/// spot for our gameplay camera: each texel covers ~10 mm at 5 m
+/// with the 90° per-face FoV, which is well below a screen pixel
+/// at any reasonable display resolution. The single-tap PCF in
+/// `samplePointShadow` plus the per-pixel basis-rotation jitter
+/// hide the residual stepping at the silhouette, so visually the
+/// 512² atlas is indistinguishable from 1024² but renders **4×
+/// fewer fragments per cube face**. Skinned characters force-
+/// re-render all 6 faces every frame for every shadow-casting
+/// light they're in range of, so this is the single biggest win
+/// for in-dungeon framerate.
+///
+/// Memory cost: 8 lights × 6 faces × 512² × 4 bytes ≈ 48 MiB
+/// color + 1 MiB depth.
+pub const POINT_SHADOW_SIZE: u32 = 512;
 
 /// Color attachment format. R32_SFLOAT gives floating-point precision
 /// for normalized distances and is universally supported as a color

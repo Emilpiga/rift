@@ -1,0 +1,16 @@
+[package]
+name = "rift-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# `kira` is a pure-Rust mixer designed for games: lock-free
+# command queue, sub-graphs (mix buses), parameter tweens with
+# easings, and a built-in 3D spatial scene that handles
+# distance attenuation + stereo panning relative to a moving
+# listener. We stay on the default backend (`cpal`) and rely on
+# the bundled symphonia codecs for OGG / WAV / FLAC decoding.
+kira = "0.12"
+glam = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }

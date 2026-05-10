@@ -31,7 +31,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // Spell-cast state machine: advances the upper-body cast layer.
     let _ = cast_advance_system(&mut state.world, dt);
 
-    skinning_system(&mut state.world, renderer, dt);
+    skinning_system(
+        &mut state.world,
+        renderer,
+        dt,
+        state.floor_mgr.dungeon.as_ref(),
+    );
 
     // Local-avatar ghost tint.
     crate::game::ghost_system::apply_tint(&state.world, renderer, state.net.local_ghost_cached);
@@ -80,6 +85,128 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         renderer.blood_field.track_player_step(0, player_pos, now);
     }
 
+    // Footstep audio: driven by the foot-IK pass, which
+    // tracks each ankle's height above the avatar's grounded
+    // plane and bumps a per-foot plant counter every time the
+    // foot transitions from airborne to planted. We compare
+    // those counters against the last-seen values cached in
+    // `FrameState` and fire one one-shot per delta.
+    //
+    // Animation-driven detection (instead of velocity-derived
+    // gait synthesis) means rolls, knockbacks, slides and any
+    // other movement effect that decouples horizontal speed
+    // from the visible foot motion automatically stay in sync
+    // \u2014 if the foot doesn't visibly hit the ground, no sound
+    // plays; if it does, the sound fires at the exact frame
+    // and at the foot's actual world position.
+    if !player_airborne {
+        if let Some(audio) = state.audio.as_mut() {
+            if let Some(player_id) = crate::game::ghost_system::player_id(&state.world) {
+                if let Ok(ik) = state
+                    .world
+                    .get::<&rift_engine::ecs::components::FootIkState>(player_id)
+                {
+                    let plants = [
+                        (
+                            ik.left_plant_seq,
+                            ik.left_plant_pos,
+                            &mut state.frame.last_left_plant_seq,
+                        ),
+                        (
+                            ik.right_plant_seq,
+                            ik.right_plant_pos,
+                            &mut state.frame.last_right_plant_seq,
+                        ),
+                    ];
+                    for (seq, pos, last) in plants {
+                        if seq == *last {
+                            continue;
+                        }
+                        // Coalesce multi-step deltas (e.g. on
+                        // first frame after regen, or after a
+                        // teleport that reset the IK chain) to
+                        // a single emission \u2014 we never want a
+                        // burst of stacked one-shots.
+                        *last = seq;
+                        state.frame.step_rotation = state.frame.step_rotation.wrapping_add(1);
+                        // Resolve the surface under the foot
+                        // *at the moment of the plant* so a
+                        // player crossing a material boundary
+                        // hears the right material on each
+                        // step. Falls back to the floor's
+                        // default surface (Sand for hub,
+                        // Stone for rift) when the dungeon
+                        // hasn't been built yet \u2014 same default
+                        // chain `Floor::surface_at` uses
+                        // internally.
+                        let surface = state
+                            .floor_mgr
+                            .dungeon
+                            .as_ref()
+                            .map(|f| f.surface_at(pos.x, pos.z))
+                            .unwrap_or_default();
+                        let bank = crate::game::audio_banks::footstep_paths(surface);
+                        if bank.is_empty() {
+                            // No authored samples for this
+                            // surface yet \u2014 silent step. See
+                            // the bank registry for what's
+                            // missing.
+                            continue;
+                        }
+                        let idx = state.frame.step_rotation as usize % bank.len();
+                        let path = bank[idx];
+                        // Slight per-step volume jitter so
+                        // consecutive plants don't sound
+                        // mechanically identical. Centred on
+                        // 1.0 so jitter doesn't double-attenuate
+                        // the already-quiet sample.
+                        let jitter = 0.95 + (idx as f32) * 0.05;
+                        let spec = rift_audio::SoundSpec {
+                            path: path.into(),
+                            // Loud: footsteps are *your*
+                            // footsteps and need to read over
+                            // the wind loop (~0.85 peak) at
+                            // every camera distance. The raw
+                            // wav peaks low so 1.6 brings them
+                            // up to parity without clipping.
+                            volume: 1.6 * jitter,
+                            // Wide full-volume zone so the
+                            // third-person camera (4\u20136 m
+                            // behind the player) sits well
+                            // inside `min_distance` and the
+                            // sample plays at its authored
+                            // level.
+                            min_distance: 8.0,
+                            max_distance: 25.0,
+                            looping: false,
+                        };
+                        // Anchor at the foot's actual world
+                        // position so spatialisation matches
+                        // exactly where the contact happened.
+                        audio.play_one_shot(&spec, pos);
+                    }
+                }
+            }
+        }
+    } else {
+        // Airborne: re-sync the cached counters to whatever
+        // the IK pass currently has so the landing frame
+        // doesn't dump every plant that fired during the
+        // jump (the IK still ticks while airborne and may
+        // count a touchdown the moment the kinematic resolves
+        // back to grounded; the dedicated landing-impact SFX
+        // belongs to a separate code path).
+        if let Some(player_id) = crate::game::ghost_system::player_id(&state.world) {
+            if let Ok(ik) = state
+                .world
+                .get::<&rift_engine::ecs::components::FootIkState>(player_id)
+            {
+                state.frame.last_left_plant_seq = ik.left_plant_seq;
+                state.frame.last_right_plant_seq = ik.right_plant_seq;
+            }
+        }
+    }
+
     // Skip aim updates while the player is dead — otherwise the
     // death pose's spine twist would keep tracking the cursor.
     if !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached) {
@@ -111,11 +238,60 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         .floor_mgr
         .torches
         .update_lights(renderer, player_pos, elapsed, fog_start, fog_end);
+    // Mirror the visual flicker into the audio mixer: each
+    // torch's looping crackle volume tracks the same distance,
+    // rank, and flicker curves as its light, so the soundscape
+    // matches the screen.
+    if let Some(audio) = state.audio.as_mut() {
+        state
+            .floor_mgr
+            .torches
+            .tick_audio(audio, player_pos, elapsed, fog_start, fog_end);
+    }
     // Hub thunderstorm: when present, restores calm lighting
     // and overlays any in-progress lightning flash. Owns the
     // entire point-light vec while in the hub (no torches).
     if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
         storm.tick(renderer, dt);
+    }
+    // Hub sandstorm haze: keep the haze emitter centred on
+    // the player so the field of dust travels with the
+    // camera rather than reading as a fixed volumetric panel
+    // somewhere on the platform. Anchor lifted to chest
+    // height so the spawn disc samples mostly ankle-to-head
+    // altitude.
+    //
+    // Wind gust envelope: a slow sum-of-sines yields a
+    // breathing curve in roughly [0.55 .. 1.45] that pulses
+    // every ~6–18 seconds. We feed it into BOTH the haze
+    // brightness (visual gust = thicker dust) and the wind
+    // emitter volume (audio gust = louder roar) so the two
+    // pulse together — the player sees the dust thicken at
+    // the same instant the wind howls. Identical phase by
+    // construction.
+    if let Some(haze) = state.floor_mgr.hub_haze {
+        let t = elapsed;
+        let slow =
+            (t * 0.35).sin() * 0.55 + (t * 0.17 + 1.7).sin() * 0.35 + (t * 0.08 + 0.4).sin() * 0.10;
+        // Map [-1, +1] -> roughly [0.55, 1.45]: a 45 % dip
+        // at the lull and a 45 % swell at the peak — wide
+        // enough to feel obviously alive without hiding /
+        // overpowering the rest of the scene.
+        let gust = (1.0 + slow * 0.45).max(0.05);
+        renderer
+            .vfx_system
+            .set_anchor(haze, player_pos + Vec3::new(0.0, 0.6, 0.0));
+        renderer.vfx_system.set_brightness(haze, gust);
+        // Drive the wind loop's volume from the same gust.
+        // Anchor it on the listener (player ear height) so
+        // the loop reads as a coherent wash of wind rather
+        // than a directional point source — distance
+        // attenuation stays at full while the gust does the
+        // work.
+        if let (Some(audio), Some(em)) = (state.audio.as_mut(), state.floor_mgr.hub_wind) {
+            audio.set_emitter_position(em, player_pos + Vec3::new(0.0, 1.6, 0.0));
+            audio.set_emitter_volume(em, gust);
+        }
     }
     // Push a hot-crimson light at every active portal AFTER
     // the torch / storm systems have rebuilt `point_lights`,
@@ -133,6 +309,21 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         ],
         elapsed,
     );
+    // Lazy-attach + per-frame volume modulation for the
+    // portal hum loops. Single integration point so the
+    // various `tick_*` portal functions don't each have to
+    // thread `&mut AudioSystem`.
+    if let Some(audio) = state.audio.as_mut() {
+        crate::game::portal_system::tick_audio(
+            &mut [
+                state.floor.hub_portal.as_mut(),
+                state.floor.exit_portal.as_mut(),
+                state.floor.rift_spawn_portal.as_mut(),
+            ],
+            audio,
+            elapsed,
+        );
+    }
     renderer.vfx_system.tick(
         dt,
         // Cull off-screen VFX past a few metres beyond the

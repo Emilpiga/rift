@@ -66,6 +66,22 @@ pub struct FrameState {
     /// the binary (which holds the net session) without
     /// teaching the combat module about `NetClient`.
     pub party_click_target_net_id: Option<rift_net::NetId>,
+    /// Last-seen plant counters from the local player's
+    /// `FootIkState`. The foot IK pass increments those
+    /// counters every time a foot transitions from airborne
+    /// to planted (animation-driven, not velocity-derived,
+    /// so rolls and other movement effects don't desynchronise
+    /// the audio from the visible step). Each render frame we
+    /// compare against the current counters and fire one
+    /// footstep one-shot per delta.
+    ///
+    /// `step_rotation` advances 0..N each plant so two
+    /// consecutive plants never use the same surface sample
+    /// (the bank length is per-surface; modulo is taken at
+    /// the call site).
+    pub last_left_plant_seq: u32,
+    pub last_right_plant_seq: u32,
+    pub step_rotation: u8,
 }
 
 impl FrameState {
@@ -77,6 +93,9 @@ impl FrameState {
         self.entity_targeting = None;
         self.damage_flash = 0.0;
         self.level_up_flash = 0.0;
+        self.last_left_plant_seq = 0;
+        self.last_right_plant_seq = 0;
+        self.step_rotation = 0;
         // `transition_fade` is intentionally NOT cleared here:
         // `apply_net_transition` pins it to 1.0 immediately
         // after calling reset, and clearing it would race with

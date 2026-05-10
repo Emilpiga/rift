@@ -76,7 +76,7 @@ pub fn decorate_hub(
 
     let scatter_count = (interior.len() * 4).max(8);
     scatter_on_tiles(
-        props, world, renderer, &interior, &mut rng,
+        props, world, renderer, floor, &interior, &mut rng,
         &ScatterPlacement {
             assets: SCATTER,
             count: scatter_count,

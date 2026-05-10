@@ -172,7 +172,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     let accept_input = !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached);
     player_action_pre_system(&mut state.world, input, dt, &action_cfg, accept_input);
     player_input_system(&mut state.world, input, dt);
-    movement_system(&mut state.world, dt);
+    movement_system(&mut state.world, dt, state.floor_mgr.dungeon.as_ref());
     player_action_post_system(&mut state.world, &action_cfg);
     collision_system(&mut state.world, &state.floor.wall_colliders);
 }

@@ -419,10 +419,18 @@ impl Sim {
             // bag + equipment in place so the player keeps the
             // chase drops they earned, while everything else
             // (regular legendaries included) is lost as usual.
+            //
+            // **Unstable wins over Anchored.** A legendary
+            // anchored item picked up inside the rift is still
+            // unstable until extraction; dying before extracting
+            // shatters it just like every other unstable drop.
+            // The "death shatters unstable loot" contract is
+            // absolute \u2014 anchored only protects items that
+            // already cleared a previous extraction.
             let mut kept_inventory: Vec<Option<rift_game::loot::Item>> = Vec::new();
             for slot in p.inventory.drain(..) {
                 if let Some(it) = slot {
-                    if it.anchored {
+                    if it.anchored && !it.unstable {
                         kept_inventory.push(Some(it));
                     }
                 }
@@ -437,7 +445,7 @@ impl Sim {
             // (everything else).
             for slot in rift_game::loot::EquipSlot::ALL {
                 if let Some(it) = p.equipment.take(slot) {
-                    if it.anchored {
+                    if it.anchored && !it.unstable {
                         p.equipment.set(slot, Some(it));
                     }
                 }
@@ -448,6 +456,115 @@ impl Sim {
         if !affected.is_empty() {
             log::info!(
                 "sim: wiped loot for {} dead player(s) on rift exit",
+                affected.len()
+            );
+        }
+        affected
+    }
+
+    /// Stabilise every living player's bag + equipment,
+    /// flipping every `unstable` item to stable. This is the
+    /// "loot purified by extraction" gate — called on the
+    /// successful extract-vote path *before* the players are
+    /// returned to the hub so [`Server::move_client_to_hub`]'s
+    /// defensive in-line strip sees nothing left to strip.
+    /// Dead players are deliberately skipped: their unstable
+    /// items shatter via [`Self::wipe_dead_loot`] regardless
+    /// of whether the party voted to extract — a corpse never
+    /// benefits from extraction.
+    ///
+    /// Returns the list of clients touched so the main loop
+    /// can fan out a fresh `InventorySync` (the tooltip line
+    /// changes from "⚠ Unstable" to clean) and persist the
+    /// now-stable bag once they're back on the hub sim.
+    pub fn stabilize_inventory(&mut self) -> Vec<ClientId> {
+        let mut affected: Vec<ClientId> = Vec::new();
+        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
+            if p.hp <= 0.0 {
+                continue;
+            }
+            let mut touched = false;
+            for slot in p.inventory.iter_mut() {
+                if let Some(it) = slot {
+                    if it.unstable {
+                        it.unstable = false;
+                        touched = true;
+                    }
+                }
+            }
+            for slot in rift_game::loot::EquipSlot::ALL {
+                if let Some(mut it) = p.equipment.take(slot) {
+                    if it.unstable {
+                        it.unstable = false;
+                        touched = true;
+                    }
+                    p.equipment.set(slot, Some(it));
+                }
+            }
+            if touched {
+                affected.push(p.client_id);
+            }
+        }
+        if !affected.is_empty() {
+            log::info!(
+                "sim: stabilised unstable loot for {} extracting player(s)",
+                affected.len()
+            );
+        }
+        affected
+    }
+
+    /// Remove every unstable item from every player's bag and
+    /// equipment in this Sim. The "unsafe exit" counterpart to
+    /// [`Self::stabilize_inventory`]. Currently unused — the
+    /// hub-return path strips per-player inline against the
+    /// extracted [`ServerPlayer`] in
+    /// [`Server::move_client_to_hub`] — but kept around for
+    /// future eviction / disconnect-grace callers that need
+    /// to act on every player in the Sim at once.
+    ///
+    /// Returns clients that actually lost something so the
+    /// caller can fan out a fresh `InventorySync` and persist
+    /// the now-shrunken bag.
+    #[allow(dead_code)]
+    pub fn strip_unstable_loot(&mut self) -> Vec<ClientId> {
+        let mut affected: Vec<ClientId> = Vec::new();
+        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
+            let before_bag = p.inventory.iter().filter(|s| s.is_some()).count();
+            let mut kept: Vec<Option<rift_game::loot::Item>> = Vec::new();
+            for slot in p.inventory.drain(..) {
+                match slot {
+                    Some(it) if it.unstable => {} // shatter
+                    Some(it) => kept.push(Some(it)),
+                    None => kept.push(None),
+                }
+            }
+            // Trim trailing empties to mirror the sparse-Vec
+            // invariant the rest of the inventory code relies on.
+            while matches!(kept.last(), Some(None)) {
+                kept.pop();
+            }
+            p.inventory = kept;
+            let after_bag = p.inventory.iter().filter(|s| s.is_some()).count();
+
+            let mut equip_lost = 0usize;
+            for slot in rift_game::loot::EquipSlot::ALL {
+                if let Some(it) = p.equipment.take(slot) {
+                    if it.unstable {
+                        equip_lost += 1;
+                    } else {
+                        p.equipment.set(slot, Some(it));
+                    }
+                }
+            }
+            if before_bag != after_bag || equip_lost > 0 {
+                p.recompute_stats();
+                affected.push(p.client_id);
+            }
+        }
+        if !affected.is_empty() {
+            log::info!(
+                "sim: shattered unstable loot for {} player(s) on rift exit",
                 affected.len()
             );
         }

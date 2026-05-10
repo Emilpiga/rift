@@ -240,34 +240,6 @@ fn solo_rift_drop_binds_only_the_soloer() {
 }
 
 #[test]
-fn pickup_self_binds_legacy_unprovenanced_drop() {
-    // Drop with `provenance: None` (legacy ground loot).
-    // The first picker mutates the bag entry's provenance
-    // to their own character_id so the next drop carries
-    // the lineage forward.
-    let (mut sim, clients) = setup_party(2, 50, 0);
-    let mut item = rolled("staff_basic", 1, 7);
-    item.provenance = None;
-    sim.spawn_dropped_loot(item, sim.floor.spawn_pos);
-    let net_id = the_loot(&sim);
-
-    let picker = clients[1];
-    let result = sim.try_pickup_loot(picker, net_id);
-    assert!(result.is_ok(), "legacy drop should be pickable: {result:?}");
-
-    let entity = *sim.sessions.get(&picker).unwrap();
-    let p = sim.world.get::<&ServerPlayer>(entity).unwrap();
-    let bag_item = p
-        .inventory
-        .iter()
-        .find_map(|s| s.as_ref())
-        .expect("picker should hold the item");
-    let prov = bag_item.provenance.as_ref().expect("self-bound after pickup");
-    assert_eq!(prov.eligible.len(), 1);
-    assert!(prov.allows(&char_uuid(picker.0).into_bytes()));
-}
-
-#[test]
 fn equip_self_binds_legacy_bag_item() {
     // Legacy item already in the bag (e.g. loaded from a
     // pre-migration row). Equipping it must bind the

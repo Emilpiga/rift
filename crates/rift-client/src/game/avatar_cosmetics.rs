@@ -297,7 +297,10 @@ pub fn apply_avatar_cosmetics(
             }
         };
         if let Some(tex) = piece.texture {
-            if let Err(e) = renderer.set_object_texture(object_index, tex) {
+            if let Err(e) = renderer.set_object_texture(
+                object_index,
+                rift_engine::TextureSource::File(std::path::Path::new(tex)),
+            ) {
                 log::warn!("avatar cosmetic texture {:?} failed: {}", tex, e);
             }
         }

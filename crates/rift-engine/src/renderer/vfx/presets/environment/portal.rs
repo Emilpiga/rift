@@ -9,15 +9,14 @@ use crate::renderer::vfx::spec::*;
 /// The mesh ([`crate::renderer::mesh::Mesh::portal_with_palette`])
 /// + the `shadeRift` shader branch already do the heavy lifting
 /// (wobbling silhouette, layered swirl, chromatic edge, dark-red
-/// veins, ember tendrils). This preset's job is to extend the
-/// rift's *physical presence* outward into the world: ash and
-/// dust caught in its gravitational pull, embers torn off the
-/// edge, dark debris tumbling along the rim, and a ring of
-/// inward-falling motes that visibly accelerate as they near
-/// the silhouette and vanish at the rim. **No bright gold
-/// sparkle.** The rift wants to read as a wound in reality.
+/// veins). This preset's job is to extend the rift's *physical
+/// presence* outward into the world: ash and dust caught in its
+/// gravitational pull, and a cold chromatic shimmer flickering
+/// along the seam where reality is split. Fire-coded layers
+/// (warm-orange embers, hot tendril sparks) have been removed —
+/// the new read is **a tear in space-time**, not a furnace.
 ///
-/// Four layers, all additive:
+/// Three layers, all additive:
 ///
 ///   1. **Inward suction** — particles spawned on a wide outer
 ///      ring with *negative* radial speed (inward kick) plus a
@@ -27,12 +26,11 @@ use crate::renderer::vfx::spec::*;
 ///      *toward* the rift centre and vanish near the rim.
 ///      Slower and finer than the suction layer; adds ambient
 ///      haze without monopolising attention.
-///   3. **Ember spit-off** — sparse hot ember sparks born on the
-///      rim with a slight outward kick, immediately yanked back
-///      tangentially.
-///   4. **Edge tendrils** — short-lived violent tendril flecks
-///      with high curl-noise displacement; the silhouette
-///      "tears" outward in flicker-bursts.
+///   3. **Rim fracture shimmer** — short, cold, anisotropic
+///      streaks spawned right on the rim that whip tangentially
+///      along the seam in both directions. Cool white-violet
+///      with HDR-boosted highlights so bloom catches them as
+///      flickering chromatic cracks rather than warm sparks.
 ///
 /// **Anchor:** Spawned at `pos + Vec3::Y * PORTAL_CENTRE_Y`
 /// (mesh centre), same as before — see [`PORTAL_CENTRE_Y`].
@@ -178,103 +176,108 @@ pub fn portal_vortex() -> Effect {
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
-            // 2. Ember spit-off. Born on the rift's rim with a
-            //    small outward kick and yanked tangentially by
-            //    a fast orbit. Drag is heavy so each ember
-            //    only travels a few centimetres before fading
-            //    — the visual is "the rift is shedding sparks
-            //    every direction", not "fire-ring".
+            // 3. Rim fracture shimmer. Thin anisotropic streaks
+            //    spawned right on the silhouette and *flung
+            //    tangentially* along the rim by a strong orbit
+            //    force, then yanked back by heavy drag so each
+            //    streak only lives a fraction of a second and
+            //    travels a few centimetres. The motion direction
+            //    is along the seam (not radial), and the colour
+            //    is cool white with a violet edge — the cue is
+            //    "reality is fracturing along this line", not
+            //    "fire is leaking out of a hole".
+            //
+            //    Two passes back-to-back at half rate apiece
+            //    with opposite orbit signs would be ideal but
+            //    `Orbit` only takes a single signed scalar; the
+            //    high curl frequency randomises the per-particle
+            //    direction enough that the shimmer reads
+            //    bidirectional anyway.
             Layer::Particles(ParticleSpec {
                 spawn: SpawnShape::RingAxis {
                     radius: 1.18,
-                    thickness: 0.05,
+                    // Razor-thin spawn band so streaks land
+                    // precisely on the silhouette, not floating
+                    // inside or outside it. The rim is the
+                    // visual *seam* the fracture lives on.
+                    thickness: 0.015,
                     axis: ring_axis,
                 },
                 emission: EmissionMode::BurstAndContinuous {
-                    burst: 12,
-                    rate: 60.0,
+                    burst: 6,
+                    rate: 80.0,
                 },
-                speed: (0.10, 0.35),
-                lifetime: (0.35, 0.75),
+                // Outward radial kick is small — the orbit
+                // force does almost all the work. Without
+                // any radial speed the streak would have
+                // zero motion at t=0 and the `Streak` sprite
+                // would render as a degenerate dot for the
+                // first frame. A few cm/s gets it moving
+                // before the orbit dominates.
+                speed: (0.04, 0.10),
+                // Very short life — the shimmer is a *flicker*
+                // along the seam, not a streamer. Multiple
+                // overlapping flickers at 80/s read as a
+                // continuous restless edge.
+                lifetime: (0.18, 0.40),
                 forces: vec![
-                    // Random direction per ember (some CW,
-                    // some CCW) — the orbit force always points
-                    // the same way around the axis, so we use a
-                    // moderate value and let curl/drag decide
-                    // the rest.
+                    // Strong tangential orbit. This is what
+                    // gives each streak its primary motion
+                    // vector; the `Streak` sprite then
+                    // orients along that vector, so the
+                    // visible shape is a thin line *along
+                    // the rim*.
                     ForceField::Orbit {
                         axis: ring_axis,
-                        speed: 4.0,
+                        speed: 6.5,
                     },
-                    ForceField::Drag { coefficient: 4.0 },
+                    // Heavy drag so the streak collapses
+                    // before it can travel far enough to
+                    // visibly orbit the disc — we want
+                    // a flicker, not a planet.
+                    ForceField::Drag { coefficient: 7.0 },
+                    // High-frequency curl noise — without it
+                    // every streak orbits in the same
+                    // direction (the orbit force is signed)
+                    // and the rim reads as a clockwise
+                    // conveyor belt. The curl scrambles
+                    // velocity per-particle so half end up
+                    // going CW, half CCW, and a few flick
+                    // outward briefly before drag eats them.
                     ForceField::Curl {
-                        frequency: 2.0,
-                        strength: 0.6,
+                        frequency: 3.0,
+                        strength: 4.0,
                     },
                 ],
-                size: Curve::from_stops([(0.0, 0.07), (1.0, 0.012)]),
-                // Hot crimson-orange embers; not gold. HDR-
-                // boosted so bloom catches them.
-                color: Gradient::from_stops([
-                    (0.0, [3.20, 1.10, 0.30, 0.95]),
-                    (0.4, [2.00, 0.45, 0.10, 0.70]),
-                    (1.0, [0.50, 0.04, 0.02, 0.0]),
+                // Born thin, briefly stretches as the orbit
+                // force accelerates it, then collapses to
+                // pixel-width as drag wins. The `Streak`
+                // sprite renders this as a tapered line.
+                size: Curve::from_stops([
+                    (0.0, 0.06),
+                    (0.35, 0.14),
+                    (1.0, 0.02),
                 ]),
-                sprite: SpriteShape::Spark,
-                blend: BlendMode::Additive,
-                opacity: 1.0,
-            }),
-            // 3. Edge tendrils. Sparse, large, fast curl-noise
-            //    fragments born just outside the rim with an
-            //    outward radial kick — they reach a few
-            //    decimetres past the silhouette before drag
-            //    and gravity pull them down. Reads as the
-            //    rift "tearing" the air around it.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::RingAxis {
-                    radius: 1.22,
-                    thickness: 0.04,
-                    axis: ring_axis,
-                },
-                emission: EmissionMode::BurstAndContinuous {
-                    burst: 0,
-                    rate: 22.0,
-                },
-                // Outward radial kick (RingAxis spawn dir =
-                // radial), strong enough that tendrils flick
-                // 0.3–0.5 m past the rim before curl smears
-                // them.
-                speed: (0.8, 1.6),
-                lifetime: (0.40, 0.85),
-                forces: vec![
-                    ForceField::Drag { coefficient: 2.8 },
-                    // Strong curl makes tendrils whip and
-                    // wobble instead of flying straight,
-                    // selling the "wound under tension" feel.
-                    ForceField::Curl {
-                        frequency: 1.6,
-                        strength: 2.2,
-                    },
-                    // Slight downward bias — tendrils drift
-                    // and fall instead of floating up like
-                    // flame, reinforcing the gravitational /
-                    // wound feel rather than fire.
-                    ForceField::Gravity {
-                        axis: -Vec3::Y,
-                        strength: 0.6,
-                    },
-                ],
-                size: Curve::from_stops([(0.0, 0.18), (1.0, 0.05)]),
-                // Dark blood-red into deep crimson — wound
-                // matter, not bright flame. The final stop
-                // fades to near-black so the tendrils read as
-                // dissipating, not extinguishing.
+                // Cool chromatic palette. Cold white core with
+                // a violet/cyan tint — the colour signature of
+                // *reality fracturing*, distinct from any warm
+                // light source in the scene. HDR-boosted on
+                // all three channels so bloom paints the
+                // shimmer as a hot rim highlight rather than a
+                // muted blue-grey. Final stop fades to deep
+                // violet (not black) so the streak's tail
+                // dissipates with the same chromatic signature
+                // as its head.
                 color: Gradient::from_stops([
-                    (0.0, [2.20, 0.30, 0.10, 0.85]),
-                    (0.5, [1.40, 0.10, 0.05, 0.55]),
-                    (1.0, [0.20, 0.02, 0.01, 0.0]),
+                    (0.0,  [1.40, 1.60, 2.40, 0.0]),
+                    (0.20, [2.40, 2.20, 3.20, 0.95]),
+                    (0.65, [1.10, 0.55, 1.80, 0.65]),
+                    (1.0,  [0.30, 0.10, 0.45, 0.0]),
                 ]),
-                sprite: SpriteShape::SoftGlow,
+                // `Streak` orients along velocity → reads as a
+                // tangent-aligned shard of light along the
+                // rim, exactly the "tear in fabric" cue.
+                sprite: SpriteShape::Streak,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),

@@ -1,5 +1,5 @@
 use super::config::FloorConfig;
-use super::rooms::{Room, RoomType};
+use super::rooms::{Room, RoomShape, RoomTheme, RoomType};
 use super::SimpleRng;
 
 /// A leaf node in the BSP tree.
@@ -53,7 +53,10 @@ impl Leaf {
         }
 
         // Pick split position
-        let split_pos = rng.range(config.min_leaf_size as u32, (max_size - config.min_leaf_size) as u32) as usize;
+        let split_pos = rng.range(
+            config.min_leaf_size as u32,
+            (max_size - config.min_leaf_size) as u32,
+        ) as usize;
 
         if split_h {
             self.left = Some(Box::new(Leaf::new(self.x, self.z, self.width, split_pos)));
@@ -108,7 +111,10 @@ impl Leaf {
                 z: rz,
                 width: w,
                 depth: d,
-                room_type: RoomType::Arena, // Will be assigned later
+                room_type: RoomType::Arena,    // Will be assigned later
+                theme: RoomTheme::Generic,     // assigned by `assign_themes_and_shapes`
+                shape: RoomShape::Rectangular, // assigned by `assign_themes_and_shapes`
+                surface: None,
             });
         }
     }
@@ -164,7 +170,10 @@ impl Leaf {
 }
 
 /// Generate rooms and corridors using BSP.
-pub fn generate_bsp(config: &FloorConfig, seed: u64) -> (Vec<Room>, Vec<(usize, usize, usize, usize)>) {
+pub fn generate_bsp(
+    config: &FloorConfig,
+    seed: u64,
+) -> (Vec<Room>, Vec<(usize, usize, usize, usize)>) {
     let mut rng = SimpleRng::new(seed);
     let mut root = Leaf::new(0, 0, config.width, config.depth);
 
@@ -174,7 +183,10 @@ pub fn generate_bsp(config: &FloorConfig, seed: u64) -> (Vec<Room>, Vec<(usize, 
         let mut next = Vec::new();
         for leaf_ptr in leaves_to_split {
             let leaf = unsafe { &mut *leaf_ptr };
-            if leaf.width > config.max_leaf_size || leaf.depth > config.max_leaf_size || rng.next() % 4 != 0 {
+            if leaf.width > config.max_leaf_size
+                || leaf.depth > config.max_leaf_size
+                || rng.next() % 4 != 0
+            {
                 if leaf.split(&mut rng, config) {
                     if let Some(ref mut l) = leaf.left {
                         next.push(l.as_mut() as *mut Leaf);
@@ -239,5 +251,110 @@ pub fn generate_bsp(config: &FloorConfig, seed: u64) -> (Vec<Room>, Vec<(usize, 
         }
     }
 
+    // ---- Theme + shape assignment ----
+    //
+    // Done in a second pass so it observes the final
+    // `room_type` (boss / portal / arena) for each room. The
+    // BSP seed re-derived here gives client and server the
+    // same assignment without any extra wire data — both
+    // sides simply call `Floor::generate` with the same seed.
+    //
+    // Roles override theme: the boss room is always a Shrine
+    // (it's the climactic chamber); the portal room is always
+    // Generic (calm transit space, no thematic clutter that
+    // would obscure the portals). Arena rooms get themed by
+    // weighted draw, biased by size (large rooms favour
+    // ceremonial themes — Library, Shrine — and small rooms
+    // favour functional ones — Storage, Prison).
+    let mut theme_rng = SimpleRng::new(seed.wrapping_add(0x7E3E_A11E));
+    for room in rooms.iter_mut() {
+        let (theme, shape) = match room.room_type {
+            RoomType::BossRoom => (
+                RoomTheme::Shrine,
+                choose_shape_for_size(room.width, room.depth, &mut theme_rng, true),
+            ),
+            RoomType::PortalRoom => (RoomTheme::Generic, RoomShape::Rectangular),
+            RoomType::Corridor => (RoomTheme::Generic, RoomShape::Rectangular),
+            RoomType::Arena => {
+                let area = room.area();
+                // Weighted theme draw. Weights are tuned so
+                // any given floor sees a healthy mix without
+                // any single theme dominating; size bias
+                // pushes "ceremonial" themes onto the big
+                // rooms (where their centerpiece props have
+                // space to breathe) and functional themes
+                // onto the small ones.
+                let big = area >= 60;
+                let weights: &[(RoomTheme, u32)] = if big {
+                    &[
+                        (RoomTheme::Library, 4),
+                        (RoomTheme::Crypt, 3),
+                        (RoomTheme::Barracks, 3),
+                        (RoomTheme::Shrine, 2),
+                        (RoomTheme::Storage, 1),
+                        (RoomTheme::Prison, 1),
+                    ]
+                } else {
+                    &[
+                        (RoomTheme::Storage, 4),
+                        (RoomTheme::Prison, 3),
+                        (RoomTheme::Crypt, 2),
+                        (RoomTheme::Barracks, 2),
+                        (RoomTheme::Library, 1),
+                        (RoomTheme::Shrine, 1),
+                    ]
+                };
+                let theme = weighted_pick(weights, &mut theme_rng);
+                let shape = choose_shape_for_size(room.width, room.depth, &mut theme_rng, false);
+                (theme, shape)
+            }
+        };
+        room.theme = theme;
+        room.shape = shape;
+    }
+
     (rooms, corridors)
+}
+
+/// Deterministic weighted pick from a `(value, weight)` slice.
+/// Used by theme assignment so adjusting palette balance is
+/// a one-line tuning knob per room category.
+fn weighted_pick<T: Copy>(items: &[(T, u32)], rng: &mut SimpleRng) -> T {
+    let total: u32 = items.iter().map(|(_, w)| *w).sum();
+    if total == 0 {
+        return items[0].0;
+    }
+    let mut roll = rng.range(0, total);
+    for (v, w) in items {
+        if roll < *w {
+            return *v;
+        }
+        roll -= *w;
+    }
+    items[items.len() - 1].0
+}
+
+/// Pick a [`RoomShape`] given the room's footprint.
+///
+/// Currently always returns `Rectangular`. The non-rectangular
+/// shapes (Pillared, Alcoved, Cross, Round) all carve interior
+/// or near-perimeter wall tiles into the room — Pillared drops
+/// freestanding pillars, the others wall off corner / curve
+/// blocks. In playtesting these read as "random walls inside
+/// the room" rather than meaningful silhouette: they break
+/// sightlines, snag ranged kiting, and obscure props the
+/// theme palette pinned to the room centre.
+///
+/// We keep the [`RoomShape`] enum + carving code intact so a
+/// future shape (e.g. octagonal-with-no-interior-walls,
+/// chamfered corners on the perimeter only) can re-enable
+/// itself without revisiting the pipeline.
+fn choose_shape_for_size(
+    width: usize,
+    depth: usize,
+    rng: &mut SimpleRng,
+    prefer_grand: bool,
+) -> RoomShape {
+    let _ = (width, depth, rng, prefer_grand);
+    RoomShape::Rectangular
 }

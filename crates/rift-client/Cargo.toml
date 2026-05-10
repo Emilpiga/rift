@@ -9,6 +9,7 @@ rift-game = { path = "../rift-game" }
 rift-net = { path = "../rift-net" }
 rift-dungeon = { path = "../rift-dungeon" }
 rift-math = { path = "../rift-math" }
+rift-audio = { path = "../rift-audio" }
 hecs = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }

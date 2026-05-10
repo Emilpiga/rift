@@ -102,6 +102,15 @@ impl Sim {
         }
 
         let _ = self.world.despawn(loot_entity);
+        // Items picked up inside an active rift are flagged
+        // "unstable": they live only in the in-memory
+        // `ServerPlayer` snapshot until the run extracts. Hub
+        // pickups (vendor drops, debug spawns, future safe-zone
+        // chests) stay stable. The flag drives both the client
+        // tooltip and every server-side strip / stabilise path.
+        if !self.is_hub() {
+            item.unstable = true;
+        }
         // Push onto the picker's `ServerPlayer.inventory` so the
         // authoritative server-side bag stays in sync with what
         // the client mirrors. Long-term DB persistence is handled
@@ -116,17 +125,6 @@ impl Sim {
             );
         }
         Ok(item)
-    }
-    /// Spawn a `ServerLoot` entity at `position` carrying `item`,
-    /// allocate it a fresh loot net-id, and queue a
-    /// `WorldEvent::LootDropped` so every observer's loot
-    /// pillar appears. Used by debug seeding and any path that
-    /// wants the legacy "anyone in the Sim can pick up" rule —
-    /// no eligibility window is attached. For player-initiated
-    /// drops use [`Self::spawn_player_drop`] instead so the
-    /// share window is set.
-    pub fn spawn_dropped_loot(&mut self, item: rift_game::loot::Item, position: glam::Vec3) {
-        self.spawn_loot_inner(item, position, None);
     }
 
     /// Spawn a `ServerLoot` for `item` at `position`, tagged with
@@ -178,7 +176,17 @@ impl Sim {
         }
         let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
         let provenance = item.provenance.as_ref().map(|p| p.eligible.clone());
-        let blob = ItemBlob { base_id, rarity, ilvl, affixes, anchored, provenance };
+        let blob = ItemBlob {
+            base_id,
+            rarity,
+            ilvl,
+            affixes,
+            anchored,
+            // Loot still on the ground hasn't been picked up
+            // yet; the unstable lifecycle starts at pickup.
+            unstable: item.unstable,
+            provenance,
+        };
         let loot = loot::ServerLoot {
             net_id,
             position,

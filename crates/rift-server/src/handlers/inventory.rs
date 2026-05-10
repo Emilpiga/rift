@@ -57,6 +57,20 @@ impl Server {
         // server-authoritative bag has already been updated by
         // `try_pickup_loot`, so a dropped/late write is
         // recoverable on the next session by re-rolling.
+        //
+        // **Skipped for unstable (rift) pickups.** Unstable
+        // items must never reach the database; the
+        // server-authoritative bag carries them in memory until
+        // the run extracts (which calls `persist_inventory_state`
+        // *after* `stabilize_inventory` has flipped the flag).
+        // If the player disconnects, dies in-rift, or returns
+        // to the hub without extracting, the in-memory copy is
+        // stripped and the DB still reflects their pre-rift
+        // bag — which is exactly the "unstable loot shatters"
+        // contract.
+        if item.unstable {
+            return;
+        }
         if let Some(handle) = &self.persistence {
             if let Some(rec) = self.sessions.get(from).and_then(|s| s.record.as_ref()) {
                 let (base_id, rarity, ilvl, affixes, anchored) = item.to_persisted();
@@ -212,7 +226,19 @@ impl Server {
     /// Snapshot the picker's bag + equipment into a flat
     /// `Vec<PersistedItem>` and queue a `ResetCharacterInventory`
     /// so the database row set matches the post-swap layout.
+    ///
+    /// **Hub-only.** While a player is inside an active rift
+    /// instance their inventory is run-state — unstable items
+    /// must never reach the database, and stable items don't
+    /// change while in-rift (equip/unequip swaps in-rift would
+    /// otherwise leak deferred state to disk). The extract
+    /// path lifts every player back to the hub *first* and
+    /// then calls this, so the post-extraction snapshot still
+    /// lands in the DB.
     pub(crate) fn persist_inventory_state(&mut self, from: ClientId) {
+        if !self.sim_for_client(from).is_hub() {
+            return;
+        }
         let Some(handle) = &self.persistence else {
             return;
         };
