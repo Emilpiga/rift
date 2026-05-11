@@ -302,6 +302,15 @@ pub struct FloorManager {
     /// `None` when the audio system is unavailable or the
     /// `ambient/wind.mp3` asset failed to load.
     pub hub_wind: Option<rift_audio::EmitterId>,
+    /// `true` once the character-select sandstorm backdrop
+    /// (sand disc + dune ring + atmosphere + drifting haze)
+    /// has been installed into the renderer for this entry
+    /// into the screen. Reset to `false` by `generate_hub`
+    /// and `generate` (rift floors) since they call
+    /// `renderer.clear_objects()` and rebuild the world
+    /// from scratch, so a future re-entry into char-select
+    /// (after a disconnect) regenerates the backdrop.
+    pub char_select_backdrop_built: bool,
 }
 
 impl FloorManager {
@@ -321,6 +330,7 @@ impl FloorManager {
             hub_storm: None,
             hub_haze: None,
             hub_wind: None,
+            char_select_backdrop_built: false,
         }
     }
 
@@ -351,6 +361,11 @@ impl FloorManager {
         // a stale `set_anchor` call from stomping a fresh
         // emitter that happens to land on the same slot.
         self.hub_haze = None;
+        // Char-select shared the same disc + haze rig; the
+        // upcoming `clear_objects()` will wipe it, so reset
+        // the flag so a future re-entry into char-select
+        // re-installs the backdrop on its first tick.
+        self.char_select_backdrop_built = false;
         // The wind emitter id is dropped here too; the
         // audio crate's own teardown is owned by the caller
         // (see `transition.rs` — it must run before this
@@ -929,6 +944,106 @@ impl FloorManager {
         Ok(())
     }
 
+    /// Install the sandstorm visual backdrop used by the
+    /// character-select screen: the sand-PBR ground disc, the
+    /// dune ring, the warm-tan atmosphere (clear / fog / sky /
+    /// key-light), and the drifting sand-haze emitter.
+    ///
+    /// Idempotent — the disc + dunes are added once, then the
+    /// method just retargets the haze brightness each frame
+    /// using the same gust envelope the hub uses. Anchor is
+    /// the avatar-podium position (camera offset baked in).
+    ///
+    /// Mirrors the visual section of [`Self::generate_hub`]
+    /// without world reset, floor data, props, portals, or
+    /// torches — char-select shows just the desert and the
+    /// preview avatar.
+    pub fn ensure_char_select_backdrop(&mut self, renderer: &mut Renderer) {
+        // Anchor under the camera podium. `OFFSET_X = -0.95`
+        // matches `character_select::update_preview_camera`.
+        let anchor = Vec3::new(-0.95, 0.6, 0.0);
+        let centre = Vec3::new(-0.95, 0.02, 0.0);
+
+        // Atmosphere is cheap to set every frame and `point_lights`
+        // gets repopulated by per-frame systems anyway, so just
+        // overwrite — matches `generate_hub`'s recipe verbatim.
+        renderer.clear_color = [0.30, 0.20, 0.12, 1.0];
+        renderer.fog_color = [0.78, 0.55, 0.30];
+        renderer.fog_start = 8.0;
+        renderer.fog_end = 55.0;
+        renderer.camera.far = 260.0;
+        renderer.sky = rift_engine::SkyConfig::sandstorm_hub();
+        renderer.key_light = rift_engine::KeyLight::SANDSTORM;
+
+        if !self.char_select_backdrop_built {
+            // ── Ground disc (sand PBR) ──────────────────────
+            const PLATFORM_RADIUS: f32 = 64.0;
+            let platform =
+                Mesh::ground_disc(centre, PLATFORM_RADIUS, 96, Vec3::splat(1.0), 1.0 / 2.0);
+            if renderer.add_mesh(&platform, Mat4::IDENTITY).is_ok() {
+                let platform_obj_idx = renderer.objects.len() - 1;
+                self.env.ensure_desert_rocks(renderer);
+                if let Some(set) = self.env.desert_rocks_set {
+                    renderer.set_object_shared_material(platform_obj_idx, set);
+                    let pbr_flags = f32::from_bits(1u32);
+                    renderer
+                        .set_object_material_params(platform_obj_idx, [1.0, 0.015, pbr_flags, 0.0]);
+                } else {
+                    self.env.ensure_crimson_stone(renderer);
+                    if let Some(set) = self.env.crimson_stone_set {
+                        renderer.set_object_shared_material(platform_obj_idx, set);
+                    }
+                }
+                renderer.set_object_casts_shadow(platform_obj_idx, false);
+            }
+
+            // ── Dune ring ───────────────────────────────────
+            let dune_params = rift_math::terrain::MountainRingParams {
+                inner_radius: PLATFORM_RADIUS - 2.0,
+                outer_radius: 180.0,
+                base_y: centre.y,
+                peak_height: 3.5,
+                angular_segments: 192,
+                radial_segments: 28,
+                noise_frequency: 0.025,
+                ridged_blend: 0.0,
+                seed: 0xD0_5E_5A_4D_5A_4D_5A_4D,
+            };
+            let dunes =
+                Mesh::mountain_terrain(&dune_params, centre, Vec3::new(1.0, 0.92, 0.78), 6.0);
+            if renderer.add_mesh(&dunes, Mat4::IDENTITY).is_ok() {
+                let dunes_obj_idx = renderer.objects.len() - 1;
+                if let Some(set) = self.env.desert_rocks_set {
+                    renderer.set_object_shared_material(dunes_obj_idx, set);
+                    let pbr_flags = f32::from_bits(1u32);
+                    renderer.set_object_material_params(dunes_obj_idx, [1.0, 0.01, pbr_flags, 0.0]);
+                }
+                renderer.set_object_casts_shadow(dunes_obj_idx, false);
+            }
+
+            // ── Haze emitter ────────────────────────────────
+            self.hub_haze = Some(renderer.vfx_system.spawn(
+                rift_engine::renderer::vfx::presets::sandstorm_haze(),
+                anchor,
+            ));
+
+            self.char_select_backdrop_built = true;
+        }
+
+        // Drive the gust envelope on the haze each frame so
+        // the dust pulses (same curve `render_phase` runs on
+        // the real hub).
+        if let Some(h) = self.hub_haze {
+            let t = renderer.elapsed_secs();
+            let slow = (t * 0.35).sin() * 0.55
+                + (t * 0.17 + 1.7).sin() * 0.35
+                + (t * 0.08 + 0.4).sin() * 0.10;
+            let gust = (1.0 + slow * 0.45).max(0.05);
+            renderer.vfx_system.set_anchor(h, anchor);
+            renderer.vfx_system.set_brightness(h, gust);
+        }
+    }
+
     /// Generate the safe hub / starting zone: a single small stone room
     /// with no enemies, no fog wall, no boss progress.  Returns the
     /// world-space position of the centre point where the caller should
@@ -943,6 +1058,19 @@ impl FloorManager {
     ) -> anyhow::Result<Vec3> {
         *world = hecs::World::new();
         renderer.clear_objects();
+        // Drop any pre-existing haze emitter (e.g. spawned by
+        // the char-select backdrop on the previous screen) so
+        // the fresh hub spawn below doesn't leak the prior
+        // handle and so the gust envelope re-anchors on the
+        // player instead of the screen-select avatar.
+        if let Some(prev) = self.hub_haze.take() {
+            renderer.vfx_system.despawn(prev);
+        }
+        // Char-select disc + dune ring were just wiped by
+        // `clear_objects()`; reset the flag so a future
+        // re-entry into char-select (after a disconnect)
+        // re-installs them on its first tick.
+        self.char_select_backdrop_built = false;
         // Despawn any previous floor's torch VFX + drop their
         // cached `PointLight` entries. Without this, the
         // dungeon's wall-torch positions would keep being

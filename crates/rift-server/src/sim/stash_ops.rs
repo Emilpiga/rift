@@ -6,7 +6,10 @@
 use rift_net::ids::ClientId;
 
 use super::player::{ServerPlayer, StashTab};
-use super::{push_into_sparse, salvage_yield, trim_trailing_none, Sim};
+use super::{
+    build_stash_occupancy, footprint_fits_stash, place_inventory_item, place_inventory_item_at,
+    place_stash_item, place_stash_item_at, salvage_yield, sort_grid_items, trim_trailing_none, Sim,
+};
 
 impl Sim {
     /// Borrow the player's stash (read-only). Used by the
@@ -151,10 +154,10 @@ impl Sim {
             .unwrap_or(false)
     }
 
-    /// Move the bag item at `inventory_index` to the end of
-    /// stash tab `tab_index`. Returns `true` on success;
-    /// `false` if either index is out of range or the
-    /// destination tab is at [`STASH_TAB_SLOTS`] capacity.
+    /// Move the bag item at `inventory_index` into the first
+    /// free anchor of stash tab `tab_index` whose footprint
+    /// fits. Returns `true` on success; `false` if either index
+    /// is out of range or no anchor fits the item.
     pub fn deposit_to_stash(
         &mut self,
         client_id: ClientId,
@@ -170,24 +173,26 @@ impl Sim {
         if tab_index >= p.stash.len() {
             return false;
         }
-        // Reject up front when the tab is already full so the
-        // bag item isn't taken out of the source slot only to
-        // be put back. Empty trailing slots aren't counted.
-        let filled = p.stash[tab_index].items.iter().filter(|s| s.is_some()).count();
-        if filled >= rift_net::messages::STASH_TAB_SLOTS {
-            return false;
-        }
         let Some(item) = p.inventory.get_mut(inventory_index).and_then(|s| s.take()) else {
             return false;
         };
-        push_into_sparse(&mut p.stash[tab_index].items, item);
-        trim_trailing_none(&mut p.inventory);
-        true
+        if place_stash_item(&mut p.stash[tab_index].items, item.clone()).is_some() {
+            true
+        } else {
+            // Restore on failure — never silently drop loot.
+            if inventory_index < p.inventory.len() {
+                p.inventory[inventory_index] = Some(item);
+            } else {
+                let _ = place_inventory_item(&mut p.inventory, item);
+            }
+            false
+        }
     }
 
-    /// Move the stash item at `(tab_index, stash_index)` to the
-    /// end of the bag. Returns `true` on success; `false` if
-    /// either index is out of range.
+    /// Move the stash item at `(tab_index, stash_index)` into
+    /// the first free anchor of the bag whose footprint fits.
+    /// Returns `true` on success; `false` on out-of-range or
+    /// when the bag has no room.
     pub fn withdraw_from_stash(
         &mut self,
         client_id: ClientId,
@@ -210,26 +215,122 @@ impl Sim {
         else {
             return false;
         };
-        trim_trailing_none(&mut p.stash[tab_index].items);
-        push_into_sparse(&mut p.inventory, item);
-        true
+        if place_inventory_item(&mut p.inventory, item.clone()).is_some() {
+            true
+        } else {
+            // Restore on failure.
+            let items = &mut p.stash[tab_index].items;
+            if stash_index < items.len() {
+                items[stash_index] = Some(item);
+            } else {
+                let _ = place_stash_item(items, item);
+            }
+            false
+        }
     }
 
-    /// Deposit the bag item at `inventory_index` into a specific
-    /// `(tab_index, stash_index)`. If the destination is already
-    /// occupied the two items swap (the prior stash occupant
-    /// goes back to the freed bag slot). Grows the tab with
-    /// `None` placeholders when `stash_index` is past the
-    /// current length, then trims trailing `None`s on both
-    /// containers. Rejects requests past [`STASH_TAB_SLOTS`].
-    pub fn deposit_to_stash_slot(
+    /// Take the stash item at `(tab_index, stash_index)` and
+    /// equip it into its canonical slot. If the slot is already
+    /// filled, the displaced item is pushed back into the
+    /// vacated stash cell (preferred), or the first free bag
+    /// anchor as a fallback. Returns `false` and rolls back on
+    /// any failure.
+    pub fn equip_from_stash(
         &mut self,
         client_id: ClientId,
-        inventory_index: usize,
         tab_index: usize,
         stash_index: usize,
     ) -> bool {
-        if stash_index >= rift_net::messages::STASH_TAB_SLOTS {
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        if tab_index >= p.stash.len() {
+            return false;
+        }
+        let Some(mut item) = p.stash[tab_index]
+            .items
+            .get_mut(stash_index)
+            .and_then(|s| s.take())
+        else {
+            return false;
+        };
+        // Self-bind legacy / unprovenanced items, mirroring
+        // `equip_from_bag`.
+        if item.provenance.is_none() {
+            if let Some(uuid) = p.character_id {
+                item.provenance = Some(rift_game::loot::LootProvenance::from_ids([
+                    uuid.into_bytes()
+                ]));
+            }
+        }
+        // Level requirement gate. Restore on failure.
+        if p.level < item.required_level() {
+            log::debug!(
+                "equip_from_stash: rejected (under-level) client={client_id:?} \
+                 tab={tab_index} idx={stash_index} player_level={} item={} req={}",
+                p.level,
+                item.display_name(),
+                item.required_level(),
+            );
+            p.stash[tab_index].items[stash_index] = Some(item);
+            return false;
+        }
+        let slot = p.equipment.default_slot(&item);
+        if !rift_game::loot::Equipment::accepts(slot, &item) {
+            p.stash[tab_index].items[stash_index] = Some(item);
+            return false;
+        }
+        let displaced = p.equipment.set(slot, Some(item));
+        if let Some(prev) = displaced {
+            // Try to put the displaced item back where the new
+            // one came from in the stash. If that footprint
+            // doesn't fit, fall back to the first free bag
+            // anchor; if even that fails, fall back to any free
+            // stash anchor; if still nothing, undo the swap.
+            let items = &mut p.stash[tab_index].items;
+            let restored_to_stash = stash_index < items.len() && items[stash_index].is_none() && {
+                items[stash_index] = Some(prev.clone());
+                true
+            };
+            if !restored_to_stash {
+                let placed_in_bag = place_inventory_item(&mut p.inventory, prev.clone()).is_some();
+                if !placed_in_bag {
+                    let placed_in_stash =
+                        place_stash_item(&mut p.stash[tab_index].items, prev.clone()).is_some();
+                    if !placed_in_stash {
+                        // Worst case: undo the equip swap.
+                        if let Some(newly_equipped) = p.equipment.take(slot) {
+                            p.stash[tab_index].items[stash_index] = Some(newly_equipped);
+                        }
+                        p.equipment.set(slot, Some(prev));
+                        return false;
+                    }
+                }
+            }
+        }
+        p.recompute_stats();
+        true
+    }
+
+    /// Take the equipped item in `slot` and place it into
+    /// `(tab_index, stash_index)`. If that stash cell is
+    /// occupied by a single item, the two swap (occupant
+    /// becomes the new equip, if it accepts the slot;
+    /// otherwise the swap is rejected). Multi-item footprint
+    /// overlaps reject. Returns `false` and rolls back on any
+    /// failure.
+    pub fn unequip_to_stash_slot(
+        &mut self,
+        client_id: ClientId,
+        slot: rift_game::loot::EquipSlot,
+        tab_index: usize,
+        stash_index: usize,
+    ) -> bool {
+        use rift_net::messages::STASH_TAB_SLOTS;
+        if stash_index >= STASH_TAB_SLOTS {
             return false;
         }
         let Some(&entity) = self.sessions.get(&client_id) else {
@@ -241,31 +342,131 @@ impl Sim {
         if tab_index >= p.stash.len() {
             return false;
         }
-        let Some(item) = p.inventory.get_mut(inventory_index).and_then(|s| s.take()) else {
+        let Some(unequipped) = p.equipment.take(slot) else {
             return false;
         };
-        let displaced = {
-            let items = &mut p.stash[tab_index].items;
-            if stash_index >= items.len() {
-                items.resize_with(stash_index + 1, || None);
-            }
-            let prev = items[stash_index].take();
-            items[stash_index] = Some(item);
-            prev
-        };
-        if let Some(prev) = displaced {
-            if inventory_index >= p.inventory.len() {
-                p.inventory.resize_with(inventory_index + 1, || None);
-            }
-            p.inventory[inventory_index] = Some(prev);
+        // Ensure the tab is sized so we can address the cell.
+        if p.stash[tab_index].items.len() < STASH_TAB_SLOTS {
+            p.stash[tab_index]
+                .items
+                .resize_with(STASH_TAB_SLOTS, || None);
         }
-        trim_trailing_none(&mut p.stash[tab_index].items);
-        trim_trailing_none(&mut p.inventory);
+        // Take the existing occupant out so the occupancy
+        // mask doesn't include it when we test the new item's
+        // footprint.
+        let displaced = p.stash[tab_index].items[stash_index].take();
+        let (uw, uh) = unequipped.footprint();
+        let occ = build_stash_occupancy(&p.stash[tab_index].items);
+        if !footprint_fits_stash(&occ, stash_index, uw, uh) {
+            // Restore everything.
+            p.stash[tab_index].items[stash_index] = displaced;
+            p.equipment.set(slot, Some(unequipped));
+            return false;
+        }
+        p.stash[tab_index].items[stash_index] = Some(unequipped);
+        if let Some(prev) = displaced {
+            // Try to equip the displaced item back into the
+            // freed slot so the player keeps something on. If
+            // it doesn't fit the slot type, push it into the
+            // first free bag anchor; if even that fails, fall
+            // back to a free stash anchor; if nothing works,
+            // roll the whole op back.
+            if rift_game::loot::Equipment::accepts(slot, &prev) {
+                p.equipment.set(slot, Some(prev));
+            } else if place_inventory_item(&mut p.inventory, prev.clone()).is_none() {
+                if place_stash_item(&mut p.stash[tab_index].items, prev.clone()).is_none() {
+                    let new_unequipped = p.stash[tab_index].items[stash_index].take();
+                    p.stash[tab_index].items[stash_index] = Some(prev);
+                    if let Some(it) = new_unequipped {
+                        p.equipment.set(slot, Some(it));
+                    }
+                    return false;
+                }
+            }
+        }
+        p.recompute_stats();
+        true
+    }
+    /// swap; multi-item overlaps reject. Mirrors the bag's
+    /// `swap_inventory_slots` semantics.
+    pub fn deposit_to_stash_slot(
+        &mut self,
+        client_id: ClientId,
+        inventory_index: usize,
+        tab_index: usize,
+        stash_index: usize,
+    ) -> bool {
+        use rift_net::messages::{INVENTORY_CAPACITY, STASH_COLS, STASH_ROWS, STASH_TAB_SLOTS};
+        if stash_index >= STASH_TAB_SLOTS || inventory_index >= INVENTORY_CAPACITY {
+            return false;
+        }
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        if tab_index >= p.stash.len() {
+            return false;
+        }
+        if p.inventory.len() < INVENTORY_CAPACITY {
+            p.inventory.resize_with(INVENTORY_CAPACITY, || None);
+        }
+        if p.stash[tab_index].items.len() < STASH_TAB_SLOTS {
+            p.stash[tab_index]
+                .items
+                .resize_with(STASH_TAB_SLOTS, || None);
+        }
+        let Some(item) = p.inventory[inventory_index].take() else {
+            return false;
+        };
+        let (iw, ih) = item.footprint();
+
+        // Identify which other item(s) the new footprint
+        // would cover at the stash anchor. Multi-item overlap
+        // means the swap can't resolve cleanly.
+        let blockers = stash_blockers(&p.stash[tab_index].items, stash_index, iw, ih);
+        if blockers.len() > 1 {
+            p.inventory[inventory_index] = Some(item);
+            return false;
+        }
+        let displaced_idx = blockers.first().copied();
+        let displaced = displaced_idx.and_then(|i| p.stash[tab_index].items[i].take());
+
+        let occ = build_stash_occupancy(&p.stash[tab_index].items);
+        if !footprint_fits_stash(&occ, stash_index, iw, ih) {
+            // Restore both.
+            if let (Some(i), Some(it)) = (displaced_idx, displaced) {
+                p.stash[tab_index].items[i] = Some(it);
+            }
+            p.inventory[inventory_index] = Some(item);
+            return false;
+        }
+        let _ = STASH_COLS;
+        let _ = STASH_ROWS;
+        p.stash[tab_index].items[stash_index] = Some(item);
+
+        if let Some(prev) = displaced {
+            // Try to place the displaced item back into the
+            // bag at the source anchor; fall back to first-fit;
+            // last resort = full rollback.
+            if !place_inventory_item_at(&mut p.inventory, prev.clone(), inventory_index)
+                && place_inventory_item(&mut p.inventory, prev.clone()).is_none()
+            {
+                // Rollback.
+                let item = p.stash[tab_index].items[stash_index].take().unwrap();
+                if let Some(i) = displaced_idx {
+                    p.stash[tab_index].items[i] = Some(prev);
+                }
+                p.inventory[inventory_index] = Some(item);
+                return false;
+            }
+        }
         true
     }
 
     /// Withdraw the stash item at `(tab_index, stash_index)`
-    /// into a specific `inventory_index`. Mirror of
+    /// into `inventory_index`. Mirror of
     /// [`Self::deposit_to_stash_slot`].
     pub fn withdraw_from_stash_slot(
         &mut self,
@@ -274,6 +475,10 @@ impl Sim {
         stash_index: usize,
         inventory_index: usize,
     ) -> bool {
+        use rift_net::messages::{INVENTORY_CAPACITY, STASH_TAB_SLOTS};
+        if stash_index >= STASH_TAB_SLOTS || inventory_index >= INVENTORY_CAPACITY {
+            return false;
+        }
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
@@ -283,30 +488,48 @@ impl Sim {
         if tab_index >= p.stash.len() {
             return false;
         }
-        // Pull the item out of the stash and drop the borrow
-        // before touching `p.inventory` so the borrow checker
-        // doesn't complain about overlapping mutable derefs.
-        let Some(item) = p.stash[tab_index]
-            .items
-            .get_mut(stash_index)
-            .and_then(|s| s.take())
-        else {
+        if p.inventory.len() < INVENTORY_CAPACITY {
+            p.inventory.resize_with(INVENTORY_CAPACITY, || None);
+        }
+        if p.stash[tab_index].items.len() < STASH_TAB_SLOTS {
+            p.stash[tab_index]
+                .items
+                .resize_with(STASH_TAB_SLOTS, || None);
+        }
+        let Some(item) = p.stash[tab_index].items[stash_index].take() else {
             return false;
         };
-        if inventory_index >= p.inventory.len() {
-            p.inventory.resize_with(inventory_index + 1, || None);
+        let (iw, ih) = item.footprint();
+        let blockers = bag_blockers(&p.inventory, inventory_index, iw, ih);
+        if blockers.len() > 1 {
+            p.stash[tab_index].items[stash_index] = Some(item);
+            return false;
         }
-        let displaced = p.inventory[inventory_index].take();
-        p.inventory[inventory_index] = Some(item);
-        if let Some(prev) = displaced {
-            let items = &mut p.stash[tab_index].items;
-            if stash_index >= items.len() {
-                items.resize_with(stash_index + 1, || None);
+        let displaced_idx = blockers.first().copied();
+        let displaced = displaced_idx.and_then(|i| p.inventory[i].take());
+
+        if !place_inventory_item_at(&mut p.inventory, item.clone(), inventory_index) {
+            // Restore both.
+            if let (Some(i), Some(it)) = (displaced_idx, displaced) {
+                p.inventory[i] = Some(it);
             }
-            items[stash_index] = Some(prev);
+            p.stash[tab_index].items[stash_index] = Some(item);
+            return false;
         }
-        trim_trailing_none(&mut p.stash[tab_index].items);
-        trim_trailing_none(&mut p.inventory);
+
+        if let Some(prev) = displaced {
+            if !place_stash_item_at(&mut p.stash[tab_index].items, prev.clone(), stash_index)
+                && place_stash_item(&mut p.stash[tab_index].items, prev.clone()).is_none()
+            {
+                // Rollback.
+                let it = p.inventory[inventory_index].take().unwrap();
+                if let Some(i) = displaced_idx {
+                    p.inventory[i] = Some(prev);
+                }
+                p.stash[tab_index].items[stash_index] = Some(it);
+                return false;
+            }
+        }
         true
     }
 
@@ -342,12 +565,7 @@ impl Sim {
     /// Rename `tab_index`. Empty / whitespace-only names are
     /// rejected; otherwise the name is trimmed and clamped to
     /// 18 characters so the tab strip stays readable.
-    pub fn rename_stash_tab(
-        &mut self,
-        client_id: ClientId,
-        tab_index: usize,
-        name: &str,
-    ) -> bool {
+    pub fn rename_stash_tab(&mut self, client_id: ClientId, tab_index: usize, name: &str) -> bool {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return false;
@@ -369,12 +587,7 @@ impl Sim {
     /// Recolor `tab_index` with a packed `0xRRGGBB` color.
     /// The high byte is masked off so callers can't smuggle
     /// alpha (the stash strip renders opaque).
-    pub fn recolor_stash_tab(
-        &mut self,
-        client_id: ClientId,
-        tab_index: usize,
-        color: u32,
-    ) -> bool {
+    pub fn recolor_stash_tab(&mut self, client_id: ClientId, tab_index: usize, color: u32) -> bool {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
@@ -388,11 +601,10 @@ impl Sim {
         true
     }
 
-    /// Swap two bag slots, used by the inventory UI's
-    /// drag-and-drop reorder path. Either index may be empty
-    /// (past the current bag length); the bag is grown with
-    /// `None` placeholders to fit, then trimmed back to the
-    /// last filled slot. Returns `true` on success.
+    /// Swap two stash slots within `tab_index`. Honours
+    /// multi-cell footprints: both anchors must fit after the
+    /// swap without overlapping any other item. Either may be
+    /// empty. Returns `true` on success.
     pub fn swap_stash_slots(
         &mut self,
         client_id: ClientId,
@@ -400,10 +612,11 @@ impl Sim {
         a: usize,
         b: usize,
     ) -> bool {
+        use rift_net::messages::STASH_TAB_SLOTS;
         if a == b {
             return false;
         }
-        if a.max(b) >= rift_net::messages::STASH_TAB_SLOTS {
+        if a.max(b) >= STASH_TAB_SLOTS {
             return false;
         }
         let Some(&entity) = self.sessions.get(&client_id) else {
@@ -415,16 +628,155 @@ impl Sim {
         let Some(tab) = p.stash.get_mut(tab_index) else {
             return false;
         };
-        let items = &mut tab.items;
-        let max = a.max(b);
-        if max >= items.len() {
-            if a >= items.len() && b >= items.len() {
-                return false;
-            }
-            items.resize_with(max + 1, || None);
+        if tab.items.len() < STASH_TAB_SLOTS {
+            tab.items.resize_with(STASH_TAB_SLOTS, || None);
         }
-        items.swap(a, b);
-        trim_trailing_none(items);
+        let it_a = tab.items[a].take();
+        let it_b = tab.items[b].take();
+
+        let occ = build_stash_occupancy(&tab.items);
+        let a_fits = match &it_b {
+            Some(it) => {
+                let (w, h) = it.footprint();
+                footprint_fits_stash(&occ, a, w, h)
+            }
+            None => true,
+        };
+        let b_fits = match &it_a {
+            Some(it) => {
+                let (w, h) = it.footprint();
+                footprint_fits_stash(&occ, b, w, h)
+            }
+            None => true,
+        };
+        // Cross-clash: a's footprint at b can't cover b's anchor (and vice-versa)
+        let cross = match (&it_a, &it_b) {
+            (Some(ia), Some(ib)) => {
+                let (aw, ah) = ia.footprint();
+                let (bw, bh) = ib.footprint();
+                covers(b, aw, ah, a) || covers(a, bw, bh, b)
+            }
+            _ => false,
+        };
+        if !a_fits || !b_fits || cross {
+            tab.items[a] = it_a;
+            tab.items[b] = it_b;
+            return false;
+        }
+        tab.items[a] = it_b;
+        tab.items[b] = it_a;
         true
     }
+
+    /// Auto-sort one stash tab in place. Returns `true` iff
+    /// the tab actually changed.
+    pub fn sort_stash_tab(&mut self, client_id: ClientId, tab_index: usize) -> bool {
+        use rift_net::messages::{STASH_COLS, STASH_ROWS};
+        if !self.is_stash_open(client_id) {
+            return false;
+        }
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        let Some(tab) = p.stash.get_mut(tab_index) else {
+            return false;
+        };
+        if tab.items.iter().all(|s| s.is_none()) {
+            return false;
+        }
+        sort_grid_items(&mut tab.items, STASH_COLS, STASH_ROWS);
+        true
+    }
+}
+
+// ── Module-local helpers ──
+
+/// List of distinct anchor indices in `slots` whose footprint
+/// would be covered by `(w, h)` anchored at `anchor`, treating
+/// `slots` as a stash-sized grid.
+fn stash_blockers(
+    slots: &[Option<rift_game::loot::Item>],
+    anchor: usize,
+    w: u8,
+    h: u8,
+) -> Vec<usize> {
+    use rift_net::messages::{STASH_COLS, STASH_ROWS};
+    grid_blockers(slots, anchor, w, h, STASH_COLS, STASH_ROWS)
+}
+
+/// As [`stash_blockers`] but for the bag grid.
+fn bag_blockers(
+    slots: &[Option<rift_game::loot::Item>],
+    anchor: usize,
+    w: u8,
+    h: u8,
+) -> Vec<usize> {
+    use rift_net::messages::{BAG_COLS, BAG_ROWS};
+    grid_blockers(slots, anchor, w, h, BAG_COLS, BAG_ROWS)
+}
+
+fn grid_blockers(
+    slots: &[Option<rift_game::loot::Item>],
+    anchor: usize,
+    w: u8,
+    h: u8,
+    cols: usize,
+    rows: usize,
+) -> Vec<usize> {
+    // Build a cell-owner map so a multi-cell other item shows
+    // up as exactly one blocker entry no matter how many of
+    // its covered cells overlap the proposed footprint.
+    let mut owner: Vec<Option<usize>> = vec![None; cols * rows];
+    for (idx, slot) in slots.iter().enumerate() {
+        let Some(it) = slot else { continue };
+        if idx >= cols * rows {
+            break;
+        }
+        let (iw, ih) = it.footprint();
+        let cx = idx % cols;
+        let cy = idx / cols;
+        for dy in 0..ih as usize {
+            for dx in 0..iw as usize {
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if nx < cols && ny < rows {
+                    owner[ny * cols + nx] = Some(idx);
+                }
+            }
+        }
+    }
+    let mut out: Vec<usize> = Vec::new();
+    let ax = anchor % cols;
+    let ay = anchor / cols;
+    for dy in 0..h as usize {
+        for dx in 0..w as usize {
+            let nx = ax + dx;
+            let ny = ay + dy;
+            if nx >= cols || ny >= rows {
+                continue;
+            }
+            if let Some(o) = owner[ny * cols + nx] {
+                if !out.contains(&o) {
+                    out.push(o);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `true` iff a `(w, h)` footprint anchored at `anchor_idx`
+/// would cover the cell `target_idx`. Used for swap cross-
+/// clash detection regardless of grid dimensions (both
+/// indices share the same grid stride).
+fn covers(anchor_idx: usize, w: u8, h: u8, target_idx: usize) -> bool {
+    use rift_net::messages::STASH_COLS as COLS;
+    let ax = anchor_idx % COLS;
+    let ay = anchor_idx / COLS;
+    let tx = target_idx % COLS;
+    let ty = target_idx / COLS;
+    tx >= ax && tx < ax + w as usize && ty >= ay && ty < ay + h as usize
 }

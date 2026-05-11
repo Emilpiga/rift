@@ -6,11 +6,12 @@ use rift_client::net_client::{ClientProfile, NetClient};
 use rift_engine::{App, Input, LoadStatus, Renderer, Window};
 struct RiftApp {
     state: GameState,
-    /// Optional networking session. `Some` only when the binary was
-    /// launched with `--connect`. The rest of `update` runs exactly
-    /// the same in both modes — Phase 2 just does the handshake and
-    /// log; Phase 3 will start steering the world from snapshots.
-    net: Option<NetClient>,
+    /// Networking session. The client cannot start without one
+    /// — every account, character, and roster lives behind
+    /// `Authenticated` on the server, and there is no offline
+    /// fallback. See `parse_args` for the resolution order of
+    /// the connect address.
+    net: NetClient,
 }
 
 impl App for RiftApp {
@@ -37,25 +38,21 @@ impl App for RiftApp {
         //   6. `apply_server_pushed_state` integrates server
         //      replies that are safe to apply after the SP frame
         //      (inventory / equipment / XP / progress / claims).
-        if self.net.is_some() {
-            self.net_pre_phase(renderer, input, dt);
-            // Skip ECS sync while the staged net-transition is
-            // running — the world is being rebuilt and any
-            // remote-avatar / enemy / loot spawn from the next
-            // snapshot would land in a half-built scene.
-            if !self.state.is_net_transitioning() {
-                self.sync_entities_from_snapshot(renderer, dt);
-                self.handle_world_events(renderer);
-            }
+        self.net_pre_phase(renderer, input, dt);
+        // Skip ECS sync while the staged net-transition is
+        // running — the world is being rebuilt and any
+        // remote-avatar / enemy / loot spawn from the next
+        // snapshot would land in a half-built scene.
+        if !self.state.is_net_transitioning() {
+            self.sync_entities_from_snapshot(renderer, dt);
+            self.handle_world_events(renderer);
         }
 
         self.state.update(renderer, input, dt);
 
-        if self.net.is_some() {
-            if !self.state.is_net_transitioning() {
-                self.forward_client_commands();
-                self.apply_server_pushed_state(renderer);
-            }
+        if !self.state.is_net_transitioning() {
+            self.forward_client_commands();
+            self.apply_server_pushed_state(renderer);
         }
 
         // Audio housekeeping: refresh the listener pose from
@@ -118,8 +115,8 @@ impl App for RiftApp {
 
 /// Per-phase helpers for [`RiftApp::update`]. Pulled out so each
 /// phase's responsibility is named and individually skimmable.
-/// Every helper short-circuits when `self.net` is `None`, so SP /
-/// offline mode pays nothing for the split.
+/// The client is always networked — there is no offline mode —
+/// so these helpers can borrow the `NetClient` directly.
 impl RiftApp {
     /// Drive the network layer and apply any server-driven floor
     /// transition. Has to run before [`Self::sync_entities_from_snapshot`]
@@ -127,7 +124,6 @@ impl RiftApp {
     /// than the old one.
     fn net_pre_phase(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
 
         // If the server told us to go away (protocol mismatch,
         // future auth failure, ...) there's no point continuing
@@ -219,7 +215,6 @@ impl RiftApp {
     /// frame.
     fn sync_entities_from_snapshot(&mut self, renderer: &mut Renderer, dt: f32) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
 
         net.sync_local_player(&mut state.world);
         net.sync_avatars(
@@ -300,10 +295,7 @@ impl RiftApp {
         // borrow on `self.net` while the per-event handlers also
         // need to touch it (read `our_net_id`, `avatar_entities`,
         // `last_positions`).
-        let events = match self.net.as_mut() {
-            Some(net) => net.drain_events(),
-            None => return,
-        };
+        let events = self.net.drain_events();
         for ev in events {
             self.handle_world_event(ev, renderer);
         }
@@ -399,7 +391,6 @@ impl RiftApp {
         renderer: &mut Renderer,
     ) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
         let world_pos = Vec3::from_array(position);
         if Some(target) == net.our_net_id() {
             state.combat_text.spawn_player_damage(world_pos, amount);
@@ -455,7 +446,6 @@ impl RiftApp {
         renderer: &mut Renderer,
     ) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
         let pos_opt = net.last_positions.get(&entity).copied();
         log::info!(
             "net: Death entity={entity:?} have_pos={} ({:?})",
@@ -583,7 +573,6 @@ impl RiftApp {
     ) {
         log::info!("net: PlayerGhosted entity={entity:?}");
         let Self { state: _, net } = self;
-        let Some(net) = net.as_mut() else { return };
         if Some(entity) == net.our_net_id() {
             return;
         }
@@ -607,7 +596,6 @@ impl RiftApp {
     ) {
         log::info!("net: PlayersRevived count={}", entities.len());
         let Self { state: _, net } = self;
-        let Some(net) = net.as_mut() else { return };
         for revived in entities {
             // Try the avatar position (remote players) first,
             // falling back to last_positions (works for the
@@ -675,7 +663,6 @@ impl RiftApp {
         };
 
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
         let caster_avatar = if Some(caster) == net.our_net_id() {
             None
         } else {
@@ -708,8 +695,7 @@ impl RiftApp {
         let pos = Vec3::from_array(position);
         let local_gender = self
             .net
-            .as_ref()
-            .and_then(|n| n.local_gender())
+            .local_gender()
             .map(rift_client::net::wire_gender_to_game);
         rift_client::game::state::on_loot_dropped(
             &mut self.state.loot,
@@ -744,7 +730,6 @@ impl RiftApp {
     fn handle_channel_end_event(&mut self, caster: rift_net::NetId, ability: u16) {
         log::debug!("net: ChannelEnd caster={caster:?} ability={ability}");
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
 
         let is_local = Some(caster) == net.our_net_id();
         let entity = if is_local {
@@ -770,7 +755,6 @@ impl RiftApp {
     /// they all live in one phase.
     fn forward_client_commands(&mut self) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
 
         // Push the chosen profile to the wire as soon as
         // character-select completes. Until this fires the
@@ -883,6 +867,9 @@ impl RiftApp {
                     inventory_index,
                 } => {
                     net.request_unequip_to_bag_slot(slot, inventory_index);
+                }
+                EquipRequest::SortBag => {
+                    net.request_sort_inventory();
                 }
             }
         }
@@ -1039,6 +1026,19 @@ impl RiftApp {
                 } => {
                     net.request_withdraw_from_stash_slot(tab_index, stash_index, inventory_index);
                 }
+                StashRequest::EquipFromStash {
+                    tab_index,
+                    stash_index,
+                } => {
+                    net.request_equip_from_stash(tab_index, stash_index);
+                }
+                StashRequest::UnequipToStashSlot {
+                    slot,
+                    tab_index,
+                    stash_index,
+                } => {
+                    net.request_unequip_to_stash_slot(slot, tab_index, stash_index);
+                }
                 StashRequest::BuyTab => {
                     net.request_buy_stash_tab();
                 }
@@ -1047,6 +1047,9 @@ impl RiftApp {
                 }
                 StashRequest::RecolorTab { tab_index, color } => {
                     net.request_recolor_stash_tab(tab_index, color);
+                }
+                StashRequest::SortTab { tab_index } => {
+                    net.request_sort_stash_tab(tab_index);
                 }
             }
         }
@@ -1060,7 +1063,6 @@ impl RiftApp {
     /// `net_pre_phase`.
     fn apply_server_pushed_state(&mut self, renderer: &mut Renderer) {
         let Self { state, net } = self;
-        let Some(net) = net.as_mut() else { return };
 
         // Loot-claim confirmations. `claimed_by == our_client_id`
         // means *we* picked it up; everyone else just removes
@@ -1091,6 +1093,12 @@ impl RiftApp {
         // rows that fail to decode (mismatched build) are
         // dropped — the next sync will correct it.
         if let Some(blobs) = net.drain_inventory_sync() {
+            // Authoritative state arrived \u2014 clear the in-transit
+            // hide so the next frame renders the new layout
+            // immediately (and the optimistic source-hide doesn't
+            // outlive its purpose).
+            state.inventory_ui.in_transit_source = None;
+            state.inventory_ui.in_transit_dest_rect = None;
             let items: Vec<Option<rift_game::loot::Item>> = blobs
                 .into_iter()
                 .map(|opt| {
@@ -1168,6 +1176,8 @@ impl RiftApp {
         // the bag — failed-to-decode rows are dropped and the
         // next sync corrects. One client tab per server tab.
         if let Some(tab_blobs) = net.drain_stash_sync() {
+            state.inventory_ui.in_transit_source = None;
+            state.inventory_ui.in_transit_dest_rect = None;
             use rift_client::game::states::sub_state::StashTabClient;
             let mut total_items = 0usize;
             let tabs: Vec<StashTabClient> = tab_blobs
@@ -1319,22 +1329,23 @@ impl RiftApp {
 }
 
 /// Parsed command-line arguments. Tiny, ad-hoc — clap is overkill for
-/// two flags. Once we grow more options we'll graduate.
+/// a single flag. Once we grow more options we'll graduate.
 struct Args {
-    connect: Option<SocketAddr>,
+    /// Resolved server address. Mandatory: the client cannot
+    /// run offline, every account / character lives behind
+    /// `Authenticated` on the server.
+    connect: SocketAddr,
 }
 
 /// Compile-time default server address baked into the client. Set
 /// at build time via the `RIFT_DEFAULT_SERVER` env var (read by
 /// `build.rs`); falls back to the local dev server. Players who
 /// just double-click `rift.exe` connect here without needing a
-/// flag. Override at runtime with `--connect`, `RIFT_SERVER`, or
-/// `--offline`.
+/// flag. Override at runtime with `--connect` or `RIFT_SERVER`.
 const DEFAULT_SERVER: Option<&str> = option_env!("RIFT_DEFAULT_SERVER");
 
 fn parse_args() -> Args {
     let mut connect: Option<SocketAddr> = None;
-    let mut explicit_offline = false;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1342,17 +1353,13 @@ fn parse_args() -> Args {
                 let v = iter.next().expect("--connect requires an address");
                 connect = Some(v.parse().expect("invalid --connect address"));
             }
-            "--offline" => {
-                explicit_offline = true;
-            }
             "--help" | "-h" => {
                 eprintln!(
-                    "rift [--connect host:port] [--offline]\n\
+                    "rift [--connect host:port]\n\
                      \n\
                      Defaults to the server baked in at build time\n\
                      (RIFT_DEFAULT_SERVER), or to the RIFT_SERVER env\n\
-                     var if set. Pass --offline to skip multiplayer\n\
-                     entirely."
+                     var if set. There is no offline mode."
                 );
                 std::process::exit(0);
             }
@@ -1363,15 +1370,15 @@ fn parse_args() -> Args {
         }
     }
     // Resolution order: explicit --connect > $RIFT_SERVER >
-    // compile-time default. --offline trumps everything.
-    if connect.is_none() && !explicit_offline {
+    // compile-time default.
+    if connect.is_none() {
         if let Ok(env_addr) = std::env::var("RIFT_SERVER") {
             if !env_addr.is_empty() {
                 connect = Some(env_addr.parse().expect("invalid RIFT_SERVER address"));
             }
         }
     }
-    if connect.is_none() && !explicit_offline {
+    if connect.is_none() {
         if let Some(default) = DEFAULT_SERVER {
             connect = Some(
                 default
@@ -1380,6 +1387,15 @@ fn parse_args() -> Args {
             );
         }
     }
+    let Some(connect) = connect else {
+        eprintln!();
+        eprintln!("=== Cannot start: no server address ===");
+        eprintln!("Pass --connect <host:port>, set the RIFT_SERVER env var, or");
+        eprintln!("build with RIFT_DEFAULT_SERVER set so the binary has a default.");
+        eprintln!("=======================================");
+        eprintln!();
+        std::process::exit(2);
+    };
     Args { connect }
 }
 
@@ -1393,53 +1409,44 @@ fn main() -> anyhow::Result<()> {
     // silently hanging the client at character-select.
     let auth_config = rift_client::auth::Config::from_env();
 
-    let net = if let Some(addr) = args.connect {
-        // We must have an auth signer before we open any
-        // network session — the server will reject our `Hello`
-        // without a valid credential and we'd just sit on a
-        // hung renet handshake. Print the user-facing reason
-        // verbatim so the player knows whether to set an env
-        // var or rebuild with the steam feature.
-        let Some(signer) = auth_config.signer.clone() else {
-            let reason = auth_config
-                .disabled_reason
-                .clone()
-                .unwrap_or_else(|| "no auth issuer configured".to_string());
-            eprintln!();
-            eprintln!("=== Cannot connect: no auth issuer ===");
-            eprintln!("{reason}");
-            eprintln!("Set RIFT_DEV_AUTH_KEY (dev) or rebuild with --features steam-auth.");
-            eprintln!("======================================");
-            eprintln!();
-            std::process::exit(2);
-        };
-
-        // Open the connection now so the handshake happens in
-        // parallel with character-select. The cosmetic profile is
-        // pushed via `set_profile` once the player picks one, which
-        // also unblocks Hello.
-        let mut net = NetClient::connect(addr)?;
-        net.set_signer(signer);
-        Some(net)
-    } else {
-        None
+    // We must have an auth signer before we open any network
+    // session — the server will reject our `Hello` without a
+    // valid credential and we'd just sit on a hung renet
+    // handshake. Print the user-facing reason verbatim so the
+    // player knows whether to set an env var or rebuild with
+    // the steam feature.
+    let Some(signer) = auth_config.signer.clone() else {
+        let reason = auth_config
+            .disabled_reason
+            .clone()
+            .unwrap_or_else(|| "no auth issuer configured".to_string());
+        eprintln!();
+        eprintln!("=== Cannot connect: no auth issuer ===");
+        eprintln!("{reason}");
+        eprintln!("Set RIFT_DEV_AUTH_KEY (dev) or rebuild with --features steam-auth.");
+        eprintln!("======================================");
+        eprintln!();
+        std::process::exit(2);
     };
 
+    // Open the connection now so the handshake happens in
+    // parallel with character-select. The cosmetic profile is
+    // pushed via `set_profile` once the player picks one, which
+    // also unblocks Hello.
+    let mut net = NetClient::connect(args.connect)?;
+    net.set_signer(signer);
+
     let mut state = GameState::new();
-    // If auth resolved at startup AND we actually have a
-    // network session, queue the dev/steam identity straight
-    // into the net layer so the binary can skip the
-    // account-entry screen entirely. Skipping in SP mode would
-    // jump the UI to `LoadingRoster` with no NetClient to ever
-    // deliver `Authenticated`, which hangs the player forever
-    // on the loading screen.
-    if net.is_some() {
-        if let Some(signer) = auth_config.signer.as_ref() {
-            let identity = signer.identity_hint();
-            state.net.roster_request = Some(identity.clone());
-            state.character_select_skip_to_loading(identity);
-        }
-    }
+    // Queue the dev / steam identity straight into the net
+    // layer so the UI lands on the loading-roster view; the
+    // server will deliver `Authenticated` + roster shortly.
+    let identity = auth_config
+        .signer
+        .as_ref()
+        .expect("signer was checked above")
+        .identity_hint();
+    state.net.roster_request = Some(identity.clone());
+    state.character_select_skip_to_loading(identity);
 
     let window = Window::new("Rift Crawler", 1280, 720);
     window.run(RiftApp { state, net })

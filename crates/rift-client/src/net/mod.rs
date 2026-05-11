@@ -6,9 +6,10 @@
 //! lives in submodules — this file is the transport + dispatch +
 //! drain surface.
 //!
-//! Activated via `--connect <addr>` on the command line. When
-//! omitted, the game runs single-player exactly as before and
-//! none of these modules are touched.
+//! The client always runs networked — there is no offline mode.
+//! The connect address is resolved at startup (`--connect`,
+//! `RIFT_SERVER`, or the compile-time default); a missing address
+//! is a hard error before this module is ever constructed.
 
 mod commands;
 mod snapshot;

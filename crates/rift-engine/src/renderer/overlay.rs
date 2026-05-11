@@ -109,23 +109,104 @@ impl OverlayBatch {
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         let uv = Self::white_uv();
         let base = self.vertices.len() as u32;
-        self.vertices.push(OverlayVertex { position: [x, y], color, uv });
-        self.vertices.push(OverlayVertex { position: [x + w, y], color, uv });
-        self.vertices.push(OverlayVertex { position: [x + w, y + h], color, uv });
-        self.vertices.push(OverlayVertex { position: [x, y + h], color, uv });
-        self.indices.extend_from_slice(&[
-            base, base + 1, base + 2,
-            base, base + 2, base + 3,
-        ]);
+        self.vertices.push(OverlayVertex {
+            position: [x, y],
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x + w, y],
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x + w, y + h],
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x, y + h],
+            color,
+            uv,
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Add a rectangle with a vertical gradient: `top` colour
+    /// at the upper edge, `bot` at the lower. The fragment
+    /// shader is `fragColor * texture(white)` so per-vertex
+    /// colours interpolate linearly across the quad — no
+    /// extra pipeline needed. Coords in NDC.
+    pub fn rect_grad_v(&mut self, x: f32, y: f32, w: f32, h: f32, top: [f32; 4], bot: [f32; 4]) {
+        let uv = Self::white_uv();
+        let base = self.vertices.len() as u32;
+        // NDC y grows downward in our pipeline; vertices at
+        // `y` are the visual *top*, vertices at `y + h` are
+        // the visual *bottom*.
+        self.vertices.push(OverlayVertex {
+            position: [x, y],
+            color: top,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x + w, y],
+            color: top,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x + w, y + h],
+            color: bot,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: [x, y + h],
+            color: bot,
+            uv,
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     /// Add a filled rect with pixel coordinates (top-left origin).
-    pub fn rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], screen_w: f32, screen_h: f32) {
+    pub fn rect_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
         let ndc_x = (x / screen_w) * 2.0 - 1.0;
         let ndc_y = (y / screen_h) * 2.0 - 1.0;
         let ndc_w = (w / screen_w) * 2.0;
         let ndc_h = (h / screen_h) * 2.0;
         self.rect(ndc_x, ndc_y, ndc_w, ndc_h, color);
+    }
+
+    /// Vertical-gradient pixel-space rect. `top` is sampled
+    /// along the upper edge, `bot` along the lower edge.
+    /// Linear interpolation across the quad gives a smooth
+    /// gradient at zero extra cost \u2014 our fragment shader
+    /// already multiplies the per-vertex colour through.
+    pub fn rect_px_grad_v(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top: [f32; 4],
+        bot: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let ndc_x = (x / screen_w) * 2.0 - 1.0;
+        let ndc_y = (y / screen_h) * 2.0 - 1.0;
+        let ndc_w = (w / screen_w) * 2.0;
+        let ndc_h = (h / screen_h) * 2.0;
+        self.rect_grad_v(ndc_x, ndc_y, ndc_w, ndc_h, top, bot);
     }
 
     /// Filled rounded rectangle in pixel coordinates. `radius` is
@@ -156,7 +237,15 @@ impl OverlayBatch {
         let r = radius.min(w * 0.5).min(h * 0.5);
 
         // Centre.
-        self.rect_px(x + r, y + r, w - 2.0 * r, h - 2.0 * r, color, screen_w, screen_h);
+        self.rect_px(
+            x + r,
+            y + r,
+            w - 2.0 * r,
+            h - 2.0 * r,
+            color,
+            screen_w,
+            screen_h,
+        );
         // Top + bottom edges (between the two top/bottom corners).
         self.rect_px(x + r, y, w - 2.0 * r, r, color, screen_w, screen_h);
         self.rect_px(x + r, y + h - r, w - 2.0 * r, r, color, screen_w, screen_h);
@@ -172,13 +261,15 @@ impl OverlayBatch {
         const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
         const PI: f32 = std::f32::consts::PI;
         let corners: [(f32, f32, f32); 4] = [
-            (x + r,         y + r,         PI),                  // TL: PI .. 1.5*PI
-            (x + w - r,     y + r,         1.5 * PI),             // TR: 1.5PI .. 2PI
-            (x + w - r,     y + h - r,     0.0),                  // BR: 0 .. PI/2
-            (x + r,         y + h - r,     HALF_PI),              // BL: PI/2 .. PI
+            (x + r, y + r, PI),           // TL: PI .. 1.5*PI
+            (x + w - r, y + r, 1.5 * PI), // TR: 1.5PI .. 2PI
+            (x + w - r, y + h - r, 0.0),  // BR: 0 .. PI/2
+            (x + r, y + h - r, HALF_PI),  // BL: PI/2 .. PI
         ];
         for (cx, cy, start) in corners {
-            self.corner_fan_px(cx, cy, r, start, HALF_PI, segments, color, screen_w, screen_h);
+            self.corner_fan_px(
+                cx, cy, r, start, HALF_PI, segments, color, screen_w, screen_h,
+            );
         }
     }
 
@@ -202,13 +293,21 @@ impl OverlayBatch {
             [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
         };
         let centre = self.vertices.len() as u32;
-        self.vertices.push(OverlayVertex { position: to_ndc(cx, cy), color, uv });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(cx, cy),
+            color,
+            uv,
+        });
         let step = sweep / segments as f32;
         for i in 0..=segments {
             let a = start + step * i as f32;
             let px = cx + a.cos() * r;
             let py = cy + a.sin() * r;
-            self.vertices.push(OverlayVertex { position: to_ndc(px, py), color, uv });
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(px, py),
+                color,
+                uv,
+            });
             if i > 0 {
                 // The just-pushed arc point is at `centre + i + 1`
                 // (centre at offset 0, arc[0]..arc[segments] at
@@ -218,45 +317,792 @@ impl OverlayBatch {
                 // the arc — invisible at small radii but very
                 // visible as a hairline notch / "squiggly line"
                 // at the new 8 px corner radius.
-                let prev = centre + i;     // arc[i-1]
+                let prev = centre + i; // arc[i-1]
                 let curr = centre + i + 1; // arc[i]
                 self.indices.extend_from_slice(&[centre, prev, curr]);
             }
         }
     }
 
+    /// Filled rounded rect with a vertical gradient: `top` along
+    /// the upper edge of the bounding box, `bot` along the lower.
+    /// Same decomposition as `rounded_rect_px` (centre + 4 edge
+    /// rects + 4 corner fans), but each sub-region's vertex
+    /// colours are lerped from `top`/`bot` based on their y
+    /// position so the gradient is continuous across the whole
+    /// shape — no visible seams between sub-rects.
+    pub fn rounded_rect_px_grad_v(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        top: [f32; 4],
+        bot: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if radius <= 0.0 || w <= 0.0 || h <= 0.0 {
+            if w > 0.0 && h > 0.0 {
+                self.rect_px_grad_v(x, y, w, h, top, bot, screen_w, screen_h);
+            }
+            return;
+        }
+        let r = radius.min(w * 0.5).min(h * 0.5);
+        let lerp = |t: f32| -> [f32; 4] {
+            [
+                top[0] + (bot[0] - top[0]) * t,
+                top[1] + (bot[1] - top[1]) * t,
+                top[2] + (bot[2] - top[2]) * t,
+                top[3] + (bot[3] - top[3]) * t,
+            ]
+        };
+        let inv_h = 1.0 / h;
+        let c_top_inner = lerp(r * inv_h);
+        let c_bot_inner = lerp((h - r) * inv_h);
+        // Top edge band.
+        self.rect_px_grad_v(
+            x + r,
+            y,
+            w - 2.0 * r,
+            r,
+            top,
+            c_top_inner,
+            screen_w,
+            screen_h,
+        );
+        // Centre.
+        self.rect_px_grad_v(
+            x + r,
+            y + r,
+            w - 2.0 * r,
+            h - 2.0 * r,
+            c_top_inner,
+            c_bot_inner,
+            screen_w,
+            screen_h,
+        );
+        // Bottom edge band.
+        self.rect_px_grad_v(
+            x + r,
+            y + h - r,
+            w - 2.0 * r,
+            r,
+            c_bot_inner,
+            bot,
+            screen_w,
+            screen_h,
+        );
+        // Side bands.
+        self.rect_px_grad_v(
+            x,
+            y + r,
+            r,
+            h - 2.0 * r,
+            c_top_inner,
+            c_bot_inner,
+            screen_w,
+            screen_h,
+        );
+        self.rect_px_grad_v(
+            x + w - r,
+            y + r,
+            r,
+            h - 2.0 * r,
+            c_top_inner,
+            c_bot_inner,
+            screen_w,
+            screen_h,
+        );
+        // Corner fans.
+        let segments = (r.ceil() as u32).clamp(3, 16);
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const PI: f32 = std::f32::consts::PI;
+        let corners: [(f32, f32, f32); 4] = [
+            (x + r, y + r, PI),
+            (x + w - r, y + r, 1.5 * PI),
+            (x + w - r, y + h - r, 0.0),
+            (x + r, y + h - r, HALF_PI),
+        ];
+        for (cx, cy, start) in corners {
+            self.corner_fan_px_grad_v(
+                cx, cy, r, start, HALF_PI, segments, y, inv_h, top, bot, screen_w, screen_h,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn corner_fan_px_grad_v(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        start: f32,
+        sweep: f32,
+        segments: u32,
+        y0: f32,
+        inv_h: f32,
+        top: [f32; 4],
+        bot: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let lerp_color = |vy: f32| -> [f32; 4] {
+            let t = ((vy - y0) * inv_h).clamp(0.0, 1.0);
+            [
+                top[0] + (bot[0] - top[0]) * t,
+                top[1] + (bot[1] - top[1]) * t,
+                top[2] + (bot[2] - top[2]) * t,
+                top[3] + (bot[3] - top[3]) * t,
+            ]
+        };
+        let centre = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(cx, cy),
+            color: lerp_color(cy),
+            uv,
+        });
+        let step = sweep / segments as f32;
+        for i in 0..=segments {
+            let a = start + step * i as f32;
+            let px = cx + a.cos() * r;
+            let py = cy + a.sin() * r;
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(px, py),
+                color: lerp_color(py),
+                uv,
+            });
+            if i > 0 {
+                let prev = centre + i;
+                let curr = centre + i + 1;
+                self.indices.extend_from_slice(&[centre, prev, curr]);
+            }
+        }
+    }
+
+    /// Filled rounded rect whose vertex colours are computed
+    /// by a per-vertex callback. Lets callers express any
+    /// gradient (radial, elliptical, axial, multi-stop …)
+    /// without adding another shader pipeline. The callback
+    /// is invoked once per generated vertex with that
+    /// vertex's pixel-space `(x, y)` and must return the
+    /// `[r, g, b, a]` colour for that point.
+    ///
+    /// Topology matches `rounded_rect_px` exactly (centre +
+    /// 4 edge bands + 4 corner fans), so the gradient
+    /// resolution is bounded by the corner-segment count
+    /// (~16 vertices per corner for the typical 8-px radius).
+    /// That's enough fidelity for the smooth top-down
+    /// lighting effects we use here while costing the same
+    /// vertex budget as the solid version.
+    pub fn rounded_rect_px_color_fn<F: FnMut(f32, f32) -> [f32; 4]>(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        mut color_at: F,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let r = if radius <= 0.0 {
+            0.0
+        } else {
+            radius.min(w * 0.5).min(h * 0.5)
+        };
+        // Helper: emit a quad whose 4 corners get their colour
+        // from the callback. The four corners are passed in the
+        // order TL, TR, BR, BL.
+        let mut quad = |verts: &mut Vec<OverlayVertex>,
+                        indices: &mut Vec<u32>,
+                        p0: (f32, f32),
+                        p1: (f32, f32),
+                        p2: (f32, f32),
+                        p3: (f32, f32),
+                        color_at: &mut F| {
+            let base = verts.len() as u32;
+            verts.push(OverlayVertex {
+                position: to_ndc(p0.0, p0.1),
+                color: color_at(p0.0, p0.1),
+                uv,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p1.0, p1.1),
+                color: color_at(p1.0, p1.1),
+                uv,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p2.0, p2.1),
+                color: color_at(p2.0, p2.1),
+                uv,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p3.0, p3.1),
+                color: color_at(p3.0, p3.1),
+                uv,
+            });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        if r <= 0.0 {
+            // Single quad fast-path.
+            quad(
+                &mut self.vertices,
+                &mut self.indices,
+                (x, y),
+                (x + w, y),
+                (x + w, y + h),
+                (x, y + h),
+                &mut color_at,
+            );
+            return;
+        }
+        // Centre quad.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y + r),
+            (x + w - r, y + r),
+            (x + w - r, y + h - r),
+            (x + r, y + h - r),
+            &mut color_at,
+        );
+        // Top band.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y),
+            (x + w - r, y),
+            (x + w - r, y + r),
+            (x + r, y + r),
+            &mut color_at,
+        );
+        // Bottom band.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y + h - r),
+            (x + w - r, y + h - r),
+            (x + w - r, y + h),
+            (x + r, y + h),
+            &mut color_at,
+        );
+        // Left band.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x, y + r),
+            (x + r, y + r),
+            (x + r, y + h - r),
+            (x, y + h - r),
+            &mut color_at,
+        );
+        // Right band.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + w - r, y + r),
+            (x + w, y + r),
+            (x + w, y + h - r),
+            (x + w - r, y + h - r),
+            &mut color_at,
+        );
+        // Corner fans.
+        let segments = (r.ceil() as u32).clamp(4, 16);
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const PI: f32 = std::f32::consts::PI;
+        let corners: [(f32, f32, f32); 4] = [
+            (x + r, y + r, PI),
+            (x + w - r, y + r, 1.5 * PI),
+            (x + w - r, y + h - r, 0.0),
+            (x + r, y + h - r, HALF_PI),
+        ];
+        for (cx, cy, start) in corners {
+            let centre = self.vertices.len() as u32;
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(cx, cy),
+                color: color_at(cx, cy),
+                uv,
+            });
+            let step = HALF_PI / segments as f32;
+            for i in 0..=segments {
+                let a = start + step * i as f32;
+                let px = cx + a.cos() * r;
+                let py = cy + a.sin() * r;
+                self.vertices.push(OverlayVertex {
+                    position: to_ndc(px, py),
+                    color: color_at(px, py),
+                    uv,
+                });
+                if i > 0 {
+                    let prev = centre + i;
+                    let curr = centre + i + 1;
+                    self.indices.extend_from_slice(&[centre, prev, curr]);
+                }
+            }
+        }
+    }
+
+    /// Filled rect with one colour per corner: `tl`, `tr`,
+    /// `bl`, `br` (top-left, top-right, bottom-left, bottom-
+    /// right). The fragment shader interpolates linearly so
+    /// you get a true bilinear gradient — useful for bevel
+    /// bands that fade out toward the horizontal edges.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rect_px_grad4(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tl: [f32; 4],
+        tr: [f32; 4],
+        bl: [f32; 4],
+        br: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x, y),
+            color: tl,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x + w, y),
+            color: tr,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x + w, y + h),
+            color: br,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x, y + h),
+            color: bl,
+            uv,
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Filled rounded rect with an elliptical radial gradient:
+    /// `centre` colour at the geometric centre, lerping out to
+    /// `edge` along the bounding ellipse. Smoothstep falloff so
+    /// the highlight reads as a soft oval (forge-iron / blood-
+    /// red button) rather than a hard hotspot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rounded_rect_px_radial(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        // Half-axes of the elliptical hotspot. Deliberately
+        // *narrower than* half-width and *much shorter than*
+        // half-height so the iso-colour ellipse is fully
+        // inscribed inside the rounded rect — i.e. every
+        // point on the perimeter (top edge, bottom edge,
+        // rounded corners) evaluates to `edge`. That kills
+        // the "solid wedge at the corners" artefact you'd
+        // get if the hotspot reached the rounded corner
+        // fans (the fan centres would then sample a non-
+        // edge colour and the few-segment corners would
+        // read as a solid mid-tone region distinct from
+        // the smooth gradient on the long edges).
+        //
+        // The shape reads as a horizontal oval: ax > ay.
+        let ax = (w * 0.50).max(1.0);
+        let ay = (h * 0.30).max(1.0);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        self.rounded_rect_px_color_fn(
+            x,
+            y,
+            w,
+            h,
+            radius,
+            |px, py| {
+                let dx = (px - cx) / ax;
+                let dy = (py - cy) / ay;
+                let d = (dx * dx + dy * dy).sqrt().min(1.0);
+                // smoothstep(1, 0, d): 1 at centre, 0 at edge.
+                let t = 1.0 - d;
+                let s = t * t * (3.0 - 2.0 * t);
+                [
+                    lerp(edge[0], centre[0], s),
+                    lerp(edge[1], centre[1], s),
+                    lerp(edge[2], centre[2], s),
+                    lerp(edge[3], centre[3], s),
+                ]
+            },
+            screen_w,
+            screen_h,
+        );
+    }
+
+    /// True rounded-rect outline of constant pixel thickness.
+    /// Builds a closed triangle strip around the perimeter so
+    /// the outline wraps the rounded corners cleanly — unlike
+    /// the four-edge-rect approximation in [`Ui::draw_rounded_outline`],
+    /// this draws the curved corner runs explicitly. Use this
+    /// for inset hairlines that have nothing behind them to
+    /// hide the corner gaps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rounded_outline_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        thickness: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if thickness <= 0.0 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        let t = thickness.min(r.max(thickness));
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        // Generate the perimeter samples: 4 straight runs + 4
+        // corner arcs. For each sample we emit two vertices
+        // (outer + inner), then connect consecutive samples
+        // with two triangles.
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const PI: f32 = std::f32::consts::PI;
+        let segments = (r.ceil() as u32).clamp(4, 16);
+        // Corner centre + start angle. Order matches a
+        // clockwise sweep starting at the top-left corner so
+        // the strip closes correctly.
+        let corners: [(f32, f32, f32); 4] = [
+            (x + r, y + r, PI),           // top-left
+            (x + w - r, y + r, 1.5 * PI), // top-right
+            (x + w - r, y + h - r, 0.0),  // bottom-right
+            (x + r, y + h - r, HALF_PI),  // bottom-left
+        ];
+        // Collect (outer, inner) sample pairs.
+        let mut samples: Vec<((f32, f32), (f32, f32))> = Vec::with_capacity(64);
+        for i in 0..4 {
+            // Straight edge run from previous corner end to
+            // this corner start. The outer/inner endpoints
+            // sit on the rect boundary tangents, no
+            // interpolation needed (just two endpoints).
+            let (cx, cy, start) = corners[i];
+            // Start point of this corner's arc:
+            let sx = cx + start.cos() * r;
+            let sy = cy + start.sin() * r;
+            let inv_normal = ((sx - cx) * (sx - cx) + (sy - cy) * (sy - cy))
+                .sqrt()
+                .max(1e-6);
+            let nx = (sx - cx) / inv_normal;
+            let ny = (sy - cy) / inv_normal;
+            samples.push(((sx, sy), (sx - nx * t, sy - ny * t)));
+            // Walk the arc.
+            let step = HALF_PI / segments as f32;
+            for s in 1..=segments {
+                let a = start + step * s as f32;
+                let ox = cx + a.cos() * r;
+                let oy = cy + a.sin() * r;
+                let dx = a.cos();
+                let dy = a.sin();
+                samples.push(((ox, oy), (ox - dx * t, oy - dy * t)));
+            }
+        }
+        // Emit triangles between consecutive samples, closing
+        // the strip back to sample 0.
+        let n = samples.len();
+        let base = self.vertices.len() as u32;
+        for ((ox, oy), (ix, iy)) in &samples {
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(*ox, *oy),
+                color,
+                uv,
+            });
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(*ix, *iy),
+                color,
+                uv,
+            });
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let o0 = base + (i as u32) * 2;
+            let i0 = base + (i as u32) * 2 + 1;
+            let o1 = base + (j as u32) * 2;
+            let i1 = base + (j as u32) * 2 + 1;
+            self.indices.extend_from_slice(&[o0, o1, i1, o0, i1, i0]);
+        }
+    }
+
+    /// Filled rounded rect with an elliptical radial gradient
+    /// AND a procedural cloud-noise modulation applied per
+    /// fragment in the shader. Same primitive cost as
+    /// [`Self::rounded_rect_px_radial`] — we just emit a
+    /// sentinel UV (`-1, -1`) so the shader knows to apply
+    /// noise. Use for any panel/button surface that should
+    /// read as textured stone or hammered metal rather than
+    /// flat gradient.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rounded_rect_px_radial_noisy(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let ax = (w * 0.50).max(1.0);
+        let ay = (h * 0.30).max(1.0);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        // Replace UV with the noise sentinel so the shader
+        // turns on its noise path. We can't reuse
+        // `rounded_rect_px_color_fn` directly because that
+        // emits white-pixel UVs — so we duplicate the
+        // tessellation here with the sentinel UV inline.
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        let color_at = |px: f32, py: f32| -> [f32; 4] {
+            let dx = (px - cx) / ax;
+            let dy = (py - cy) / ay;
+            let d = (dx * dx + dy * dy).sqrt().min(1.0);
+            let tn = 1.0 - d;
+            let s = tn * tn * (3.0 - 2.0 * tn);
+            [
+                lerp(edge[0], centre[0], s),
+                lerp(edge[1], centre[1], s),
+                lerp(edge[2], centre[2], s),
+                lerp(edge[3], centre[3], s),
+            ]
+        };
+        // Sentinel UV — fragment shader treats UV.x < 0 as
+        // "apply procedural noise + sample white".
+        const NOISE_UV: [f32; 2] = [-1.0, -1.0];
+        let mut quad = |verts: &mut Vec<OverlayVertex>,
+                        indices: &mut Vec<u32>,
+                        p0: (f32, f32),
+                        p1: (f32, f32),
+                        p2: (f32, f32),
+                        p3: (f32, f32)| {
+            let base = verts.len() as u32;
+            verts.push(OverlayVertex {
+                position: to_ndc(p0.0, p0.1),
+                color: color_at(p0.0, p0.1),
+                uv: NOISE_UV,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p1.0, p1.1),
+                color: color_at(p1.0, p1.1),
+                uv: NOISE_UV,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p2.0, p2.1),
+                color: color_at(p2.0, p2.1),
+                uv: NOISE_UV,
+            });
+            verts.push(OverlayVertex {
+                position: to_ndc(p3.0, p3.1),
+                color: color_at(p3.0, p3.1),
+                uv: NOISE_UV,
+            });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        if r <= 0.0 {
+            quad(
+                &mut self.vertices,
+                &mut self.indices,
+                (x, y),
+                (x + w, y),
+                (x + w, y + h),
+                (x, y + h),
+            );
+            return;
+        }
+        // Centre + 4 edge bands.
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y + r),
+            (x + w - r, y + r),
+            (x + w - r, y + h - r),
+            (x + r, y + h - r),
+        );
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y),
+            (x + w - r, y),
+            (x + w - r, y + r),
+            (x + r, y + r),
+        );
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + r, y + h - r),
+            (x + w - r, y + h - r),
+            (x + w - r, y + h),
+            (x + r, y + h),
+        );
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x, y + r),
+            (x + r, y + r),
+            (x + r, y + h - r),
+            (x, y + h - r),
+        );
+        quad(
+            &mut self.vertices,
+            &mut self.indices,
+            (x + w - r, y + r),
+            (x + w, y + r),
+            (x + w, y + h - r),
+            (x + w - r, y + h - r),
+        );
+        // Corner fans.
+        let segments = (r.ceil() as u32).clamp(4, 16);
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const PI: f32 = std::f32::consts::PI;
+        let corners: [(f32, f32, f32); 4] = [
+            (x + r, y + r, PI),
+            (x + w - r, y + r, 1.5 * PI),
+            (x + w - r, y + h - r, 0.0),
+            (x + r, y + h - r, HALF_PI),
+        ];
+        for (cx, cy, start) in corners {
+            let centre_idx = self.vertices.len() as u32;
+            self.vertices.push(OverlayVertex {
+                position: to_ndc(cx, cy),
+                color: color_at(cx, cy),
+                uv: NOISE_UV,
+            });
+            let step = HALF_PI / segments as f32;
+            for i in 0..=segments {
+                let a = start + step * i as f32;
+                let px = cx + a.cos() * r;
+                let py = cy + a.sin() * r;
+                self.vertices.push(OverlayVertex {
+                    position: to_ndc(px, py),
+                    color: color_at(px, py),
+                    uv: NOISE_UV,
+                });
+                if i > 0 {
+                    let prev = centre_idx + i;
+                    let curr = centre_idx + i + 1;
+                    self.indices.extend_from_slice(&[centre_idx, prev, curr]);
+                }
+            }
+        }
+    }
+
     /// Draw a text string at pixel position (top-left origin).
     /// Returns the width in pixels of the rendered text.
-    pub fn text(&mut self, text: &str, x: f32, y: f32, size: f32, color: [f32; 4], screen_w: f32, screen_h: f32) -> f32 {
-        let scale = size / self.font.glyph_height as f32;
+    pub fn text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> f32 {
+        // Scale from rasterised pixels to display pixels.
+        let scale = size / self.font.raster_px;
         let mut cursor_x = x;
 
         for ch in text.chars() {
-            if let Some(glyph) = self.font.glyph(ch) {
-                let gw = self.font.glyph_width as f32 * scale;
-                let gh = self.font.glyph_height as f32 * scale;
-
-                // Convert pixel position to NDC
-                let ndc_x = (cursor_x / screen_w) * 2.0 - 1.0;
-                let ndc_y = (y / screen_h) * 2.0 - 1.0;
-                let ndc_w = (gw / screen_w) * 2.0;
-                let ndc_h = (gh / screen_h) * 2.0;
-
-                let base = self.vertices.len() as u32;
-                self.vertices.push(OverlayVertex { position: [ndc_x, ndc_y], color, uv: [glyph.u0, glyph.v0] });
-                self.vertices.push(OverlayVertex { position: [ndc_x + ndc_w, ndc_y], color, uv: [glyph.u1, glyph.v0] });
-                self.vertices.push(OverlayVertex { position: [ndc_x + ndc_w, ndc_y + ndc_h], color, uv: [glyph.u1, glyph.v1] });
-                self.vertices.push(OverlayVertex { position: [ndc_x, ndc_y + ndc_h], color, uv: [glyph.u0, glyph.v1] });
-                self.indices.extend_from_slice(&[
-                    base, base + 1, base + 2,
-                    base, base + 2, base + 3,
-                ]);
-
-                cursor_x += gw;
-            } else {
-                // Space or unknown — advance cursor
-                cursor_x += self.font.glyph_width as f32 * scale;
+            let Some(glyph) = self.font.glyph(ch) else {
+                // Unknown char — still advance by a half-em
+                // so cursor positioning matches `measure_text`.
+                cursor_x += self.font.advance(ch) * scale;
+                continue;
+            };
+            // Empty bitmap (e.g. space): advance only.
+            if glyph.w_px <= 0.0 || glyph.h_px <= 0.0 {
+                cursor_x += glyph.advance * scale;
+                continue;
             }
+
+            let gx = cursor_x + glyph.x_offset * scale;
+            let gy = y + glyph.y_offset * scale;
+            let gw = glyph.w_px * scale;
+            let gh = glyph.h_px * scale;
+
+            // Convert pixel position to NDC.
+            let ndc_x = (gx / screen_w) * 2.0 - 1.0;
+            let ndc_y = (gy / screen_h) * 2.0 - 1.0;
+            let ndc_w = (gw / screen_w) * 2.0;
+            let ndc_h = (gh / screen_h) * 2.0;
+
+            let base = self.vertices.len() as u32;
+            self.vertices.push(OverlayVertex {
+                position: [ndc_x, ndc_y],
+                color,
+                uv: [glyph.u0, glyph.v0],
+            });
+            self.vertices.push(OverlayVertex {
+                position: [ndc_x + ndc_w, ndc_y],
+                color,
+                uv: [glyph.u1, glyph.v0],
+            });
+            self.vertices.push(OverlayVertex {
+                position: [ndc_x + ndc_w, ndc_y + ndc_h],
+                color,
+                uv: [glyph.u1, glyph.v1],
+            });
+            self.vertices.push(OverlayVertex {
+                position: [ndc_x, ndc_y + ndc_h],
+                color,
+                uv: [glyph.u0, glyph.v1],
+            });
+            self.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            cursor_x += glyph.advance * scale;
         }
 
         cursor_x - x
@@ -264,8 +1110,8 @@ impl OverlayBatch {
 
     /// Measure text width in pixels without drawing.
     pub fn measure_text(&self, text: &str, size: f32) -> f32 {
-        let scale = size / self.font.glyph_height as f32;
-        text.len() as f32 * self.font.glyph_width as f32 * scale
+        let scale = size / self.font.raster_px;
+        text.chars().map(|c| self.font.advance(c)).sum::<f32>() * scale
     }
 
     /// Draw a registered icon at pixel position (top-left origin).
@@ -406,7 +1252,13 @@ impl OverlayRenderer {
         let atlas_data = font.atlas_data();
 
         let (font_image, font_allocation) = Self::create_font_image(
-            device, allocator, queue, command_pool, &atlas_data, atlas_w, atlas_h,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            &atlas_data,
+            atlas_w,
+            atlas_h,
         )?;
 
         let font_image_view = Self::create_image_view(device, font_image)?;
@@ -415,16 +1267,23 @@ impl OverlayRenderer {
         // Descriptor set for the font texture
         let descriptor_set_layout = Self::create_descriptor_set_layout(device)?;
         let descriptor_pool = Self::create_descriptor_pool(device)?;
-        let descriptor_set = Self::allocate_descriptor_set(device, descriptor_pool, descriptor_set_layout)?;
+        let descriptor_set =
+            Self::allocate_descriptor_set(device, descriptor_pool, descriptor_set_layout)?;
         Self::update_descriptor_set(device, descriptor_set, font_image_view, font_sampler);
 
         let (pipeline, pipeline_layout) = Self::create_pipeline(
-            device, render_pass, extent, descriptor_set_layout, shader_dir,
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layout,
+            shader_dir,
         )?;
 
         log::info!(
             "overlay: atlas {}x{}, {} icon(s) queued for streaming load",
-            atlas_w, atlas_h, total_icons,
+            atlas_w,
+            atlas_h,
+            total_icons,
         );
 
         Ok(Self {
@@ -465,9 +1324,13 @@ impl OverlayRenderer {
     }
 
     /// Total icons discovered at startup (for progress UI).
-    pub fn total_icons(&self) -> usize { self.total_icons }
+    pub fn total_icons(&self) -> usize {
+        self.total_icons
+    }
     /// Icons whose decode + upload has completed.
-    pub fn loaded_icons(&self) -> usize { self.loaded_icons }
+    pub fn loaded_icons(&self) -> usize {
+        self.loaded_icons
+    }
 
     /// Decode + upload up to `budget` queued icon PNGs into the
     /// atlas's icon region, registering each one's UV rect.
@@ -501,7 +1364,9 @@ impl OverlayRenderer {
         // those that don't are dropped with a warning.
         let mut jobs: Vec<(u32, std::path::PathBuf, String)> = Vec::with_capacity(budget);
         for _ in 0..budget {
-            if self.next_icon_idx >= self.pending_icon_paths.len() { break; }
+            if self.next_icon_idx >= self.pending_icon_paths.len() {
+                break;
+            }
             let (path, name) = {
                 let entry = &self.pending_icon_paths[self.next_icon_idx];
                 (entry.0.clone(), entry.1.clone())
@@ -518,9 +1383,7 @@ impl OverlayRenderer {
             let row = slot / ICON_COLS;
             let x0 = col * ICON_SLOT_PX;
             let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
-            if x0 + ICON_SLOT_PX > self.atlas_width
-                || y0 + ICON_SLOT_PX > self.atlas_height
-            {
+            if x0 + ICON_SLOT_PX > self.atlas_width || y0 + ICON_SLOT_PX > self.atlas_height {
                 log::warn!("overlay: atlas full — dropping icon {name} (slot {slot})");
                 continue;
             }
@@ -538,10 +1401,7 @@ impl OverlayRenderer {
                 let img = match image::open(&path) {
                     Ok(img) => img,
                     Err(e) => {
-                        log::warn!(
-                            "overlay: failed to load icon {}: {e}",
-                            path.display(),
-                        );
+                        log::warn!("overlay: failed to load icon {}: {e}", path.display(),);
                         return None;
                     }
                 };
@@ -567,15 +1427,20 @@ impl OverlayRenderer {
             staging_bytes.extend_from_slice(pixels);
         }
         let staging = buffer::create_host_buffer(
-            device, allocator, &staging_bytes,
-            vk::BufferUsageFlags::TRANSFER_SRC, "icon_staging_batch",
+            device,
+            allocator,
+            &staging_bytes,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            "icon_staging_batch",
         )?;
 
         let cmd = Self::begin_single_time_commands(device, command_pool)?;
         let subresource = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1,
-            base_array_layer: 0, layer_count: 1,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
         };
         unsafe {
             // One SHADER_READ_ONLY -> TRANSFER_DST barrier covers
@@ -592,31 +1457,48 @@ impl OverlayRenderer {
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
-                &[], &[], &[to_dst],
+                &[],
+                &[],
+                &[to_dst],
             );
 
             // Build one BufferImageCopy per decoded icon. They all
             // share the same source buffer, just different offsets
             // and image_offset rects.
-            let regions: Vec<vk::BufferImageCopy> = decoded.iter().enumerate().map(|(i, (slot, _, _))| {
-                let col = slot % ICON_COLS;
-                let row = slot / ICON_COLS;
-                let x0 = col * ICON_SLOT_PX;
-                let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
-                vk::BufferImageCopy::default()
-                    .buffer_offset((i * icon_byte_count) as u64)
-                    .image_subresource(vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0, base_array_layer: 0, layer_count: 1,
-                    })
-                    .image_offset(vk::Offset3D { x: x0 as i32, y: y0 as i32, z: 0 })
-                    .image_extent(vk::Extent3D {
-                        width: ICON_SLOT_PX, height: ICON_SLOT_PX, depth: 1,
-                    })
-            }).collect();
+            let regions: Vec<vk::BufferImageCopy> = decoded
+                .iter()
+                .enumerate()
+                .map(|(i, (slot, _, _))| {
+                    let col = slot % ICON_COLS;
+                    let row = slot / ICON_COLS;
+                    let x0 = col * ICON_SLOT_PX;
+                    let y0 = ICON_REGION_Y + row * ICON_SLOT_PX;
+                    vk::BufferImageCopy::default()
+                        .buffer_offset((i * icon_byte_count) as u64)
+                        .image_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .image_offset(vk::Offset3D {
+                            x: x0 as i32,
+                            y: y0 as i32,
+                            z: 0,
+                        })
+                        .image_extent(vk::Extent3D {
+                            width: ICON_SLOT_PX,
+                            height: ICON_SLOT_PX,
+                            depth: 1,
+                        })
+                })
+                .collect();
             device.cmd_copy_buffer_to_image(
-                cmd, staging.buffer, self.font_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions,
+                cmd,
+                staging.buffer,
+                self.font_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
             );
 
             // TRANSFER_DST -> SHADER_READ_ONLY
@@ -632,7 +1514,9 @@ impl OverlayRenderer {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::DependencyFlags::empty(),
-                &[], &[], &[to_read],
+                &[],
+                &[],
+                &[to_read],
             );
         }
         Self::end_single_time_commands(device, command_pool, queue, cmd)?;
@@ -683,14 +1567,20 @@ impl OverlayRenderer {
         }
 
         self.vertex_buffers[frame] = Some(buffer::create_device_local_buffer(
-            device, allocator, queue, command_pool,
+            device,
+            allocator,
+            queue,
+            command_pool,
             &batch.vertices,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             "overlay_vb",
         )?);
 
         self.index_buffers[frame] = Some(buffer::create_device_local_buffer(
-            device, allocator, queue, command_pool,
+            device,
+            allocator,
+            queue,
+            command_pool,
             &batch.indices,
             vk::BufferUsageFlags::INDEX_BUFFER,
             "overlay_ib",
@@ -743,7 +1633,11 @@ impl OverlayRenderer {
             device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
         let (pipeline, layout) = Self::create_pipeline(
-            device, render_pass, extent, self.descriptor_set_layout, shader_dir,
+            device,
+            render_pass,
+            extent,
+            self.descriptor_set_layout,
+            shader_dir,
         )?;
         self.pipeline = pipeline;
         self.pipeline_layout = layout;
@@ -760,8 +1654,10 @@ impl OverlayRenderer {
         let vert_src = std::fs::read_to_string(shader_dir.join("overlay.vert"))?;
         let frag_src = std::fs::read_to_string(shader_dir.join("overlay.frag"))?;
 
-        let vert_spv = hot_reload::compile_glsl(&vert_src, "overlay.vert", shaderc::ShaderKind::Vertex)?;
-        let frag_spv = hot_reload::compile_glsl(&frag_src, "overlay.frag", shaderc::ShaderKind::Fragment)?;
+        let vert_spv =
+            hot_reload::compile_glsl(&vert_src, "overlay.vert", shaderc::ShaderKind::Vertex)?;
+        let frag_spv =
+            hot_reload::compile_glsl(&frag_src, "overlay.frag", shaderc::ShaderKind::Fragment)?;
 
         let vert_module = crate::vulkan::pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = crate::vulkan::pipeline::create_shader_module(device, &frag_spv)?;
@@ -789,11 +1685,17 @@ impl OverlayRenderer {
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
 
         let viewport = vk::Viewport {
-            x: 0.0, y: 0.0,
-            width: extent.width as f32, height: extent.height as f32,
-            min_depth: 0.0, max_depth: 1.0,
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
         };
-        let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewports(std::slice::from_ref(&viewport))
             .scissors(std::slice::from_ref(&scissor));
@@ -825,8 +1727,7 @@ impl OverlayRenderer {
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
         let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts);
+        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -863,8 +1764,8 @@ impl OverlayRenderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(std::slice::from_ref(&binding));
+        let layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
 
         let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
         Ok(layout)
@@ -914,7 +1815,9 @@ impl OverlayRenderer {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(std::slice::from_ref(&image_info));
 
-        unsafe { device.update_descriptor_sets(&[write], &[]); }
+        unsafe {
+            device.update_descriptor_sets(&[write], &[]);
+        }
     }
 
     fn create_font_image(
@@ -931,14 +1834,22 @@ impl OverlayRenderer {
 
         // Create staging buffer
         let staging = buffer::create_host_buffer(
-            device, allocator, data, vk::BufferUsageFlags::TRANSFER_SRC, "font_staging",
+            device,
+            allocator,
+            data,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            "font_staging",
         )?;
 
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R8G8B8A8_UNORM)
-            .extent(vk::Extent3D { width, height, depth: 1 })
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -971,27 +1882,40 @@ impl OverlayRenderer {
                 .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0, level_count: 1,
-                    base_array_layer: 0, layer_count: 1,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 });
             device.cmd_pipeline_barrier(
                 cmd_buf,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
-                &[], &[], &[barrier],
+                &[],
+                &[],
+                &[barrier],
             );
 
             // Copy
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 })
-                .image_extent(vk::Extent3D { width, height, depth: 1 });
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                });
             device.cmd_copy_buffer_to_image(
-                cmd_buf, staging.buffer, image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region],
+                cmd_buf,
+                staging.buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
             );
 
             // Transition to SHADER_READ_ONLY
@@ -1003,15 +1927,19 @@ impl OverlayRenderer {
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0, level_count: 1,
-                    base_array_layer: 0, layer_count: 1,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 });
             device.cmd_pipeline_barrier(
                 cmd_buf,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::DependencyFlags::empty(),
-                &[], &[], &[barrier],
+                &[],
+                &[],
+                &[barrier],
             );
         }
         Self::end_single_time_commands(device, command_pool, queue, cmd_buf)?;
@@ -1030,8 +1958,10 @@ impl OverlayRenderer {
             .format(vk::Format::R8G8B8A8_UNORM)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0, level_count: 1,
-                base_array_layer: 0, layer_count: 1,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
             });
         let view = unsafe { device.create_image_view(&view_info, None)? };
         Ok(view)
@@ -1054,7 +1984,10 @@ impl OverlayRenderer {
         Ok(sampler)
     }
 
-    fn begin_single_time_commands(device: &ash::Device, pool: vk::CommandPool) -> Result<vk::CommandBuffer> {
+    fn begin_single_time_commands(
+        device: &ash::Device,
+        pool: vk::CommandPool,
+    ) -> Result<vk::CommandBuffer> {
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -1067,12 +2000,14 @@ impl OverlayRenderer {
     }
 
     fn end_single_time_commands(
-        device: &ash::Device, pool: vk::CommandPool, queue: vk::Queue, cmd: vk::CommandBuffer,
+        device: &ash::Device,
+        pool: vk::CommandPool,
+        queue: vk::Queue,
+        cmd: vk::CommandBuffer,
     ) -> Result<()> {
         unsafe {
             device.end_command_buffer(cmd)?;
-            let submit_info = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&cmd));
+            let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
             device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
             device.queue_wait_idle(queue)?;
             device.free_command_buffers(pool, &[cmd]);
@@ -1201,3 +2136,166 @@ fn compute_atlas_height(icon_count: u32) -> u32 {
     needed.max(OVERLAY_ATLAS_SIZE)
 }
 
+// ─── DrawList bridge ───────────────────────────────────────────
+//
+// `rift_ui_im::DrawList` is what widgets emit pixels through;
+// keeping the impl here means the UI crate doesn't have to know
+// the batch type. Methods just forward — the trait surface was
+// designed to match `OverlayBatch`'s existing signatures.
+impl rift_ui_im::DrawList for OverlayBatch {
+    fn rect_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rect_px(self, x, y, w, h, color, screen_w, screen_h);
+    }
+
+    fn rounded_rect_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_rect_px(self, x, y, w, h, radius, color, screen_w, screen_h);
+    }
+
+    fn rect_px_grad_v(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top: [f32; 4],
+        bot: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rect_px_grad_v(self, x, y, w, h, top, bot, screen_w, screen_h);
+    }
+
+    fn rounded_rect_px_grad_v(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        top: [f32; 4],
+        bot: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_rect_px_grad_v(
+            self, x, y, w, h, radius, top, bot, screen_w, screen_h,
+        );
+    }
+
+    fn rect_px_grad4(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tl: [f32; 4],
+        tr: [f32; 4],
+        bl: [f32; 4],
+        br: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rect_px_grad4(self, x, y, w, h, tl, tr, bl, br, screen_w, screen_h);
+    }
+
+    fn rounded_rect_px_radial(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_rect_px_radial(
+            self, x, y, w, h, radius, edge, centre, screen_w, screen_h,
+        );
+    }
+
+    fn rounded_rect_px_radial_noisy(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_rect_px_radial_noisy(
+            self, x, y, w, h, radius, edge, centre, screen_w, screen_h,
+        );
+    }
+
+    fn rounded_outline_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        thickness: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_outline_px(
+            self, x, y, w, h, radius, thickness, color, screen_w, screen_h,
+        );
+    }
+
+    fn text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> f32 {
+        OverlayBatch::text(self, text, x, y, size, color, screen_w, screen_h)
+    }
+
+    fn measure_text(&self, text: &str, size: f32) -> f32 {
+        OverlayBatch::measure_text(self, text, size)
+    }
+
+    fn icon(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tint: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> bool {
+        OverlayBatch::icon(self, name, x, y, w, h, tint, screen_w, screen_h)
+    }
+}

@@ -28,7 +28,6 @@ use rift_engine::ui::im::{
     Color, Frame, Id, Pad, Pos2, Rect, Ui,
 };
 use rift_net::messages::{chat_channel, CHAT_MAX_LEN};
-use winit::keyboard::KeyCode;
 
 /// One stored chat line on the client side. Retained in
 /// [`ChatUi::messages`] for the scrollback panel.
@@ -232,8 +231,8 @@ impl ChatUi {
             // Open with T (or Slash) when no other surface
             // owns the keyboard.
             if !already_typing_elsewhere
-                && (ui.input().key_just_pressed(KeyCode::KeyT)
-                    || ui.input().key_just_pressed(KeyCode::Slash))
+                && (ui.input().key_just_pressed(rift_engine::ui::im::ImKey::KeyT)
+                    || ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Slash))
             {
                 self.open = true;
                 self.draft.clear();
@@ -243,7 +242,7 @@ impl ChatUi {
                 // input field.
                 ui.input().discard_text_input();
             } else if !already_typing_elsewhere
-                && ui.input().key_just_pressed(KeyCode::KeyR)
+                && ui.input().key_just_pressed(rift_engine::ui::im::ImKey::KeyR)
             {
                 if let Some(name) = self.last_whisper_from.clone() {
                     self.open = true;
@@ -260,12 +259,12 @@ impl ChatUi {
         // keep working while text-capture is on (which it is,
         // because the chat is open and this very frame's
         // gameplay polling is suppressed).
-        if ui.input().key_just_pressed_raw(KeyCode::Escape) {
+        if ui.input().key_just_pressed_raw(rift_engine::ui::im::ImKey::Escape) {
             self.open = false;
             self.draft.clear();
             return;
         }
-        if ui.input().key_just_pressed_raw(KeyCode::Tab) {
+        if ui.input().key_just_pressed_raw(rift_engine::ui::im::ImKey::Tab) {
             // Cycle through the channels the player can
             // actively post to (skips SYSTEM and WHISPER).
             self.channel = match self.channel {

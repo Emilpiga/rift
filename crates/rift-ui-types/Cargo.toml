@@ -1,0 +1,20 @@
+[package]
+name = "rift-ui-types"
+version = "0.1.0"
+edition = "2021"
+
+# Intentionally has no dependencies on rift-engine, rift-game,
+# rift-client, or rift-ui. See lib.rs for the rationale: this
+# crate sits at the bottom of the UI dependency graph so its
+# types can cross the hot-reload boundary without the loaded
+# library and the host disagreeing about layout. Only `serde`
+# (so themes can be authored in TOML at runtime) is allowed
+# here.
+
+[dependencies]
+# Both kept in the dep list so the crate is forward-ready for
+# theme TOML deserialization (`serde`) and color / position
+# math constants (`glam`). Unused-import warnings are silenced
+# via `__future_use` until the first user lands.
+serde = { workspace = true }
+glam = { workspace = true }

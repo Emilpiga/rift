@@ -94,9 +94,6 @@ Override the baked-in server (if any):
 or set the env var:
     RIFT_SERVER=HOST:PORT ./$BIN
 
-Skip multiplayer entirely:
-    ./$BIN --offline
-
 Notes:
 * You need a Vulkan-capable GPU + a modern driver. Every
   mainstream 2018+ GPU qualifies. If the game complains about

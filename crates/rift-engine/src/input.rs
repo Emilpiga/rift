@@ -43,6 +43,11 @@ pub struct Input {
     /// to held arrows / Home / End / Delete naturally rather
     /// than once per physical press. Cleared in `end_frame`.
     key_events: Vec<KeyCode>,
+    /// Mirror of `key_events`, pre-translated to `rift_ui_im::ImKey`
+    /// (variants without a mapping are skipped). The `UiInput`
+    /// trait returns `&[ImKey]`; populating this field at event
+    /// time lets the accessor be a zero-allocation borrow.
+    key_events_im: Vec<rift_ui_im::ImKey>,
     /// Enter pressed this frame.
     enter_pressed: bool,
     /// When set, gameplay-style key polling
@@ -91,6 +96,7 @@ impl Default for Input {
             backspace_pressed: 0,
             delete_pressed: 0,
             key_events: Vec::new(),
+            key_events_im: Vec::new(),
             enter_pressed: false,
             text_capture: Cell::new(false),
             text_swallow: Cell::new(false),
@@ -175,6 +181,7 @@ impl Input {
         self.backspace_pressed = 0;
         self.delete_pressed = 0;
         self.key_events.clear();
+        self.key_events_im.clear();
         self.enter_pressed = false;
         self.left_just_released = false;
         self.prev_left_mouse_down = self.left_mouse_down;
@@ -219,6 +226,9 @@ impl Input {
     /// per-key fields.
     pub fn on_key_event(&mut self, key: KeyCode) {
         self.key_events.push(key);
+        if let Some(im) = winit_to_im_key(key) {
+            self.key_events_im.push(im);
+        }
     }
 
     /// Notify that Enter / Return was pressed this frame.
@@ -383,4 +393,141 @@ impl Input {
     pub fn scroll_delta(&self) -> f32 {
         self.scroll_delta
     }
+}
+
+// ─── UiInput bridge ────────────────────────────────────────────
+//
+// `rift_ui_im::UiInput` is the trait widgets actually call. Keeping
+// the impl here (rather than in the UI crate) lets the UI crate
+// stay winit-free: the engine maps `ImKey` to `winit::KeyCode` at
+// the boundary and forwards everything else verbatim.
+
+impl rift_ui_im::UiInput for Input {
+    fn is_key_held(&self, key: rift_ui_im::ImKey) -> bool {
+        Input::is_key_held(self, im_key_to_winit(key))
+    }
+    fn key_just_pressed(&self, key: rift_ui_im::ImKey) -> bool {
+        Input::key_just_pressed(self, im_key_to_winit(key))
+    }
+    fn is_key_held_raw(&self, key: rift_ui_im::ImKey) -> bool {
+        Input::is_key_held_raw(self, im_key_to_winit(key))
+    }
+    fn key_just_pressed_raw(&self, key: rift_ui_im::ImKey) -> bool {
+        Input::key_just_pressed_raw(self, im_key_to_winit(key))
+    }
+    fn chars_typed(&self) -> &[char] {
+        Input::chars_typed(self)
+    }
+    fn backspace_count(&self) -> u32 {
+        Input::backspace_count(self)
+    }
+    fn delete_count(&self) -> u32 {
+        Input::delete_count(self)
+    }
+    fn key_events(&self) -> &[rift_ui_im::ImKey] {
+        // The engine pushes ImKey-shaped events directly into
+        // `key_events_im` so this accessor doesn't need to allocate
+        // (and the widget side, which only sees a `&dyn UiInput`,
+        // can rely on the borrow living as long as `self`).
+        &self.key_events_im
+    }
+    fn enter_just_pressed(&self) -> bool {
+        Input::enter_just_pressed(self)
+    }
+    fn discard_text_input(&self) {
+        Input::discard_text_input(self)
+    }
+    fn mouse_pos(&self) -> (f32, f32) {
+        Input::mouse_pos(self)
+    }
+    fn left_mouse_held(&self) -> bool {
+        Input::left_mouse_held(self)
+    }
+    fn left_just_pressed(&self) -> bool {
+        Input::left_just_pressed(self)
+    }
+    fn left_just_released(&self) -> bool {
+        Input::left_just_released(self)
+    }
+    fn left_clicked(&self) -> bool {
+        Input::left_clicked(self)
+    }
+    fn right_clicked(&self) -> bool {
+        Input::right_clicked(self)
+    }
+    fn scroll_delta(&self) -> f32 {
+        Input::scroll_delta(self)
+    }
+    fn set_text_capture(&self, on: bool) {
+        Input::set_text_capture(self, on)
+    }
+}
+
+/// Map a widget-facing `ImKey` to its `winit::keyboard::KeyCode`
+/// equivalent. New variants get added in lock-step with
+/// `rift_ui_im::ImKey`.
+fn im_key_to_winit(k: rift_ui_im::ImKey) -> winit::keyboard::KeyCode {
+    use rift_ui_im::ImKey as I;
+    use winit::keyboard::KeyCode as K;
+    match k {
+        I::ShiftLeft => K::ShiftLeft,
+        I::ShiftRight => K::ShiftRight,
+        I::ControlLeft => K::ControlLeft,
+        I::ControlRight => K::ControlRight,
+        I::ArrowLeft => K::ArrowLeft,
+        I::ArrowRight => K::ArrowRight,
+        I::ArrowUp => K::ArrowUp,
+        I::ArrowDown => K::ArrowDown,
+        I::Home => K::Home,
+        I::End => K::End,
+        I::Escape => K::Escape,
+        I::Enter => K::Enter,
+        I::Tab => K::Tab,
+        I::Backspace => K::Backspace,
+        I::Delete => K::Delete,
+        I::KeyA => K::KeyA,
+        I::KeyB => K::KeyB,
+        I::KeyC => K::KeyC,
+        I::KeyR => K::KeyR,
+        I::KeyT => K::KeyT,
+        I::KeyV => K::KeyV,
+        I::KeyX => K::KeyX,
+        I::KeyZ => K::KeyZ,
+        I::Slash => K::Slash,
+    }
+}
+
+/// Inverse of `im_key_to_winit`; returns `None` for keys not
+/// modelled in `ImKey` so the engine can simply skip them when
+/// populating `key_events_im`.
+pub(crate) fn winit_to_im_key(k: winit::keyboard::KeyCode) -> Option<rift_ui_im::ImKey> {
+    use rift_ui_im::ImKey as I;
+    use winit::keyboard::KeyCode as K;
+    Some(match k {
+        K::ShiftLeft => I::ShiftLeft,
+        K::ShiftRight => I::ShiftRight,
+        K::ControlLeft => I::ControlLeft,
+        K::ControlRight => I::ControlRight,
+        K::ArrowLeft => I::ArrowLeft,
+        K::ArrowRight => I::ArrowRight,
+        K::ArrowUp => I::ArrowUp,
+        K::ArrowDown => I::ArrowDown,
+        K::Home => I::Home,
+        K::End => I::End,
+        K::Escape => I::Escape,
+        K::Enter => I::Enter,
+        K::Tab => I::Tab,
+        K::Backspace => I::Backspace,
+        K::Delete => I::Delete,
+        K::KeyA => I::KeyA,
+        K::KeyB => I::KeyB,
+        K::KeyC => I::KeyC,
+        K::KeyR => I::KeyR,
+        K::KeyT => I::KeyT,
+        K::KeyV => I::KeyV,
+        K::KeyX => I::KeyX,
+        K::KeyZ => I::KeyZ,
+        K::Slash => I::Slash,
+        _ => return None,
+    })
 }

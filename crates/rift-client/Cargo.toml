@@ -11,6 +11,12 @@ rift-net = { path = "../rift-net" }
 rift-dungeon = { path = "../rift-dungeon" }
 rift-math = { path = "../rift-math" }
 rift-audio = { path = "../rift-audio" }
+# UI widget crates. `rift-ui` holds the widget code; the host
+# calls into it directly via `rift_ui::<screen>::frame_xxx`.
+# View-model + action types live in `rift-ui-types` so the
+# host doesn't have to depend on `rift-ui-im` either.
+rift-ui = { path = "../rift-ui" }
+rift-ui-types = { path = "../rift-ui-types" }
 hecs = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }

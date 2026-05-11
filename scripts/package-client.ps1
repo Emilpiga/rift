@@ -90,9 +90,6 @@ Override the baked-in server (if any):
 or set the env var:
     set RIFT_SERVER=HOST:PORT
 
-Skip multiplayer entirely:
-    rift.exe --offline
-
 Notes:
 * You need a Vulkan-capable GPU + a modern driver. Every
   mainstream 2018+ GPU qualifies. If the game complains about

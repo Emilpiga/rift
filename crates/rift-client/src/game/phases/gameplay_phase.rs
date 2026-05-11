@@ -121,7 +121,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &state.world,
         &state.floor_mgr,
         input,
-        &mut state.mp_inventory_ui,
+        &mut state.inventory_ui,
         &mut state.net,
         &mut state.loot,
         &mut state.frame.hud_prompt,

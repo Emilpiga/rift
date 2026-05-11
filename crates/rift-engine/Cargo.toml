@@ -9,6 +9,7 @@ build = "build.rs"
 rift-dungeon = { path = "../rift-dungeon" }
 rift-game = { path = "../rift-game" }
 rift-math = { path = "../rift-math" }
+rift-ui-im = { path = "../rift-ui-im" }
 ash = { workspace = true }
 ash-window = { workspace = true }
 winit = { workspace = true }
@@ -24,6 +25,7 @@ gltf = { workspace = true }
 hecs = { workspace = true }
 image = { workspace = true }
 rayon = { workspace = true }
+fontdue = { workspace = true }
 
 [build-dependencies]
 shaderc = "0.10.1"

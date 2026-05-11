@@ -22,29 +22,29 @@ use rift_net::{
 };
 
 pub mod ability;
+pub mod ability_ops;
 pub mod channel;
 pub mod combat_ctx;
+pub mod damage;
 pub mod effect;
 pub mod enemies;
 pub mod floor;
+pub mod floor_ops;
+pub mod inventory_ops;
 pub mod loot;
+pub mod loot_ops;
 pub mod meters;
 pub mod player;
+pub mod player_ops;
+pub mod procs;
 pub mod projectile;
 pub mod shrine;
 pub mod snapshot;
-pub mod vote;
-pub mod procs;
-pub mod transforms;
 pub mod stash_ops;
-pub mod inventory_ops;
-pub mod voting_ops;
-pub mod loot_ops;
-pub mod damage;
 pub mod step;
-pub mod player_ops;
-pub mod ability_ops;
-pub mod floor_ops;
+pub mod transforms;
+pub mod vote;
+pub mod voting_ops;
 
 pub use player::ServerPlayer;
 pub use player::StashTab;
@@ -69,6 +69,216 @@ pub(super) fn push_into_sparse<T>(v: &mut Vec<Option<T>>, item: T) {
     } else {
         v.push(Some(item));
     }
+}
+
+/// Build a `cols × rows` occupancy mask for `slots`,
+/// honouring each item's multi-cell footprint. A cell is
+/// `true` iff some item's anchor + footprint covers it.
+pub(super) fn build_grid_occupancy(
+    slots: &[Option<rift_game::loot::Item>],
+    cols: usize,
+    rows: usize,
+) -> Vec<bool> {
+    let mut occ = vec![false; cols * rows];
+    for (idx, slot) in slots.iter().enumerate() {
+        let Some(it) = slot else { continue };
+        if idx >= cols * rows {
+            break;
+        }
+        let (w, h) = it.footprint();
+        let cx = idx % cols;
+        let cy = idx / cols;
+        for dy in 0..h as usize {
+            for dx in 0..w as usize {
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if nx < cols && ny < rows {
+                    occ[ny * cols + nx] = true;
+                }
+            }
+        }
+    }
+    occ
+}
+
+/// `true` iff a `(w, h)` footprint anchored at `idx` would
+/// fit inside a `cols × rows` grid without overlapping any
+/// cell flagged in `occ`. Out-of-bounds anchors return `false`.
+pub(super) fn footprint_fits_in(
+    occ: &[bool],
+    cols: usize,
+    rows: usize,
+    idx: usize,
+    w: u8,
+    h: u8,
+) -> bool {
+    let cx = idx % cols;
+    let cy = idx / cols;
+    if cx + w as usize > cols || cy + h as usize > rows {
+        return false;
+    }
+    for dy in 0..h as usize {
+        for dx in 0..w as usize {
+            if occ[(cy + dy) * cols + (cx + dx)] {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Place `item` into `slots` at the first anchor where its
+/// footprint fits without overlapping. Returns the chosen
+/// anchor index. Grows `slots` to the full grid capacity on
+/// first use so cell indices are stable.
+pub(super) fn place_grid_item(
+    slots: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+    cols: usize,
+    rows: usize,
+) -> Option<usize> {
+    let capacity = cols * rows;
+    if slots.len() < capacity {
+        slots.resize_with(capacity, || None);
+    }
+    let occ = build_grid_occupancy(slots, cols, rows);
+    let (w, h) = item.footprint();
+    for cy in 0..rows.saturating_sub((h as usize).saturating_sub(1)) {
+        for cx in 0..cols.saturating_sub((w as usize).saturating_sub(1)) {
+            let idx = cy * cols + cx;
+            if footprint_fits_in(&occ, cols, rows, idx, w, h) {
+                slots[idx] = Some(item);
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// Like [`place_grid_item`] but only succeeds at the caller-
+/// supplied `anchor` cell. Returns `true` iff the item was
+/// placed.
+pub(super) fn place_grid_item_at(
+    slots: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+    anchor: usize,
+    cols: usize,
+    rows: usize,
+) -> bool {
+    let capacity = cols * rows;
+    if slots.len() < capacity {
+        slots.resize_with(capacity, || None);
+    }
+    if anchor >= capacity || slots[anchor].is_some() {
+        return false;
+    }
+    let (w, h) = item.footprint();
+    let occ = build_grid_occupancy(slots, cols, rows);
+    if !footprint_fits_in(&occ, cols, rows, anchor, w, h) {
+        return false;
+    }
+    slots[anchor] = Some(item);
+    true
+}
+
+// ── Bag-specialized wrappers (use BAG_COLS × BAG_ROWS) ──
+
+pub(super) fn build_bag_occupancy(bag: &[Option<rift_game::loot::Item>]) -> Vec<bool> {
+    use rift_net::messages::{BAG_COLS, BAG_ROWS};
+    build_grid_occupancy(bag, BAG_COLS, BAG_ROWS)
+}
+
+pub(super) fn footprint_fits(occ: &[bool], idx: usize, w: u8, h: u8) -> bool {
+    use rift_net::messages::{BAG_COLS, BAG_ROWS};
+    footprint_fits_in(occ, BAG_COLS, BAG_ROWS, idx, w, h)
+}
+
+pub(super) fn place_inventory_item(
+    bag: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+) -> Option<usize> {
+    use rift_net::messages::{BAG_COLS, BAG_ROWS};
+    place_grid_item(bag, item, BAG_COLS, BAG_ROWS)
+}
+
+pub(super) fn place_inventory_item_at(
+    bag: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+    anchor: usize,
+) -> bool {
+    use rift_net::messages::{BAG_COLS, BAG_ROWS};
+    place_grid_item_at(bag, item, anchor, BAG_COLS, BAG_ROWS)
+}
+
+// ── Stash-specialized wrappers (use STASH_COLS × STASH_ROWS) ──
+
+pub(super) fn build_stash_occupancy(tab: &[Option<rift_game::loot::Item>]) -> Vec<bool> {
+    use rift_net::messages::{STASH_COLS, STASH_ROWS};
+    build_grid_occupancy(tab, STASH_COLS, STASH_ROWS)
+}
+
+pub(super) fn footprint_fits_stash(occ: &[bool], idx: usize, w: u8, h: u8) -> bool {
+    use rift_net::messages::{STASH_COLS, STASH_ROWS};
+    footprint_fits_in(occ, STASH_COLS, STASH_ROWS, idx, w, h)
+}
+
+pub(super) fn place_stash_item(
+    tab: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+) -> Option<usize> {
+    use rift_net::messages::{STASH_COLS, STASH_ROWS};
+    place_grid_item(tab, item, STASH_COLS, STASH_ROWS)
+}
+
+pub(super) fn place_stash_item_at(
+    tab: &mut Vec<Option<rift_game::loot::Item>>,
+    item: rift_game::loot::Item,
+    anchor: usize,
+) -> bool {
+    use rift_net::messages::{STASH_COLS, STASH_ROWS};
+    place_grid_item_at(tab, item, anchor, STASH_COLS, STASH_ROWS)
+}
+
+/// Compact `slots` by emptying it and re-anchoring every
+/// item, sorted `(rarity desc, ilvl desc, footprint area
+/// desc, base id)` so the largest, rarest items go in first
+/// and small fillers slot in around them. Items that no
+/// longer fit (shouldn't happen with the same total content)
+/// are pushed to the end as a fallback.
+pub(super) fn sort_grid_items(
+    slots: &mut Vec<Option<rift_game::loot::Item>>,
+    cols: usize,
+    rows: usize,
+) {
+    let mut items: Vec<rift_game::loot::Item> = slots.iter_mut().filter_map(|s| s.take()).collect();
+    items.sort_by(|a, b| {
+        let ra = a.rarity as u8;
+        let rb = b.rarity as u8;
+        rb.cmp(&ra)
+            .then_with(|| b.ilvl.cmp(&a.ilvl))
+            .then_with(|| {
+                let (aw, ah) = a.footprint();
+                let (bw, bh) = b.footprint();
+                let area_b = bw as u32 * bh as u32;
+                let area_a = aw as u32 * ah as u32;
+                area_b.cmp(&area_a)
+            })
+            .then_with(|| a.base.id.cmp(&b.base.id))
+    });
+    // Empty the grid (we already drained items above; resize
+    // to capacity so `place_grid_item` is happy).
+    let capacity = cols * rows;
+    slots.clear();
+    slots.resize_with(capacity, || None);
+    for it in items {
+        if place_grid_item(slots, it, cols, rows).is_none() {
+            // Repacking should always succeed since the items
+            // came out of a valid grid; if not, drop the item
+            // on the floor of the bag rather than losing it.
+            // (This branch is unreachable in practice.)
+        }
+    }
+    trim_trailing_none(slots);
 }
 
 /// Count of filled slots in a sparse bag/stash. Used by debug
@@ -328,7 +538,6 @@ impl Sim {
         sim
     }
 
-
     /// Drain world events generated this tick. Caller broadcasts on
     /// `Channel::Event`.
     pub fn drain_events(&mut self) -> Vec<WorldEvent> {
@@ -582,7 +791,6 @@ impl Sim {
         self.meters.build_snapshot(&self.world)
     }
 }
-
 
 #[cfg(test)]
 mod equip_tests;

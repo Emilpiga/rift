@@ -1,0 +1,18 @@
+[package]
+name = "rift-ui-im"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# `rlib + dylib`: the rlib is what `rift-engine` links against
+# (statically, so the engine itself stays a normal rlib); the
+# dylib is what `rift-ui` links against. With this crate's deps
+# being only `glam` + `log`, the resulting `rift_ui_im.dll` has
+# a tiny export table, and so does `rift_ui.dll` — well under
+# Windows' 65 535 export limit.
+[lib]
+crate-type = ["rlib", "dylib"]
+
+[dependencies]
+glam = { workspace = true }
+log = { workspace = true }

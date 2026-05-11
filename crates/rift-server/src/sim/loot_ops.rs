@@ -8,7 +8,7 @@ use rift_net::{NetId, NetTick};
 
 use super::loot;
 use super::player::ServerPlayer;
-use super::{count_filled, push_into_sparse, Sim, PICKUP_RANGE, SHARE_WINDOW_TICKS};
+use super::{count_filled, place_inventory_item, Sim, PICKUP_RANGE, SHARE_WINDOW_TICKS};
 
 impl Sim {
     /// Try to claim a ground-loot drop for `client_id`. Validates
@@ -66,9 +66,7 @@ impl Sim {
                     .map(|u| prov.allows(&u.into_bytes()))
                     .unwrap_or(false);
                 if !allowed {
-                    return Err(Some(
-                        rift_net::messages::PickupRejectReason::NotEligible,
-                    ));
+                    return Err(Some(rift_net::messages::PickupRejectReason::NotEligible));
                 }
             }
         }
@@ -82,11 +80,14 @@ impl Sim {
         // Capacity check before we mutate anything: leave the
         // loot row alive so the player can pick it up after
         // freeing a slot.
+        // Capacity check: try to find an anchor where the
+        // item's footprint fits without overlap. If no anchor
+        // fits we treat the bag as full — multi-cell items
+        // can be "too big" even when individual cells are
+        // free.
         if let Ok(p) = self.world.get::<&ServerPlayer>(player_entity) {
             if count_filled(&p.inventory) >= rift_net::messages::INVENTORY_CAPACITY {
-                return Err(Some(
-                    rift_net::messages::PickupRejectReason::InventoryFull,
-                ));
+                return Err(Some(rift_net::messages::PickupRejectReason::InventoryFull));
             }
         }
 
@@ -96,8 +97,9 @@ impl Sim {
         // `provenance` set by `drop_for_enemy`.
         if item.provenance.is_none() {
             if let Some(uuid) = picker_char_id {
-                item.provenance =
-                    Some(rift_game::loot::LootProvenance::from_ids([uuid.into_bytes()]));
+                item.provenance = Some(rift_game::loot::LootProvenance::from_ids([
+                    uuid.into_bytes()
+                ]));
             }
         }
 
@@ -117,7 +119,18 @@ impl Sim {
         // by the caller (server main) which also has the
         // `PersistenceHandle`.
         if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(player_entity) {
-            push_into_sparse(&mut p.inventory, item.clone());
+            if place_inventory_item(&mut p.inventory, item.clone()).is_none() {
+                // No anchor fit — put the loot back on the
+                // ground and tell the client. We don't
+                // re-spawn the despawned loot entity; the
+                // caller can re-drop it via the standard
+                // path. For now log and reject.
+                log::debug!(
+                    "sim: inventory full for {:?}, no anchor fits item footprint",
+                    client_id
+                );
+                return Err(Some(rift_net::messages::PickupRejectReason::InventoryFull));
+            }
             log::debug!(
                 "sim: inventory for {:?} now has {} item(s)",
                 client_id,
@@ -145,9 +158,9 @@ impl Sim {
             if let Some(&entity) = self.sessions.get(&dropper) {
                 if let Ok(p) = self.world.get::<&ServerPlayer>(entity) {
                     if let Some(uuid) = p.character_id {
-                        item.provenance = Some(
-                            rift_game::loot::LootProvenance::from_ids([uuid.into_bytes()]),
-                        );
+                        item.provenance = Some(rift_game::loot::LootProvenance::from_ids([
+                            uuid.into_bytes()
+                        ]));
                     }
                 }
             }

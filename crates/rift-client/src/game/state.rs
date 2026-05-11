@@ -5,7 +5,6 @@ use rift_engine::{Input, LoadStatus, Renderer};
 use super::character_select;
 use super::character_spawn;
 use super::floor::FloorManager;
-use super::inventory;
 use super::loot_system;
 use super::monster_assets::load_role;
 use super::player_state::PlayerState;
@@ -28,11 +27,10 @@ pub struct GameState {
     pub rift: RiftState,
     pub player_state: PlayerState,
     pub floor_mgr: FloorManager,
-    /// New multiplayer inventory panel — operates on
-    /// [`LootClientState::mp_inventory`] (the server-mirrored bag)
-    /// instead of the legacy engine `Inventory`. Owns the Tab
-    /// toggle now.
-    pub mp_inventory_ui: inventory::MpInventoryUI,
+    /// Inventory-screen UI state. Logic lives in
+    /// `rift_ui::inventory`; the host owns the persistent
+    /// state struct so it survives hot-reload.
+    pub inventory_ui: rift_ui_types::inventory::InventoryUiState,
     pub combat_text: CombatTextSystem,
     /// Cross-frame immediate-mode UI state — owns focus, hover,
     /// drag, and the modal stack. Borrowed by `Ui::begin` once
@@ -152,7 +150,7 @@ impl GameState {
             rift: RiftState::new(1),
             player_state: PlayerState::new(),
             floor_mgr: FloorManager::new(),
-            mp_inventory_ui: inventory::MpInventoryUI::new(),
+            inventory_ui: rift_ui_types::inventory::InventoryUiState::new(),
             combat_text: CombatTextSystem::new(),
             ui_state: rift_engine::ui::im::UiState::new(),
             needs_new_floor: false,
@@ -304,7 +302,7 @@ impl GameState {
         // uses widget-facing accessors (chars_typed /
         // enter_just_pressed), which the flag intentionally
         // leaves alone.
-        input.set_text_capture(self.chat.is_typing() || self.mp_inventory_ui.wants_text_input());
+        input.set_text_capture(self.chat.is_typing() || self.inventory_ui.wants_text_input());
         match self.app_state.clone() {
             AppState::CharacterSelect => {
                 crate::game::transition::update_character_select(self, renderer, input, dt);

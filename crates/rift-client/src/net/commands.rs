@@ -420,6 +420,45 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::BuyStashTab);
     }
 
+    /// Equip a stash item directly (bypassing the bag).
+    pub fn request_equip_from_stash(&mut self, tab_index: u8, stash_index: u32) {
+        log::debug!("net: -> EquipFromStash tab={tab_index} idx={stash_index}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::EquipFromStash {
+                tab_index,
+                stash_index,
+            },
+        );
+    }
+
+    /// Unequip the item in `slot` directly into a specific
+    /// stash cell (bypassing the bag).
+    pub fn request_unequip_to_stash_slot(&mut self, slot: u8, tab_index: u8, stash_index: u32) {
+        log::debug!("net: -> UnequipToStashSlot slot={slot} tab={tab_index} idx={stash_index}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::UnequipToStashSlot {
+                slot,
+                tab_index,
+                stash_index,
+            },
+        );
+    }
+
+    /// Auto-sort the bag. Server compacts items by rarity /
+    /// ilvl / footprint area.
+    pub fn request_sort_inventory(&mut self) {
+        log::debug!("net: -> SortInventory");
+        self.send(Channel::Control, &ClientMsg::SortInventory);
+    }
+
+    /// Auto-sort one stash tab.
+    pub fn request_sort_stash_tab(&mut self, tab_index: u8) {
+        log::debug!("net: -> SortStashTab tab={tab_index}");
+        self.send(Channel::Control, &ClientMsg::SortStashTab { tab_index });
+    }
+
     /// Rename `tab_index`. The server clamps the name and
     /// rejects empty strings.
     pub fn request_rename_stash_tab(&mut self, tab_index: u8, name: String) {

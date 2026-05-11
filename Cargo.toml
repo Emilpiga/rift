@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence", "crates/rift-audio"]
+members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence", "crates/rift-audio", "crates/rift-ui-im", "crates/rift-ui-types", "crates/rift-ui"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -19,6 +19,11 @@ shaderc = "0.10.1"
 notify = "8.2.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 rayon = "1.10"
+# TTF rasteriser used by the overlay font path. Pure Rust, no
+# system deps, fast enough to build the entire ASCII glyph
+# atlas at startup in a few ms. Replaces the legacy 6x8
+# bitmap font with the bundled PT Serif faces.
+fontdue = "0.9"
 # Networking (Phase 1 of MP): renet for the UDP transport with reliable +
 # unreliable channels, serde+bincode for the wire format. Kept in the
 # workspace table so any future binary (rift-server) shares the version.

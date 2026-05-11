@@ -30,6 +30,14 @@ param(
     # is set.
     [switch]$Steam,
 
+    # Override the dev account identity. When provided, sets
+    # `RIFT_DEV_USER` for the launched client(s) so the
+    # dev-auth verifier uses this exact name instead of
+    # minting a randomized `dev-XXXXXX`. No effect on the
+    # server side or when `-Steam` is set.
+    [Parameter()]
+    [string]$User,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -71,6 +79,11 @@ if (-not $env:RIFT_DEV_AUTH_KEY) {
 
 $BuildProfile = if ($Release) { "release" } else { "debug" }
 
+if ($User) {
+    $env:RIFT_DEV_USER = $User
+    Write-Host "rift: RIFT_DEV_USER=$User"
+}
+
 if ($Steam) {
     if (-not $env:RIFT_STEAM_APPID) {
         # Spacewar — Valve's public sandbox appid. Anyone with
@@ -86,7 +99,11 @@ if ($Steam) {
 function Invoke-Cargo {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
     $featureArgs = @()
-    if ($Steam) { $featureArgs = @("--features", "steam-auth") }
+    $features = @()
+    if ($Steam) { $features += "steam-auth" }
+    if ($features.Count -gt 0) {
+        $featureArgs = @("--features", ($features -join ","))
+    }
     if ($Release) {
         & cargo build --release @featureArgs @Args
     } else {
@@ -161,7 +178,9 @@ switch ($Command) {
             -ArgumentList "--bind", $ServerBind
         $env:RUST_LOG = $prevLog
         Start-Sleep -Milliseconds 500
-        try { Run-Client } finally { if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force } }
+        try { Run-Client } finally {
+            if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force }
+        }
     }
     "build" {
         if ($Steam) {

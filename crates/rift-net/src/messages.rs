@@ -15,11 +15,20 @@
 use crate::ids::{ClientId, NetId, NetTick};
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of bag slots a player can carry. Mirrored on the
-/// client UI (`mp_inventory_ui.rs` lays out a 5×6 grid). The server
-/// enforces this on every `PickUpLoot`; the client checks it locally
-/// to avoid a wasted round-trip and to surface an instant warning.
-pub const INVENTORY_CAPACITY: usize = 30;
+/// Bag grid dimensions. The bag is a 2D grid where storage
+/// index = `row * BAG_COLS + col`; each item anchors at its
+/// index and a multi-cell item occupies the cells extending
+/// down + right of its anchor (those cells must remain
+/// empty). Mirrored on the client UI.
+pub const BAG_COLS: usize = 10;
+pub const BAG_ROWS: usize = 8;
+
+/// Maximum number of bag slots a player can carry — total
+/// cells in the [`BAG_COLS`] × [`BAG_ROWS`] grid. The server
+/// enforces this on every `PickUpLoot`; the client checks it
+/// locally to avoid a wasted round-trip and to surface an
+/// instant warning.
+pub const INVENTORY_CAPACITY: usize = BAG_COLS * BAG_ROWS;
 
 /// Time (in seconds) every living player must keep their
 /// `ToggleShrineChannel` intent active while standing within
@@ -317,6 +326,37 @@ pub enum ClientMsg {
         stash_index: u32,
         inventory_index: u32,
     },
+
+    /// Equip a stash item directly: removes the item from
+    /// `(tab_index, stash_index)`, equips it into its canonical
+    /// slot, and pushes any displaced item back into the same
+    /// stash cell (or the first free bag slot if that fails).
+    /// Server validates indices + that a stash session is open.
+    /// Reliable on `Channel::Control`.
+    EquipFromStash { tab_index: u8, stash_index: u32 },
+
+    /// Unequip the item currently in `slot` directly into a
+    /// specific stash cell. If the cell is occupied, the
+    /// previous occupant is equipped in its place (mirrors the
+    /// bag\u2194equip swap semantics). Server validates indices +
+    /// that a stash session is open. Reliable on
+    /// `Channel::Control`.
+    UnequipToStashSlot {
+        slot: u8,
+        tab_index: u8,
+        stash_index: u32,
+    },
+
+    /// Auto-sort the player's bag in place. Server compacts
+    /// items by `(rarity desc, ilvl desc, footprint area
+    /// desc)` and re-anchors them with the standard packer.
+    /// Reliable on `Channel::Control`.
+    SortInventory,
+
+    /// Auto-sort one stash tab. Same ordering as
+    /// `SortInventory`. Server validates a stash session is
+    /// open. Reliable on `Channel::Control`.
+    SortStashTab { tab_index: u8 },
 
     /// Reorder the bag: swap the items at `a` and `b` (either may
     /// be an empty slot, in which case the filled item moves into
@@ -1257,7 +1297,15 @@ pub struct StashTabBlob {
 /// as `STASH_COLS * STASH_ROWS`. The server enforces this on
 /// every deposit; the client mirrors it for the empty-slot
 /// indication.
-pub const STASH_TAB_SLOTS: usize = 36;
+pub const STASH_TAB_SLOTS: usize = STASH_COLS * STASH_ROWS;
+
+/// Stash grid columns (anchor x = idx % STASH_COLS). Matches
+/// [`BAG_COLS`] so each tab holds a full inventory's worth.
+pub const STASH_COLS: usize = BAG_COLS;
+
+/// Stash grid rows (anchor y = idx / STASH_COLS). Matches
+/// [`BAG_ROWS`] so each tab holds a full inventory's worth.
+pub const STASH_ROWS: usize = BAG_ROWS;
 
 /// Maximum number of stash tabs a single character can own.
 /// First tab is free; every additional tab costs shards (see

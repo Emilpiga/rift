@@ -1,35 +1,102 @@
-/// Bitmap font using a simple 6x8 monospace pixel font.
-///
-/// The font lives in the top-left corner of a larger 256x256 RGBA
-/// overlay atlas \u2014 the rest of that atlas is reserved for icon
-/// glyphs (ability icons, item icons, ...) loaded by the renderer
-/// at startup. Glyph UVs are computed against the *full* atlas
-/// dimensions so callers can sample directly without scaling.
-///
-/// First pixel (0,0) is guaranteed solid white opaque so any
-/// vertex that wants a flat colour rect can use UV = (0,0).
+//! TTF-rasterised UI font (PT Serif) packed into the overlay
+//! atlas.
+//!
+//! The overlay pipeline samples a single RGBA atlas: the top
+//! `ICON_REGION_Y` rows hold rasterised font glyphs (and the
+//! solid-white pixel at (0,0) used for flat-colour rects);
+//! everything below is the icon region the renderer streams
+//! into at startup.
+//!
+//! Why one big raster + scale at draw time rather than
+//! multiple pre-baked sizes: a single 36-px raster of PT Serif
+//! covers every UI token (`size_sm 12 → size_xl 28`, all
+//! multiplied by the per-frame scale), packs into the
+//! 512×320 font region with room to spare, and looks crisp at
+//! all our display sizes thanks to the shader's bilinear
+//! sampler. Authoring multiple atlases per font size would
+//! multiply the upload + descriptor surface for marginal gain.
+//!
+//! The on-disk TTF is bundled at compile time via
+//! `include_bytes!` so a missing font file is a build error,
+//! not a runtime panic.
 
-/// Side length of the combined overlay atlas in pixels.
-pub const OVERLAY_ATLAS_SIZE: u32 = 256;
-/// y-coordinate where the icon region starts. The font region is
-/// `0..ICON_REGION_Y` along the vertical axis. Kept aligned to a
-/// power-of-two so an icon row stays inside the texture cleanly.
-pub const ICON_REGION_Y: u32 = 64;
+use std::collections::HashMap;
 
+use fontdue::{Font, FontSettings};
+
+/// PT Serif Regular bytes baked into the binary.
+const FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/PT_Serif/PTSerif-Regular.ttf");
+
+/// Side length of the combined overlay atlas in pixels. The
+/// font region sits in the top-left up to [`ICON_REGION_Y`];
+/// icons live below.
+pub const OVERLAY_ATLAS_SIZE: u32 = 512;
+
+/// y-coordinate where the icon region starts. Everything above
+/// belongs to the font raster (and the solid-white pixel at
+/// (0,0) used by flat-colour vertices).
+pub const ICON_REGION_Y: u32 = 320;
+
+/// Pixel size we rasterise the font at. Picked above the
+/// largest UI token (`size_xl = 28` × max scale ≈ 1.5 → 42 px,
+/// rounded down a touch) so glyphs sample crisply even when
+/// the bilinear sampler upsizes them. Going higher just costs
+/// atlas area without visible gain.
+const RASTER_PX: f32 = 36.0;
+
+/// 1-px padding around every glyph in the atlas so bilinear
+/// sampling at glyph edges doesn't bleed across into the
+/// neighbouring glyph's footprint.
+const GLYPH_PAD: u32 = 1;
+
+/// Per-glyph metadata. UVs are normalised against the *whole*
+/// atlas; `w_px` / `h_px` are the rasterised pixel dimensions
+/// of the glyph at [`RASTER_PX`]; `x_offset` / `y_offset` are
+/// the bearings from the layout pen position to the glyph
+/// bitmap's top-left at the same raster size; `advance` is the
+/// horizontal pen advance after drawing the glyph, also in
+/// raster pixels. Render-time code multiplies all four by
+/// `display_size / raster_px` to scale to the requested size.
+#[derive(Debug, Clone, Copy)]
 pub struct GlyphInfo {
     pub u0: f32,
     pub v0: f32,
     pub u1: f32,
     pub v1: f32,
+    pub w_px: f32,
+    pub h_px: f32,
+    pub x_offset: f32,
+    pub y_offset: f32,
+    pub advance: f32,
 }
 
+/// TTF-backed overlay font. Built once at startup. Name is
+/// preserved for backward compatibility with the engine call
+/// sites that already reference `BitmapFont`.
 pub struct BitmapFont {
-    pub glyph_width: u32,
-    pub glyph_height: u32,
+    /// Pixel size we rasterised at; render code reads this to
+    /// compute per-character draw scale (`size / raster_px`).
+    pub raster_px: f32,
+    /// Vertical line height in raster pixels (ascent − descent
+    /// + line gap). Render code can use this to walk
+    /// multi-line layouts.
+    pub line_height: f32,
+    /// Ascent in raster pixels — distance from the layout y
+    /// origin down to the baseline. Glyph y-offsets are
+    /// expressed relative to the bitmap top, so the render
+    /// path uses this to align baselines across glyphs of
+    /// differing heights.
+    pub ascent: f32,
     /// Full overlay atlas dimensions (font + icon region).
     pub atlas_width: u32,
     pub atlas_height: u32,
-    cols: u32,
+    /// Per-character metrics indexed by `char`.
+    glyphs: HashMap<char, GlyphInfo>,
+    /// Rasterised glyph bitmaps, kept around so [`atlas_data`]
+    /// can re-emit the atlas image on demand. Tuple is
+    /// `(x, y, w, h, mask)` with `mask` row-major 8-bit
+    /// coverage (0..=255).
+    rasters: Vec<(u32, u32, u32, u32, Vec<u8>)>,
 }
 
 impl BitmapFont {
@@ -38,87 +105,207 @@ impl BitmapFont {
     }
 
     /// Construct a font that paints into an atlas of the given
-    /// dimensions. The font region itself is fixed-size (top-left
-    /// 97x48); growing the atlas just creates more room for the
-    /// icon region. Width must be at least the font's native
-    /// width and height must be at least `ICON_REGION_Y`.
+    /// dimensions. The font region itself uses the top
+    /// `ICON_REGION_Y` rows; growing the atlas height just
+    /// creates more room for the icon region below. Width is
+    /// fixed by [`OVERLAY_ATLAS_SIZE`].
     pub fn with_atlas_size(atlas_width: u32, atlas_height: u32) -> Self {
-        // 6x8 font, 16 columns x 6 rows = 96 glyphs (ASCII 32..127).
-        // Glyphs occupy the top-left 97x48 region.
+        let font = Font::from_bytes(FONT_BYTES, FontSettings::default())
+            .expect("PT Serif TTF failed to parse — bundled asset corrupted?");
+
+        // Line metrics at our reference raster size.
+        let line_metrics = font
+            .horizontal_line_metrics(RASTER_PX)
+            .expect("font lacks horizontal line metrics");
+        let ascent = line_metrics.ascent;
+        let line_height =
+            (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).ceil();
+        // Effective ascent used to place glyphs against the
+        // caller's `y` argument. We treat `y` as the top of an
+        // em-box of height `size` (display px), with the
+        // baseline at `y + size * (ascent / line_height)`.
+        // Baking that ratio into the per-glyph y_offset lets
+        // the render path keep its simple `y + y_offset*scale`
+        // formula while making `size` align with the visible
+        // text height — otherwise glyphs sit ~5–15 % below
+        // a vertically-centred rect because the raw ascent
+        // exceeds `size` and the baseline falls past centre.
+        let effective_ascent = ascent * RASTER_PX / line_height.max(1.0);
+
+        let mut glyphs = HashMap::with_capacity(96);
+        let mut rasters = Vec::with_capacity(96);
+
+        // Reserve the top-left pixel for the solid-white
+        // sample so flat-colour rects keep working unchanged.
+        // The packer starts a few pixels in.
+        let mut pen_x: u32 = 4 + GLYPH_PAD;
+        let mut pen_y: u32 = GLYPH_PAD;
+        let mut row_h: u32 = 0;
+
+        // Rasterise printable ASCII (32..=126). Going wider
+        // (Latin-1, currency, arrows) is a one-line change.
+        for code in 32u32..=126 {
+            let ch = match char::from_u32(code) {
+                Some(c) => c,
+                None => continue,
+            };
+            let (metrics, bitmap) = font.rasterize(ch, RASTER_PX);
+            let gw = metrics.width as u32;
+            let gh = metrics.height as u32;
+
+            // Zero-size glyph (e.g. space) — record metrics
+            // only, no atlas footprint.
+            if gw == 0 || gh == 0 {
+                glyphs.insert(
+                    ch,
+                    GlyphInfo {
+                        u0: 0.0,
+                        v0: 0.0,
+                        u1: 0.0,
+                        v1: 0.0,
+                        w_px: 0.0,
+                        h_px: 0.0,
+                        x_offset: 0.0,
+                        y_offset: 0.0,
+                        advance: metrics.advance_width,
+                    },
+                );
+                continue;
+            }
+
+            // Wrap to a new shelf when the glyph wouldn't fit
+            // on the current row.
+            if pen_x + gw + GLYPH_PAD > atlas_width {
+                pen_x = GLYPH_PAD;
+                pen_y += row_h + GLYPH_PAD;
+                row_h = 0;
+            }
+            // If we'd overflow the font region, drop the rest
+            // (extremely unlikely with PT Serif at 36 px in a
+            // 320-tall region; logging keeps the failure
+            // visible if a future font change pushes us over).
+            if pen_y + gh + GLYPH_PAD > ICON_REGION_Y {
+                log::warn!(
+                    "font: ran out of atlas room at glyph U+{:04X} '{}' \
+                     (atlas font region is {}x{}, glyph would land at y={})",
+                    code,
+                    ch,
+                    atlas_width,
+                    ICON_REGION_Y,
+                    pen_y + gh,
+                );
+                break;
+            }
+
+            let u0 = pen_x as f32 / atlas_width as f32;
+            let v0 = pen_y as f32 / atlas_height as f32;
+            let u1 = (pen_x + gw) as f32 / atlas_width as f32;
+            let v1 = (pen_y + gh) as f32 / atlas_height as f32;
+
+            // fontdue's `ymin` is the baseline-relative bottom
+            // of the bitmap (positive = above baseline). We
+            // flip into a top-down `y_offset` measured from
+            // the layout origin (top of the size-tall em-box)
+            // so render code can do
+            //   pos.y + y_offset_scaled
+            // to land the glyph correctly. Using
+            // `effective_ascent` (ascent normalised against
+            // line_height) keeps the visible text inside the
+            // requested `size` rather than overflowing below.
+            let x_offset = metrics.xmin as f32;
+            let y_offset = effective_ascent - metrics.ymin as f32 - gh as f32;
+
+            glyphs.insert(
+                ch,
+                GlyphInfo {
+                    u0,
+                    v0,
+                    u1,
+                    v1,
+                    w_px: gw as f32,
+                    h_px: gh as f32,
+                    x_offset,
+                    y_offset,
+                    advance: metrics.advance_width,
+                },
+            );
+            rasters.push((pen_x, pen_y, gw, gh, bitmap));
+
+            pen_x += gw + GLYPH_PAD;
+            row_h = row_h.max(gh);
+        }
+
         Self {
-            glyph_width: 6,
-            glyph_height: 8,
+            raster_px: RASTER_PX,
+            line_height,
+            ascent,
             atlas_width,
             atlas_height,
-            cols: 16,
+            glyphs,
+            rasters,
         }
     }
 
-    /// Get glyph UV coordinates for a character.
+    /// Per-character glyph metrics. Returns `None` for
+    /// characters not in the rasterised set.
     pub fn glyph(&self, ch: char) -> Option<GlyphInfo> {
-        let code = ch as u32;
-        if code < 32 || code > 126 {
-            return None;
-        }
-        let index = code - 32;
-        let col = index % self.cols;
-        let row = index / self.cols;
+        self.glyphs.get(&ch).copied()
+    }
 
-        // +1 pixel offset for the white column at x=0
-        let px_x = 1 + col * self.glyph_width;
-        let px_y = row * self.glyph_height;
-
-        let u0 = px_x as f32 / self.atlas_width as f32;
-        let v0 = px_y as f32 / self.atlas_height as f32;
-        let u1 = (px_x + self.glyph_width) as f32 / self.atlas_width as f32;
-        let v1 = (px_y + self.glyph_height) as f32 / self.atlas_height as f32;
-
-        Some(GlyphInfo { u0, v0, u1, v1 })
+    /// Pen advance for a single character at raster scale, in
+    /// raster pixels. Falls back to a half-em for unknown
+    /// glyphs so cursor advance keeps moving on missing chars.
+    pub fn advance(&self, ch: char) -> f32 {
+        self.glyphs
+            .get(&ch)
+            .map(|g| g.advance)
+            .unwrap_or(self.raster_px * 0.5)
     }
 
     /// Generate the combined overlay atlas pixel data as RGBA8.
-    /// The font region (top-left) stores glyph masks as
-    /// `(255, 255, 255, mask)`; the icon region (`y >= ICON_REGION_Y`)
-    /// is left zeroed out for the renderer to fill at startup.
+    /// The font region stores glyph masks as
+    /// `(255, 255, 255, mask)`; the icon region (`y >=
+    /// ICON_REGION_Y`) is left zeroed for the renderer to fill
+    /// later via sub-region uploads.
     pub fn atlas_data(&self) -> Vec<u8> {
         let w = self.atlas_width as usize;
         let h = self.atlas_height as usize;
         let mut data = vec![0u8; w * h * 4];
 
-        // Column 0 of the font region: solid white opaque pixels
-        // \u2014 vertices that want a flat colour rect sample here.
-        let font_h = (self.glyph_height * 6) as usize; // 48
-        for y in 0..font_h {
-            let dst = y * w * 4;
-            data[dst] = 255;
-            data[dst + 1] = 255;
-            data[dst + 2] = 255;
-            data[dst + 3] = 255;
+        // Solid-white 4×4 patch at (0, 0) — flat-colour rects
+        // (and the noisy radial overlay primitive) sample
+        // this. The 4×4 footprint protects against bilinear
+        // sampling picking up a transparent neighbour at
+        // sub-pixel positions.
+        for y in 0..4usize.min(h) {
+            for x in 0..4usize.min(w) {
+                let dst = (y * w + x) * 4;
+                data[dst] = 255;
+                data[dst + 1] = 255;
+                data[dst + 2] = 255;
+                data[dst + 3] = 255;
+            }
         }
 
-        // Render each glyph as white with alpha = mask bit.
-        for code in 32u32..=126 {
-            let index = code - 32;
-            let col = (index % self.cols) as usize;
-            let row = (index / self.cols) as usize;
-            let base_x = 1 + col * self.glyph_width as usize;
-            let base_y = row * self.glyph_height as usize;
-
-            let glyph_data = get_glyph_bitmap(code as u8);
-            for gy in 0..8usize {
-                let row_bits = glyph_data[gy];
-                for gx in 0..6usize {
-                    if (row_bits >> (5 - gx)) & 1 != 0 {
-                        let px = base_x + gx;
-                        let py = base_y + gy;
-                        if px < w && py < h {
-                            let dst = (py * w + px) * 4;
-                            data[dst] = 255;
-                            data[dst + 1] = 255;
-                            data[dst + 2] = 255;
-                            data[dst + 3] = 255;
-                        }
+        // Stamp each rasterised glyph as
+        // (255, 255, 255, coverage).
+        for (px, py, gw, gh, bitmap) in &self.rasters {
+            for gy in 0..*gh as usize {
+                for gx in 0..*gw as usize {
+                    let mask = bitmap[gy * (*gw as usize) + gx];
+                    if mask == 0 {
+                        continue;
                     }
+                    let x = *px as usize + gx;
+                    let y = *py as usize + gy;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    let dst = (y * w + x) * 4;
+                    data[dst] = 255;
+                    data[dst + 1] = 255;
+                    data[dst + 2] = 255;
+                    data[dst + 3] = mask;
                 }
             }
         }
@@ -126,207 +313,3 @@ impl BitmapFont {
         data
     }
 }
-
-/// Get 6x8 bitmap for an ASCII character (rows top to bottom, 6 bits per row MSB-first).
-fn get_glyph_bitmap(ch: u8) -> [u8; 8] {
-    if ch < 32 || ch > 126 {
-        return [0; 8];
-    }
-    FONT_DATA[(ch - 32) as usize]
-}
-
-/// 6x8 pixel font data for ASCII 32-126 (95 glyphs).
-/// Each glyph is 8 bytes (rows), each row has 6 pixels in the upper 6 bits.
-#[rustfmt::skip]
-const FONT_DATA: [[u8; 8]; 95] = [
-    // 32 ' ' (space)
-    [0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 33 '!'
-    [0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b000000, 0b001000, 0b000000],
-    // 34 '"'
-    [0b010100, 0b010100, 0b010100, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 35 '#'
-    [0b010100, 0b010100, 0b111110, 0b010100, 0b111110, 0b010100, 0b010100, 0b000000],
-    // 36 '$'
-    [0b001000, 0b011110, 0b101000, 0b011100, 0b001010, 0b111100, 0b001000, 0b000000],
-    // 37 '%'
-    [0b110000, 0b110010, 0b000100, 0b001000, 0b010000, 0b100110, 0b000110, 0b000000],
-    // 38 '&'
-    [0b011000, 0b100100, 0b101000, 0b010000, 0b101010, 0b100100, 0b011010, 0b000000],
-    // 39 '''
-    [0b001000, 0b001000, 0b010000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 40 '('
-    [0b000100, 0b001000, 0b010000, 0b010000, 0b010000, 0b001000, 0b000100, 0b000000],
-    // 41 ')'
-    [0b100000, 0b010000, 0b001000, 0b001000, 0b001000, 0b010000, 0b100000, 0b000000],
-    // 42 '*'
-    [0b000000, 0b001000, 0b101010, 0b011100, 0b101010, 0b001000, 0b000000, 0b000000],
-    // 43 '+'
-    [0b000000, 0b001000, 0b001000, 0b111110, 0b001000, 0b001000, 0b000000, 0b000000],
-    // 44 ','
-    [0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b001000, 0b001000, 0b010000],
-    // 45 '-'
-    [0b000000, 0b000000, 0b000000, 0b111110, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 46 '.'
-    [0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b001000, 0b000000],
-    // 47 '/'
-    [0b000000, 0b000010, 0b000100, 0b001000, 0b010000, 0b100000, 0b000000, 0b000000],
-    // 48 '0'
-    [0b011100, 0b100010, 0b100110, 0b101010, 0b110010, 0b100010, 0b011100, 0b000000],
-    // 49 '1'
-    [0b001000, 0b011000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0b000000],
-    // 50 '2'
-    [0b011100, 0b100010, 0b000010, 0b001100, 0b010000, 0b100000, 0b111110, 0b000000],
-    // 51 '3'
-    [0b011100, 0b100010, 0b000010, 0b001100, 0b000010, 0b100010, 0b011100, 0b000000],
-    // 52 '4'
-    [0b000100, 0b001100, 0b010100, 0b100100, 0b111110, 0b000100, 0b000100, 0b000000],
-    // 53 '5'
-    [0b111110, 0b100000, 0b111100, 0b000010, 0b000010, 0b100010, 0b011100, 0b000000],
-    // 54 '6'
-    [0b011100, 0b100000, 0b100000, 0b111100, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 55 '7'
-    [0b111110, 0b000010, 0b000100, 0b001000, 0b010000, 0b010000, 0b010000, 0b000000],
-    // 56 '8'
-    [0b011100, 0b100010, 0b100010, 0b011100, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 57 '9'
-    [0b011100, 0b100010, 0b100010, 0b011110, 0b000010, 0b000010, 0b011100, 0b000000],
-    // 58 ':'
-    [0b000000, 0b000000, 0b001000, 0b000000, 0b000000, 0b001000, 0b000000, 0b000000],
-    // 59 ';'
-    [0b000000, 0b000000, 0b001000, 0b000000, 0b000000, 0b001000, 0b001000, 0b010000],
-    // 60 '<'
-    [0b000100, 0b001000, 0b010000, 0b100000, 0b010000, 0b001000, 0b000100, 0b000000],
-    // 61 '='
-    [0b000000, 0b000000, 0b111110, 0b000000, 0b111110, 0b000000, 0b000000, 0b000000],
-    // 62 '>'
-    [0b100000, 0b010000, 0b001000, 0b000100, 0b001000, 0b010000, 0b100000, 0b000000],
-    // 63 '?'
-    [0b011100, 0b100010, 0b000010, 0b000100, 0b001000, 0b000000, 0b001000, 0b000000],
-    // 64 '@'
-    [0b011100, 0b100010, 0b101110, 0b101010, 0b101110, 0b100000, 0b011100, 0b000000],
-    // 65 'A'
-    [0b011100, 0b100010, 0b100010, 0b111110, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 66 'B'
-    [0b111100, 0b100010, 0b100010, 0b111100, 0b100010, 0b100010, 0b111100, 0b000000],
-    // 67 'C'
-    [0b011100, 0b100010, 0b100000, 0b100000, 0b100000, 0b100010, 0b011100, 0b000000],
-    // 68 'D'
-    [0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b111100, 0b000000],
-    // 69 'E'
-    [0b111110, 0b100000, 0b100000, 0b111100, 0b100000, 0b100000, 0b111110, 0b000000],
-    // 70 'F'
-    [0b111110, 0b100000, 0b100000, 0b111100, 0b100000, 0b100000, 0b100000, 0b000000],
-    // 71 'G'
-    [0b011100, 0b100010, 0b100000, 0b101110, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 72 'H'
-    [0b100010, 0b100010, 0b100010, 0b111110, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 73 'I'
-    [0b011100, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0b000000],
-    // 74 'J'
-    [0b000010, 0b000010, 0b000010, 0b000010, 0b000010, 0b100010, 0b011100, 0b000000],
-    // 75 'K'
-    [0b100010, 0b100100, 0b101000, 0b110000, 0b101000, 0b100100, 0b100010, 0b000000],
-    // 76 'L'
-    [0b100000, 0b100000, 0b100000, 0b100000, 0b100000, 0b100000, 0b111110, 0b000000],
-    // 77 'M'
-    [0b100010, 0b110110, 0b101010, 0b101010, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 78 'N'
-    [0b100010, 0b110010, 0b101010, 0b100110, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 79 'O'
-    [0b011100, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 80 'P'
-    [0b111100, 0b100010, 0b100010, 0b111100, 0b100000, 0b100000, 0b100000, 0b000000],
-    // 81 'Q'
-    [0b011100, 0b100010, 0b100010, 0b100010, 0b101010, 0b100100, 0b011010, 0b000000],
-    // 82 'R'
-    [0b111100, 0b100010, 0b100010, 0b111100, 0b101000, 0b100100, 0b100010, 0b000000],
-    // 83 'S'
-    [0b011100, 0b100010, 0b100000, 0b011100, 0b000010, 0b100010, 0b011100, 0b000000],
-    // 84 'T'
-    [0b111110, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b000000],
-    // 85 'U'
-    [0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 86 'V'
-    [0b100010, 0b100010, 0b100010, 0b100010, 0b010100, 0b010100, 0b001000, 0b000000],
-    // 87 'W'
-    [0b100010, 0b100010, 0b100010, 0b101010, 0b101010, 0b110110, 0b100010, 0b000000],
-    // 88 'X'
-    [0b100010, 0b100010, 0b010100, 0b001000, 0b010100, 0b100010, 0b100010, 0b000000],
-    // 89 'Y'
-    [0b100010, 0b100010, 0b010100, 0b001000, 0b001000, 0b001000, 0b001000, 0b000000],
-    // 90 'Z'
-    [0b111110, 0b000010, 0b000100, 0b001000, 0b010000, 0b100000, 0b111110, 0b000000],
-    // 91 '['
-    [0b011100, 0b010000, 0b010000, 0b010000, 0b010000, 0b010000, 0b011100, 0b000000],
-    // 92 '\'
-    [0b000000, 0b100000, 0b010000, 0b001000, 0b000100, 0b000010, 0b000000, 0b000000],
-    // 93 ']'
-    [0b011100, 0b000100, 0b000100, 0b000100, 0b000100, 0b000100, 0b011100, 0b000000],
-    // 94 '^'
-    [0b001000, 0b010100, 0b100010, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 95 '_'
-    [0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000, 0b111110, 0b000000],
-    // 96 '`'
-    [0b010000, 0b001000, 0b000100, 0b000000, 0b000000, 0b000000, 0b000000, 0b000000],
-    // 97 'a'
-    [0b000000, 0b000000, 0b011100, 0b000010, 0b011110, 0b100010, 0b011110, 0b000000],
-    // 98 'b'
-    [0b100000, 0b100000, 0b111100, 0b100010, 0b100010, 0b100010, 0b111100, 0b000000],
-    // 99 'c'
-    [0b000000, 0b000000, 0b011100, 0b100000, 0b100000, 0b100000, 0b011100, 0b000000],
-    // 100 'd'
-    [0b000010, 0b000010, 0b011110, 0b100010, 0b100010, 0b100010, 0b011110, 0b000000],
-    // 101 'e'
-    [0b000000, 0b000000, 0b011100, 0b100010, 0b111110, 0b100000, 0b011100, 0b000000],
-    // 102 'f'
-    [0b001100, 0b010000, 0b010000, 0b111000, 0b010000, 0b010000, 0b010000, 0b000000],
-    // 103 'g'
-    [0b000000, 0b000000, 0b011110, 0b100010, 0b100010, 0b011110, 0b000010, 0b011100],
-    // 104 'h'
-    [0b100000, 0b100000, 0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 105 'i'
-    [0b001000, 0b000000, 0b011000, 0b001000, 0b001000, 0b001000, 0b011100, 0b000000],
-    // 106 'j'
-    [0b000100, 0b000000, 0b000100, 0b000100, 0b000100, 0b000100, 0b100100, 0b011000],
-    // 107 'k'
-    [0b100000, 0b100000, 0b100100, 0b101000, 0b110000, 0b101000, 0b100100, 0b000000],
-    // 108 'l'
-    [0b011000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0b000000],
-    // 109 'm'
-    [0b000000, 0b000000, 0b110100, 0b101010, 0b101010, 0b101010, 0b101010, 0b000000],
-    // 110 'n'
-    [0b000000, 0b000000, 0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0b000000],
-    // 111 'o'
-    [0b000000, 0b000000, 0b011100, 0b100010, 0b100010, 0b100010, 0b011100, 0b000000],
-    // 112 'p'
-    [0b000000, 0b000000, 0b111100, 0b100010, 0b100010, 0b111100, 0b100000, 0b100000],
-    // 113 'q'
-    [0b000000, 0b000000, 0b011110, 0b100010, 0b100010, 0b011110, 0b000010, 0b000010],
-    // 114 'r'
-    [0b000000, 0b000000, 0b101100, 0b110000, 0b100000, 0b100000, 0b100000, 0b000000],
-    // 115 's'
-    [0b000000, 0b000000, 0b011100, 0b100000, 0b011100, 0b000010, 0b111100, 0b000000],
-    // 116 't'
-    [0b010000, 0b010000, 0b111000, 0b010000, 0b010000, 0b010000, 0b001100, 0b000000],
-    // 117 'u'
-    [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b100010, 0b011110, 0b000000],
-    // 118 'v'
-    [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b010100, 0b001000, 0b000000],
-    // 119 'w'
-    [0b000000, 0b000000, 0b100010, 0b100010, 0b101010, 0b101010, 0b010100, 0b000000],
-    // 120 'x'
-    [0b000000, 0b000000, 0b100010, 0b010100, 0b001000, 0b010100, 0b100010, 0b000000],
-    // 121 'y'
-    [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b011110, 0b000010, 0b011100],
-    // 122 'z'
-    [0b000000, 0b000000, 0b111110, 0b000100, 0b001000, 0b010000, 0b111110, 0b000000],
-    // 123 '{'
-    [0b000100, 0b001000, 0b001000, 0b010000, 0b001000, 0b001000, 0b000100, 0b000000],
-    // 124 '|'
-    [0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b000000],
-    // 125 '}'
-    [0b100000, 0b010000, 0b010000, 0b001000, 0b010000, 0b010000, 0b100000, 0b000000],
-    // 126 '~'
-    [0b000000, 0b010000, 0b101010, 0b000100, 0b000000, 0b000000, 0b000000, 0b000000],
-];

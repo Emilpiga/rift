@@ -102,7 +102,7 @@ impl SpellbookUi {
         if !self.open {
             return None;
         }
-        if ui.input().key_just_pressed(winit::keyboard::KeyCode::Escape) {
+        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
             self.close();
             return None;
         }

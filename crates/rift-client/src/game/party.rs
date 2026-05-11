@@ -471,7 +471,7 @@ impl PartyUi {
 
     fn draw_portal_modal(&mut self, ui: &mut Ui<'_>, net: &mut NetState) {
         let Some(modal) = self.portal_modal.clone() else { return };
-        if ui.input().key_just_pressed(winit::keyboard::KeyCode::Escape) {
+        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
             self.portal_modal = None;
             return;
         }
@@ -741,7 +741,7 @@ impl PartyUi {
             self.context_menu = None;
         }
         // Pressing Escape also closes.
-        if ui.input().key_just_pressed(winit::keyboard::KeyCode::Escape) {
+        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
             self.context_menu = None;
         }
     }

@@ -427,11 +427,35 @@ impl Server {
                     inventory_index as usize,
                 );
             }
+            ClientMsg::EquipFromStash {
+                tab_index,
+                stash_index,
+            } => {
+                self.handle_equip_from_stash(from, tab_index as usize, stash_index as usize);
+            }
+            ClientMsg::UnequipToStashSlot {
+                slot,
+                tab_index,
+                stash_index,
+            } => {
+                self.handle_unequip_to_stash_slot(
+                    from,
+                    slot,
+                    tab_index as usize,
+                    stash_index as usize,
+                );
+            }
             ClientMsg::SwapInventorySlots { a, b } => {
                 self.handle_swap_inventory_slots(from, a as usize, b as usize);
             }
             ClientMsg::SwapStashSlots { tab_index, a, b } => {
                 self.handle_swap_stash_slots(from, tab_index as usize, a as usize, b as usize);
+            }
+            ClientMsg::SortInventory => {
+                self.handle_sort_inventory(from);
+            }
+            ClientMsg::SortStashTab { tab_index } => {
+                self.handle_sort_stash_tab(from, tab_index as usize);
             }
             ClientMsg::BuyStashTab => {
                 self.handle_buy_stash_tab(from);

@@ -198,6 +198,14 @@ impl LootProvenance {
 pub const ANCHORED_CHANCE: f32 = 1.0 / 5_000.0;
 
 impl Item {
+    /// Bag-grid footprint `(width_cells, height_cells)`. The
+    /// item anchors at its inventory storage index and
+    /// extends down + right by these dimensions; all covered
+    /// cells must remain empty in the storage `Vec`.
+    pub fn footprint(&self) -> (u8, u8) {
+        self.base.equip_slot.inventory_size()
+    }
+
     /// Roll a fresh drop of `base` at the given rarity / item-level.
     ///
     /// Two-phase pipeline:

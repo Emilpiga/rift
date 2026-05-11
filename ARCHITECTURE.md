@@ -66,6 +66,82 @@ go again. Multiplayer is server-authoritative.
   rules. Both server (auth) and client (prediction / display)
   call into the same functions.
 
+## UI hot-reload split
+
+The UI lives in three small crates separate from `rift-client`
+to enable Rust-level hot-reload of widget code in dev. Saving
+a file in `rift-ui` recompiles only that crate (~1–3 s on a
+warm cache); `rift-client` re-loads the swapped library
+between frames without restarting, relogging in, or
+re-selecting a character.
+
+```
++-----------------+
+|  rift-ui-types  |  pure data: view models, action enums,
++--------+--------+  theme constants. No engine deps.
+         ^
+         |  shared layout-stable types
+         |
++--------+--------+        +-----------------+
+|     rift-ui     |<-------|  rift-ui-hot    |  cdylib shim:
++-----------------+        +--------+--------+  re-exports rift-ui
+| widget fns,     | rlib            ^           statically (release)
+| frame_*, layout |                 |           or via dlopen +
+| (depends on     |                 |           file-watcher (dev,
+|  rift-engine    |        +--------+--------+  `hot-reload` feature).
+|  + ui-types)    |<-------|   rift-client   |
++-----------------+        +-----------------+
+                           | host: owns all  |
+                           | UI state, builds|
+                           | view models,    |
+                           | dispatches      |
+                           | returned actions|
+                           +-----------------+
+```
+
+### Why three crates instead of one
+
+- **`rift-ui-types`** sits at the bottom because every type
+  that crosses the hot-reload boundary must be defined in a
+  crate neither the host nor the loaded library owns; otherwise
+  layout drift after a reload corrupts memory. Plain data only:
+  view models, action enums, theme.
+- **`rift-ui`** is where you actually edit. Holds the widget
+  functions (`frame_character_select`, `frame_inventory`, …).
+  Compiled as a normal `rlib` so tests, examples, and release
+  builds all link it statically with full inlining.
+- **`rift-ui-hot`** is a tiny shim. In release it's a plain
+  `pub use rift_ui::*`; in dev (`--features hot-reload`) it
+  becomes a `cdylib` whose entry points the host swaps via
+  `hot-lib-reloader`. Lives separately from `rift-ui` because
+  `hot-lib-reloader` requires the reloadable code to be in a
+  distinct cdylib crate, and we don't want `rift-ui` itself
+  to be cdylib-only (would break tests, generic helpers, and
+  release inlining).
+
+### The contract (read before adding a widget)
+
+1. **State lives in the host.** No `static mut`, no `OnceCell`,
+   no globals in `rift-ui` or `rift-ui-hot`. Persistent UI
+   state (selected slot, typed text, scroll offset) sits on a
+   `*State` struct in `rift-client` and is passed in by `&mut`.
+2. **Inputs and outputs use only `rift-ui-types`** for owned
+   data, plus `&mut Ui` / `&mut Renderer` from `rift-engine`
+   for borrowed engine state. The engine is statically linked
+   into the host and never reloads, so its types are safe to
+   cross the boundary.
+3. **Function signatures are the boundary.** Body changes are
+   free; signature changes require a full restart. Plan entry
+   points to take broad, stable inputs (a whole `RosterView`,
+   not 12 individual fields).
+4. **Caches outside the hot crate.** Atlases, texture handles,
+   `AvatarCosmeticsCache`, etc. live in `rift-client`.
+
+See the crate-level docs in [`rift-ui-types`](crates/rift-ui-types/src/lib.rs),
+[`rift-ui`](crates/rift-ui/src/lib.rs) and
+[`rift-ui-hot`](crates/rift-ui-hot/src/lib.rs) for the
+extended rationale and a worked example.
+
 ## Tech stack
 
 - **Language:** Rust (workspace, edition 2021).

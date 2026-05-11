@@ -145,8 +145,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         hub_portal_pos,
     );
     state.combat_text.render(&mut ui, view_proj);
-    state.mp_inventory_ui.frame(
+    crate::game::inventory::frame(
         &mut ui,
+        &mut state.inventory_ui,
         &state.loot.items,
         &state.loot.equipment,
         &mut state.loot.pending_equip_requests,
@@ -159,7 +160,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // Spellbook toggle (B) — open / close the loadout editor.
     // Suppressed while a stash session is active so B doesn't
     // double-bind alongside the inventory drag context.
-    if !state.loot.stash_session && ui.input().key_just_pressed(winit::keyboard::KeyCode::KeyB) {
+    if !state.loot.stash_session
+        && ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::KeyB)
+    {
         state.spellbook.toggle();
     }
     if let Some(action) = state.spellbook.frame(

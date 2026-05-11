@@ -84,6 +84,13 @@ pub fn update_character_select(
     // and forcing the server to drop the connect-token key.
     state.floor_mgr.env.tick_world_preload(renderer);
 
+    // Install (lazily) and animate the sandstorm backdrop so
+    // the preview avatar reads as standing on the desert
+    // floor with dunes silhouetted in the haze. Idempotent:
+    // the disc + dunes are built once on first call, the
+    // gust envelope runs every frame.
+    state.floor_mgr.ensure_char_select_backdrop(renderer);
+
     // Preview avatar (independent of UI; needs &mut World/Renderer).
     state
         .character_select
@@ -137,9 +144,6 @@ pub fn update_character_select(
 
     match action {
         character_select::SelectAction::None => {}
-        character_select::SelectAction::AccountConfirmed { name } => {
-            state.net.roster_request = Some(name);
-        }
         character_select::SelectAction::Play {
             account_name,
             profile,
@@ -434,7 +438,7 @@ pub fn reset_for_regeneration(state: &mut GameState, renderer: &mut Renderer) {
     renderer.vfx_system.clear_all();
     state.loot.reset_for_floor();
     state.shrines.reset_for_floor();
-    state.mp_inventory_ui.open = false;
+    state.inventory_ui.open = false;
     // The world wipe just erased every `SkinnedAttachments`
     // component along with the player entity. Set the dirty
     // flag so the binary's per-frame retry loop re-applies the

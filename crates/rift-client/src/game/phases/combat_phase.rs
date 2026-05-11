@@ -12,14 +12,17 @@ use crate::game::state::GameState;
 
 pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: f32) {
     let dt = _dt;
-    let (sw, sh) = renderer.screen_size();
+    let _ = renderer;
     // Inventory input + draw is fused into the HUD render
     // pass below (single IM pass). Here we only gate gameplay
     // input: when the cursor is inside the inventory panel,
     // skip the combat tick so a click-to-equip doesn't also
     // fire a basic attack.
     let mp = input.mouse_pos();
-    let pointer_in_inventory = state.mp_inventory_ui.consumes_mouse(mp.0, mp.1, sw, sh);
+    let pointer_in_inventory =
+        state
+            .inventory_ui
+            .consumes_mouse(mp.0, mp.1, state.loot.stash_session);
     // Same gate, but for the party UI (party frames, portal
     // modal, per-member confirm prompt, right-click context
     // menu) and the chat input field. Without this the

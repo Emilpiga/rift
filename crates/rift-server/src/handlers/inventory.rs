@@ -18,13 +18,14 @@ impl Server {
         let item = match self.sim_for_client_mut(from).try_pickup_loot(from, net_id) {
             Ok(item) => item,
             Err(Some(reason)) => {
-                log::info!(
-                    "loot pickup rejected for {from:?}: {reason:?}"
-                );
+                log::info!("loot pickup rejected for {from:?}: {reason:?}");
                 self.send_to(
                     from,
                     Channel::Control,
-                    &ServerMsg::PickupRejected { loot: net_id, reason },
+                    &ServerMsg::PickupRejected {
+                        loot: net_id,
+                        reason,
+                    },
                 );
                 return;
             }
@@ -101,10 +102,11 @@ impl Server {
     /// `ResetCharacterInventory` so the persisted snapshot
     /// matches the in-memory swap.
     pub(crate) fn handle_equip_item(&mut self, from: ClientId, inventory_index: usize) {
-        if !self.sim_for_client_mut(from).equip_from_bag(from, inventory_index) {
-            log::debug!(
-                "equip: rejected equip request from {from:?} idx={inventory_index}"
-            );
+        if !self
+            .sim_for_client_mut(from)
+            .equip_from_bag(from, inventory_index)
+        {
+            log::debug!("equip: rejected equip request from {from:?} idx={inventory_index}");
             return;
         }
         self.broadcast_inventory_state(from);
@@ -331,12 +333,70 @@ impl Server {
             return;
         }
         if !self.hub.withdraw_from_stash(from, tab_index, stash_index) {
+            log::debug!("stash: withdraw rejected for {from:?} tab={tab_index} idx={stash_index}");
+            return;
+        }
+        self.broadcast_inventory_state(from);
+        self.send_stash_state(from);
+        self.persist_inventory_state(from);
+        self.persist_stash_state(from);
+    }
+
+    /// Equip a stash item directly. Sends fresh inventory,
+    /// stash, and equipment syncs and persists all three.
+    pub(crate) fn handle_equip_from_stash(
+        &mut self,
+        from: ClientId,
+        tab_index: usize,
+        stash_index: usize,
+    ) {
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: equip-from rejected for {from:?} stash not open");
+            return;
+        }
+        if !self.hub.equip_from_stash(from, tab_index, stash_index) {
             log::debug!(
-                "stash: withdraw rejected for {from:?} tab={tab_index} idx={stash_index}"
+                "stash: equip-from rejected for {from:?} tab={tab_index} idx={stash_index}"
             );
             return;
         }
         self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
+        self.send_stash_state(from);
+        self.persist_inventory_state(from);
+        self.persist_stash_state(from);
+    }
+
+    /// Unequip the item in `slot` directly into a specific
+    /// stash cell. Mirrors `handle_unequip_to_bag_slot` but on
+    /// the stash side.
+    pub(crate) fn handle_unequip_to_stash_slot(
+        &mut self,
+        from: ClientId,
+        slot_byte: u8,
+        tab_index: usize,
+        stash_index: usize,
+    ) {
+        let Some(slot) = rift_game::loot::EquipSlot::from_u8(slot_byte) else {
+            log::debug!("unequip-to-stash: unknown slot byte {slot_byte} from {from:?}");
+            return;
+        };
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: unequip-to-stash rejected for {from:?} stash not open");
+            return;
+        }
+        if !self
+            .hub
+            .unequip_to_stash_slot(from, slot, tab_index, stash_index)
+        {
+            log::debug!(
+                "stash: unequip-to-stash rejected for {from:?} slot={slot_byte} \
+                 tab={tab_index} idx={stash_index}"
+            );
+            return;
+        }
+        self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
         self.send_stash_state(from);
         self.persist_inventory_state(from);
         self.persist_stash_state(from);
@@ -407,7 +467,11 @@ impl Server {
             .map(|tab| rift_net::messages::StashTabBlob {
                 name: tab.name,
                 color: tab.color,
-                items: tab.items.iter().map(|s| s.as_ref().map(item_to_blob)).collect(),
+                items: tab
+                    .items
+                    .iter()
+                    .map(|s| s.as_ref().map(item_to_blob))
+                    .collect(),
             })
             .collect();
         self.send_to(to, Channel::Control, &ServerMsg::StashSync { tabs });
@@ -457,7 +521,10 @@ impl Server {
     /// Reorder the bag: swap two slots. Either may be empty;
     /// see [`Sim::swap_inventory_slots`].
     pub(crate) fn handle_swap_inventory_slots(&mut self, from: ClientId, a: usize, b: usize) {
-        if !self.sim_for_client_mut(from).swap_inventory_slots(from, a, b) {
+        if !self
+            .sim_for_client_mut(from)
+            .swap_inventory_slots(from, a, b)
+        {
             log::debug!("inv: swap rejected for {from:?} a={a} b={b}");
             return;
         }
@@ -487,6 +554,31 @@ impl Server {
         self.persist_stash_state(from);
     }
 
+    /// Auto-sort the bag in place. No-op for an empty bag.
+    pub(crate) fn handle_sort_inventory(&mut self, from: ClientId) {
+        if !self.sim_for_client_mut(from).sort_inventory(from) {
+            log::debug!("inv: sort no-op for {from:?}");
+            return;
+        }
+        self.broadcast_inventory_state(from);
+        self.persist_inventory_state(from);
+    }
+
+    /// Auto-sort one stash tab. Requires an open stash
+    /// session.
+    pub(crate) fn handle_sort_stash_tab(&mut self, from: ClientId, tab_index: usize) {
+        if !self.hub.is_stash_open(from) {
+            log::debug!("stash: sort rejected for {from:?} stash not open");
+            return;
+        }
+        if !self.hub.sort_stash_tab(from, tab_index) {
+            log::debug!("stash: sort no-op for {from:?} tab={tab_index}");
+            return;
+        }
+        self.send_stash_state(from);
+        self.persist_stash_state(from);
+    }
+
     /// Spend shards to add another stash tab. Replies with
     /// fresh `StashSync` + `ShardsSync` on success and persists
     /// both the tab list (via `persist_stash_state`) and the
@@ -502,7 +594,11 @@ impl Server {
         };
         log::info!("stash: {from:?} bought tab #{new_count} (shards={new_shards})");
         self.send_stash_state(from);
-        self.send_to(from, Channel::Control, &ServerMsg::ShardsSync { amount: new_shards });
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::ShardsSync { amount: new_shards },
+        );
         self.persist_stash_state(from);
         self.persist_shards_for(from, new_shards);
     }
@@ -510,12 +606,7 @@ impl Server {
     /// Rename a stash tab. Empty / whitespace-only names are
     /// dropped silently (the client should validate before
     /// sending).
-    pub(crate) fn handle_rename_stash_tab(
-        &mut self,
-        from: ClientId,
-        tab_index: usize,
-        name: &str,
-    ) {
+    pub(crate) fn handle_rename_stash_tab(&mut self, from: ClientId, tab_index: usize, name: &str) {
         if !self.hub.is_stash_open(from) {
             log::debug!("stash: rename rejected for {from:?} stash not open");
             return;
@@ -560,22 +651,19 @@ impl Server {
     /// hub.
     pub(crate) fn handle_drop_inventory_item(&mut self, from: ClientId, inventory_index: usize) {
         if self.sim_for_client(from).is_hub() {
-            log::debug!(
-                "inv: drop rejected for {from:?} idx={inventory_index} (in hub)"
-            );
+            log::debug!("inv: drop rejected for {from:?} idx={inventory_index} (in hub)");
             return;
         }
-        let Some((item, pos)) = self.sim_for_client_mut(from).pop_inventory_item(from, inventory_index) else {
-            log::debug!(
-                "inv: drop rejected for {from:?} idx={inventory_index}"
-            );
+        let Some((item, pos)) = self
+            .sim_for_client_mut(from)
+            .pop_inventory_item(from, inventory_index)
+        else {
+            log::debug!("inv: drop rejected for {from:?} idx={inventory_index}");
             return;
         };
-        log::info!(
-            "inv: {from:?} dropped {} at {pos:?}",
-            item.display_name(),
-        );
-        self.sim_for_client_mut(from).spawn_player_drop(item, pos, from);
+        log::info!("inv: {from:?} dropped {} at {pos:?}", item.display_name(),);
+        self.sim_for_client_mut(from)
+            .spawn_player_drop(item, pos, from);
         self.broadcast_inventory_state(from);
         self.persist_inventory_state(from);
     }
@@ -587,23 +675,15 @@ impl Server {
     /// server-side (see `Sim::salvage_inventory_item`) so the
     /// client doesn't have to special-case them — a rejected
     /// salvage just produces no broadcast.
-    pub(crate) fn handle_salvage_inventory_item(
-        &mut self,
-        from: ClientId,
-        inventory_index: usize,
-    ) {
+    pub(crate) fn handle_salvage_inventory_item(&mut self, from: ClientId, inventory_index: usize) {
         let Some(new_total) = self
             .sim_for_client_mut(from)
             .salvage_inventory_item(from, inventory_index)
         else {
-            log::debug!(
-                "inv: salvage rejected for {from:?} idx={inventory_index}"
-            );
+            log::debug!("inv: salvage rejected for {from:?} idx={inventory_index}");
             return;
         };
-        log::info!(
-            "inv: {from:?} salvaged idx={inventory_index} -> {new_total} shards"
-        );
+        log::info!("inv: {from:?} salvaged idx={inventory_index} -> {new_total} shards");
         self.broadcast_inventory_state(from);
         self.send_to(
             from,
@@ -620,11 +700,7 @@ impl Server {
     /// matched, so the client UI can re-render and reset its
     /// "confirm" state. Persists when at least one item was
     /// actually salvaged.
-    pub(crate) fn handle_salvage_inventory_bulk(
-        &mut self,
-        from: ClientId,
-        rarity_max: u8,
-    ) {
+    pub(crate) fn handle_salvage_inventory_bulk(&mut self, from: ClientId, rarity_max: u8) {
         let Some((count, new_total)) = self
             .sim_for_client_mut(from)
             .salvage_inventory_bulk(from, rarity_max)
@@ -660,7 +736,10 @@ impl Server {
             log::debug!("unequip: unknown slot byte {slot_byte} from {from:?}");
             return;
         };
-        if !self.sim_for_client_mut(from).unequip_to_bag_slot(from, slot, inventory_index) {
+        if !self
+            .sim_for_client_mut(from)
+            .unequip_to_bag_slot(from, slot, inventory_index)
+        {
             return;
         }
         self.broadcast_inventory_state(from);

@@ -12,6 +12,12 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 /// Version history (most recent first):
 /// - **v5** (2026-05-11): `Hello.auth: AuthCredential` enum
 ///   collapsed to `Hello.auth_ticket: Vec<u8>`. Dev and Steam
+/// - v7 (2026-05-11): added `ClientMsg::SortInventory` and
+///   `ClientMsg::SortStashTab` for one-click auto-sort.
+/// - v6 (2026-05-11): added `ClientMsg::EquipFromStash` and
+///   `ClientMsg::UnequipToStashSlot` for atomic stash\u2194equip
+///   drag.
+/// - v5 (2025-...): `LoginTicket` / `SteamTicket` variants
 ///   now share one opaque-ticket wire shape; the server's
 ///   installed verifier (chosen at startup) decides how to
 ///   parse the bytes.
@@ -22,7 +28,7 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 ///   trip.
 /// - v3: previous schema (free-form `account_name` string,
 ///   pre-Hello `RequestRoster` lookup).
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Hard cap on simultaneous connected clients per server. Matches the
 /// design target of 4-player co-op (one slot is the host on a listen

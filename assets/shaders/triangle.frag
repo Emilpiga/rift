@@ -97,7 +97,16 @@ mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
     vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
 
-    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    // Guard against degenerate quads where the UV derivatives
+    // collapse (zero-area triangles in screen space, e.g. on
+    // thin character features like eyelids or fingertips
+    // viewed edge-on). Without this floor `inversesqrt(0)`
+    // returns `+inf`, T/B explode to inf, the normal-map
+    // rotation produces NaN, and the *entire* 2x2 derivative
+    // quad is shaded black — that's the random "black
+    // squares on the skin" symptom.
+    float maxLen2 = max(max(dot(T, T), dot(B, B)), 1e-12);
+    float invmax = inversesqrt(maxLen2);
     return mat3(T * invmax, B * invmax, N);
 }
 
@@ -1122,6 +1131,12 @@ vec3 shadePbr() {
     vec3 albedo = texture(baseColorMap, uv).rgb * fragColor;
     vec3 nTex = texture(normalMap, uv).xyz * 2.0 - 1.0;
     vec3 N = normalize(TBN * nTex);
+    // Final NaN guard. If the TBN frame still degenerated
+    // for any reason (e.g. nTex itself was a degenerate
+    // sample), fall back to the geometric normal so the
+    // fragment shades from a sane direction instead of
+    // going black across the derivative quad.
+    if (any(isnan(N))) N = Ngeo;
 
     vec2 mr = texture(mrMap, uv).rg;
     float metallic  = mr.r;
@@ -1267,6 +1282,10 @@ vec3 shadePbr() {
         }  // end shadow-light bounce gate (PBR path)
     }
 
+    if (any(isnan(lighting)) || any(isinf(lighting))) {
+        lighting = albedo * max(ao, 0.05);
+    }
+
     return lighting;
 }
 
@@ -1297,7 +1316,16 @@ vec3 evalCharLight(
     float NdotL = dot(N, L);
     float NdotLp = max(NdotL, 0.0);
     float NdotV = max(dot(N, V), 0.0);
-    vec3  H = normalize(L + V);
+    // `normalize(L + V)` blows up to NaN when L and V are
+    // exactly anti-parallel (light coming from the camera
+    // direction). Even in dynamic lighting this is rare, but
+    // it's exactly the kind of edge case that produces
+    // momentary 2x2 black squares as the camera moves through
+    // the singularity. Guard with a tiny lower bound on the
+    // half-vector length and fall back to N when degenerate.
+    vec3  HRaw = L + V;
+    float HLen = length(HRaw);
+    vec3  H = HLen > 1e-4 ? HRaw / HLen : N;
     float NdotH = max(dot(N, H), 0.0);
 
     // ---- Diffuse curve ----
@@ -1406,9 +1434,24 @@ vec3 evalCharLight(
 // / props so the project's existing painted look stays intact.
 // ---------------------------------------------------------------------------
 vec3 shadeCel() {
-    vec3 N = normalize(fragNormal);
+    // Normal can collapse to a zero vector for two reasons:
+    //   * the asset itself ships a zero normal at a vertex
+    //     (rare but happens on hand-authored meshes), or
+    //   * the GPU skin pass produced a zero post-skinned
+    //     normal because the bone palette and the rest
+    //     normal happen to align with the matrix kernel.
+    // `normalize(0)` returns NaN, which then poisons every
+    // downstream dot/pow and the fragment outputs black.
+    // Fall back to a stable up vector (most characters are
+    // upright; this is biased toward looking "lit from above"
+    // rather than collapsing to a black square).
+    vec3 nRaw = fragNormal;
+    float nLen = length(nRaw);
+    vec3 N = nLen > 1e-4 ? nRaw / nLen : vec3(0.0, 1.0, 0.0);
     vec3 L = normalize(ubo.lightDir.xyz);
-    vec3 V = normalize(ubo.cameraPos.xyz - fragWorldPos);
+    vec3 vRaw = ubo.cameraPos.xyz - fragWorldPos;
+    float vLen = length(vRaw);
+    vec3 V = vLen > 1e-4 ? vRaw / vLen : vec3(0.0, 0.0, 1.0);
 
     float ambient = ubo.lightColor.w;
 
@@ -1584,6 +1627,19 @@ vec3 shadeCel() {
                      * NdotB * bAtten * 0.16;
         }
         }  // end shadow-light bounce gate (cel path)
+    }
+
+    // Final NaN/Inf sweep. Even with the entry guards above,
+    // a single anomalous input (e.g. a NaN sneaking out of
+    // `samplePointShadow` on a degenerate cube face) would
+    // poison the accumulated `lighting` and the fragment
+    // would output black across the entire 2x2 derivative
+    // quad — the "random black squares on the skin" symptom.
+    // Replace any non-finite component with the unlit base
+    // colour so the worst case degrades to flat-shaded
+    // instead of opaque black.
+    if (any(isnan(lighting)) || any(isinf(lighting))) {
+        lighting = baseColor * ambient;
     }
 
     return lighting;

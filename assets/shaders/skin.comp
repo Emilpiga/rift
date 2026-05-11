@@ -107,6 +107,13 @@ void main() {
     vec3 sp = (m * vec4(pos, 1.0)).xyz;
     vec3 sn = normalize(mat3(m) * nrm);
     if (any(isnan(sn))) sn = nrm;
+    // Same guard for position. A pathological palette entry
+    // (NaN in a transmitted bone matrix) would otherwise
+    // collapse the vertex to NaN and the rasteriser could
+    // splat random screen coverage as a degenerate triangle —
+    // visible as flickering black quads where the derivative
+    // pass picks up the NaN.
+    if (any(isnan(sp))) sp = pos;
 
     sp += sn * pc.inflate;
 

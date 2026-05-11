@@ -1,0 +1,16 @@
+[package]
+name = "rift-ui"
+version = "0.1.0"
+edition = "2021"
+
+# Widget code for the loading-roster / character-select / login
+# screens. Linked statically into `rift-client`. The crate is
+# kept deliberately small (depends only on `rift-ui-im` for UI
+# primitives + `rift-ui-types` for view-model data) so a
+# widget tweak rebuilds in seconds.
+
+[dependencies]
+rift-ui-im = { path = "../rift-ui-im" }
+rift-ui-types = { path = "../rift-ui-types" }
+glam = { workspace = true }
+log = { workspace = true }

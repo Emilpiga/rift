@@ -6,10 +6,12 @@
 use rift_net::ids::ClientId;
 
 use super::player::ServerPlayer;
-use super::{push_into_sparse, trim_trailing_none, Sim};
+use super::{
+    build_bag_occupancy, footprint_fits, place_inventory_item, place_inventory_item_at,
+    sort_grid_items, trim_trailing_none, Sim,
+};
 
 impl Sim {
-
     /// Move the bag item at `inventory_index` into its canonical
     /// equipment slot. If the slot is already filled, the
     /// previously-equipped item is pushed back to the bag at the
@@ -34,9 +36,9 @@ impl Sim {
         // `provenance` set at drop time.
         if item.provenance.is_none() {
             if let Some(uuid) = p.character_id {
-                item.provenance = Some(
-                    rift_game::loot::LootProvenance::from_ids([uuid.into_bytes()]),
-                );
+                item.provenance = Some(rift_game::loot::LootProvenance::from_ids([
+                    uuid.into_bytes()
+                ]));
             }
         }
         // Level requirement gate. Reject before mutating the
@@ -62,18 +64,31 @@ impl Sim {
         }
         let displaced = p.equipment.set(slot, Some(item));
         if let Some(prev) = displaced {
-            // Re-occupy the same bag slot so the UI position the
-            // client just saw stays stable across the swap.
-            p.inventory[inventory_index] = Some(prev);
+            // Try to place the displaced item back at the same
+            // bag anchor so the UI position stays stable. If it
+            // doesn't fit (footprint clash), fall back to the
+            // first free anchor; if even that fails, re-equip
+            // the previous item to keep the player's gear
+            // intact.
+            if !place_inventory_item_at(&mut p.inventory, prev.clone(), inventory_index) {
+                if place_inventory_item(&mut p.inventory, prev.clone()).is_none() {
+                    // Worst case: undo the equip swap.
+                    if let Some(newly_equipped) = p.equipment.take(slot) {
+                        p.inventory[inventory_index] = Some(newly_equipped);
+                    }
+                    p.equipment.set(slot, Some(prev));
+                    return false;
+                }
+            }
         }
-        trim_trailing_none(&mut p.inventory);
         p.recompute_stats();
         true
     }
 
     /// Move the item currently in `slot` back into the bag (at
-    /// the end). Returns `true` if anything actually moved;
-    /// `false` for an empty slot or a stale client byte.
+    /// the first slot whose anchor fits the item's footprint).
+    /// Returns `true` if anything actually moved; `false` for
+    /// an empty slot, a stale client byte, or a full bag.
     pub fn unequip_to_bag(
         &mut self,
         client_id: ClientId,
@@ -88,7 +103,12 @@ impl Sim {
         let Some(item) = p.equipment.take(slot) else {
             return false;
         };
-        push_into_sparse(&mut p.inventory, item);
+        if place_inventory_item(&mut p.inventory, item.clone()).is_none() {
+            // No room — put the item back on the equipment
+            // slot to keep state consistent.
+            p.equipment.set(slot, Some(item));
+            return false;
+        }
         p.recompute_stats();
         true
     }
@@ -150,13 +170,9 @@ impl Sim {
             .unwrap_or_default()
     }
 
-    pub fn swap_inventory_slots(
-        &mut self,
-        client_id: ClientId,
-        a: usize,
-        b: usize,
-    ) -> bool {
-        if a == b {
+    pub fn swap_inventory_slots(&mut self, client_id: ClientId, a: usize, b: usize) -> bool {
+        use rift_net::messages::INVENTORY_CAPACITY;
+        if a == b || a >= INVENTORY_CAPACITY || b >= INVENTORY_CAPACITY {
             return false;
         }
         let Some(&entity) = self.sessions.get(&client_id) else {
@@ -165,17 +181,68 @@ impl Sim {
         let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
             return false;
         };
-        let max = a.max(b);
-        if max >= p.inventory.len() {
-            // Both indices off the end of the bag = no-op.
-            if a >= p.inventory.len() && b >= p.inventory.len() {
-                return false;
-            }
-            p.inventory.resize_with(max + 1, || None);
+        if p.inventory.len() < INVENTORY_CAPACITY {
+            p.inventory.resize_with(INVENTORY_CAPACITY, || None);
         }
-        p.inventory.swap(a, b);
-        trim_trailing_none(&mut p.inventory);
-        true
+        let item_a = p.inventory[a].take();
+        let item_b = p.inventory[b].take();
+
+        // Build occupancy WITHOUT a and b, then test that
+        // each item fits at the destination's anchor. Both
+        // must fit — partial swaps would visually corrupt the
+        // grid — otherwise we restore the originals.
+        let occ = build_bag_occupancy(&p.inventory);
+        let a_fits_b = item_a
+            .as_ref()
+            .map(|it| {
+                let (w, h) = it.footprint();
+                footprint_fits(&occ, b, w, h)
+            })
+            .unwrap_or(true);
+        let b_fits_a = item_b
+            .as_ref()
+            .map(|it| {
+                let (w, h) = it.footprint();
+                footprint_fits(&occ, a, w, h)
+            })
+            .unwrap_or(true);
+
+        if a_fits_b && b_fits_a {
+            // Cells we're about to fill don't conflict with
+            // each other because a != b and each footprint
+            // was tested against the same occ snapshot. The
+            // only remaining risk is that one item's
+            // footprint covers the other's anchor cell. Test
+            // explicitly:
+            let cross_clash = item_a
+                .as_ref()
+                .zip(item_b.as_ref())
+                .map(|(ia, ib)| {
+                    let (aw, ah) = ia.footprint();
+                    let (bw, bh) = ib.footprint();
+                    use rift_net::messages::BAG_COLS;
+                    let bx = b % BAG_COLS;
+                    let by = b / BAG_COLS;
+                    let ax = a % BAG_COLS;
+                    let ay = a / BAG_COLS;
+                    let a_covers_a_anchor =
+                        ax >= bx && ax < bx + aw as usize && ay >= by && ay < by + ah as usize;
+                    let b_covers_b_anchor =
+                        bx >= ax && bx < ax + bw as usize && by >= ay && by < ay + bh as usize;
+                    a_covers_a_anchor || b_covers_b_anchor
+                })
+                .unwrap_or(false);
+            if !cross_clash {
+                p.inventory[b] = item_a;
+                p.inventory[a] = item_b;
+                return true;
+            }
+        }
+
+        // Restore originals on any failure.
+        p.inventory[a] = item_a;
+        p.inventory[b] = item_b;
+        false
     }
 
     /// Swap two stash slots within `tab_index`, used by the
@@ -197,21 +264,29 @@ impl Sim {
     ) -> Option<(rift_game::loot::Item, glam::Vec3)> {
         let &entity = self.sessions.get(&client_id)?;
         let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
-        let item = p.inventory.get_mut(inventory_index).and_then(|s| s.take())?;
+        let item = p
+            .inventory
+            .get_mut(inventory_index)
+            .and_then(|s| s.take())?;
         trim_trailing_none(&mut p.inventory);
         Some((item, p.k.position))
     }
 
     /// Move whatever's currently in `slot` into the bag at
     /// `inventory_index`, swapping with whatever is already
-    /// there (or growing the bag if the index is past the end).
-    /// Returns `true` on success.
+    /// there. Validates that footprints fit at the swapped
+    /// anchors. Returns `true` on success, `false` if the
+    /// swap would overlap.
     pub fn unequip_to_bag_slot(
         &mut self,
         client_id: ClientId,
         slot: rift_game::loot::EquipSlot,
         inventory_index: usize,
     ) -> bool {
+        use rift_net::messages::INVENTORY_CAPACITY;
+        if inventory_index >= INVENTORY_CAPACITY {
+            return false;
+        }
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
@@ -221,28 +296,56 @@ impl Sim {
         let Some(unequipped) = p.equipment.take(slot) else {
             return false;
         };
-        // Grow the bag to fit the requested index. The displaced
-        // item (if any) gets re-equipped if it's compatible with
-        // the slot, otherwise it lands at the first free bag
-        // slot (or the end).
-        if inventory_index >= p.inventory.len() {
-            p.inventory.resize_with(inventory_index + 1, || None);
-            p.inventory[inventory_index] = Some(unequipped);
-        } else {
-            let displaced = std::mem::replace(
-                &mut p.inventory[inventory_index],
-                Some(unequipped),
-            );
-            if let Some(prev) = displaced {
-                if rift_game::loot::Equipment::accepts(slot, &prev) {
-                    p.equipment.set(slot, Some(prev));
-                } else {
-                    push_into_sparse(&mut p.inventory, prev);
+        if p.inventory.len() < INVENTORY_CAPACITY {
+            p.inventory.resize_with(INVENTORY_CAPACITY, || None);
+        }
+        // Take the existing occupant out so the occupancy
+        // mask doesn't include it when we test the new item's
+        // footprint.
+        let displaced = p.inventory[inventory_index].take();
+        let (uw, uh) = unequipped.footprint();
+        let occ = build_bag_occupancy(&p.inventory);
+        if !footprint_fits(&occ, inventory_index, uw, uh) {
+            // Restore everything.
+            p.inventory[inventory_index] = displaced;
+            p.equipment.set(slot, Some(unequipped));
+            return false;
+        }
+        p.inventory[inventory_index] = Some(unequipped);
+        if let Some(prev) = displaced {
+            // The displaced item goes to equipment if it fits
+            // the same slot, else into the first free anchor.
+            if rift_game::loot::Equipment::accepts(slot, &prev) {
+                p.equipment.set(slot, Some(prev));
+            } else if place_inventory_item(&mut p.inventory, prev.clone()).is_none() {
+                // Last resort: roll back the entire op so we
+                // don't lose the item.
+                let new_unequipped = p.inventory[inventory_index].take();
+                p.inventory[inventory_index] = Some(prev);
+                if let Some(it) = new_unequipped {
+                    p.equipment.set(slot, Some(it));
                 }
+                return false;
             }
         }
-        trim_trailing_none(&mut p.inventory);
         p.recompute_stats();
+        true
+    }
+
+    /// Auto-sort the bag in place. Returns `true` iff
+    /// anything actually moved (false for an empty bag).
+    pub fn sort_inventory(&mut self, client_id: ClientId) -> bool {
+        use rift_net::messages::{BAG_COLS, BAG_ROWS};
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        if p.inventory.iter().all(|s| s.is_none()) {
+            return false;
+        }
+        sort_grid_items(&mut p.inventory, BAG_COLS, BAG_ROWS);
         true
     }
 }

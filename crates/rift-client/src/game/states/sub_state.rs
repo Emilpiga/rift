@@ -311,29 +311,71 @@ impl LootClientState {
 /// item-movement and tab-management events flow through here.
 #[derive(Clone, Debug)]
 pub enum StashRequest {
-    Deposit { inventory_index: u32, tab_index: u8 },
-    Withdraw { tab_index: u8, stash_index: u32 },
+    Deposit {
+        inventory_index: u32,
+        tab_index: u8,
+    },
+    Withdraw {
+        tab_index: u8,
+        stash_index: u32,
+    },
     /// Reorder stash: swap two stash slots in place. Either
     /// index may be empty (past the current stash length); the
     /// server grows the tab with `None` placeholders to fit
     /// and then trims back to the last filled slot.
-    Swap { tab_index: u8, a: u32, b: u32 },
+    Swap {
+        tab_index: u8,
+        a: u32,
+        b: u32,
+    },
     /// Deposit an inventory item into a specific stash slot.
     /// If the destination is occupied the two items swap
     /// (occupant comes back to `inventory_index`); if empty,
     /// the item simply moves into the requested slot.
-    DepositToSlot { inventory_index: u32, tab_index: u8, stash_index: u32 },
+    DepositToSlot {
+        inventory_index: u32,
+        tab_index: u8,
+        stash_index: u32,
+    },
     /// Withdraw a stash item into a specific bag slot.
     /// Same swap semantics as `DepositToSlot`.
-    WithdrawToSlot { tab_index: u8, stash_index: u32, inventory_index: u32 },
+    WithdrawToSlot {
+        tab_index: u8,
+        stash_index: u32,
+        inventory_index: u32,
+    },
+    /// Equip a stash item directly into its canonical
+    /// equipment slot, swapping any displaced item back into
+    /// the freed stash cell.
+    EquipFromStash {
+        tab_index: u8,
+        stash_index: u32,
+    },
+    /// Unequip the item in `slot` directly into a specific
+    /// stash cell (mirror of `EquipFromStash`).
+    UnequipToStashSlot {
+        slot: u8,
+        tab_index: u8,
+        stash_index: u32,
+    },
     /// Buy a new stash tab with shards. Server validates cost
     /// and tab cap; on success the new tab is appended at the
     /// end and the player's shard total drops accordingly.
     BuyTab,
     /// Rename a stash tab.
-    RenameTab { tab_index: u8, name: String },
+    RenameTab {
+        tab_index: u8,
+        name: String,
+    },
     /// Recolor a stash tab. `color` is packed `0xRRGGBB`.
-    RecolorTab { tab_index: u8, color: u32 },
+    RecolorTab {
+        tab_index: u8,
+        color: u32,
+    },
+    /// Auto-sort one stash tab.
+    SortTab {
+        tab_index: u8,
+    },
 }
 
 /// Outgoing equip / unequip request shape, queued by the
@@ -341,25 +383,44 @@ pub enum StashRequest {
 /// `NetClient::request_equip` / `request_unequip`.
 #[derive(Clone, Copy, Debug)]
 pub enum EquipRequest {
-    Equip { inventory_index: u32 },
-    Unequip { slot: u8 },
+    Equip {
+        inventory_index: u32,
+    },
+    Unequip {
+        slot: u8,
+    },
     /// Reorder bag: swap two inventory slots in place.
-    SwapBag { a: u32, b: u32 },
+    SwapBag {
+        a: u32,
+        b: u32,
+    },
     /// Drop the bag item out onto the ground at the player's
     /// position (server picks the spawn point).
-    DropToWorld { inventory_index: u32 },
+    DropToWorld {
+        inventory_index: u32,
+    },
     /// Salvage the bag item for shards. Server validates the
     /// item isn't anchored, removes it from the bag, and
     /// pushes back fresh `InventorySync` + `ShardsSync`.
-    Salvage { inventory_index: u32 },
+    Salvage {
+        inventory_index: u32,
+    },
     /// Bulk-salvage every non-anchored bag item whose rarity is
     /// at most `rarity_max`. Wired to the inventory panel's
     /// "Salvage Trash" button (with a 2-stage confirm).
-    SalvageBulk { rarity_max: u8 },
+    SalvageBulk {
+        rarity_max: u8,
+    },
     /// Unequip into a specific bag index. The previous occupant
     /// of that slot is shoved into `slot` if it fits, otherwise
     /// appended at the end of the bag.
-    UnequipToSlot { slot: u8, inventory_index: u32 },
+    UnequipToSlot {
+        slot: u8,
+        inventory_index: u32,
+    },
+    /// Auto-sort the bag in place. Server compacts items by
+    /// rarity desc, ilvl desc, footprint area desc.
+    SortBag,
 }
 
 /// Visual + bookkeeping for a single ground-loot drop. Spawned by

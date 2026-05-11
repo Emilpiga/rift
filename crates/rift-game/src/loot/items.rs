@@ -145,6 +145,25 @@ impl EquipSlot {
             EquipSlot::Amulet => "Amulet",
         }
     }
+
+    /// Default `(width, height)` an item targeting this slot
+    /// occupies in the bag grid. Mirrors the visual size used
+    /// on the paperdoll so picking up an item from an equip
+    /// slot lands on a bag tile of the same shape. All values
+    /// are in inventory cells (1 cell = one bag grid square).
+    pub fn inventory_size(self) -> (u8, u8) {
+        match self {
+            EquipSlot::Weapon => (2, 3),
+            EquipSlot::Shoulders => (2, 2),
+            EquipSlot::Chest => (2, 3),
+            EquipSlot::Legs => (2, 2),
+            EquipSlot::Helm => (2, 2),
+            EquipSlot::Hands => (2, 2),
+            EquipSlot::Boots => (2, 2),
+            EquipSlot::Ring1 | EquipSlot::Ring2 => (1, 1),
+            EquipSlot::Amulet => (1, 1),
+        }
+    }
 }
 
 /// One row in the base-item table. All fields are `'static` so the

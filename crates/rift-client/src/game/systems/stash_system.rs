@@ -10,8 +10,8 @@ use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::Input;
 
 use crate::game::floor::FloorManager;
-use crate::game::inventory::MpInventoryUI;
 use crate::game::sub_state::{LootClientState, NetState};
+use rift_ui_types::inventory::InventoryUiState;
 
 /// Walk-to-interact range for the hub stash chest. Slightly
 /// tighter than the portal radius so the prompt only fires
@@ -34,7 +34,7 @@ pub fn tick(
     world: &hecs::World,
     floor_mgr: &FloorManager,
     input: &Input,
-    mp_inventory_ui: &mut MpInventoryUI,
+    mp_inventory_ui: &mut InventoryUiState,
     net: &mut NetState,
     loot: &mut LootClientState,
     hud_prompt: &mut Option<&'static str>,
