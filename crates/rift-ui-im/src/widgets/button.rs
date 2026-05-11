@@ -272,7 +272,24 @@ impl<'a> Button<'a> {
                 ),
             };
             let (edge, centre) = if pressed {
-                (base_centre, base_edge)
+                // Pressed: uniformly darker than the rest
+                // state so the button reads as pushed-in
+                // without inverting the rim (which produced
+                // a bright halo) or stripping the gradient
+                // (which produced a flat plate).
+                let de = Color::rgba(
+                    base_edge.0[0] * 0.55,
+                    base_edge.0[1] * 0.55,
+                    base_edge.0[2] * 0.55,
+                    base_edge.0[3],
+                );
+                let dc = Color::rgba(
+                    base_centre.0[0] * 0.55,
+                    base_centre.0[1] * 0.55,
+                    base_centre.0[2] * 0.55,
+                    base_centre.0[3],
+                );
+                (de, dc)
             } else if hovered {
                 (base_edge, hover_centre)
             } else {
@@ -280,13 +297,12 @@ impl<'a> Button<'a> {
             };
             ui.draw_rounded_radial_rect_noisy(rect, theme.spacing.corner_radius, edge, centre);
 
-            // Top + bottom bevel bands (skipped while
-            // pressed so the recess look stays clean). The
-            // band heights are *capped in pixels* so they
-            // stay tasteful on tall buttons (Create / Confirm
-            // can be 56 px high; a 35%-of-height sheen there
-            // would drag halfway down the button).
-            if !pressed {
+            // Top + bottom bevel bands. Pressed keeps a
+            // softer version of both (alpha halved) so the
+            // surface still reads as forged metal instead of
+            // a flat plate, but the bands clearly recede.
+            let pressed_dim = if pressed { 0.45 } else { 1.0 };
+            {
                 let r = theme.spacing.corner_radius;
                 let inset = r.max(2.0);
                 let inner_x = rect.x() + inset;
@@ -295,7 +311,7 @@ impl<'a> Button<'a> {
                     let band_h = (rect.height() * 0.35).clamp(4.0, 14.0);
                     let band_y = rect.y() + 1.0;
                     let half_w = inner_w * 0.5;
-                    let opaque_mid = Color::rgba(1.0, 0.96, 0.90, 0.32);
+                    let opaque_mid = Color::rgba(1.0, 0.96, 0.90, 0.32 * pressed_dim);
                     let transparent = Color::rgba(1.0, 0.96, 0.90, 0.0);
                     ui.draw_grad4_rect(
                         Rect::from_xywh(inner_x, band_y, half_w, band_h),
@@ -314,7 +330,11 @@ impl<'a> Button<'a> {
 
                     let shadow_h = (rect.height() * 0.30).clamp(3.0, 12.0);
                     let shadow_y = rect.max.y - shadow_h - 1.0;
-                    let opaque_dark = Color::rgba(0.0, 0.0, 0.0, 0.45);
+                    // Pressed gets a *stronger* bottom
+                    // shadow band so the recess reads even
+                    // though the top sheen is muted.
+                    let bottom_alpha = if pressed { 0.55 } else { 0.45 };
+                    let opaque_dark = Color::rgba(0.0, 0.0, 0.0, bottom_alpha);
                     let trans_dark = Color::rgba(0.0, 0.0, 0.0, 0.0);
                     ui.draw_grad4_rect(
                         Rect::from_xywh(inner_x, shadow_y, half_w, shadow_h),
@@ -333,7 +353,16 @@ impl<'a> Button<'a> {
                 }
             }
         } else {
-            ui.draw_rounded_rect(rect, theme.spacing.corner_radius, theme.colors.bg_slot);
+            // Disabled: flat, muted, noticeably darker than
+            // any active state so the affordance reads as
+            // "not interactable" against any panel colour.
+            // Pulls from `bg_panel` (warm stone) instead of
+            // `bg_slot` (cool slate) so disabled buttons
+            // don't pop as a bright chip on the carved-stone
+            // surfaces the inventory + character-select use.
+            let p = theme.colors.bg_panel.0;
+            let disabled_fill = Color::rgba(p[0] * 0.60, p[1] * 0.60, p[2] * 0.60, p[3]);
+            ui.draw_rounded_rect(rect, theme.spacing.corner_radius, disabled_fill);
         }
 
         // Outline. Every enabled button gets the dark stone
@@ -354,12 +383,10 @@ impl<'a> Button<'a> {
         );
 
         // Inner hairline 1 px inside the outer border. Reads
-        // as a forged-bevel framing line. The new
-        // `draw_rounded_outline` uses real arcs at the
-        // corners so the hairline wraps cleanly even with
-        // nothing behind it (no more corner gaps). Skipped
-        // on pressed and disabled.
-        if self.enabled && !pressed {
+        // as a forged-bevel framing line. Stays on for
+        // pressed (alpha halved) so the chrome is consistent
+        // across rest / hover / pressed.
+        if self.enabled {
             let inner = Rect::from_xywh(
                 rect.x() + 2.0,
                 rect.y() + 2.0,
@@ -367,10 +394,16 @@ impl<'a> Button<'a> {
                 (rect.height() - 4.0).max(0.0),
             );
             // Keep the inner radius positive so the corner
-            // arcs are visible \u2014 going to 0 would degrade
+            // arcs are visible — going to 0 would degrade
             // to a sharp inset rectangle.
             let inner_r = (theme.spacing.corner_radius - 2.0).max(2.0);
-            ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.18));
+            let hairline_a = if pressed { 0.09 } else { 0.18 };
+            ui.draw_rounded_outline(
+                inner,
+                inner_r,
+                1.0,
+                Color::rgba(1.0, 0.92, 0.84, hairline_a),
+            );
         }
 
         // Centred label. Two-stage overflow guard so a button

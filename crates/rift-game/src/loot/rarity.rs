@@ -26,15 +26,25 @@ impl Rarity {
     /// Number of *bonus* affixes rolled at this rarity. Bonus
     /// affixes come on top of the deterministic per-slot
     /// signature (Vitality + slot-specific guaranteed lines)
-    /// that every item gets regardless of rarity. Legendary
-    /// additionally gets one effect affix from the legendary
-    /// pool — see `Item::roll`.
+    /// and the Source × Element × Archetype trio that the rolling
+    /// pipeline injects per rarity. Legendary additionally gets
+    /// one effect affix from the legendary pool — see
+    /// `Item::roll`.
+    ///
+    /// Ranges sampled inclusively on both ends:
+    ///
+    /// | Rarity    | Bonus range |
+    /// | --------- | ----------- |
+    /// | Common    | 1 .. 2      |
+    /// | Magic     | 2 .. 3      |
+    /// | Rare      | 3 .. 4      |
+    /// | Legendary | 3 .. 4      |
     pub fn affix_count_range(self) -> (u32, u32) {
         match self {
-            Rarity::Common => (0, 0),
-            Rarity::Magic => (1, 1),
-            Rarity::Rare => (2, 2),
-            Rarity::Legendary => (3, 3),
+            Rarity::Common => (1, 2),
+            Rarity::Magic => (2, 3),
+            Rarity::Rare => (3, 4),
+            Rarity::Legendary => (3, 4),
         }
     }
 

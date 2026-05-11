@@ -282,6 +282,7 @@ impl NetClient {
                         cmd.move_dir,
                         cmd.aim_dir,
                         cmd.buttons,
+                        self.predicted_move_speed,
                     );
                     rift_game::kinematic::integrate(&mut self.predicted, floor, dt);
                 }

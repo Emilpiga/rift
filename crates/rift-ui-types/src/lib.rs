@@ -80,6 +80,7 @@
 // so a tweak to the inventory view models doesn't force a
 // recompile of the character-select view models.
 pub mod character_select;
+pub mod chat;
+pub mod hud;
 pub mod inventory;
 // pub mod theme;
-// pub mod hud;

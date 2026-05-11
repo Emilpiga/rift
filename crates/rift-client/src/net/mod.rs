@@ -323,6 +323,12 @@ pub struct NetClient {
     /// so the camera + animation pipeline see the predicted
     /// position with zero added latency.
     pub(super) predicted: Kinematic,
+    /// Local player's current authoritative `move_speed`, mirrored
+    /// from `PlayerState::stats().move_speed` whenever the game
+    /// loop calls `set_predicted_move_speed`. Used by the input
+    /// prediction path so Boots/MoveSpeed affixes feel responsive
+    /// locally instead of waiting for the next server snapshot.
+    pub(super) predicted_move_speed: f32,
     /// Whether `predicted` has been seeded from a server snapshot.
     /// Until the first snapshot lands we don't know our authoritative
     /// position and shouldn't override the SP player transform.
@@ -466,6 +472,7 @@ impl NetClient {
             pending_meters: None,
             our_client_id: None,
             predicted: Kinematic::default(),
+            predicted_move_speed: rift_game::hero::HERO.base_move_speed,
             predicted_ready: false,
             local_dead: false,
             local_ghost: false,

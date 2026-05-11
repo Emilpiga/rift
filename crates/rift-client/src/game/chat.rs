@@ -24,10 +24,16 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use rift_engine::ui::im::{
-    Color, Frame, Id, Pad, Pos2, Rect, Ui,
-};
+use rift_engine::ui::im::{Color, Id, Pos2, Rect, TextSelection, Ui};
 use rift_net::messages::{chat_channel, CHAT_MAX_LEN};
+
+/// Stable id used both by `frame_chat` (to render the field)
+/// and the host (to detect / claim / blur focus). Single
+/// source of truth so any change here is reflected on both
+/// sides without drifting.
+fn chat_field_id() -> Id {
+    Id::root("chat").child("input")
+}
 
 /// One stored chat line on the client side. Retained in
 /// [`ChatUi::messages`] for the scrollback panel.
@@ -130,7 +136,17 @@ impl ChatUi {
     /// in the field.
     pub fn open_with_draft(&mut self, ui: &mut Ui<'_>, draft: String) {
         self.open = true;
+        let len = draft.len();
         self.draft = draft;
+        // Force-focus the field so the player can type
+        // straight away. Seed the caret at end-of-string so
+        // the next keystroke appends rather than overwrites.
+        let id = chat_field_id();
+        ui.state_mut().focus = Some(id);
+        ui.state_mut().text_selection = TextSelection {
+            anchor: len,
+            caret: len,
+        };
         ui.input().discard_text_input();
     }
 
@@ -211,60 +227,66 @@ impl ChatUi {
     /// Process key bindings each frame. Must be called *before*
     /// [`ChatUi::frame`] so the open/close edge picked up by
     /// `T` / `Esc` lands in the same frame the panel renders.
-    /// Returns `true` if the chat consumed an event the
-    /// gameplay layer should ignore (e.g. an Enter that
-    /// submitted a line).
-    pub fn handle_keys(
-        &mut self,
-        ui: &mut Ui<'_>,
-        out: &mut Vec<(u8, Option<String>, String)>,
-    ) {
-        // Ignore key bindings entirely if some other UI
-        // surface is already capturing the keyboard (avoids
-        // T-to-open firing while the user is typing in the
-        // account field). Focus is the canonical signal —
-        // any focused widget owns text input this frame.
-        let already_typing_elsewhere = ui.state().focus.is_some()
-            && ui.state().focus != Some(Id::root("chat").child("input"));
+    ///
+    /// The single source of truth for "chat is active" is the
+    /// TextField's focus state: `self.open` is kept in sync
+    /// with `ui.state().focus == Some(chat_field_id())` at the
+    /// start of this method and again at the end of
+    /// [`Self::frame`]. This means clicking the field directly
+    /// also "opens" the chat (gates gameplay input next frame),
+    /// and blurring the field (Esc, Enter-submit, click-out)
+    /// closes it without any extra bookkeeping.
+    pub fn handle_keys(&mut self, ui: &mut Ui<'_>, out: &mut Vec<(u8, Option<String>, String)>) {
+        let field_id = chat_field_id();
+        let field_focused = ui.state().focus == Some(field_id);
+        let elsewhere_focused = ui.state().focus.is_some() && !field_focused;
 
-        if !self.open {
-            // Open with T (or Slash) when no other surface
-            // owns the keyboard.
-            if !already_typing_elsewhere
-                && (ui.input().key_just_pressed(rift_engine::ui::im::ImKey::KeyT)
-                    || ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Slash))
+        // Sync the "open" mirror to the canonical focus state
+        // at the top of the frame so any external focus change
+        // (e.g. user clicked the field with the mouse last
+        // frame) is reflected before we react to keys.
+        self.open = field_focused;
+
+        if !field_focused {
+            if elsewhere_focused {
+                return;
+            }
+            // Closed: T / `/` open the chat for new input; R
+            // pre-fills a `/w <last_dm_from> ` reply.
+            if ui
+                .input()
+                .key_just_pressed(rift_engine::ui::im::ImKey::KeyT)
+                || ui
+                    .input()
+                    .key_just_pressed(rift_engine::ui::im::ImKey::Slash)
             {
-                self.open = true;
-                self.draft.clear();
-                // Swallow this frame's typed-char buffer so
-                // the very `T` (or `/`) that opened the chat
-                // doesn't also land in the freshly-focused
-                // input field.
-                ui.input().discard_text_input();
-            } else if !already_typing_elsewhere
-                && ui.input().key_just_pressed(rift_engine::ui::im::ImKey::KeyR)
+                self.focus_field(ui, String::new());
+            } else if ui
+                .input()
+                .key_just_pressed(rift_engine::ui::im::ImKey::KeyR)
             {
                 if let Some(name) = self.last_whisper_from.clone() {
-                    self.open = true;
-                    self.draft = format!("/w {name} ");
-                    ui.input().discard_text_input();
+                    self.focus_field(ui, format!("/w {name} "));
                 }
             }
             return;
         }
 
-        // Open: handle Esc / Enter / Tab. Body characters are
-        // consumed by the focused TextField widget itself.
-        // Use the *raw* key accessor here so these bindings
-        // keep working while text-capture is on (which it is,
-        // because the chat is open and this very frame's
-        // gameplay polling is suppressed).
-        if ui.input().key_just_pressed_raw(rift_engine::ui::im::ImKey::Escape) {
-            self.open = false;
+        // Focused: handle Esc / Enter / Tab. Body characters
+        // are consumed by the focused TextField widget. Raw
+        // accessors stay valid while text-capture is on.
+        if ui
+            .input()
+            .key_just_pressed_raw(rift_engine::ui::im::ImKey::Escape)
+        {
+            self.blur_field(ui);
             self.draft.clear();
             return;
         }
-        if ui.input().key_just_pressed_raw(rift_engine::ui::im::ImKey::Tab) {
+        if ui
+            .input()
+            .key_just_pressed_raw(rift_engine::ui::im::ImKey::Tab)
+        {
             // Cycle through the channels the player can
             // actively post to (skips SYSTEM and WHISPER).
             self.channel = match self.channel {
@@ -279,230 +301,148 @@ impl ChatUi {
         }
         if ui.input().enter_just_pressed() {
             self.submit(out);
+            self.blur_field(ui);
         }
     }
 
-    /// Render scrollback + (when open) the input field. Must
-    /// be called after [`ChatUi::handle_keys`].
+    /// Move keyboard focus onto the chat field and seed the
+    /// caret at the end of the (possibly pre-filled) draft.
+    /// Discards this frame's typed-char buffer so the keystroke
+    /// that triggered the open doesn't bleed into the field.
+    fn focus_field(&mut self, ui: &mut Ui<'_>, draft: String) {
+        let len = draft.len();
+        self.draft = draft;
+        self.open = true;
+        let id = chat_field_id();
+        ui.state_mut().focus = Some(id);
+        ui.state_mut().text_selection = TextSelection {
+            anchor: len,
+            caret: len,
+        };
+        ui.input().discard_text_input();
+    }
+
+    /// Release keyboard focus from the chat field. Used after
+    /// Enter-submit and Esc-cancel so gameplay regains WASD
+    /// without the player having to click elsewhere first.
+    fn blur_field(&mut self, ui: &mut Ui<'_>) {
+        self.open = false;
+        self.picker_open = false;
+        let id = chat_field_id();
+        if ui.state().focus == Some(id) {
+            ui.state_mut().focus = None;
+        }
+    }
+
+    /// Render scrollback + (when open) the input field, by
+    /// flattening into a [`ChatView`] and delegating to the
+    /// pure widget in [`rift_ui::chat::frame_chat`]. Picker /
+    /// channel-switch events come back as [`ChatAction`]s and
+    /// are applied in-place.
     pub fn frame(&mut self, ui: &mut Ui<'_>, time: f32) {
+        use rift_ui_types::chat::{ChatAction, ChatChannelOption, ChatLineView, ChatView};
+
         let theme = *ui.theme();
-        let s = ui.screen_size();
         let scale = theme.scale;
+        let screen = ui.screen_size();
 
-        // Reset the cached pointer-consume rect; the input
-        // path below resets it when the field is open.
-        self.cached_input_rect = None;
-
-        // Bottom-left anchor. Keep clear of HUD bars so the
-        // chat doesn't fight with health / mana meters.
-        let panel_w = (380.0 * scale).min(s.x * 0.40);
-        let panel_h = 200.0 * scale;
+        // Cache the input-field rect for `consumes_mouse`.
+        // Mirrors the geometry inside `frame_chat` exactly so
+        // a click on the field still gates the basic-attack.
+        // The input row is always rendered now, so the cache
+        // is always populated.
+        let panel_w = (460.0 * scale).min(screen.x * 0.45);
         let margin = 16.0 * scale;
-        let input_h = if self.open { 36.0 * scale } else { 0.0 };
-        let input_gap = if self.open { 6.0 * scale } else { 0.0 };
-
-        let scrollback_rect = Rect::from_xywh(
+        let input_h = 42.0 * scale;
+        self.cached_input_rect = Some(Rect::from_xywh(
             margin,
-            s.y - margin - input_h - input_gap - panel_h,
+            screen.y - margin - input_h,
             panel_w,
-            panel_h,
-        );
+            input_h,
+        ));
 
-        // Translucent panel — readable but not opaque enough
-        // to obscure the world behind it.
-        Frame::panel(&theme)
-            .with_fill(Color::rgba(0.05, 0.06, 0.09, 0.55))
-            .with_padding(Pad::all(8.0 * scale))
-            .show(ui, scrollback_rect, |ui, body| {
-                draw_scrollback(ui, body, &self.messages, &theme);
-            });
-
-        if self.open {
-            let input_rect = Rect::from_xywh(
-                margin,
-                s.y - margin - input_h,
-                panel_w,
-                input_h,
-            );
-            self.cached_input_rect = Some(input_rect);
-            // Channel pip drawn to the left of the field so
-            // the player always sees which scope a no-prefix
-            // send will hit. Clickable — toggles the dropdown
-            // picker rendered above the input field.
-            let prefix = channel_short_name(self.channel);
-            let pip_w = ui.measure_text(prefix, theme.fonts.size_md) + 22.0 * scale;
-            let pip_rect = Rect::from_xywh(
-                input_rect.x(),
-                input_rect.y(),
-                pip_w,
-                input_rect.height(),
-            );
-            let pip_id = Id::root("chat").child("pip");
-            let pip_hovered = ui.interact_hover(pip_id, pip_rect);
-            let pip_clicked = pip_hovered && ui.input().left_clicked();
-            let mut pip_fill = channel_pip_color(self.channel);
-            if pip_hovered {
-                // Lift the pip a touch on hover so the click
-                // affordance reads.
-                pip_fill = lighten(pip_fill, 0.10);
-            }
-            Frame::panel(&theme).with_fill(pip_fill).show_only(ui, pip_rect);
-            ui.draw_text(
-                Pos2::new(
-                    pip_rect.x() + 8.0 * scale,
-                    pip_rect.y()
-                        + (pip_rect.height() - theme.fonts.size_md) * 0.5,
-                ),
-                prefix,
-                theme.fonts.size_md,
-                Color::rgb(1.0, 1.0, 1.0),
-            );
-            // Tiny chevron hint that this is interactable.
-            ui.draw_text(
-                Pos2::new(
-                    pip_rect.x() + pip_rect.width() - 12.0 * scale,
-                    pip_rect.y()
-                        + (pip_rect.height() - theme.fonts.size_sm) * 0.5,
-                ),
-                if self.picker_open { "\u{25B2}" } else { "\u{25BC}" },
-                theme.fonts.size_sm,
-                Color::rgba(1.0, 1.0, 1.0, 0.85),
-            );
-
-            let field_rect = Rect::from_xywh(
-                pip_rect.x() + pip_rect.width() + 4.0 * scale,
-                input_rect.y(),
-                input_rect.width() - pip_rect.width() - 4.0 * scale,
-                input_rect.height(),
-            );
-            let field_id = Id::root("chat").child("input");
-            let _ = rift_engine::ui::im::widgets::TextField::new(field_id)
-                .max_chars(CHAT_MAX_LEN)
-                .placeholder("Enter to send  ·  Esc to close")
-                .auto_focus(true)
-                .show(ui, field_rect, &mut self.draft, time);
-
-            // Toggling the picker is handled *after* the field
-            // renders so the field's own blur-on-outside-click
-            // logic (which sees the same press) leaves focus
-            // alone — we then forcibly restore focus to the
-            // field here so the player can keep typing.
-            if pip_clicked {
-                self.picker_open = !self.picker_open;
-                ui.state_mut().focus = Some(field_id);
-            }
-
-            if self.picker_open {
-                self.draw_picker(ui, &theme, pip_rect, field_id);
-            }
-        } else {
-            // Picker only makes sense while the chat is open.
-            self.picker_open = false;
-        }
-    }
-
-    /// Render the channel-picker dropdown above the input
-    /// field. One row per selectable channel; clicking a row
-    /// pins that channel as the manual choice and closes the
-    /// picker.
-    fn draw_picker(
-        &mut self,
-        ui: &mut Ui<'_>,
-        theme: &rift_engine::ui::im::Theme,
-        pip_rect: Rect,
-        field_id: Id,
-    ) {
-        let scale = theme.scale;
-        // Channels we let the player post to. SYSTEM is server-
-        // emit-only; WHISPER needs a target and is reached
-        // through `/w` instead.
-        let options: [(u8, &str, &str); 4] = [
-            (chat_channel::GLOBAL, "G", "Global"),
-            (chat_channel::HUB, "H", "Hub"),
-            (chat_channel::FLOOR, "F", "Floor"),
-            (chat_channel::PARTY, "P", "Party"),
-        ];
-
-        let row_h = 26.0 * scale;
-        let pad = 4.0 * scale;
-        let picker_w = 160.0 * scale;
-        let picker_h = row_h * options.len() as f32 + pad * 2.0;
-        let picker_rect = Rect::from_xywh(
-            pip_rect.x(),
-            pip_rect.y() - picker_h - 4.0 * scale,
-            picker_w,
-            picker_h,
-        );
-        Frame::panel(theme)
-            .with_fill(Color::rgba(0.05, 0.06, 0.09, 0.92))
-            .show_only(ui, picker_rect);
-
-        let mut any_row_hovered = false;
-        for (i, (channel_id, _short, label)) in options.iter().enumerate() {
-            let row_rect = Rect::from_xywh(
-                picker_rect.x() + pad,
-                picker_rect.y() + pad + row_h * i as f32,
-                picker_rect.width() - pad * 2.0,
-                row_h,
-            );
-            let row_id = Id::root("chat").child(("picker_row", *channel_id));
-            let hovered = ui.interact_hover(row_id, row_rect);
-            let clicked = hovered && ui.input().left_clicked();
-            if hovered {
-                any_row_hovered = true;
-            }
-            let active = *channel_id == self.channel;
-            let fill = if hovered {
-                Color::rgba(0.20, 0.25, 0.35, 0.90)
-            } else if active {
-                Color::rgba(0.15, 0.18, 0.26, 0.85)
-            } else {
-                Color::rgba(0.0, 0.0, 0.0, 0.0)
+        // Build per-line views with the prefix the widget
+        // doesn't compose itself (channel-tag + sender +
+        // optional `[to X]` / `[from X]` decoration).
+        let mut formatted: Vec<String> = Vec::with_capacity(self.messages.len());
+        let mut colors: Vec<[f32; 4]> = Vec::with_capacity(self.messages.len());
+        for line in self.messages.iter() {
+            let prefix = match (line.channel, line.sender.as_deref(), line.target.as_deref()) {
+                (chat_channel::SYSTEM, _, _) => format!("{} ", channel_tag(line.channel)),
+                (chat_channel::WHISPER, Some(s), Some(t)) => {
+                    format!("{} [to {t}] {s}: ", channel_tag(line.channel))
+                }
+                (chat_channel::WHISPER, Some(s), None) => {
+                    format!("{} [from {s}] ", channel_tag(line.channel))
+                }
+                (_, Some(s), _) => format!("{} {s}: ", channel_tag(line.channel)),
+                (_, None, _) => format!("{} ", channel_tag(line.channel)),
             };
-            if fill.0[3] > 0.0 {
-                ui.draw_rounded_rect(row_rect, 4.0, fill);
-            }
-            // Coloured pip on the left of each row so the
-            // colour-coding in the scrollback maps to the
-            // picker.
-            let pip = Rect::from_xywh(
-                row_rect.x() + 4.0 * scale,
-                row_rect.y() + (row_rect.height() - 12.0 * scale) * 0.5,
-                12.0 * scale,
-                12.0 * scale,
-            );
-            ui.draw_rounded_rect(pip, 3.0, channel_pip_color(*channel_id));
-            ui.draw_text(
-                Pos2::new(
-                    pip.x() + pip.width() + 8.0 * scale,
-                    row_rect.y()
-                        + (row_rect.height() - theme.fonts.size_md) * 0.5,
-                ),
+            formatted.push(format!("{prefix}{}", line.text));
+            colors.push(channel_color(line.channel).0);
+        }
+        let messages_view: Vec<ChatLineView<'_>> = formatted
+            .iter()
+            .zip(colors.iter())
+            .map(|(text, color)| ChatLineView {
+                text: text.as_str(),
+                color: *color,
+            })
+            .collect();
+
+        // Picker options — must match the channels that the
+        // Tab cycle visits so the dropdown and Tab agree on
+        // selectable scopes.
+        let picker_labels: [(u8, &str); 4] = [
+            (chat_channel::GLOBAL, "Global"),
+            (chat_channel::HUB, "Hub"),
+            (chat_channel::FLOOR, "Floor"),
+            (chat_channel::PARTY, "Party"),
+        ];
+        let picker_options: Vec<ChatChannelOption<'_>> = picker_labels
+            .iter()
+            .map(|(id, label)| ChatChannelOption {
+                id: *id,
                 label,
-                theme.fonts.size_md,
-                Color::rgb(0.95, 0.95, 0.95),
-            );
-            if clicked {
-                self.channel = *channel_id;
-                self.manual_channel = true;
-                self.picker_open = false;
-                ui.state_mut().focus = Some(field_id);
+                pip_color: channel_pip_color(*id).0,
+            })
+            .collect();
+
+        let channel_short = channel_short_name(self.channel);
+        let channel_pip = channel_pip_color(self.channel).0;
+        let view = ChatView {
+            messages: &messages_view,
+            open: self.open,
+            picker_open: self.picker_open,
+            channel: self.channel,
+            channel_short,
+            channel_pip_color: channel_pip,
+            picker_options: &picker_options,
+            max_chars: CHAT_MAX_LEN,
+        };
+
+        let actions = rift_ui::chat::frame_chat(ui, &view, &mut self.draft, time);
+        for a in actions {
+            match a {
+                ChatAction::TogglePicker => self.picker_open = !self.picker_open,
+                ChatAction::SelectChannel(c) => {
+                    self.channel = c;
+                    self.manual_channel = true;
+                    self.picker_open = false;
+                }
+                ChatAction::ClosePicker => self.picker_open = false,
             }
         }
-        // Click anywhere outside both the picker and the pip
-        // dismisses the dropdown so it doesn't linger after the
-        // player loses interest.
-        if ui.input().left_clicked() && !any_row_hovered {
-            // The pip click toggle in `frame` already runs
-            // *before* `draw_picker`, so a click on the pip
-            // has already flipped `picker_open` for next
-            // frame; closing here would only undo that flip.
-            // Detect "click was on the pip" by re-testing
-            // hover against the pip rect.
-            let (mx, my) = ui.input().mouse_pos();
-            if !pip_rect.contains(Pos2::new(mx, my)) {
-                self.picker_open = false;
-            }
+
+        // Re-sync the "open" mirror at the end of the frame:
+        // the field's focus may have flipped during this frame
+        // (user clicked the field, clicked outside, etc.).
+        // Reading focus here keeps `is_typing()` accurate next
+        // tick so gameplay's text-capture flag tracks reality.
+        let field_id = chat_field_id();
+        self.open = ui.state().focus == Some(field_id);
+        if !self.open {
+            self.picker_open = false;
         }
     }
 
@@ -513,7 +453,9 @@ impl ChatUi {
     /// keystroke if they meant to cancel.
     fn submit(&mut self, out: &mut Vec<(u8, Option<String>, String)>) {
         let raw = std::mem::take(&mut self.draft);
-        self.open = false;
+        // Closing is handled by the caller (`blur_field`) so
+        // both Enter-submit and Esc-cancel share the same
+        // teardown path.
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return;
@@ -552,15 +494,9 @@ impl ChatUi {
                 }
                 "r" | "reply" if !body.is_empty() => {
                     if let Some(name) = self.last_whisper_from.clone() {
-                        out.push((
-                            chat_channel::WHISPER,
-                            Some(name),
-                            body.to_string(),
-                        ));
+                        out.push((chat_channel::WHISPER, Some(name), body.to_string()));
                     } else {
-                        self.push_local_system(
-                            "No-one has whispered you yet.",
-                        );
+                        self.push_local_system("No-one has whispered you yet.");
                     }
                 }
                 "mute" if !body.is_empty() => {
@@ -609,18 +545,6 @@ fn split_first_word(s: &str) -> Option<(&str, &str)> {
     Some((&s[..idx], s[idx..].trim_start()))
 }
 
-/// Lighten an RGBA colour by mixing in white. Used to flash the
-/// channel pip on hover so the click affordance reads.
-fn lighten(c: Color, amount: f32) -> Color {
-    let t = amount.clamp(0.0, 1.0);
-    Color::rgba(
-        c.0[0] + (1.0 - c.0[0]) * t,
-        c.0[1] + (1.0 - c.0[1]) * t,
-        c.0[2] + (1.0 - c.0[2]) * t,
-        c.0[3],
-    )
-}
-
 fn channel_short_name(channel: u8) -> &'static str {
     match channel {
         chat_channel::GLOBAL => "G",
@@ -664,115 +588,4 @@ fn channel_tag(channel: u8) -> &'static str {
         chat_channel::WHISPER => "[w]",
         _ => "[?]",
     }
-}
-
-/// Render the most recent lines that fit inside `body`,
-/// bottom-aligned so the newest line is closest to the input
-/// field.
-fn draw_scrollback(
-    ui: &mut Ui<'_>,
-    body: Rect,
-    messages: &VecDeque<ChatLine>,
-    theme: &rift_engine::ui::im::Theme,
-) {
-    let line_size = theme.fonts.size_sm;
-    let line_pitch = line_size + 4.0 * theme.scale;
-    if line_pitch <= 0.0 {
-        return;
-    }
-
-    // Walk messages newest-first, wrap each one to the panel
-    // width, and render bottom-up. Stop as soon as we've
-    // drawn enough wrapped rows to fill the panel — older
-    // lines simply scroll off the top.
-    let mut y = body.y() + body.height() - line_pitch;
-    'outer: for line in messages.iter().rev() {
-        let color = channel_color(line.channel);
-        let prefix = match (line.channel, line.sender.as_deref(), line.target.as_deref()) {
-            (chat_channel::SYSTEM, _, _) => format!("{} ", channel_tag(line.channel)),
-            (chat_channel::WHISPER, Some(s), Some(t)) => {
-                format!("{} [to {t}] {s}: ", channel_tag(line.channel))
-            }
-            (chat_channel::WHISPER, Some(s), None) => {
-                format!("{} [from {s}] ", channel_tag(line.channel))
-            }
-            (_, Some(s), _) => format!("{} {s}: ", channel_tag(line.channel)),
-            (_, None, _) => format!("{} ", channel_tag(line.channel)),
-        };
-        let formatted = format!("{prefix}{}", line.text);
-
-        // Wrap into rows that each fit inside `body.width()`,
-        // breaking on whitespace where possible and falling
-        // back to mid-word breaks for un-whitespaceable runs
-        // (long URLs, languages without spaces) so nothing
-        // ever overflows the panel.
-        let rows = wrap_text(ui, &formatted, line_size, body.width());
-
-        // Draw the wrapped block bottom-up (the message's own
-        // last row sits at the lowest `y`, the first row is
-        // highest). This keeps the *latest* message visually
-        // glued to the bottom of the panel.
-        for row in rows.iter().rev() {
-            if y < body.y() {
-                break 'outer;
-            }
-            ui.draw_text(Pos2::new(body.x(), y), row, line_size, color);
-            y -= line_pitch;
-        }
-    }
-}
-
-/// Break `text` into rows that each measure no wider than
-/// `max_width`. Prefers whitespace breaks; falls back to
-/// per-character splits when a single token is wider than
-/// `max_width` (long URLs, unbreakable strings) so the caller
-/// never sees a row that overflows the requested width.
-fn wrap_text(ui: &mut Ui<'_>, text: &str, size: f32, max_width: f32) -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
-    if max_width <= 0.0 {
-        rows.push(text.to_string());
-        return rows;
-    }
-    let mut current = String::new();
-    for word in text.split_inclusive(char::is_whitespace) {
-        // Trial fit: does the current row + this word still
-        // sit within `max_width`?
-        let trial = format!("{current}{word}");
-        if ui.measure_text(trial.trim_end(), size) <= max_width {
-            current = trial;
-            continue;
-        }
-        // Doesn't fit. Flush the current row (trimming the
-        // trailing whitespace that split_inclusive carried
-        // over) and start a fresh row with `word`.
-        if !current.is_empty() {
-            rows.push(current.trim_end().to_string());
-        }
-        // The word itself may exceed the width — split it
-        // char by char until it fits.
-        if ui.measure_text(word.trim_end(), size) <= max_width {
-            current = word.to_string();
-        } else {
-            let mut buf = String::new();
-            for ch in word.chars() {
-                let trial = format!("{buf}{ch}");
-                if ui.measure_text(&trial, size) <= max_width {
-                    buf = trial;
-                } else {
-                    if !buf.is_empty() {
-                        rows.push(buf.clone());
-                    }
-                    buf = ch.to_string();
-                }
-            }
-            current = buf;
-        }
-    }
-    if !current.trim_end().is_empty() {
-        rows.push(current.trim_end().to_string());
-    }
-    if rows.is_empty() {
-        rows.push(String::new());
-    }
-    rows
 }

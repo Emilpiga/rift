@@ -46,6 +46,7 @@ pub mod ability_mods;
 pub mod affixes;
 pub mod drops;
 pub mod equipment;
+pub mod families;
 pub mod inventory;
 pub mod item;
 pub mod items;
@@ -54,20 +55,19 @@ pub mod rng;
 
 pub use crate::stats::{Stat, StatBlock};
 pub use ability_mods::AbilityMods;
-pub use affixes::{
-    AbilityVariant, AffixDef, AffixEffect, ProcAction, ProcEvent, AFFIX_POOL,
-};
+pub use affixes::{AbilityVariant, AffixDef, AffixEffect, ProcAction, ProcEvent, AFFIX_POOL};
 pub use drops::{
-    table_for, BaseItemSelector, LootEntry, LootTable, SlotFilter, BOSS_TABLE,
-    BRUTE_TABLE, CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
+    table_for, BaseItemSelector, LootEntry, LootTable, SlotFilter, BOSS_TABLE, BRUTE_TABLE,
+    CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
 };
 pub use equipment::Equipment;
+pub use families::{Archetype, Attribute, BaseFamily, Element};
 pub use inventory::{Inventory, Loadout};
 pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix};
 pub use items::{
     tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, GenderedModel, ItemSlot, WeaponKind,
     BASE_ITEMS,
 };
-pub use rarity::Rarity;
 pub use rarity::salvage_yield;
+pub use rarity::Rarity;
 pub use rng::LootRng;

@@ -208,79 +208,264 @@ impl Item {
 
     /// Roll a fresh drop of `base` at the given rarity / item-level.
     ///
-    /// Two-phase pipeline:
+    /// **Phase 2 pipeline** (see `ITEMS.md` §2.1 and §3 Phase 2):
     ///
-    /// 1. **Signature injection** — every item gets the
-    ///    per-`EquipSlot` signature (Vitality + slot-specific
-    ///    guaranteed lines, see [`super::affixes::signature_for`]).
-    ///    These are rolled deterministically; rarity doesn't gate
-    ///    them. Ring / Amulet randomise *which* element / archetype
-    ///    they roll while still always producing one signature
-    ///    line of that family.
+    /// 1. **Signature injection** — deterministic Vitality + slim
+    ///    per-`EquipSlot` defensive line (helm CDR, boots move
+    ///    speed, gloves crit pair, etc.). Damage-axis lines no
+    ///    longer live here; the trio owns those.
     ///
-    /// 2. **Bonus rolls** — `rarity.affix_count_range()` extra
-    ///    lines from the bonus pool (filtered by tags + ilvl +
-    ///    rarity_min, signature ids excluded so we never
-    ///    double-roll a guaranteed line). Legendary additionally
-    ///    rolls one effect affix from the legendary pool
-    ///    (Transform / Proc / ExtraProjectiles).
+    /// 2. **Source × Element × Archetype trio** — family-locked
+    ///    axis lines, gated by rarity:
     ///
-    /// The result: every item is readable top-down — Vitality,
-    /// slot signature, then the bonus block — and a Legendary
-    /// always carries one truly build-changing line on top.
+    ///    | Rarity    | Source | Element | Archetype |
+    ///    | --------- | :----: | :-----: | :-------: |
+    ///    | Common    | ✓      |         |           |
+    ///    | Magic     | ✓      | one of {Element, Archetype}      ||
+    ///    | Rare      | ✓      | ✓       | ✓         |
+    ///    | Legendary | ✓      | ✓       | ✓         |
+    ///
+    ///    Each line is sampled uniformly from the corresponding
+    ///    axis sub-pool filtered by [`super::BaseFamily`]. Wildcard
+    ///    axes (e.g. accessories) permit the full pool; locked
+    ///    axes (e.g. Staff → `{Fire, Ice, Lightning}`) permit only
+    ///    the declared subset. Cross-family rolls are impossible
+    ///    by construction.
+    ///
+    /// 3. **Bonus rolls** — `rarity.affix_count_range()` extra
+    ///    lines from the *bonus* sub-pool only (legendary effects
+    ///    excluded; damage-axis affixes excluded — those live in
+    ///    the trio). Excludes any `Stat` already touched by the
+    ///    signature or trio, so e.g. a Chest can't double up on
+    ///    `+Health`.
+    ///
+    /// 4. **Legendary effect** — Legendary rarity additionally
+    ///    rolls one effect from the legendary pool (Transform /
+    ///    Proc / ExtraProjectiles). Phase 4 of the refactor
+    ///    replaces this with named uniques; for now the
+    ///    procedural roll persists.
+    ///
+    /// 5. **Anchored roll** — Legendary 1/5000, independent.
     pub fn roll(base: &'static BaseItem, rarity: Rarity, ilvl: u32, rng: &mut LootRng) -> Self {
+        use super::affixes::{
+            affix_archetype, affix_attribute, affix_element, category, AffixCategory,
+        };
+        use crate::stats::Stat;
+
         let mut rolled: Vec<RolledAffix> = Vec::new();
+        let mut used_stats: std::collections::HashSet<Stat> = Default::default();
+        // Seed `used_stats` with the base item's implicit stats so
+        // signature / trio / bonus rolls can't double-up on a
+        // stat the implicit already carries. Without this a chest
+        // with implicit `+18 Health` could still roll
+        // `flat_health` as a signature and ship two Health lines.
+        for &(stat, _) in base.implicit {
+            used_stats.insert(stat);
+        }
+
+        // Track a rolled affix; updates `used_stats` so later
+        // phases never duplicate the same `Stat`.
+        let push = |def: &'static AffixDef,
+                    value: f32,
+                    rolled: &mut Vec<RolledAffix>,
+                    used: &mut std::collections::HashSet<Stat>| {
+            if let AffixEffect::Stat(s) = def.effect {
+                used.insert(s);
+            }
+            rolled.push(RolledAffix { def, value });
+        };
 
         // ── Phase 1: signature injection ────────────────────────
         let sig_ids = super::affixes::signature_for(base.equip_slot, rng);
         for id in &sig_ids {
             if let Some(def) = super::affixes::lookup(id) {
+                // Skip signature lines whose `Stat` already
+                // appears in the implicit set — e.g. a Chest
+                // with `+18 Health` implicit no longer also
+                // ships a `flat_health` signature line. Without
+                // this guard the tooltip would show two
+                // separate Health rows that sum at equip time.
+                if let AffixEffect::Stat(s) = def.effect {
+                    if used_stats.contains(&s) {
+                        continue;
+                    }
+                }
                 let value = roll_value(def, ilvl, rng);
-                rolled.push(RolledAffix { def, value });
+                push(def, value, &mut rolled, &mut used_stats);
             }
         }
 
-        // ── Phase 2: bonus rolls ────────────────────────────────
+        // ── Phase 2: Attribute × Element × Archetype trio ──────
+        //
+        // Decide which axes this rarity activates.
+        //   Common    — Attribute only (one identity line).
+        //   Magic     — Attribute + one of {Element, Archetype}
+        //               (xor; if family rejects one, fall back).
+        //   Rare/Leg  — full trio.
+        let (do_attribute, do_element, do_archetype) = match rarity {
+            Rarity::Common => (true, false, false),
+            Rarity::Magic => {
+                let want_arch = rng.range(0, 2) == 0;
+                (true, !want_arch, want_arch)
+            }
+            Rarity::Rare | Rarity::Legendary => (true, true, true),
+        };
+
+        // Uniform pick from a family-locked axis sub-pool. Returns
+        // `None` when no candidate clears the family + ilvl
+        // filters (uncommon but possible at very low ilvl).
+        fn pick_axis(
+            base: &BaseItem,
+            ilvl: u32,
+            rng: &mut LootRng,
+            cat: AffixCategory,
+        ) -> Option<&'static AffixDef> {
+            let candidates: Vec<&'static AffixDef> = AFFIX_POOL
+                .iter()
+                .filter(|d| {
+                    if d.min_ilvl > ilvl {
+                        return false;
+                    }
+                    if category(d) != cat {
+                        return false;
+                    }
+                    match cat {
+                        AffixCategory::Element => affix_element(d)
+                            .map(|e| base.family.allows_element(e))
+                            .unwrap_or(false),
+                        AffixCategory::Archetype => affix_archetype(d)
+                            .map(|a| base.family.allows_archetype(a))
+                            .unwrap_or(false),
+                        AffixCategory::Attribute => affix_attribute(d)
+                            .map(|a| base.family.allows_attribute(a))
+                            .unwrap_or(false),
+                        AffixCategory::Bonus => false,
+                        AffixCategory::Resonance => false,
+                    }
+                })
+                .collect();
+            if candidates.is_empty() {
+                return None;
+            }
+            let idx = rng.range(0, candidates.len() as u32) as usize;
+            Some(candidates[idx])
+        }
+
+        // Magic's xor: try the chosen axis; if it produces nothing
+        // (family rejected every candidate), try the other before
+        // giving up — better to silently produce the trio's third
+        // option than to ship a stat-thin Magic drop.
+        if do_attribute {
+            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Attribute) {
+                let value = roll_value(def, ilvl, rng);
+                push(def, value, &mut rolled, &mut used_stats);
+            }
+        }
+        let mut tried = (false, false);
+        if do_element {
+            tried.0 = true;
+            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
+                let value = roll_value(def, ilvl, rng);
+                push(def, value, &mut rolled, &mut used_stats);
+            } else if rarity == Rarity::Magic {
+                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
+                    let value = roll_value(def, ilvl, rng);
+                    push(def, value, &mut rolled, &mut used_stats);
+                    tried.1 = true;
+                }
+            }
+        }
+        if do_archetype && !tried.1 {
+            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
+                let value = roll_value(def, ilvl, rng);
+                push(def, value, &mut rolled, &mut used_stats);
+            } else if rarity == Rarity::Magic && !tried.0 {
+                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
+                    let value = roll_value(def, ilvl, rng);
+                    push(def, value, &mut rolled, &mut used_stats);
+                }
+            }
+        }
+
+        // ── Phase 3: bonus rolls ────────────────────────────────
         let (lo, hi) = rarity.affix_count_range();
         let bonus_count = rng.range(lo, hi + 1) as usize;
 
-        // Bonus pool: stat affixes + non-legendary effects (amp,
-        // cdr) that pass the base's tag mask and aren't already
-        // in the signature.
-        let mut bonus_candidates: Vec<(&'static AffixDef, u32)> = AFFIX_POOL
-            .iter()
-            .filter(|a| {
-                !sig_ids.contains(&a.id)
-                    && !super::affixes::is_legendary_effect(&a.effect)
-                    && (a.tags & base.allowed_tags) != 0
-                    && a.min_ilvl <= ilvl
-                    && rarity.at_least(a.rarity_min)
-                    // Signature-only entries have weight 0 to keep
-                    // them out of bonus rolling.
-                    && a.weight > 0
-            })
-            .map(|a| {
-                let favored = (a.tags & base.favored_tags) != 0;
-                let weight = if favored { a.weight * 2 } else { a.weight };
-                (a, weight)
-            })
-            .collect();
+        // Bonus pool: only the `Bonus` category, weight > 0,
+        // legendary effects filtered out, and excluding any Stat
+        // already touched by signature or trio. Legacy
+        // `allowed_tags` / `favored_tags` masks still drive the
+        // bonus-flavour bias until Phase 7 retires them.
+        let bonus_pool_filter =
+            |a: &&'static AffixDef,
+             rolled: &[RolledAffix],
+             used: &std::collections::HashSet<Stat>| {
+                if category(a) != AffixCategory::Bonus {
+                    return false;
+                }
+                if super::affixes::is_legendary_effect(&a.effect) {
+                    return false;
+                }
+                if a.weight == 0 {
+                    return false;
+                }
+                if a.min_ilvl > ilvl {
+                    return false;
+                }
+                if !rarity.at_least(a.rarity_min) {
+                    return false;
+                }
+                if (a.tags & base.allowed_tags) == 0 {
+                    return false;
+                }
+                // Dedupe — by affix id (for non-stat lines) and by
+                // Stat (for the no-duplicate-stat invariant).
+                if rolled.iter().any(|r| r.def.id == a.id) {
+                    return false;
+                }
+                if let AffixEffect::Stat(s) = a.effect {
+                    if used.contains(&s) {
+                        return false;
+                    }
+                }
+                true
+            };
 
         for _ in 0..bonus_count {
-            if bonus_candidates.is_empty() {
+            let candidates: Vec<&'static AffixDef> = AFFIX_POOL
+                .iter()
+                .filter(|a| bonus_pool_filter(a, &rolled, &used_stats))
+                .collect();
+            if candidates.is_empty() {
                 break;
             }
-            let weights: Vec<u32> = bonus_candidates.iter().map(|(_, w)| *w).collect();
+            let weights: Vec<u32> = candidates
+                .iter()
+                .map(|a| {
+                    let base_w = a.weight;
+                    if (a.tags & base.favored_tags) != 0 {
+                        base_w * 2
+                    } else {
+                        base_w
+                    }
+                })
+                .collect();
             let Some(pick) = rng.weighted_index(&weights) else {
                 break;
             };
-            let def = bonus_candidates[pick].0;
-            bonus_candidates.retain(|(c, _)| c.id != def.id);
+            let def = candidates[pick];
             let value = roll_value(def, ilvl, rng);
-            rolled.push(RolledAffix { def, value });
+            push(def, value, &mut rolled, &mut used_stats);
         }
 
-        // ── Phase 3: legendary effect ───────────────────────────
+        // ── Phase 4: legendary effect ───────────────────────────
+        // Procedural roll preserved during Phase 2; Phase 4
+        // (named uniques) replaces this with the `UniqueDef`
+        // table. The candidate filter is still tag-based and is
+        // therefore *not* family-locked — a known incoherence
+        // (a sword can still roll Fireball ExtraProjectiles
+        // today). Phase 4 closes that gap by replacing the whole
+        // path.
         if rarity == Rarity::Legendary {
             let mut effect_candidates: Vec<(&'static AffixDef, u32)> = AFFIX_POOL
                 .iter()
@@ -292,24 +477,78 @@ impl Item {
                 })
                 .map(|a| (a, a.weight))
                 .collect();
-            // Drop already-rolled ids (paranoia — none should be in
-            // bonus pool, but a future refactor might overlap).
             effect_candidates.retain(|(a, _)| !rolled.iter().any(|r| r.def.id == a.id));
             if !effect_candidates.is_empty() {
                 let weights: Vec<u32> = effect_candidates.iter().map(|(_, w)| *w).collect();
                 if let Some(pick) = rng.weighted_index(&weights) {
                     let def = effect_candidates[pick].0;
                     let value = roll_value(def, ilvl, rng);
-                    rolled.push(RolledAffix { def, value });
+                    push(def, value, &mut rolled, &mut used_stats);
                 }
             }
         }
 
-        // ── Phase 4: anchored roll ──────────────────────────────
+        // ── Phase 4½: Resonance ─────────────────────────────────
+        // ITEMS.md §2.5: with `{Rare: 5 %, Legendary: 25 %}` the
+        // item gets an extra cross-family axis line drawn from
+        // `RESONANCE_POOL`. Filter to axes the base's
+        // `BaseFamily` would normally *reject* — the whole point
+        // of resonance is that it's "off-archetype". Also skip
+        // stats already on the item to keep the no-duplicate-
+        // stat invariant intact.
+        let res_chance = super::affixes::resonance_chance(rarity);
+        if res_chance > 0.0 && rng.next_f32() < res_chance {
+            let candidates: Vec<&'static AffixDef> = super::affixes::RESONANCE_POOL
+                .iter()
+                .filter(|a| {
+                    if a.min_ilvl > ilvl {
+                        return false;
+                    }
+                    if !rarity.at_least(a.rarity_min) {
+                        return false;
+                    }
+                    // No-duplicate-stat: skip if the stat is
+                    // already present (from signature or trio).
+                    if let AffixEffect::Stat(s) = a.effect {
+                        if used_stats.contains(&s) {
+                            return false;
+                        }
+                    }
+                    // Cross-family rule: keep only axes the family
+                    // *rejects*. A wildcard family rejects nothing
+                    // and therefore cannot resonate — accessories
+                    // pull from the normal trio for their flavour
+                    // (see §2.3). Element / Archetype checked
+                    // independently; one match suffices.
+                    if let Some(e) = super::affixes::resonance_element(a) {
+                        if !base.family.allows_element(e) {
+                            return true;
+                        }
+                    }
+                    if let Some(ar) = super::affixes::resonance_archetype(a) {
+                        if !base.family.allows_archetype(ar) {
+                            return true;
+                        }
+                    }
+                    if let Some(at) = super::affixes::resonance_attribute(a) {
+                        if !base.family.allows_attribute(at) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .collect();
+            if !candidates.is_empty() {
+                let pick = rng.range(0, candidates.len() as u32) as usize;
+                let def = candidates[pick];
+                let value = roll_value(def, ilvl, rng);
+                push(def, value, &mut rolled, &mut used_stats);
+            }
+        }
+
+        // ── Phase 5: anchored roll ──────────────────────────────
         // Legendary-only and *very* rare. Decided after the
-        // affix block so the stat roll is independent — players
-        // see the same legendary they would have rolled, just
-        // occasionally tagged Anchored on top.
+        // affix block so the stat roll is independent.
         let anchored = rarity == Rarity::Legendary && rng.next_f32() < ANCHORED_CHANCE;
 
         Self {
@@ -394,11 +633,10 @@ impl Item {
     ///    this item (see [`Item::required_level`]). The renderer
     ///    can colour this red when the viewing player can't meet it.
     /// 4. Implicits (base-item lines, e.g. "+24 Armor")
-    /// 5. **Signature block** \u2014 the slot-defining lines, ordered
-    ///    `[primary, Vitality, secondary?]` so the slot's headline
-    ///    stat reads first and the eternal `+N Vitality` anchor
-    ///    sits directly under it.
-    /// 6. **Bonus block** \u2014 separator (`\u2500\u2500\u2500`) then any
+    /// 5. **Signature block** — the slot-defining lines (helm
+    ///    CDR, boots move speed, gloves crit pair, etc.). Rendered
+    ///    in authored order; Phase 2 retired the Vitality anchor.
+    /// 6. **Bonus block** — separator (`───`) then any
     ///    rarity-rolled stat affixes.
     /// 7. Amplify / cooldown affixes.
     /// 8. Legendary effect (when present) \u2014 prefixed `\u2605 ` so the
@@ -450,61 +688,81 @@ impl Item {
             .filter(|a| !super::affixes::is_legendary_effect(&a.def.effect))
             .collect();
 
-        // Find the Vitality entry inside the signature slice.
-        // Other signatures keep their authored order; primary is
-        // whatever comes first that *isn't* Vitality.
-        let vitality_idx = signatures.iter().position(|a| {
-            matches!(
-                a.def.effect,
-                AffixEffect::Stat(crate::stats::Stat::Vitality)
-            )
-        });
-
-        // Render signature block in the requested order.
-        if !signatures.is_empty() {
+        // Trio block (Attribute → Element → Archetype). These
+        // are the item's damage / identity axis lines and lead
+        // the stat list. Rendered as a single contiguous group
+        // — no inner dividers — so the trio reads as one block.
+        // Common usually has only Attribute; Magic adds one of
+        // {Element, Archetype}; Rare / Legendary fill all three.
+        use super::affixes::{category, AffixCategory};
+        let by_cat = |cat: AffixCategory| -> Option<&RolledAffix> {
+            rest.iter().find(|a| category(a.def) == cat)
+        };
+        let trio: Vec<&RolledAffix> = [
+            AffixCategory::Attribute,
+            AffixCategory::Element,
+            AffixCategory::Archetype,
+        ]
+        .into_iter()
+        .filter_map(by_cat)
+        .collect();
+        if !trio.is_empty() {
             out.push(String::new());
-            // Primary: first non-Vitality signature.
-            let mut primary_rendered = false;
-            for (i, a) in signatures.iter().enumerate() {
-                if Some(i) == vitality_idx {
-                    continue;
-                }
-                out.push(a.tooltip(self.ilvl));
-                primary_rendered = true;
-                break;
-            }
-            // Vitality \u2014 always second when present, or first if
-            // there's no other signature (shouldn't happen with
-            // current slot mapping, but defensive).
-            if let Some(vi) = vitality_idx {
-                out.push(signatures[vi].tooltip(self.ilvl));
-            }
-            // Secondary (and any further) non-Vitality signatures.
-            // Skip the first non-Vitality entry we already wrote
-            // as `primary`.
-            let mut skipped_primary = !primary_rendered;
-            for (i, a) in signatures.iter().enumerate() {
-                if Some(i) == vitality_idx {
-                    continue;
-                }
-                if !skipped_primary {
-                    skipped_primary = true;
-                    continue;
-                }
+            for a in &trio {
                 out.push(a.tooltip(self.ilvl));
             }
         }
 
-        // Bonus stat affixes (post-signature). Separated visually
-        // from the signature block by a thin divider so the
-        // player parses "guaranteed" vs "rolled" at a glance.
+        // Resonance line — a cross-family damage axis that
+        // intentionally breaks the trio's family lock. Prefixed
+        // with `◆ ` so the classifier can tag it with a distinct
+        // colour (see `TooltipLineKind::Resonance`); shares the
+        // damage-axes block above so no divider is inserted.
+        let resonance_lines: Vec<&RolledAffix> = rest
+            .iter()
+            .filter(|a| category(a.def) == AffixCategory::Resonance)
+            .collect();
+        if !resonance_lines.is_empty() {
+            if trio.is_empty() {
+                out.push(String::new());
+            }
+            for a in &resonance_lines {
+                out.push(format!("◆ {}", a.tooltip(self.ilvl)));
+            }
+        }
+
+        // Defensives / utility block — signature (slot identity:
+        // CDR on helm, move speed on boots, crit pair on gloves,
+        // …) followed by remaining bonus stat rolls. Separated
+        // from the damage axes above by a single divider so the
+        // tooltip has at most one inline divider in the common
+        // case; no inner dividers within the block.
         let bonus_stats: Vec<&RolledAffix> = rest
             .iter()
-            .filter(|a| matches!(a.def.effect, AffixEffect::Stat(_)))
+            .filter(|a| {
+                matches!(a.def.effect, AffixEffect::Stat(_))
+                    && !matches!(
+                        category(a.def),
+                        AffixCategory::Attribute
+                            | AffixCategory::Element
+                            | AffixCategory::Archetype
+                            | AffixCategory::Resonance
+                    )
+            })
             .collect();
-        if !bonus_stats.is_empty() {
-            out.push(String::new());
-            out.push("───".to_string());
+        let has_defutil = !signatures.is_empty() || !bonus_stats.is_empty();
+        if has_defutil {
+            // Only emit the divider when there's a damage-axes
+            // block above to separate from. Otherwise just a
+            // blank lead-in.
+            if !trio.is_empty() || !resonance_lines.is_empty() {
+                out.push("───".to_string());
+            } else {
+                out.push(String::new());
+            }
+            for a in &signatures {
+                out.push(a.tooltip(self.ilvl));
+            }
             for a in bonus_stats {
                 out.push(a.tooltip(self.ilvl));
             }
@@ -559,8 +817,6 @@ impl Item {
     /// allocation beyond the returned `Vec`.
     ///
     /// Match rules:
-    /// - `Stat::WeaponDamage` / `SpellDamage` → matches abilities
-    ///   whose `Scaling` equals it.
     /// - `Stat::PhysicalDamage` / `FireDamage` / `IceDamage` /
     ///   `LightningDamage` → matches abilities whose `Element`
     ///   equals it.
@@ -571,7 +827,7 @@ impl Item {
     ///   `ExtraProjectiles(id)` / `TransformAbility(id, _)` →
     ///   match if that exact ability is slotted.
     fn synergy_against(&self, loadout: &crate::loadout::Loadout) -> Vec<String> {
-        use crate::abilities::{Archetype, Element, Scaling};
+        use crate::abilities::{Archetype, Element};
         use crate::stats::Stat;
         let mut out: Vec<String> = Vec::new();
         // Gather slotted abilities once so each affix scan is O(6).
@@ -597,12 +853,6 @@ impl Item {
 
         for a in &self.affixes {
             match a.def.effect {
-                AffixEffect::Stat(Stat::WeaponDamage) => {
-                    push_match(&mut out, "Weapon", |x| matches!(x.scaling, Scaling::Weapon))
-                }
-                AffixEffect::Stat(Stat::SpellDamage) => {
-                    push_match(&mut out, "Spell", |x| matches!(x.scaling, Scaling::Spell))
-                }
                 AffixEffect::Stat(Stat::PhysicalDamage) => push_match(&mut out, "Physical", |x| {
                     matches!(x.element, Element::Physical)
                 }),
@@ -959,5 +1209,341 @@ mod tests {
             lines.iter().any(|l| l == &expected),
             "tooltip missing `{expected}`; got {lines:?}",
         );
+    }
+
+    /// Every `BaseItem` × `Rarity` combo must produce a roll with
+    /// at least the per-slot signature lines. Catches the class of
+    /// regressions where a base's tag mask filters every bonus
+    /// candidate out, or a slot's signature ids drift out of the
+    /// pool — see ITEMS.md §3 Phase 0.
+    #[test]
+    fn every_base_rolls_at_every_rarity() {
+        use super::super::affixes::signature_count;
+        let rarities = [
+            Rarity::Common,
+            Rarity::Magic,
+            Rarity::Rare,
+            Rarity::Legendary,
+        ];
+        // Drive several seeds per cell so Ring/Amulet's random
+        // signature pick is exercised in every branch.
+        for b in BASE_ITEMS {
+            for r in rarities {
+                for seed in 0..8u64 {
+                    let mut rng = LootRng::new(
+                        (b.id.len() as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add((r as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                            .wrapping_add(seed),
+                    );
+                    let it = Item::roll(b, r, b.min_ilvl.max(1), &mut rng);
+                    let sig = signature_count(b.equip_slot);
+                    assert!(
+                        it.affixes.len() >= sig,
+                        "base `{}` rarity {:?}: rolled {} affixes, \
+                         expected at least {} signature lines",
+                        b.id,
+                        r,
+                        it.affixes.len(),
+                        sig,
+                    );
+                    // Every rolled affix must round-trip through the
+                    // pool — the persisted-id path depends on this.
+                    for a in &it.affixes {
+                        assert!(
+                            super::super::affixes::lookup(a.def.id).is_some(),
+                            "base `{}` rolled affix id `{}` that \
+                             does not resolve in AFFIX_POOL",
+                            b.id,
+                            a.def.id,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Phase 2 invariants (see ITEMS.md §3 Phase 2) ─────────────
+
+    /// Helper: iterate `Item::roll` over every base × rarity × N
+    /// seeds and hand each rolled `Item` to `check`. Phase 2
+    /// invariants are statistical — we exercise enough seeds that
+    /// rare branches (Magic's element-vs-archetype flip,
+    /// family-empty-element fallbacks) get covered.
+    fn for_every_roll(seeds: u64, mut check: impl FnMut(&Item)) {
+        let rarities = [
+            Rarity::Common,
+            Rarity::Magic,
+            Rarity::Rare,
+            Rarity::Legendary,
+        ];
+        for b in BASE_ITEMS {
+            for r in rarities {
+                for seed in 0..seeds {
+                    let mut rng = LootRng::new(
+                        (b.id.len() as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add((r as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                            .wrapping_add(seed),
+                    );
+                    let it = Item::roll(b, r, b.min_ilvl.max(1), &mut rng);
+                    check(&it);
+                }
+            }
+        }
+    }
+
+    /// Every damage-axis affix on a rolled item must satisfy the
+    /// base's `BaseFamily` lock. A sword (Source::Weapon) must
+    /// never roll a Spell-source line; a staff (Element ∈ {Fire,
+    /// Ice, Lightning}) must never roll Physical; a bow
+    /// (Archetype::Projectile) must never roll Beam / AoE / Melee.
+    /// This is *the* invariant Phase 2 buys us — it's why the
+    /// trio pipeline exists.
+    ///
+    /// Resonance lines ([`super::super::affixes::is_resonance`])
+    /// are excluded from this assertion — they break the family
+    /// lock on purpose and carry their own invariant
+    /// ([`resonance_lines_are_always_cross_family`]).
+    #[test]
+    fn axis_lines_respect_family_lock() {
+        use super::super::affixes::{
+            affix_archetype, affix_attribute, affix_element, is_resonance,
+        };
+        for_every_roll(16, |it| {
+            for a in &it.affixes {
+                if is_resonance(a.def) {
+                    continue;
+                }
+                if let Some(e) = affix_element(a.def) {
+                    assert!(
+                        it.base.family.allows_element(e),
+                        "base `{}` (family {:?}) rolled out-of-family \
+                         Element line `{}`",
+                        it.base.id,
+                        it.base.family,
+                        a.def.id,
+                    );
+                }
+                if let Some(ar) = affix_archetype(a.def) {
+                    assert!(
+                        it.base.family.allows_archetype(ar),
+                        "base `{}` (family {:?}) rolled out-of-family \
+                         Archetype line `{}`",
+                        it.base.id,
+                        it.base.family,
+                        a.def.id,
+                    );
+                }
+                if let Some(at) = affix_attribute(a.def) {
+                    assert!(
+                        it.base.family.allows_attribute(at),
+                        "base `{}` (family {:?}) rolled out-of-family \
+                         Attribute line `{}`",
+                        it.base.id,
+                        it.base.family,
+                        a.def.id,
+                    );
+                }
+            }
+        });
+    }
+
+    /// No `Stat` may appear twice on the same item — signature,
+    /// trio, and bonus rolls all share the dedupe set. A Chest
+    /// that signatures `+Health` must never bonus-roll another
+    /// `+Health`; a Weapon that trios `+Weapon Damage` must never
+    /// pick up a second `+Weapon Damage` line.
+    #[test]
+    fn no_stat_appears_twice() {
+        use crate::stats::Stat;
+        for_every_roll(16, |it| {
+            let mut seen: std::collections::HashSet<Stat> = Default::default();
+            for a in &it.affixes {
+                if let AffixEffect::Stat(s) = a.def.effect {
+                    assert!(
+                        seen.insert(s),
+                        "base `{}` rolled stat {:?} twice (affixes: {:?})",
+                        it.base.id,
+                        s,
+                        it.affixes.iter().map(|x| x.def.id).collect::<Vec<_>>(),
+                    );
+                }
+            }
+        });
+    }
+
+    /// Common rolls exactly one attribute line. Magic rolls
+    /// attribute + one of {Element, Archetype}. Rare/Legendary
+    /// rolls the full Attribute × Element × Archetype trio.
+    #[test]
+    fn rarity_gates_trio_shape() {
+        use super::super::affixes::{
+            affix_archetype, affix_attribute, affix_element, is_resonance,
+        };
+        for_every_roll(16, |it| {
+            let mut elements = 0;
+            let mut archetypes = 0;
+            let mut attributes = 0;
+            for a in &it.affixes {
+                if is_resonance(a.def) {
+                    continue;
+                }
+                if affix_element(a.def).is_some() {
+                    elements += 1;
+                }
+                if affix_archetype(a.def).is_some() {
+                    archetypes += 1;
+                }
+                if affix_attribute(a.def).is_some() {
+                    attributes += 1;
+                }
+            }
+            match it.rarity {
+                Rarity::Common => {
+                    assert_eq!(
+                        attributes, 1,
+                        "base `{}` Common: expected 1 attribute line, got {}",
+                        it.base.id, attributes
+                    );
+                    assert_eq!(
+                        elements + archetypes,
+                        0,
+                        "base `{}` Common: expected 0 element/archetype lines, got {}+{}",
+                        it.base.id,
+                        elements,
+                        archetypes
+                    );
+                }
+                Rarity::Magic => {
+                    assert_eq!(
+                        attributes, 1,
+                        "base `{}` Magic: expected 1 attribute line, got {}",
+                        it.base.id, attributes
+                    );
+                    assert_eq!(
+                        elements + archetypes,
+                        1,
+                        "base `{}` Magic: expected exactly one of element/archetype, got {}+{}",
+                        it.base.id,
+                        elements,
+                        archetypes
+                    );
+                }
+                Rarity::Rare | Rarity::Legendary => {
+                    assert_eq!(
+                        attributes, 1,
+                        "base `{}` {:?}: expected 1 Attribute line, got {}",
+                        it.base.id, it.rarity, attributes
+                    );
+                    assert_eq!(
+                        elements, 1,
+                        "base `{}` {:?}: expected 1 Element line, got {}",
+                        it.base.id, it.rarity, elements
+                    );
+                    assert_eq!(
+                        archetypes, 1,
+                        "base `{}` {:?}: expected 1 Archetype line, got {}",
+                        it.base.id, it.rarity, archetypes
+                    );
+                }
+            }
+        });
+    }
+
+    // ── Phase 3 invariants (resonance) ──────────────────────────
+
+    /// Every rolled resonance line must target an axis the base's
+    /// `BaseFamily` **rejects**. This is the design contract for
+    /// resonance — it's the slot where the family lock is broken
+    /// on purpose. A sword (Source::Weapon) resonating must pick
+    /// a Spell-source line; a staff (no Physical element) must
+    /// pick Physical; a bow must pick Beam/AoE/Melee or wrong
+    /// element. If this fails, the resonance filter is leaking
+    /// in-family lines and the cross-family flavour is gone.
+    #[test]
+    fn resonance_lines_are_always_cross_family() {
+        use super::super::affixes::{
+            is_resonance, resonance_archetype, resonance_attribute, resonance_element,
+        };
+        for_every_roll(64, |it| {
+            for a in &it.affixes {
+                if !is_resonance(a.def) {
+                    continue;
+                }
+                let cross = resonance_element(a.def)
+                    .map(|e| !it.base.family.allows_element(e))
+                    .unwrap_or(false)
+                    || resonance_archetype(a.def)
+                        .map(|ar| !it.base.family.allows_archetype(ar))
+                        .unwrap_or(false)
+                    || resonance_attribute(a.def)
+                        .map(|at| !it.base.family.allows_attribute(at))
+                        .unwrap_or(false);
+                assert!(
+                    cross,
+                    "base `{}` (family {:?}) rolled in-family \
+                     resonance line `{}` — resonance must always \
+                     target a family-rejected axis",
+                    it.base.id, it.base.family, a.def.id,
+                );
+            }
+        });
+    }
+
+    /// Resonance can fire at most once per item — the pipeline
+    /// has exactly one probabilistic check after the bonus block.
+    /// A failure here would mean the resonance phase re-entered
+    /// or the pool was being double-sampled, breaking the slot
+    /// budget and the tooltip layout.
+    #[test]
+    fn at_most_one_resonance_line_per_item() {
+        use super::super::affixes::is_resonance;
+        for_every_roll(64, |it| {
+            let count = it.affixes.iter().filter(|a| is_resonance(a.def)).count();
+            assert!(
+                count <= 1,
+                "base `{}` rolled {} resonance lines (max 1)",
+                it.base.id,
+                count
+            );
+        });
+    }
+
+    /// Common and Magic rarities never produce a resonance line.
+    /// The chance gate ([`super::super::affixes::resonance_chance`])
+    /// returns 0 for those tiers; this test pins that behaviour
+    /// so a future tuning pass can't silently extend resonance
+    /// to lower rarities.
+    #[test]
+    fn common_and_magic_never_resonate() {
+        use super::super::affixes::is_resonance;
+        for_every_roll(64, |it| {
+            if matches!(it.rarity, Rarity::Common | Rarity::Magic) {
+                let any = it.affixes.iter().any(|a| is_resonance(a.def));
+                assert!(
+                    !any,
+                    "base `{}` rarity {:?} resonated — should never happen",
+                    it.base.id, it.rarity,
+                );
+            }
+        });
+    }
+
+    /// Every id in [`RESONANCE_POOL`] must round-trip through
+    /// [`super::super::affixes::lookup`] — persistence stores
+    /// items by id, and a missing resonance id would silently
+    /// drop the line on rehydration.
+    #[test]
+    fn every_resonance_id_resolves() {
+        use super::super::affixes::{lookup, RESONANCE_POOL};
+        for def in RESONANCE_POOL {
+            let found = lookup(def.id);
+            assert!(
+                found.is_some(),
+                "resonance id `{}` does not resolve through `lookup`",
+                def.id
+            );
+        }
     }
 }

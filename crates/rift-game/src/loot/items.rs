@@ -19,6 +19,8 @@
 
 use crate::stats::Stat;
 
+use super::families::BaseFamily;
+
 /// Tag constants used by [`BaseItem::allowed_tags`] /
 /// [`BaseItem::favored_tags`] and [`crate::loot::AffixDef::tags`].
 ///
@@ -183,6 +185,13 @@ pub struct BaseItem {
     pub implicit: &'static [(Stat, f32)],
     /// Minimum item-level at which this base can drop.
     pub min_ilvl: u32,
+    /// Damage-axis lock for this base — `Source × Element ×
+    /// Archetype`. Authored per row; Phase 2 of the itemisation
+    /// refactor (see `ITEMS.md` §3) makes the affix-roll pipeline
+    /// honour this and lets the legacy `allowed_tags` / `favored_tags`
+    /// bitmasks retire. During Phase 1 both fields coexist so the
+    /// rolling code keeps working unchanged.
+    pub family: BaseFamily,
     /// Registry key for the inventory icon, matching the relative
     /// stem produced by the engine's icon-discovery pass
     /// (e.g. `"loot/Boots/Boots_1"`). Look-ups go through the
@@ -239,6 +248,10 @@ impl GenderedModel {
 
 use tag::*;
 
+use super::families::{
+    Attribute, ARCHETYPES_MELEE, ARCHETYPES_PROJECTILE, ELEMENTS_CASTER, ELEMENTS_PHYSICAL,
+};
+
 pub const BASE_ITEMS: &[BaseItem] = &[
     // ---- Weapons ------------------------------------------------------
     BaseItem {
@@ -248,9 +261,19 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | CRIT,
         favored_tags: ANY_ELEMENT | CASTER,
-        implicit: &[(Stat::SpellDamage, 0.08)],
+        implicit: &[(Stat::FireDamage, 0.08)],
         min_ilvl: 1,
-        icon: "loot/Weapons/1",
+        // Staff = caster: spell scaling, any element, archetype
+        // wildcard. Beam / AoE shapes (Frost Ray, Fire Wave,
+        // Fireball) are covered by their element axis — the
+        // archetype trio line for a staff just opens up to
+        // Projectile or Melee resonance instead of locking.
+        family: BaseFamily {
+            attribute: Some(Attribute::Intellect),
+            element: Some(ELEMENTS_CASTER),
+            archetype: None,
+        },
+        icon: "loot/Weapons/43",
         models: None,
     },
     BaseItem {
@@ -260,9 +283,15 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: MELEE | CRIT | SPEED | DEFENSE | UTILITY,
         favored_tags: MELEE | CRIT,
-        implicit: &[(Stat::WeaponDamage, 0.10)],
+        implicit: &[(Stat::PhysicalDamage, 0.10)],
         min_ilvl: 1,
-        icon: "loot/Weapons/2",
+        // Sword = physical melee weapon.
+        family: BaseFamily {
+            attribute: Some(Attribute::Strength),
+            element: Some(ELEMENTS_PHYSICAL),
+            archetype: Some(ARCHETYPES_MELEE),
+        },
+        icon: "loot/Weapons/25",
         models: None,
     },
     BaseItem {
@@ -272,9 +301,15 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: MELEE | CRIT | SPEED | UTILITY,
         favored_tags: CRIT | SPEED,
-        implicit: &[(Stat::WeaponDamage, 0.06), (Stat::CritChance, 0.05)],
+        implicit: &[(Stat::MeleeDamage, 0.06), (Stat::CritChance, 0.05)],
         min_ilvl: 1,
-        icon: "loot/Weapons/3",
+        // Dagger = physical melee weapon, crit-flavoured.
+        family: BaseFamily {
+            attribute: Some(Attribute::Strength),
+            element: Some(ELEMENTS_PHYSICAL),
+            archetype: Some(ARCHETYPES_MELEE),
+        },
+        icon: "loot/Weapons/1",
         models: None,
     },
     BaseItem {
@@ -284,9 +319,19 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SPEED,
         favored_tags: CASTER | UTILITY,
-        implicit: &[(Stat::SpellDamage, 0.06), (Stat::CooldownReduction, 0.04)],
+        implicit: &[
+            (Stat::ProjectileDamage, 0.06),
+            (Stat::CooldownReduction, 0.04),
+        ],
         min_ilvl: 1,
-        icon: "loot/Weapons/4",
+        // Wand = caster, any element, projectile shape (Fireball,
+        // Multi-Shot-style spell projectiles).
+        family: BaseFamily {
+            attribute: Some(Attribute::Agility),
+            element: Some(ELEMENTS_CASTER),
+            archetype: Some(ARCHETYPES_PROJECTILE),
+        },
+        icon: "loot/Weapons/15",
         models: None,
     },
     // ---- Armor — Helm, Chest, Legs, Hands, Boots ---------------------
@@ -301,6 +346,13 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 12.0), (Stat::Health, 15.0)],
         min_ilvl: 1,
+        // Light helm — wildcard attribute; physical element vibe
+        // comes from the implicit, not the family lock.
+        family: BaseFamily {
+            attribute: None,
+            element: Some(ELEMENTS_PHYSICAL),
+            archetype: None,
+        },
         icon: "loot/Helmets/Helmet_1",
         models: Some(GenderedModel {
             female: Some("assets/models/loot/helm/armor_helm_leather_01_female.glb"),
@@ -316,6 +368,9 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: SPEED | CRIT,
         implicit: &[(Stat::Evasion, 0.02), (Stat::Health, 12.0)],
         min_ilvl: 1,
+        // Light shoulders — flexible across all axes; identity
+        // comes from the evasion implicit, not the family lock.
+        family: BaseFamily::WILDCARD,
         icon: "loot/Shoulders/Shoulders_1",
         models: Some(GenderedModel {
             female: Some(
@@ -333,6 +388,12 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 24.0), (Stat::Health, 30.0)],
         min_ilvl: 1,
+        // Heavy plate — Strength, physical, melee archetype.
+        family: BaseFamily {
+            attribute: Some(Attribute::Strength),
+            element: Some(ELEMENTS_PHYSICAL),
+            archetype: Some(ARCHETYPES_MELEE),
+        },
         icon: "loot/BodyArmor/BodyArmor_1",
         models: None,
     },
@@ -345,6 +406,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: SPEED | CRIT,
         implicit: &[(Stat::Evasion, 0.05), (Stat::Health, 18.0)],
         min_ilvl: 1,
+        // Light chest — flexible. Suits rogue / ranger / hybrid.
+        family: BaseFamily::WILDCARD,
         icon: "loot/BodyArmor/BodyArmor_2",
         // Bring-up: first modular armor visual. Studded Vest is the
         // closest fit thematically; once we have more art each base
@@ -364,6 +427,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: SPEED,
         implicit: &[(Stat::MoveSpeed, 0.05), (Stat::Evasion, 0.03)],
         min_ilvl: 1,
+        // Boots are identity-neutral — wildcard family.
+        family: BaseFamily::WILDCARD,
         icon: "loot/Boots/Boots_1",
         models: Some(GenderedModel {
             female: Some("assets/models/loot/feet/armor_boots_leather_01_female.glb"),
@@ -379,6 +444,12 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::Health, 14.0), (Stat::ResourceRegen, 0.08)],
         min_ilvl: 1,
+        // Robe — Intellect, element-flex, no archetype lock.
+        family: BaseFamily {
+            attribute: Some(Attribute::Intellect),
+            element: None,
+            archetype: None,
+        },
         icon: "loot/BodyArmor/BodyArmor_3",
         models: None,
     },
@@ -391,6 +462,12 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: CASTER | ANY_ELEMENT,
         implicit: &[(Stat::CooldownReduction, 0.03)],
         min_ilvl: 1,
+        // Light gloves lean caster — Intellect, element-flex.
+        family: BaseFamily {
+            attribute: Some(Attribute::Intellect),
+            element: None,
+            archetype: None,
+        },
         icon: "loot/Gloves/Gloves_1",
         models: Some(GenderedModel {
             female: Some("assets/models/loot/gloves/armor_gloves_leather_01_female.glb"),
@@ -406,6 +483,12 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: DEFENSE,
         implicit: &[(Stat::Armor, 16.0), (Stat::Health, 20.0)],
         min_ilvl: 1,
+        // Heavy-ish legs — Strength, physical, melee archetype.
+        family: BaseFamily {
+            attribute: Some(Attribute::Strength),
+            element: Some(ELEMENTS_PHYSICAL),
+            archetype: Some(ARCHETYPES_MELEE),
+        },
         icon: "loot/Pants/Pants_1",
         models: Some(GenderedModel {
             female: Some("assets/models/loot/legs/armor_legs_leather_01_female.glb"),
@@ -422,6 +505,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: 0,
         implicit: &[],
         min_ilvl: 1,
+        // Accessories — the build-completion slots. Wildcard.
+        family: BaseFamily::WILDCARD,
         icon: "loot/Rings/Ring_1",
         models: None,
     },
@@ -434,7 +519,89 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         favored_tags: 0,
         implicit: &[(Stat::Health, 10.0)],
         min_ilvl: 1,
+        // Accessories — wildcard. Amulet completes elemental sets.
+        family: BaseFamily::WILDCARD,
         icon: "loot/Necklaces/Necklace_1",
         models: None,
     },
 ];
+
+#[cfg(test)]
+mod family_tests {
+    use super::super::families::{Archetype, Element};
+    use super::*;
+
+    /// Every `BaseItem` row declares a `family`. Source-less
+    /// (wildcard) and source-locked entries are both legal; what
+    /// we enforce is that a non-empty element / archetype slice is
+    /// just that — non-empty — so the Phase 2 roll path can pick
+    /// at least one option per axis when the lock is set.
+    #[test]
+    fn every_base_declares_a_coherent_family() {
+        for b in BASE_ITEMS {
+            if let Some(list) = b.family.element {
+                assert!(
+                    !list.is_empty(),
+                    "base `{}` has an empty element slice",
+                    b.id,
+                );
+            }
+            if let Some(list) = b.family.archetype {
+                assert!(
+                    !list.is_empty(),
+                    "base `{}` has an empty archetype slice",
+                    b.id,
+                );
+            }
+        }
+    }
+
+    /// Weapons should always declare an attribute — they are the
+    /// damage-producing slot, and the attribute axis drives class
+    /// scaling. Armor / accessories may legitimately be wildcard.
+    #[test]
+    fn weapons_lock_an_attribute() {
+        for b in BASE_ITEMS {
+            if matches!(b.slot, ItemSlot::Weapon(_)) {
+                assert!(
+                    b.family.attribute.is_some(),
+                    "weapon base `{}` has no attribute lock — \
+                     weapons must commit to one of Str / Agi / Int",
+                    b.id,
+                );
+            }
+        }
+    }
+
+    /// Wildcard sanity: an accessory base should permit every
+    /// element and every archetype, so the build-completion slot
+    /// can finish any build.
+    #[test]
+    fn accessories_are_wildcard_friendly() {
+        for b in BASE_ITEMS {
+            if matches!(b.slot, ItemSlot::Accessory(_)) {
+                for e in [
+                    Element::Physical,
+                    Element::Fire,
+                    Element::Ice,
+                    Element::Lightning,
+                ] {
+                    assert!(
+                        b.family.allows_element(e),
+                        "accessory `{}` rejects element {:?}",
+                        b.id,
+                        e,
+                    );
+                }
+                for a in [Archetype::Projectile, Archetype::Melee] {
+                    assert!(
+                        b.family.allows_archetype(a),
+                        "accessory `{}` rejects archetype {:?}",
+                        b.id,
+                        a,
+                    );
+                }
+            }
+        }
+    }
+}

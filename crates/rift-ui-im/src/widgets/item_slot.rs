@@ -72,6 +72,13 @@ pub struct ItemSlot<'a> {
     /// filter to fade out non-matching items without hiding
     /// them entirely).
     dim_alpha: f32,
+    /// When `true`, the icon is drawn into the full slot
+    /// rect (minus a 1px guard so it doesn't bleed over the
+    /// outline) instead of the default 6%-inset `inner_rect`.
+    /// Lets surfaces like the ability bar present icons that
+    /// visually fill their container the way the player
+    /// reads them from the source art.
+    icon_fills: bool,
 }
 
 impl<'a> ItemSlot<'a> {
@@ -90,7 +97,15 @@ impl<'a> ItemSlot<'a> {
             anchored: false,
             transparent_bg: false,
             dim_alpha: 1.0,
+            icon_fills: false,
         }
+    }
+
+    /// Make the icon fill the full slot rect (minus a 1px
+    /// guard) instead of the default 6%-inset interior.
+    pub fn icon_fills(mut self, on: bool) -> Self {
+        self.icon_fills = on;
+        self
     }
 
     pub fn icon(mut self, name: &'a str) -> Self {
@@ -314,6 +329,20 @@ impl<'a> ItemSlot<'a> {
         // Rarity inset behind the icon (slightly inset so the
         // outer slot frame still reads).
         let inner = inner_rect(rect);
+        // Icon target rect: either the small inset (default,
+        // matches the inventory's framing) or the full slot
+        // minus a 1px guard so the icon visibly fills its
+        // container (used by the ability bar).
+        let icon_rect = if self.icon_fills {
+            Rect::from_xywh(
+                rect.x() + 1.0,
+                rect.y() + 1.0,
+                (rect.width() - 2.0).max(0.0),
+                (rect.height() - 2.0).max(0.0),
+            )
+        } else {
+            inner
+        };
         if let Some(tint) = self.rarity_tint {
             let dimmed = Color::rgba(tint.0[0] * 0.55, tint.0[1] * 0.55, tint.0[2] * 0.55, 1.0);
             ui.draw_rect(inner, dimmed);
@@ -331,7 +360,7 @@ impl<'a> ItemSlot<'a> {
             } else {
                 Color::rgba(1.0, 1.0, 1.0, 1.0)
             };
-            ui.draw_icon(inner, name, tint);
+            ui.draw_icon(icon_rect, name, tint);
         } else if let Some(ch) = self.fallback_glyph {
             let mut buf = [0u8; 4];
             let s: &str = ch.encode_utf8(&mut buf);

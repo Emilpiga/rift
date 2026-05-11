@@ -46,8 +46,18 @@ pub const PANEL_PAD_X: f32 = 18.0;
 pub const PANEL_PAD_Y: f32 = 16.0;
 pub const HEADER_H: f32 = 38.0;
 pub const SECTION_GAP: f32 = 14.0;
-pub const CURRENCY_BAR_H: f32 = 36.0;
+/// Compact shards "pill" anchored under the bag section.
+/// Smaller than the old full-width currency bar so it reads
+/// as a badge belonging to the bag rather than a row.
+pub const CURRENCY_BAR_H: f32 = 26.0;
 pub const TOGGLE_BAR_H: f32 = 30.0;
+
+/// Pixel inset between the inside edge of a section's stone
+/// chrome and the slot grid it contains. Stops the
+/// paperdoll + bag slots from kissing the section border
+/// and lets the inner-shadow bevel read as a real recessed
+/// niche around the grid.
+pub const SECTION_INNER_PAD: f32 = 10.0;
 
 /// Pixel gap between adjacent paperdoll slots (each side gets
 /// half this inset). Keeps the slots from looking like they
@@ -160,53 +170,67 @@ impl Layout {
         let header = Rect::from_xywh(content.x(), content.y(), content.width(), header_h);
 
         let currency_h = CURRENCY_BAR_H * fit;
-        let currency_bar = Rect::from_xywh(
-            content.x(),
-            content.max.y - currency_h,
-            content.width(),
-            currency_h,
-        );
-
         let toggle_bar_h = TOGGLE_BAR_H * fit;
 
-        // Bottom block of the inventory drawer is just the
-        // toggle bar + currency bar now. Stats and stash
-        // float to the left as their own drawers.
-        let bottom_block_h = currency_h + toggle_bar_h + SECTION_GAP * fit;
+        // Vertical layout: header → paperdoll → toggle bar →
+        // bag → currency pill. The toggle bar lives between
+        // the two grids so the actions sit at the boundary
+        // they act on; the currency pill sits as a small
+        // badge under the bag.
+        let section_gap = SECTION_GAP * fit;
         let avail_h_for_grids =
-            (content.height() - header_h - SECTION_GAP * fit * 2.0 - bottom_block_h).max(0.0);
+            (content.height() - header_h - section_gap * 4.0 - toggle_bar_h - currency_h).max(0.0);
 
         // Cell size constraint: width / cols, OR fit both
         // grids stacked vertically (paperdoll + bag).
-        let cell_w_limit = content.width() / PAPERDOLL_COLS as f32;
-        let cell_h_limit = avail_h_for_grids / (PAPERDOLL_ROWS as f32 + bag_rows as f32);
+        let section_pad = SECTION_INNER_PAD * fit;
+        let cell_w_limit = (content.width() - section_pad * 2.0) / PAPERDOLL_COLS as f32;
+        let cell_h_limit =
+            (avail_h_for_grids - section_pad * 4.0) / (PAPERDOLL_ROWS as f32 + bag_rows as f32);
         let cell = cell_w_limit.min(cell_h_limit).max(10.0);
 
         let pd_cell = cell;
         let pd_w = pd_cell * PAPERDOLL_COLS as f32;
         let pd_h = pd_cell * PAPERDOLL_ROWS as f32;
+        // The section's outer rect is the grid plus an inner
+        // pad on every side; the grid origin sits inset by
+        // `section_pad` from the section's top-left.
         let paperdoll = Rect::from_xywh(
-            content.x() + (content.width() - pd_w) * 0.5,
-            header.max.y + SECTION_GAP * fit,
-            pd_w,
-            pd_h,
+            content.x() + (content.width() - (pd_w + section_pad * 2.0)) * 0.5,
+            header.max.y + section_gap,
+            pd_w + section_pad * 2.0,
+            pd_h + section_pad * 2.0,
         );
-        let paperdoll_origin = paperdoll.min;
+        let paperdoll_origin =
+            Pos2::new(paperdoll.min.x + section_pad, paperdoll.min.y + section_pad);
 
-        let bag_top = paperdoll.max.y + SECTION_GAP * fit;
+        // Toggle bar sits between the two sections.
+        let toggle_top = paperdoll.max.y + section_gap;
+        let toggle_bar = Rect::from_xywh(content.x(), toggle_top, content.width(), toggle_bar_h);
+
+        let bag_top = toggle_bar.max.y + section_gap;
         let bag_cell = cell;
         let bag_w = bag_cell * bag_cols as f32;
         let bag_h = bag_cell * bag_rows as f32;
         let bag = Rect::from_xywh(
-            content.x() + (content.width() - bag_w) * 0.5,
+            content.x() + (content.width() - (bag_w + section_pad * 2.0)) * 0.5,
             bag_top,
-            bag_w,
-            bag_h,
+            bag_w + section_pad * 2.0,
+            bag_h + section_pad * 2.0,
         );
-        let bag_origin = bag.min;
+        let bag_origin = Pos2::new(bag.min.x + section_pad, bag.min.y + section_pad);
 
-        let toggle_top = bag.max.y + SECTION_GAP * fit;
-        let toggle_bar = Rect::from_xywh(content.x(), toggle_top, content.width(), toggle_bar_h);
+        // Currency "pill": compact badge under the bag.
+        // Width is just enough to fit the glyph + amount +
+        // label rather than the full content width, anchored
+        // flush with the right edge of the bag section.
+        let currency_w = (180.0 * fit).min(content.width());
+        let currency_bar = Rect::from_xywh(
+            bag.max.x - currency_w,
+            bag.max.y + section_gap * 0.5,
+            currency_w,
+            currency_h,
+        );
 
         // Side drawers — stats opens to the LEFT of the
         // inventory drawer. Stash is its own full-size

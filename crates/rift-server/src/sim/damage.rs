@@ -13,10 +13,11 @@ use super::{combat_ctx, meters, procs, projectile, GHOST_RISE_DELAY};
 /// Apply queued enemy → player damage and emit one `Damage`
 /// event per applied hit. Defensive stats consumed here:
 /// * `armor` — flat damage reduction via
-///   [`CharacterStats::armor_damage_reduction`].
-/// * `physical_resist` / `elemental_resist` — element-typed
-///   resist multiplier on top, gated by the source ability's
-///   [`Element`].
+///   [`CharacterStats::armor_damage_reduction`]; the sole
+///   mitigation channel for `Element::Physical` hits.
+/// * `elemental_resist` — percent resist multiplier on top,
+///   applied only when the source ability's [`Element`] is
+///   `Fire` / `Ice` / `Lightning`.
 /// * `evasion` — passive dodge roll; on success the hit is
 ///   cancelled outright (no damage, no meter row, no Damage
 ///   event), and any `OnDodge` procs fire.
@@ -42,7 +43,12 @@ pub(super) fn apply_player_damage(
     let mut idx_salt: u64 = 0;
     for hit in pending {
         idx_salt = idx_salt.wrapping_add(1);
-        let combat_ctx::PlayerHit { target: player_entity, attacker_kind, ability_id, amount } = hit;
+        let combat_ctx::PlayerHit {
+            target: player_entity,
+            attacker_kind,
+            ability_id,
+            amount,
+        } = hit;
 
         // Resolve the source ability's element / archetype for
         // resist routing. Unknown ids (`OTHER`, environmental)
@@ -56,7 +62,9 @@ pub(super) fn apply_player_damage(
         // path can decide to skip damage entirely without
         // re-borrowing.
         let (evasion, armor_dr, resist_mult, dodge_procs, position, net_id, client_id) = {
-            let Ok(p) = world.get::<&ServerPlayer>(player_entity) else { continue };
+            let Ok(p) = world.get::<&ServerPlayer>(player_entity) else {
+                continue;
+            };
             if p.hp <= 0.0 {
                 continue;
             }
@@ -110,7 +118,9 @@ pub(super) fn apply_player_damage(
         let mitigated = amount * (1.0 - armor_dr) * resist_mult;
 
         let (was_low_hp_armed, hp_before, hp_after, died) = {
-            let Ok(mut p) = world.get::<&mut ServerPlayer>(player_entity) else { continue };
+            let Ok(mut p) = world.get::<&mut ServerPlayer>(player_entity) else {
+                continue;
+            };
             if p.hp <= 0.0 {
                 continue;
             }
@@ -166,10 +176,7 @@ pub(super) fn apply_player_damage(
         // Skipped on the killing blow — the player's already in
         // ghost state, no point in firing a panic proc on a
         // corpse.
-        if was_low_hp_armed
-            && !died
-            && hp_before != hp_after
-        {
+        if was_low_hp_armed && !died && hp_before != hp_after {
             let low_procs: Vec<rift_game::loot::ability_mods::Proc> = world
                 .get::<&ServerPlayer>(player_entity)
                 .map(|p| p.ability_mods.procs.iter().copied().collect())

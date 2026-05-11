@@ -61,15 +61,24 @@ void main() {
     // pixel space means it doesn't crawl when the surface
     // resizes — each pixel always evaluates to the same grain.
     if (fragUV.x < 0.0) {
-        // Big, soft features: ~1 cycle per ~36 px on the
-        // base octave, halved each octave. Reads as drifting
-        // cloud bands instead of sandpaper grain.
-        vec2 p = gl_FragCoord.xy * (1.0 / 36.0);
-        float n = fbm3(p);
-        // Centre on 0 and squeeze. ±14 % brightness
-        // modulation keeps the gradient readable while
-        // giving the surface a real cloudy quality.
-        float m = (n - 0.5) * 0.28;
+        // Domain-warped fbm: sample the noise twice and offset
+        // the second sample by the first's vector field. The
+        // warp shears the lattice in soft swirls so the tile
+        // structure of plain fbm disappears — visually reads
+        // as wet-smudged stone rather than a repeating bumpmap.
+        // Base period stays ~52 px so the smudges are broad
+        // ribbons, not pixel grain.
+        vec2 p = gl_FragCoord.xy * (1.0 / 52.0);
+        // Warp field: two fbm samples offset to act as a 2D
+        // gradient. Multiply by 1.4 to give the smudge real
+        // travel — small values look like noise still tiles,
+        // bigger values fully break the lattice.
+        vec2 q = vec2(fbm3(p), fbm3(p + vec2(5.2, 1.3)));
+        float n = fbm3(p + 1.4 * q);
+        // Centre on 0 and squeeze. ±18 % brightness modulation
+        // keeps the gradient readable while giving the surface
+        // a real cloudy / smudged quality.
+        float m = (n - 0.5) * 0.36;
         vec3 rgb = clamp(fragColor.rgb * (1.0 + m), 0.0, 1.0);
         outColor = vec4(rgb, fragColor.a);
         return;

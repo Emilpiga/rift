@@ -271,10 +271,11 @@ pub fn frame(
         .iter()
         .map(|rows| {
             rows.iter()
-                .map(|(label, value, color)| StatRow {
+                .map(|(label, value, color, tooltip)| StatRow {
                     label: label.as_str(),
                     value: value.as_str(),
                     value_color: *color,
+                    tooltip: tooltip.as_deref(),
                 })
                 .collect()
         })
@@ -552,6 +553,8 @@ fn classify_tooltip<'a>(lines: &'a [String], viewer_level: u32) -> Vec<TooltipLi
                 TooltipLineKind::Divider
             } else if s.starts_with('★') {
                 TooltipLineKind::Legendary
+            } else if s.starts_with('◆') {
+                TooltipLineKind::Resonance
             } else if s.starts_with('⚓') {
                 TooltipLineKind::Anchored
             } else if s.starts_with('⚠') {
@@ -592,14 +595,11 @@ fn compare_delta_rows(hovered: &Item, equipped: &Item) -> Vec<(String, bool)> {
         Stat::CritDamage,
         Stat::AttackSpeed,
         Stat::Health,
-        Stat::Vitality,
         Stat::Armor,
         Stat::Evasion,
         Stat::CooldownReduction,
         Stat::ResourceRegen,
         Stat::MoveSpeed,
-        Stat::WeaponDamage,
-        Stat::SpellDamage,
         Stat::PhysicalDamage,
         Stat::FireDamage,
         Stat::IceDamage,
@@ -633,49 +633,183 @@ fn build_stat_rows(
     ps: &PlayerState,
 ) -> (
     Vec<&'static str>,
-    Vec<Vec<(String, String, Option<[f32; 4]>)>>,
+    Vec<Vec<(String, String, Option<[f32; 4]>, Option<String>)>>,
 ) {
     let s = ps.stats();
+    let a = &ps.attributes;
     let pct = |v: f32| format!("{:.1}%", v * 100.0);
     let int = |v: f32| format!("{:.0}", v);
     let f1 = |v: f32| format!("{:.1}", v);
     let f2 = |v: f32| format!("{:.2}", v);
     let per_sec = |v: f32| format!("{:.1}/s", v);
+    let tip = |t: &str| Some(t.to_string());
 
     let mut names: Vec<&'static str> = Vec::new();
-    let mut rows: Vec<Vec<(String, String, Option<[f32; 4]>)>> = Vec::new();
+    let mut rows: Vec<Vec<(String, String, Option<[f32; 4]>, Option<String>)>> = Vec::new();
+
+    // ── ATTRIBUTES ───────────────────────────────────────────
+    // Core stat investment. Item-rolled `+Strength` / `+Agility`
+    // / `+Intellect` lines fold into these values 1:1 with
+    // the manual point-spend screen, so the displayed numbers
+    // are gear + manual combined.
+    let primary_atype = ps.config.primary_attribute;
+    let star = |a_type| {
+        if a_type == primary_atype {
+            " ★"
+        } else {
+            ""
+        }
+    };
+    names.push("ATTRIBUTES");
+    rows.push(vec![
+        (
+            format!(
+                "Strength{}",
+                star(rift_game::attributes::AttributeType::Strength)
+            ),
+            int(a.strength as f32),
+            None,
+            tip("Increases armor by 0.8% per point. \
+                 If this is your primary attribute, also boosts damage by 1% per point."),
+        ),
+        (
+            format!(
+                "Agility{}",
+                star(rift_game::attributes::AttributeType::Agility)
+            ),
+            int(a.agility as f32),
+            None,
+            tip(
+                "Increases crit chance by 0.1% and attack speed by 0.5% per point. \
+                 If this is your primary attribute, also boosts damage by 1% per point.",
+            ),
+        ),
+        (
+            format!(
+                "Intellect{}",
+                star(rift_game::attributes::AttributeType::Intellect)
+            ),
+            int(a.intellect as f32),
+            None,
+            tip("Increases maximum essence by 2 per point. \
+                 If this is your primary attribute, also boosts damage by 1% per point."),
+        ),
+        (
+            format!(
+                "Vitality{}",
+                star(rift_game::attributes::AttributeType::Vitality)
+            ),
+            int(a.vitality as f32),
+            None,
+            tip("Increases maximum health by 3 per point."),
+        ),
+    ]);
 
     names.push("OFFENSE");
     rows.push(vec![
-        ("Damage".into(), int(s.damage), None),
-        ("Crit Chance".into(), pct(s.crit_chance), None),
-        ("Crit Damage".into(), pct(s.crit_damage), None),
-        ("Attack Speed".into(), f2(s.attack_speed), None),
+        (
+            "Damage".into(),
+            int(s.damage),
+            None,
+            tip(
+                "Base outgoing damage before element / archetype / ability multipliers. \
+                 Each point in your primary attribute adds 1% to base damage.",
+            ),
+        ),
+        (
+            "Crit Chance".into(),
+            pct(s.crit_chance),
+            None,
+            tip("Chance for any hit to deal extra damage."),
+        ),
+        (
+            "Crit Damage".into(),
+            pct(s.crit_damage),
+            None,
+            tip("Bonus damage dealt by a critical hit, on top of the base."),
+        ),
+        (
+            "Attack Speed".into(),
+            f2(s.attack_speed),
+            None,
+            tip("Attacks per second. Higher = faster basic attacks."),
+        ),
     ]);
 
     names.push("DEFENSE");
     let mut def = vec![
-        ("Health".into(), int(s.max_hp), None),
-        ("Health Regen".into(), per_sec(s.health_regen), None),
-        ("Armor".into(), int(s.armor), None),
-        ("Evasion".into(), pct(s.evasion), None),
+        (
+            "Health".into(),
+            int(s.max_hp),
+            None,
+            tip("Your maximum life total. Reach 0 and you die."),
+        ),
+        (
+            "Health Regen".into(),
+            per_sec(s.health_regen),
+            None,
+            tip("Health restored per second out of combat."),
+        ),
+        (
+            "Armor".into(),
+            int(s.armor),
+            None,
+            tip(
+                "Reduces incoming physical damage. Effectiveness scales with attacker level \
+                 — stack it for melee fights.",
+            ),
+        ),
+        (
+            "Evasion".into(),
+            pct(s.evasion),
+            None,
+            tip("Chance to completely dodge an incoming attack, taking no damage."),
+        ),
     ];
-    if s.physical_resist > 0.0 {
-        def.push(("Physical Resist".into(), pct(s.physical_resist), None));
-    }
     if s.elemental_resist > 0.0 {
-        def.push(("Elemental Resist".into(), pct(s.elemental_resist), None));
+        def.push((
+            "Elemental Resist".into(),
+            pct(s.elemental_resist),
+            None,
+            tip("Flat percent reduction to fire / ice / lightning damage taken (caps at 75%)."),
+        ));
     }
     if s.healing_received > 0.0 {
-        def.push(("Healing Received".into(), pct(s.healing_received), None));
+        def.push((
+            "Healing Received".into(),
+            pct(s.healing_received),
+            None,
+            tip("Multiplier applied to all healing you receive from any source."),
+        ));
     }
     rows.push(def);
 
     names.push("UTILITY");
     rows.push(vec![
-        ("Move Speed".into(), f1(s.move_speed), None),
-        ("Cooldown Reduction".into(), pct(s.cooldown_reduction), None),
-        ("Essence Regen".into(), per_sec(s.resource_regen), None),
+        (
+            "Move Speed".into(),
+            f1(s.move_speed),
+            None,
+            tip("World units traveled per second while moving."),
+        ),
+        (
+            "Cooldown Reduction".into(),
+            pct(s.cooldown_reduction),
+            None,
+            tip("Reduces the cooldown of every ability by this percent (caps at 75%)."),
+        ),
+        (
+            "Max Essence".into(),
+            int(s.max_resource),
+            None,
+            tip("Essence is the resource pool spent on abilities. Grows with Intellect."),
+        ),
+        (
+            "Essence Regen".into(),
+            per_sec(s.resource_regen),
+            None,
+            tip("Essence restored per second while not casting."),
+        ),
     ]);
 
     if s.fire_damage > 0.0 || s.ice_damage > 0.0 || s.lightning_damage > 0.0 {
@@ -686,6 +820,7 @@ fn build_stat_rows(
                 "Fire".into(),
                 pct(s.fire_damage),
                 Some([0.96, 0.55, 0.30, 1.0]),
+                tip("Bonus multiplier applied to fire damage you deal."),
             ));
         }
         if s.ice_damage > 0.0 {
@@ -693,6 +828,7 @@ fn build_stat_rows(
                 "Ice".into(),
                 pct(s.ice_damage),
                 Some([0.55, 0.85, 0.96, 1.0]),
+                tip("Bonus multiplier applied to ice damage you deal."),
             ));
         }
         if s.lightning_damage > 0.0 {
@@ -700,6 +836,7 @@ fn build_stat_rows(
                 "Lightning".into(),
                 pct(s.lightning_damage),
                 Some([0.95, 0.85, 0.45, 1.0]),
+                tip("Bonus multiplier applied to lightning damage you deal."),
             ));
         }
         rows.push(el);

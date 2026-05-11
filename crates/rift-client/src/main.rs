@@ -797,6 +797,11 @@ impl RiftApp {
             .next()
             .unwrap_or(Vec3::ZERO);
         net.set_aim(aim);
+        // Keep the prediction layer's move_speed mirror in sync
+        // with the locally computed player sheet so Boots /
+        // MoveSpeed affixes feel responsive without waiting for
+        // the next server snapshot to reconcile our position.
+        net.set_predicted_move_speed(state.player_state.stats().move_speed);
 
         // Floor transition requests. The actual world
         // regeneration happens later when the server's

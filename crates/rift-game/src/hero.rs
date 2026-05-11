@@ -32,16 +32,12 @@ pub struct HeroConfig {
     pub base_resource_regen: f32,
     /// Base damage (before weapon/attributes).
     pub base_damage: f32,
-    /// Base defense (before armor/attributes).
-    pub base_defense: f32,
     /// Base attack speed (attacks per second).
     pub base_attack_speed: f32,
     /// Base crit chance (0.0 - 1.0).
     pub base_crit_chance: f32,
     /// Base movement speed.
     pub base_move_speed: f32,
-    /// Attack range.
-    pub base_range: f32,
 }
 
 /// The single player config. Stats and damage formulas all
@@ -56,11 +52,9 @@ pub const HERO: HeroConfig = HeroConfig {
     resource_per_level: 5.0,
     base_resource_regen: 8.0,
     base_damage: 8.0,
-    base_defense: 3.0,
     base_attack_speed: 1.4,
     base_crit_chance: 0.05,
     base_move_speed: 6.0,
-    base_range: 12.0,
 };
 
 /// Skinned glTF + base albedo for the player avatar, picked by

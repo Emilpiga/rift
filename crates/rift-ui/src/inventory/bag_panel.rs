@@ -68,19 +68,54 @@ const GOLD_OUTLINE: Color = Color::rgba(0.78, 0.62, 0.30, 0.85);
 /// Slightly brighter highlight drawn 1 px inside the gold
 /// stroke so the cell reads as inset rather than painted on.
 const INSET_HIGHLIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.10);
+/// 1px dark band painted along the top + left edges inside
+/// a cell so it reads as recessed into the stone slab.
+/// Pairs with [`CELL_INSET_LIGHT`] on the opposing edges.
+const CELL_INSET_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.55);
+/// 1px cream highlight along the bottom + right edges of a
+/// cell. Together with the top/left shadow it sells the
+/// bevel without a full gradient.
+const CELL_INSET_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.08);
+/// Inner-shadow band the [`draw_section_chrome`] helper
+/// paints along the top + left edges of a section so the
+/// niche reads as carved into the drawer rather than tiled
+/// on top of it.
+const SECTION_INNER_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.42);
+/// Highlight band along the bottom + right edges of a
+/// section, matching `SECTION_INNER_SHADOW` on the opposing
+/// edges so the niche reads as recessed at every viewing
+/// distance.
+const SECTION_INNER_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.06);
 
 /// Empty equipment-slot fill. The equipment container has a
 /// stone texture; each slot gets a darker overlay so the
 /// slot grid pops against the slab without losing the
-/// underlying texture entirely.
+/// underlying texture entirely. Darker than the bag empty-
+/// cell wash so the equipped row reads as the focal column.
 fn equip_slot_fill() -> Color {
-    Color::rgba(0.0, 0.0, 0.0, 0.32)
+    Color::rgba(0.0, 0.0, 0.0, 0.42)
+}
+
+/// Empty bag-cell fill. Lighter than `equip_slot_fill` so the
+/// hierarchy reads bag < equipment when scanned: the bag is
+/// the inventory you live in, equipment is the smaller,
+/// more important set.
+fn bag_empty_fill() -> Color {
+    Color::rgba(0.0, 0.0, 0.0, 0.22)
 }
 
 /// Draw the textured stone backing used by both the bag and
 /// the equipment container. `darker = true` darkens the
 /// gradient slightly so the equipment slab reads as a
 /// recessed niche behind the bag.
+///
+/// In addition to the carved-stone fill + border, paints a
+/// 1px dark band along the top + left edges of the inside
+/// rect (and a matching lit band along the bottom + right).
+/// This gives the section a clear recessed feel against the
+/// drawer behind it — without it the section + drawer both
+/// use the same stone fill and blend into one surface at
+/// any distance.
 pub(super) fn draw_section_chrome(
     ui: &mut Ui<'_>,
     theme: &rift_ui_im::Theme,
@@ -89,19 +124,51 @@ pub(super) fn draw_section_chrome(
 ) {
     let fill = if darker {
         let s = theme.colors.bg_stone.0;
-        Color::rgba(s[0] * 0.78, s[1] * 0.78, s[2] * 0.78, s[3])
+        Color::rgba(s[0] * 0.62, s[1] * 0.62, s[2] * 0.62, s[3])
     } else {
-        theme.colors.bg_stone
+        let s = theme.colors.bg_stone.0;
+        Color::rgba(s[0] * 0.85, s[1] * 0.85, s[2] * 0.85, s[3])
     };
     Frame::stone(theme)
         .with_fill(fill)
         .with_stroke(Stroke::new(2.0, theme.colors.border_stone))
         .with_padding(Pad::all(0.0))
         .show_only(ui, rect);
+
+    // Inner shadow / bevel. Two pixels thick to read at
+    // normal viewing distance; thinner on cells (1px) so the
+    // hierarchy stays section > cell when scanned.
+    let w = rect.width();
+    let h = rect.height();
+    if w > 8.0 && h > 8.0 {
+        // Top dark band
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(rect.x() + 2.0, rect.y() + 2.0, w - 4.0, 2.0),
+            SECTION_INNER_SHADOW,
+        );
+        // Left dark band
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(rect.x() + 2.0, rect.y() + 2.0, 2.0, h - 4.0),
+            SECTION_INNER_SHADOW,
+        );
+        // Bottom highlight
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(rect.x() + 2.0, rect.max.y - 3.0, w - 4.0, 1.0),
+            SECTION_INNER_LIGHT,
+        );
+        // Right highlight
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(rect.max.x - 3.0, rect.y() + 2.0, 1.0, h - 4.0),
+            SECTION_INNER_LIGHT,
+        );
+    }
 }
 
 /// Outline a single slot cell: gold-toned outer stroke plus
-/// a 1px brighter inset that fakes a chiselled bevel.
+/// a 1px brighter inset that fakes a chiselled bevel, and a
+/// 1px inner-shadow on top + left (with a matching highlight
+/// on the bottom + right) so the cell reads as a recessed
+/// well rather than a stamped rectangle.
 fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
     ui.draw_outline(rect, 1.0, GOLD_OUTLINE);
     let inset = rift_ui_im::Rect::from_xywh(
@@ -111,6 +178,30 @@ fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
         (rect.height() - 2.0).max(0.0),
     );
     ui.draw_outline(inset, 1.0, INSET_HIGHLIGHT);
+
+    // Inner bevel: 1px dark band on top + left, 1px light
+    // band on bottom + right. Sized off the inset rect so it
+    // sits cleanly inside the gold outline.
+    let w = inset.width();
+    let h = inset.height();
+    if w > 2.0 && h > 2.0 {
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(inset.x() + 1.0, inset.y() + 1.0, w - 2.0, 1.0),
+            CELL_INSET_SHADOW,
+        );
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(inset.x() + 1.0, inset.y() + 1.0, 1.0, h - 2.0),
+            CELL_INSET_SHADOW,
+        );
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(inset.x() + 1.0, inset.max.y - 2.0, w - 2.0, 1.0),
+            CELL_INSET_LIGHT,
+        );
+        ui.draw_rect(
+            rift_ui_im::Rect::from_xywh(inset.max.x - 2.0, inset.y() + 1.0, 1.0, h - 2.0),
+            CELL_INSET_LIGHT,
+        );
+    }
 }
 
 pub fn render_paperdoll(
@@ -296,9 +387,12 @@ pub fn render_bag_grid(
             }
             let cell_idx = cy as u32 * cols as u32 + cx as u32;
             let rect = layout.bag_rect(cx, cy, 1, 1);
-            // Transparent fill so the section's stone
-            // texture shows through; outline gives the cell
-            // its shape.
+            // Dark wash + outline so the empty cell reads as
+            // a well in the stone slab. Transparent would
+            // leave only the gold outline and the cell would
+            // blend into the section's stone texture at
+            // distance.
+            ui.draw_rect(rect, bag_empty_fill());
             draw_cell_outline(ui, rect);
 
             // Map empty cell back to its inventory index 1:1

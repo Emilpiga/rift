@@ -5,40 +5,14 @@
 
 use glam::Vec3;
 use rift_dungeon::NavGrid;
-use rift_engine::ecs::components::{Boss, Enemy, Health, LocalPlayer, Player, Transform};
+use rift_engine::ecs::components::{Boss, Enemy, LocalPlayer, Player, Transform};
 use rift_engine::ui::im::{Banner, Color, Pos2, Rect, Ui};
+use rift_ui_types::hud::{MinimapEnemy, MinimapPlayer, MinimapView};
 
-/// Soft-haloed minimap pip: draws a low-alpha halo rounded-rect
-/// then the opaque core rounded-rect on top.
-fn draw_pip(
-    ui: &mut Ui<'_>,
-    mx: f32,
-    my: f32,
-    core_size: f32,
-    core_col: Color,
-    halo_col: Color,
-) {
-    let halo = core_size * 2.4;
-    ui.draw_rounded_rect(
-        Rect::from_xywh(mx - halo * 0.5, my - halo * 0.5, halo, halo),
-        halo * 0.5,
-        halo_col,
-    );
-    ui.draw_rounded_rect(
-        Rect::from_xywh(
-            mx - core_size * 0.5,
-            my - core_size * 0.5,
-            core_size,
-            core_size,
-        ),
-        core_size * 0.5,
-        core_col,
-    );
-}
-
-/// Top-right minimap. Shows walkable tiles, the player (white pip with a
-/// short heading fan), nearby enemies (red), the boss (orange), and the
-/// active rift / hub portal (cyan).
+/// Top-right minimap. Walks the hecs world to build a flat
+/// [`MinimapView`], then delegates to the pure widget in
+/// [`rift_ui::hud::frame_minimap`]. All visual layout +
+/// drawing lives there; this shim is host glue only.
 pub fn render_minimap(
     ui: &mut Ui<'_>,
     world: &hecs::World,
@@ -46,256 +20,47 @@ pub fn render_minimap(
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
 ) {
-    use rift_engine::ui::im::{Frame, Pad};
-
-    const MAP_PX_BASE: f32 = 224.0;
-    const HEADER_H_BASE: f32 = 18.0;
-    const INSET_BASE: f32 = 6.0;
-    const MARGIN_BASE: f32 = 14.0;
-    const RADIUS_BASE: f32 = 6.0;
-
-    let theme = *ui.theme();
-    let s = theme.scale;
-    let map_px = MAP_PX_BASE * s;
-    let header_h = HEADER_H_BASE * s;
-    let inset = INSET_BASE * s;
-    let margin = MARGIN_BASE * s;
-    let radius = RADIUS_BASE * s;
-    let screen = ui.screen_size();
-    let sw = screen.x;
-
-    let map_x = sw - map_px - margin;
-    let map_y = margin;
-    let panel_rect = Rect::from_xywh(map_x, map_y, map_px, map_px);
-
-    ui.draw_rounded_rect(
-        Rect::from_xywh(map_x + 2.0 * s, map_y + 3.0 * s, map_px, map_px),
-        radius + 1.0 * s,
-        Color::rgba(0.0, 0.0, 0.0, 0.32),
-    );
-    let frame = Frame::panel(&theme)
-        .with_fill(Color::rgba(0.04, 0.05, 0.07, 0.94))
-        .with_radius(radius)
-        .with_padding(Pad::all(0.0));
-    frame.show(ui, panel_rect, |ui, body| {
-        let header = Rect::from_xywh(body.x(), body.y(), body.width(), header_h);
-        ui.draw_rect(
-            Rect::from_xywh(header.x(), header.y(), header.width(), header.height()),
-            Color::rgba(0.07, 0.09, 0.12, 1.0),
-        );
-        ui.draw_rect(
-            Rect::from_xywh(header.x(), header.max.y - 1.0, header.width(), 1.0),
-            Color::rgba(0.16, 0.18, 0.24, 1.0),
-        );
-        ui.draw_text(
-            Pos2::new(header.x() + 8.0 * s, header.y() + 4.0 * s),
-            "MAP",
-            theme.fonts.size_sm,
-            theme.colors.text_dim,
-        );
-        let n_w = ui.measure_text("N", theme.fonts.size_sm);
-        let n_x = header.max.x - n_w - 12.0 * s;
-        ui.draw_rect(
-            Rect::from_xywh(n_x - 5.0 * s, header.y() + 6.0 * s, 3.0 * s, 6.0 * s),
-            Color::rgba(0.55, 0.78, 1.0, 0.65),
-        );
-        ui.draw_text(
-            Pos2::new(n_x, header.y() + 4.0 * s),
-            "N",
-            theme.fonts.size_sm,
-            Color::rgba(0.85, 0.92, 1.0, 0.95),
-        );
-
-        let inner_rect = Rect::from_xywh(
-            body.x() + inset,
-            body.y() + header_h + inset,
-            body.width() - inset * 2.0,
-            body.height() - header_h - inset * 2.0,
-        );
-
-        ui.draw_rounded_rect(
-            inner_rect,
-            (radius - 2.0 * s).max(1.0),
-            Color::rgba(0.025, 0.028, 0.035, 1.0),
-        );
-
-        let cell = (inner_rect.width().min(inner_rect.height())
-            / nav.width.max(nav.depth) as f32)
-            .max(1.0);
-        let map_w = cell * nav.width as f32;
-        let map_h = cell * nav.depth as f32;
-        let inner_x = inner_rect.x() + (inner_rect.width() - map_w) * 0.5;
-        let inner_y = inner_rect.y() + (inner_rect.height() - map_h) * 0.5;
-
-        let floor_a = Color::rgba(0.42, 0.36, 0.30, 0.95);
-        let floor_b = Color::rgba(0.36, 0.30, 0.25, 0.95);
-        for z in 0..nav.depth {
-            for x in 0..nav.width {
-                if nav.is_walkable(x, z) {
-                    let col = if (x ^ z) & 1 == 0 { floor_a } else { floor_b };
-                    ui.draw_rect(
-                        Rect::from_xywh(
-                            inner_x + x as f32 * cell,
-                            inner_y + z as f32 * cell,
-                            cell,
-                            cell,
-                        ),
-                        col,
-                    );
-                }
-            }
+    // Walkable mask, row-major.
+    let mut walkable = Vec::with_capacity(nav.width * nav.depth);
+    for z in 0..nav.depth {
+        for x in 0..nav.width {
+            walkable.push(nav.is_walkable(x, z));
         }
+    }
 
-        const VIG_STEPS: i32 = 3;
-        for i in 0..VIG_STEPS {
-            let f = 1.0 - (i as f32 / VIG_STEPS as f32);
-            let alpha = 0.28 * f;
-            let band = (4.0 - i as f32 * 1.2).max(1.0);
-            let col = Color::rgba(0.0, 0.0, 0.0, alpha);
-            ui.draw_rect(
-                Rect::from_xywh(
-                    inner_rect.x(),
-                    inner_rect.y() + i as f32,
-                    inner_rect.width(),
-                    band,
-                ),
-                col,
-            );
-            ui.draw_rect(
-                Rect::from_xywh(
-                    inner_rect.x(),
-                    inner_rect.max.y - i as f32 - band,
-                    inner_rect.width(),
-                    band,
-                ),
-                col,
-            );
-            ui.draw_rect(
-                Rect::from_xywh(
-                    inner_rect.x() + i as f32,
-                    inner_rect.y(),
-                    band,
-                    inner_rect.height(),
-                ),
-                col,
-            );
-            ui.draw_rect(
-                Rect::from_xywh(
-                    inner_rect.max.x - i as f32 - band,
-                    inner_rect.y(),
-                    band,
-                    inner_rect.height(),
-                ),
-                col,
-            );
-        }
+    // Enemy pips — separate non-boss / boss so the widget can
+    // size them independently.
+    let mut enemies: Vec<MinimapEnemy> = Vec::new();
+    for (_id, (t, _e, boss)) in world
+        .query::<(&Transform, &Enemy, Option<&Boss>)>()
+        .iter()
+    {
+        enemies.push(MinimapEnemy {
+            pos: (t.position.x, t.position.z),
+            is_boss: boss.is_some(),
+        });
+    }
 
-        ui.draw_rounded_outline(
-            inner_rect,
-            (radius - 2.0 * s).max(1.0),
-            1.0,
-            Color::rgba(0.18, 0.20, 0.26, 1.0),
-        );
+    // Local player + facing flattened to 2D nav-grid space.
+    let player = world
+        .query::<(&Transform, &Player, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (t, _, _))| MinimapPlayer {
+            pos: (t.position.x, t.position.z),
+            facing: (player_facing.x, player_facing.z),
+        })
+        .next();
 
-        let to_map = |p: Vec3| -> (f32, f32) { (inner_x + p.x * cell, inner_y + p.z * cell) };
-        let in_inner = |mx: f32, my: f32| -> bool {
-            mx >= inner_rect.x()
-                && mx <= inner_rect.max.x
-                && my >= inner_rect.y()
-                && my <= inner_rect.max.y
-        };
-
-        if let Some(p) = portal_pos {
-            let (mx, my) = to_map(p);
-            if in_inner(mx, my) {
-                let pip_size = (cell * 2.4).max(5.0);
-                draw_pip(
-                    ui,
-                    mx,
-                    my,
-                    pip_size,
-                    Color::rgba(0.45, 0.85, 1.0, 1.0),
-                    Color::rgba(0.30, 0.75, 1.0, 0.35),
-                );
-            }
-        }
-
-        for (_id, (t, _e, boss, _)) in world
-            .query::<(&Transform, &Enemy, Option<&Boss>, Option<&Health>)>()
-            .iter()
-        {
-            let (mx, my) = to_map(t.position);
-            if !in_inner(mx, my) {
-                continue;
-            }
-            if boss.is_some() {
-                let pip_size = (cell * 2.6).max(5.0);
-                draw_pip(
-                    ui,
-                    mx,
-                    my,
-                    pip_size,
-                    Color::rgba(1.00, 0.60, 0.10, 1.0),
-                    Color::rgba(1.00, 0.55, 0.10, 0.40),
-                );
-            } else {
-                let pip_size = (cell * 1.7).max(3.0);
-                draw_pip(
-                    ui,
-                    mx,
-                    my,
-                    pip_size,
-                    Color::rgba(0.94, 0.30, 0.26, 1.0),
-                    Color::rgba(0.92, 0.20, 0.18, 0.30),
-                );
-            }
-        }
-
-        if let Some((pp, _)) = world
-            .query::<(&Transform, &Player, &LocalPlayer)>()
-            .iter()
-            .map(|(_, (t, p, _))| (t.position, p.aim_dir))
-            .next()
-        {
-            let (mx, my) = to_map(pp);
-            if in_inner(mx, my) {
-                let f = Vec3::new(player_facing.x, 0.0, player_facing.z);
-                if f.length_squared() > 1e-4 {
-                    let f = f.normalize();
-                    let len = (cell * 4.5).max(8.0);
-                    let dx = f.x * len;
-                    let dz = f.z * len;
-                    const STEPS: i32 = 5;
-                    for i in 1..=STEPS {
-                        let t = i as f32 / STEPS as f32;
-                        let size = (3.2 * (1.0 - t * 0.6)).max(1.4);
-                        let alpha = (1.0 - t) * 0.85 + 0.15;
-                        ui.draw_rounded_rect(
-                            Rect::from_xywh(
-                                mx + dx * t - size * 0.5,
-                                my + dz * t - size * 0.5,
-                                size,
-                                size,
-                            ),
-                            size * 0.5,
-                            Color::rgba(0.95, 0.97, 1.0, alpha),
-                        );
-                    }
-                }
-                let pip_size = (cell * 2.0).max(4.5);
-                draw_pip(
-                    ui,
-                    mx,
-                    my,
-                    pip_size,
-                    Color::rgba(0.98, 0.99, 1.0, 1.0),
-                    Color::rgba(0.55, 0.78, 1.0, 0.45),
-                );
-            }
-        }
-    });
+    let view = MinimapView {
+        grid_width: nav.width as u32,
+        grid_depth: nav.depth as u32,
+        walkable: &walkable,
+        portal: portal_pos.map(|p| (p.x, p.z)),
+        enemies: &enemies,
+        player,
+    };
+    rift_ui::hud::frame_minimap(ui, &view);
 }
-
 /// Generic interaction prompt centred just below mid-screen, used by
 /// the rift / hub portals. `text` is the message body (e.g.
 /// "PRESS [F] TO ENTER THE RIFT").

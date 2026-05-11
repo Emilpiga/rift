@@ -229,6 +229,47 @@ impl Frame {
             ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
         }
 
+        // 4c. Soft inset shadow — three hairline rounded
+        //     outlines stepping inward from the border, each
+        //     tinted slightly darker than the fill (not black,
+        //     so it reads as recess rather than a hard ring).
+        //     Alpha falls off with depth to fake a soft falloff
+        //     without a full blur pass. Skipped on near-
+        //     transparent fills (no surface ⇒ no shadow).
+        if self.fill.0[3] > 0.20 {
+            let f = self.fill.0;
+            // 55 % of the fill RGB \u2014 darker than the surface
+            // but still tinted to the same palette so the
+            // shadow doesn't look like a black scribble on
+            // top of a colourful panel.
+            let shadow_rgb = (f[0] * 0.55, f[1] * 0.55, f[2] * 0.55);
+            // Start one pixel inside the outer border so the
+            // ring doesn't fight the stroke. Stone frames
+            // already have the 2 px bevel inner outline, so
+            // we step in past that.
+            let start_inset = if self.stone_bevel { 3.0 } else { 1.0 } + self.stroke.thickness;
+            for i in 0..3 {
+                let off = start_inset + i as f32;
+                let inner = Rect::from_xywh(
+                    rect.x() + off,
+                    rect.y() + off,
+                    (rect.width() - off * 2.0).max(0.0),
+                    (rect.height() - off * 2.0).max(0.0),
+                );
+                if inner.width() <= 0.0 || inner.height() <= 0.0 {
+                    break;
+                }
+                let r = (self.corner_radius - off).max(0.0);
+                let alpha = 0.22 / (i + 1) as f32;
+                ui.draw_rounded_outline(
+                    inner,
+                    r,
+                    1.0,
+                    Color::rgba(shadow_rgb.0, shadow_rgb.1, shadow_rgb.2, alpha),
+                );
+            }
+        }
+
         // 5. Body inside the padded interior.
         let inner = rect.shrink2(self.padding);
         body(ui, inner)

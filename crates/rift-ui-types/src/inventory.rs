@@ -67,6 +67,10 @@ pub enum TooltipLineKind {
     RequiresLevel { ok: bool },
     /// `★ …` legendary effect line. Gold.
     Legendary,
+    /// `◆ …` resonance affix line — cross-family damage axis
+    /// that intentionally breaks the trio's family lock.
+    /// Distinct violet colour per ITEMS.md §2.5.
+    Resonance,
     /// `⚓ …` anchored trait line. Saturated gold.
     Anchored,
     /// `⚠ …` warning line (e.g. unstable rift loot). Red.
@@ -204,6 +208,9 @@ pub struct StatRow<'a> {
     pub value: &'a str,
     /// `None` = use default text colour.
     pub value_color: Option<[f32; 4]>,
+    /// Optional explanatory tooltip rendered when the player
+    /// hovers the row. `None` = no tooltip.
+    pub tooltip: Option<&'a str>,
 }
 
 /// One section of the character sheet. Section header drawn

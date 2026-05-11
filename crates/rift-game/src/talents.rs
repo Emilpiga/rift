@@ -33,9 +33,16 @@ pub enum TalentEffect {
     /// +X flat bonus to a stat.
     FlatBonus { stat: TalentStat, per_rank: f32 },
     /// Modify a specific ability.
-    AbilityMod { ability: AbilityId, modifier: AbilityModifier },
+    AbilityMod {
+        ability: AbilityId,
+        modifier: AbilityModifier,
+    },
     /// Unlock a passive proc.
-    PassiveProc { description: &'static str, chance: f32, per_rank: f32 },
+    PassiveProc {
+        description: &'static str,
+        chance: f32,
+        per_rank: f32,
+    },
 }
 
 /// Stats that talents can modify.
@@ -139,7 +146,9 @@ impl TalentTree {
     pub fn compute_bonuses(&self) -> TalentBonuses {
         let mut bonuses = TalentBonuses::default();
         for node in &self.nodes {
-            if node.current_rank == 0 { continue; }
+            if node.current_rank == 0 {
+                continue;
+            }
             let rank = node.current_rank as f32;
             match &node.effect {
                 TalentEffect::PercentBonus { stat, per_rank } => {
@@ -224,10 +233,6 @@ impl TalentTree {
                 // every build path. Flat damage talents fold into
                 // the same percent channel; we don't author flat
                 // damage talents anyway.
-                (TalentStat::Damage, _) => {
-                    m.percent.add(Stat::WeaponDamage, v);
-                    m.percent.add(Stat::SpellDamage, v);
-                }
                 (TalentStat::MaxHp, TalentEffect::PercentBonus { .. }) => {
                     m.percent.add(Stat::Health, v);
                 }
@@ -238,13 +243,15 @@ impl TalentTree {
                 (TalentStat::CritDamage, _) => m.flat.add(Stat::CritDamage, v),
                 (TalentStat::AttackSpeed, _) => m.flat.add(Stat::AttackSpeed, v),
                 (TalentStat::MoveSpeed, _) => m.flat.add(Stat::MoveSpeed, v),
-                (TalentStat::CooldownReduction, _) => {
-                    m.flat.add(Stat::CooldownReduction, v)
-                }
-                // Defense / Range / ProjectileSpeed: no `Stat`
-                // counterpart in the resolved sheet yet. Drop on
-                // the floor; if/when those become first-class
-                // we'll plumb them through.
+                (TalentStat::CooldownReduction, _) => m.flat.add(Stat::CooldownReduction, v),
+                // `Defense` is now folded into `Stat::Armor`'s
+                // percent channel — a +5 % defense talent reads
+                // as +5 % armor at compute time.
+                (TalentStat::Defense, _) => m.percent.add(Stat::Armor, v),
+                // `Range` rolls onto `Stat::Range` (global ability
+                // range multiplier). `ProjectileSpeed` has no
+                // `Stat` analogue yet — dropped on the floor.
+                (TalentStat::Range, _) => m.flat.add(Stat::Range, v),
                 _ => {}
             }
         }
@@ -366,7 +373,7 @@ pub fn hunter_tree() -> TalentTree {
         TalentNode {
             id: TalentId(8),
             name: "Thick Skin",
-            description: "+5% defense per rank.",
+            description: "+5% armor per rank.",
             max_rank: 3,
             current_rank: 0,
             tier: 2,

@@ -141,6 +141,46 @@ pub struct AffixDef {
 use crate::abilities as ab;
 
 pub const AFFIX_POOL: &[AffixDef] = &[
+    // ════════ Attribute axis — flat points ═══════════════════════════
+    //
+    // The third trio axis is Attribute. These affixes don't draw
+    // from the bonus pool (their category is `Attribute`, which
+    // the bonus filter rejects); they roll only when the trio
+    // pipeline asks for an attribute line. Range / scale matches
+    // the `flat_health` shape — boring, predictable, comparable.
+    AffixDef {
+        id: "flat_strength",
+        name_template: "{} Strength",
+        effect: AffixEffect::Stat(Stat::Strength),
+        roll: (4.0, 8.0),
+        ilvl_scale: 0.6,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "flat_agility",
+        name_template: "{} Agility",
+        effect: AffixEffect::Stat(Stat::Agility),
+        roll: (4.0, 8.0),
+        ilvl_scale: 0.6,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "flat_intellect",
+        name_template: "{} Intellect",
+        effect: AffixEffect::Stat(Stat::Intellect),
+        roll: (4.0, 8.0),
+        ilvl_scale: 0.6,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
     // ════════ Common-tier: pure stats ═══════════════════════════════
     AffixDef {
         id: "flat_health",
@@ -218,17 +258,6 @@ pub const AFFIX_POOL: &[AffixDef] = &[
         min_ilvl: 1,
         rarity_min: Rarity::Common,
         weight: 50,
-    },
-    AffixDef {
-        id: "pct_physical_resist",
-        name_template: "{} Physical Resist",
-        effect: AffixEffect::Stat(Stat::PhysicalResist),
-        roll: (0.03, 0.06),
-        ilvl_scale: 0.002,
-        tags: DEFENSE | MELEE,
-        min_ilvl: 3,
-        rarity_min: Rarity::Magic,
-        weight: 45,
     },
     AffixDef {
         id: "pct_elemental_resist",
@@ -379,10 +408,7 @@ pub const AFFIX_POOL: &[AffixDef] = &[
     AffixDef {
         id: "transform_frost_ray_shatter",
         name_template: "Frost Ray detonates into shards",
-        effect: AffixEffect::TransformAbility(
-            ab::FROST_RAY,
-            AbilityVariant::FrostRayShatter,
-        ),
+        effect: AffixEffect::TransformAbility(ab::FROST_RAY, AbilityVariant::FrostRayShatter),
         roll: (0.0, 0.0),
         ilvl_scale: 0.0,
         tags: ICE | CASTER,
@@ -398,39 +424,6 @@ pub const AFFIX_POOL: &[AffixDef] = &[
     // but normally never roll as bonuses because every item slot
     // already carries them. The bonus-roll path filters them
     // out by `id` in `Item::roll`.
-    AffixDef {
-        id: "flat_vitality",
-        name_template: "{} Vitality",
-        effect: AffixEffect::Stat(Stat::Vitality),
-        roll: (8.0, 16.0),
-        ilvl_scale: 3.0,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
-    AffixDef {
-        id: "pct_weapon_damage",
-        name_template: "{} Weapon Damage",
-        effect: AffixEffect::Stat(Stat::WeaponDamage),
-        roll: (0.05, 0.12),
-        ilvl_scale: 0.004,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
-    AffixDef {
-        id: "pct_spell_damage",
-        name_template: "{} Spell Damage",
-        effect: AffixEffect::Stat(Stat::SpellDamage),
-        roll: (0.05, 0.12),
-        ilvl_scale: 0.004,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
     AffixDef {
         id: "pct_physical_damage",
         name_template: "{} Physical Damage",
@@ -454,28 +447,6 @@ pub const AFFIX_POOL: &[AffixDef] = &[
         weight: 0,
     },
     AffixDef {
-        id: "pct_beam_damage",
-        name_template: "{} Beam Damage",
-        effect: AffixEffect::Stat(Stat::BeamDamage),
-        roll: (0.06, 0.14),
-        ilvl_scale: 0.005,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
-    AffixDef {
-        id: "pct_aoe_damage",
-        name_template: "{} AoE Damage",
-        effect: AffixEffect::Stat(Stat::AoeDamage),
-        roll: (0.06, 0.14),
-        ilvl_scale: 0.005,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
-    AffixDef {
         id: "pct_melee_damage",
         name_template: "{} Melee Damage",
         effect: AffixEffect::Stat(Stat::MeleeDamage),
@@ -488,10 +459,188 @@ pub const AFFIX_POOL: &[AffixDef] = &[
     },
 ];
 
+// ---------------------------------------------------------------------
+// Resonance pool (ITEMS.md §2.5 / §3 Phase 3)
+// ---------------------------------------------------------------------
+//
+// "Cross-family" damage-axis lines. Every entry mirrors a normal
+// axis affix but rolls at ~60 % of its sibling's magnitudes
+// (roll-range and ilvl_scale both scaled). The roll pipeline
+// draws from this pool *only* in the resonance phase and filters
+// to axes the base's `BaseFamily` would otherwise reject \u2014 so a
+// resonance line is by construction something the item shouldn't
+// "naturally" have. That's the design: a tiny, exciting,
+// off-archetype bonus that rewards specific build pivots.
+//
+// `min_ilvl: 5` everywhere keeps resonance off the very earliest
+// Rare drops; `rarity_min: Rarity::Rare` enforces the rarity gate
+// at the def level too even though the pipeline chance-gates it
+// separately. `weight: 1` everywhere because the pipeline picks
+// uniformly from the filtered subset \u2014 weight differentiation
+// would just bias which off-family pivot the player gets.
+pub const RESONANCE_POOL: &[AffixDef] = &[
+    // ── Element resonance ───────────────────────────────────────
+    AffixDef {
+        id: "res_physical_damage",
+        name_template: "Resonant {} Physical Damage",
+        effect: AffixEffect::Stat(Stat::PhysicalDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_fire_damage",
+        name_template: "Resonant {} Fire Damage",
+        effect: AffixEffect::Stat(Stat::FireDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_ice_damage",
+        name_template: "Resonant {} Ice Damage",
+        effect: AffixEffect::Stat(Stat::IceDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_lightning_damage",
+        name_template: "Resonant {} Lightning Damage",
+        effect: AffixEffect::Stat(Stat::LightningDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    // ── Archetype resonance ─────────────────────────────────────
+    AffixDef {
+        id: "res_projectile_damage",
+        name_template: "Resonant {} Projectile Damage",
+        effect: AffixEffect::Stat(Stat::ProjectileDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_melee_damage",
+        name_template: "Resonant {} Melee Damage",
+        effect: AffixEffect::Stat(Stat::MeleeDamage),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.003,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    // ── Attribute resonance ──────────────────────────
+    // Flat attribute points at ~60 % of the in-axis roll — a
+    // resonance line is supposed to feel like a bonus, not a
+    // straight upgrade over the family-locked attribute slot.
+    AffixDef {
+        id: "res_strength",
+        name_template: "Resonant {} Strength",
+        effect: AffixEffect::Stat(Stat::Strength),
+        roll: (2.0, 5.0),
+        ilvl_scale: 0.4,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_agility",
+        name_template: "Resonant {} Agility",
+        effect: AffixEffect::Stat(Stat::Agility),
+        roll: (2.0, 5.0),
+        ilvl_scale: 0.4,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+    AffixDef {
+        id: "res_intellect",
+        name_template: "Resonant {} Intellect",
+        effect: AffixEffect::Stat(Stat::Intellect),
+        roll: (2.0, 5.0),
+        ilvl_scale: 0.4,
+        tags: ALL,
+        min_ilvl: 5,
+        rarity_min: Rarity::Rare,
+        weight: 1,
+    },
+];
+
+/// Per-rarity probability that an item gets an extra Resonance
+/// affix appended after the bonus block. ITEMS.md §2.5: Rare 5 %,
+/// Legendary 25 %. Common / Magic never resonate.
+pub fn resonance_chance(rarity: Rarity) -> f32 {
+    match rarity {
+        Rarity::Common | Rarity::Magic => 0.0,
+        Rarity::Rare => 0.05,
+        Rarity::Legendary => 0.25,
+    }
+}
+
+/// Element targeted by a resonance affix; `None` if not in the
+/// resonance pool or not an element axis.
+pub fn resonance_element(def: &AffixDef) -> Option<families::Element> {
+    if !is_resonance(def) {
+        return None;
+    }
+    affix_element(def)
+}
+
+/// Archetype targeted by a resonance affix.
+pub fn resonance_archetype(def: &AffixDef) -> Option<families::Archetype> {
+    if !is_resonance(def) {
+        return None;
+    }
+    affix_archetype(def)
+}
+
+/// Attribute targeted by a resonance affix.
+pub fn resonance_attribute(def: &AffixDef) -> Option<families::Attribute> {
+    if !is_resonance(def) {
+        return None;
+    }
+    affix_attribute(def)
+}
+
 /// Look up an affix by stable id. `O(n)` — used for save-game
-/// rehydration, not hot paths.
+/// rehydration, not hot paths. Searches both [`AFFIX_POOL`] and
+/// [`RESONANCE_POOL`] so a persisted resonance line rehydrates
+/// transparently.
 pub fn lookup(id: &str) -> Option<&'static AffixDef> {
-    AFFIX_POOL.iter().find(|a| a.id == id)
+    AFFIX_POOL
+        .iter()
+        .chain(RESONANCE_POOL.iter())
+        .find(|a| a.id == id)
+}
+
+/// `true` if `def` lives in [`RESONANCE_POOL`]. Resonance lines
+/// are identified by the `res_` id prefix — a convention the
+/// const pool authors maintain, since `AffixDef` itself has no
+/// data flag for it. Cheap byte-prefix check, no pointer
+/// comparison, works for both freshly-rolled and persisted-then-
+/// rehydrated items.
+pub fn is_resonance(def: &AffixDef) -> bool {
+    def.id.as_bytes().starts_with(b"res_")
 }
 
 /// `true` if `effect` is a "legendary" effect — i.e. one of the
@@ -507,46 +656,155 @@ pub fn is_legendary_effect(effect: &AffixEffect) -> bool {
     )
 }
 
+// ---------------------------------------------------------------------
+// Axis classification — Element × Archetype
+// ---------------------------------------------------------------------
+//
+// Phase 2 of the itemisation refactor (see `ITEMS.md` §3 Phase 2)
+// classifies every affix as one of three logical categories. The
+// trio rolling pipeline reads these helpers to filter the
+// `AFFIX_POOL` into per-axis sub-pools without growing the data
+// table — the affixes themselves don't carry the category, it
+// falls out of the `Stat` they wrap.
+//
+// The historical "Source" axis (WeaponDamage / SpellDamage) is
+// retired — those stats overlap completely with Element and
+// Archetype scaling. The future Attribute axis
+// (Strength / Agility / Intellect) replaces it; for now the
+// pipeline is an Element × Archetype duo.
+
+use super::families;
+
+/// Logical category of an affix, used by [`super::Item::roll`] to
+/// split affixes into pipeline phases. Falls out of
+/// `AffixDef::effect` plus the `res_` id-prefix convention —
+/// affixes don't carry the category as data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AffixCategory {
+    /// `Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage)`.
+    Element,
+    /// `Stat(ProjectileDamage | MeleeDamage)`. Beam / AoE damage
+    /// stats are not gated on the archetype axis — they're
+    /// covered by element scaling. Their `Stat` values are still
+    /// applied at runtime by abilities; they just never roll as
+    /// affixes.
+    Archetype,
+    /// `Stat(Strength | Agility | Intellect)` — flat attribute
+    /// points. The third trio axis; family-locked to the base's
+    /// declared attribute (or wildcard).
+    Attribute,
+    /// Anything in [`RESONANCE_POOL`] — a damage-axis line that
+    /// **breaks the family lock by design**. Rolled in its own
+    /// dedicated slot with `{Rare: 5 %, Legendary: 25 %}` chance.
+    Resonance,
+    /// Everything else — defensives, crit, utility, ability mods,
+    /// legendary effects. The bonus pool draws from here.
+    Bonus,
+}
+
+/// Classify `def` for the trio pipeline. `is_legendary_effect`
+/// still gates the legendary-effect slot independently; a
+/// legendary effect is always `Bonus` by category since it never
+/// appears on a damage-axis line. Resonance affixes are
+/// classified by pool membership ([`is_resonance`]) regardless
+/// of which `Stat` they wrap.
+pub fn category(def: &AffixDef) -> AffixCategory {
+    use crate::stats::Stat::*;
+    if is_resonance(def) {
+        return AffixCategory::Resonance;
+    }
+    match def.effect {
+        AffixEffect::Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage) => {
+            AffixCategory::Element
+        }
+        AffixEffect::Stat(ProjectileDamage | MeleeDamage) => AffixCategory::Archetype,
+        AffixEffect::Stat(Strength | Agility | Intellect) => AffixCategory::Attribute,
+        _ => AffixCategory::Bonus,
+    }
+}
+
+/// Item-family `Attribute` an affix targets.
+pub fn affix_attribute(def: &AffixDef) -> Option<families::Attribute> {
+    use crate::stats::Stat::*;
+    match def.effect {
+        AffixEffect::Stat(Strength) => Some(families::Attribute::Strength),
+        AffixEffect::Stat(Agility) => Some(families::Attribute::Agility),
+        AffixEffect::Stat(Intellect) => Some(families::Attribute::Intellect),
+        _ => None,
+    }
+}
+
+/// Item-family `Element` an affix targets.
+pub fn affix_element(def: &AffixDef) -> Option<families::Element> {
+    use crate::stats::Stat::*;
+    match def.effect {
+        AffixEffect::Stat(PhysicalDamage) => Some(families::Element::Physical),
+        AffixEffect::Stat(FireDamage) => Some(families::Element::Fire),
+        AffixEffect::Stat(IceDamage) => Some(families::Element::Ice),
+        AffixEffect::Stat(LightningDamage) => Some(families::Element::Lightning),
+        _ => None,
+    }
+}
+
+/// Item-family `Archetype` an affix targets. Beam / AoE damage
+/// stats exist on the [`crate::stats::Stat`] enum (abilities still
+/// apply them at runtime) but no affix rolls them — they're
+/// covered by the element axis. Hence the narrow match.
+pub fn affix_archetype(def: &AffixDef) -> Option<families::Archetype> {
+    use crate::stats::Stat::*;
+    match def.effect {
+        AffixEffect::Stat(ProjectileDamage) => Some(families::Archetype::Projectile),
+        AffixEffect::Stat(MeleeDamage) => Some(families::Archetype::Melee),
+        _ => None,
+    }
+}
+
 /// Number of leading affix entries on a fresh roll that come from
 /// the slot's signature ([`signature_for`]). The first N entries
 /// of [`super::Item::affixes`] are always signatures \u2014 reading
 /// this is how tooltip rendering tells "guaranteed lines" from
 /// "bonus rolls" without storing an extra flag per affix.
+///
+/// **Phase 2 update:** signatures no longer carry damage-axis
+/// lines (those move to the trio pipeline). Each slot's signature
+/// is now `Vitality + slot-defensive-stat`, with `Hands` keeping
+/// the crit pair because crit identity is what gloves *mean* in
+/// this game.
 pub fn signature_count(slot: super::items::EquipSlot) -> usize {
     use super::items::EquipSlot::*;
     match slot {
-        // Vitality + WeaponDamage + SpellDamage
-        Weapon => 3,
-        // Vitality + CritChance + CritDamage
-        Hands => 3,
-        // Vitality + slot-specific defensive / utility line
-        Helm | Shoulders | Chest | Legs | Boots => 2,
-        // Vitality + one random element / archetype line
-        Ring1 | Ring2 | Amulet => 2,
+        // CritChance + CritDamage — gloves are the crit slot in
+        // this game; the pair stays as a signature.
+        Hands => 2,
+        // Slot defensive / utility line only.
+        Helm | Shoulders | Chest | Legs | Boots => 1,
+        // No signature lines — identity comes from the
+        // family-locked Element × Archetype trio.
+        Weapon | Ring1 | Ring2 | Amulet => 0,
     }
 }
 
 /// Deterministic per-slot affix ids that every item gets injected
-/// regardless of rarity. Returned as a small `Vec` because some
-/// slots (Ring/Amulet) randomise the *kind* of element / archetype
-/// while still always producing exactly one such line.
+/// regardless of rarity.
 ///
-/// Vitality is always slot 0 — read top-down on every tooltip the
-/// player sees `+N Vitality` first, then the slot signature.
+/// **Phase 2 update:** signatures are now slim and deterministic
+/// — one slot-defensive / utility line (Hands keeps the crit
+/// pair). The damage-axis trio (Element × Archetype) is rolled
+/// separately by [`super::Item::roll`] from the family-locked
+/// sub-pools. Weapon and accessories have no signature at all.
+///
+/// The `_rng` parameter is retained on the signature because future
+/// signatures may randomise (e.g. a Helm rolling CDR vs.
+/// MaxResource); none of today's signatures need it.
 pub fn signature_for(
     slot: super::items::EquipSlot,
-    rng: &mut super::rng::LootRng,
+    _rng: &mut super::rng::LootRng,
 ) -> Vec<&'static str> {
     use super::items::EquipSlot::*;
-    let mut out: Vec<&'static str> = Vec::with_capacity(3);
-    out.push("flat_vitality");
+    let mut out: Vec<&'static str> = Vec::with_capacity(2);
     match slot {
-        Weapon => {
-            out.push("pct_weapon_damage");
-            out.push("pct_spell_damage");
-        }
         Helm => out.push("pct_cooldown"),
-        Shoulders => out.push("pct_armor"),
+        Shoulders => out.push("flat_armor"),
         Chest => out.push("flat_health"),
         Legs => out.push("flat_armor"),
         Hands => {
@@ -554,32 +812,44 @@ pub fn signature_for(
             out.push("pct_crit_damage");
         }
         Boots => out.push("pct_move_speed"),
-        Ring1 | Ring2 => {
-            // One random elemental damage line per ring. Each
-            // ring rolls independently, so a player can stack
-            // matching elements or hedge across two.
-            const ELEMENTS: [&str; 4] = [
-                "pct_fire_damage",
-                "pct_ice_damage",
-                "pct_lightning_damage",
-                "pct_physical_damage",
-            ];
-            let pick = rng.range(0, ELEMENTS.len() as u32) as usize;
-            out.push(ELEMENTS[pick]);
-        }
-        Amulet => {
-            // One random archetype damage line. Maps to which
-            // ability shape (projectile / beam / AoE / melee)
-            // benefits.
-            const ARCHETYPES: [&str; 4] = [
-                "pct_projectile_damage",
-                "pct_beam_damage",
-                "pct_aoe_damage",
-                "pct_melee_damage",
-            ];
-            let pick = rng.range(0, ARCHETYPES.len() as u32) as usize;
-            out.push(ARCHETYPES[pick]);
+        Weapon | Ring1 | Ring2 | Amulet => {
+            // No signature line — identity comes entirely from
+            // the family-locked Element × Archetype trio.
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::items::EquipSlot;
+    use super::super::rng::LootRng;
+    use super::*;
+
+    /// Every id returned by [`signature_for`] must resolve in
+    /// [`AFFIX_POOL`]. A `None` return from [`lookup`] is silently
+    /// dropped by `Item::roll` and produces an item missing its
+    /// guaranteed slot line — exactly the regression we just fixed
+    /// for Shoulders. Tests every slot, and (for Ring/Amulet) every
+    /// random branch so a future content change can't sneak an
+    /// unknown id past us.
+    #[test]
+    fn every_signature_id_resolves_in_pool() {
+        for slot in EquipSlot::ALL {
+            // Drive the slot through enough seeds that every
+            // random branch (Ring/Amulet pick 1-of-4) is hit.
+            for seed in 0..32u64 {
+                let mut rng = LootRng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let ids = signature_for(slot, &mut rng);
+                for id in ids {
+                    assert!(
+                        lookup(id).is_some(),
+                        "signature id `{id}` for slot {slot:?} (seed {seed}) \
+                         not found in AFFIX_POOL — `Item::roll` would silently \
+                         drop this line",
+                    );
+                }
+            }
+        }
+    }
 }

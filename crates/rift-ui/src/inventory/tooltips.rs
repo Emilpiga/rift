@@ -99,6 +99,7 @@ fn render_item_tooltip_inner(
                     Color::rgba(0.96, 0.40, 0.40, 1.0)
                 }
                 TooltipLineKind::Legendary => Color::rgba(1.00, 0.70, 0.20, 1.0),
+                TooltipLineKind::Resonance => Color::rgba(0.78, 0.55, 1.00, 1.0),
                 TooltipLineKind::Anchored => Color::rgba(1.00, 0.82, 0.25, 1.0),
                 TooltipLineKind::Synergy => theme.colors.accent,
                 TooltipLineKind::Stat | TooltipLineKind::Blank => theme.colors.text,

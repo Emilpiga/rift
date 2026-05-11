@@ -118,6 +118,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &state.player_state.abilities,
         state.player_state.experience.level,
         state.player_state.resource_pct * state.player_state.stats().max_resource,
+        state.player_state.stats(),
         // Highlight whichever slot is mid-targeting so the
         // player has a clear "you're aiming this one" cue.
         state

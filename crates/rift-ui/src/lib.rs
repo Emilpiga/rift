@@ -79,6 +79,7 @@
 // screen is its own module so a tweak to inventory doesn't
 // invalidate the character-select compile cache.
 pub mod character_select;
+pub mod chat;
+pub mod hud;
 pub mod inventory;
-// pub mod hud;
 // pub mod chat;

@@ -106,6 +106,7 @@ impl NetClient {
                     cmd.move_dir,
                     cmd.aim_dir,
                     cmd.buttons,
+                    self.predicted_move_speed,
                 );
                 rift_game::kinematic::integrate(&mut self.predicted, floor, dt);
             }
@@ -140,6 +141,17 @@ impl NetClient {
         } else {
             self.pending_aim = [0.0, 0.0];
         }
+    }
+
+    /// Update the local player's predicted `move_speed`. The game
+    /// loop calls this once per frame with `PlayerState::stats().
+    /// move_speed`, so Boots/MoveSpeed affixes feel snappy on the
+    /// local avatar without waiting for a server reconcile.
+    pub fn set_predicted_move_speed(&mut self, move_speed: f32) {
+        // Clamp to a sane floor so a malformed sheet can't freeze
+        // local movement. The authoritative server still uses its
+        // own value, so this is purely a UX guard.
+        self.predicted_move_speed = move_speed.max(0.5);
     }
 
     /// Arm the auth handshake: tell the net layer the player

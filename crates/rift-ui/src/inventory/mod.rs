@@ -18,7 +18,7 @@ mod stash_panel;
 mod stats_panel;
 mod tooltips;
 
-use rift_ui_im::{Button, ButtonSize, Color, Frame, Id, ImKey, Pad, Pos2, Rect, Stroke, Ui};
+use rift_ui_im::{Button, ButtonSize, Color, Frame, Id, ImKey, Pad, Pos2, Rect, Ui};
 use rift_ui_types::inventory::{
     DragSource, InventoryAction, InventoryUiState, InventoryView, ItemView,
 };
@@ -468,9 +468,7 @@ pub fn frame_inventory(
     // target slot reads as empty between the drop frame and
     // the next inventory snapshot, producing a one-frame
     // "flicker on target before it lands".
-    if let (Some(src), Some(rect_arr)) =
-        (state.in_transit_source, state.in_transit_dest_rect)
-    {
+    if let (Some(src), Some(rect_arr)) = (state.in_transit_source, state.in_transit_dest_rect) {
         use rift_ui_types::inventory::InTransitSource;
         let item = match src {
             InTransitSource::Bag(idx) => view.items.get(idx as usize).and_then(|o| o.as_ref()),
@@ -484,15 +482,10 @@ pub fn frame_inventory(
                 .and_then(|t| t.items.get(idx as usize).and_then(|o| o.as_ref())),
         };
         if let Some(it) = item {
-            let rect =
-                Rect::from_xywh(rect_arr[0], rect_arr[1], rect_arr[2], rect_arr[3]);
+            let rect = Rect::from_xywh(rect_arr[0], rect_arr[1], rect_arr[2], rect_arr[3]);
             self::drag::build_item_slot(Some(it))
                 .dim_alpha(0.55)
-                .show_rect(
-                    ui,
-                    rect,
-                    Id::root("inv").child("in_transit_dest_ghost"),
-                );
+                .show_rect(ui, rect, Id::root("inv").child("in_transit_dest_ghost"));
         }
     }
 
@@ -621,15 +614,17 @@ fn render_currency_bar(ui: &mut Ui<'_>, rect: Rect, shards: u32, fit: f32) {
         return;
     }
     let theme = *ui.theme();
-    Frame::inset(&theme)
-        .with_fill(theme.colors.bg_stone_alt)
-        .with_stroke(Stroke::new(1.0, theme.colors.border_stone))
-        .with_padding(Pad::all(0.0))
-        .show_only(ui, rect);
+    // Compact "badge" look: pill-rounded, noticeably darker
+    // than the bag section behind it, with a thin warm-gold
+    // outline so it reads as a currency tag rather than a
+    // generic toolbar row.
+    let radius = (rect.height() * 0.5).min(14.0 * fit);
+    ui.draw_rounded_rect(rect, radius, Color::rgba(0.05, 0.06, 0.08, 0.92));
+    ui.draw_rounded_outline(rect, radius, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.65));
 
-    let pad = 12.0 * fit;
+    let pad = 10.0 * fit;
     let glyph = "\u{25C6}";
-    let glyph_size = theme.fonts.size_lg;
+    let glyph_size = theme.fonts.size_md;
     let amount = format_amount(shards);
     let amount_size = theme.fonts.size_md;
     let glyph_color = Color::rgba(0.60, 0.85, 1.00, 1.0);
@@ -652,7 +647,7 @@ fn render_currency_bar(ui: &mut Ui<'_>, rect: Rect, shards: u32, fit: f32) {
         theme.colors.text,
     );
     let label_size = theme.fonts.size_sm;
-    let label_x = amount_x + ui.measure_text(&amount, amount_size) + 8.0 * fit;
+    let label_x = amount_x + ui.measure_text(&amount, amount_size) + 6.0 * fit;
     ui.draw_text(
         Pos2::new(label_x, rect.y() + (rect.height() - label_size) * 0.5),
         "Shards",

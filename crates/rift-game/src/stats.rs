@@ -40,30 +40,30 @@ use crate::hero::HERO;
 /// Every stat that can appear on an item or character sheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stat {
+    // Attributes — flat bonus points that fold into the
+    // character's `Attributes` block at compute time, then drive
+    // class scaling (damage / HP / crit / etc.).
+    Strength,
+    Agility,
+    Intellect,
     // Offensive
     CritChance,
     CritDamage,
     AttackSpeed,
     // Defensive
     Health,
-    /// Flat life pool bonus. Distinct from Health so guaranteed
-    /// "+N Vitality" item lines stack with rare "+N Health"
-    /// rolls instead of overwriting each other in tooltips.
-    Vitality,
     Armor,
     Evasion,
     /// Flat health regenerated per second. Authored on items as
     /// e.g. `+3 Health Regen`. Ticks alongside essence regen on
     /// the server, no spend-pause gating.
     HealthRegen,
-    /// Damage reduction vs. `Element::Physical` ability hits,
-    /// percent (0..1, capped at 0.75 in the consumer). Stacks
-    /// additively across gear.
-    PhysicalResist,
     /// Damage reduction vs. `Element::{Fire,Ice,Lightning}`
     /// ability hits, percent (0..1, capped at 0.75). One stat
     /// covers all three elements; per-element resists can be
-    /// split out later if/when the design needs it.
+    /// split out later if/when the design needs it. Physical
+    /// damage is mitigated solely by `Armor` (soft-capped flat
+    /// reduction) — there is no separate `PhysicalResist`.
     ElementalResist,
     /// Bonus to incoming heals, percent (0.20 = +20% heals
     /// received). Multiplies both direct heals and HoT ticks
@@ -80,10 +80,10 @@ pub enum Stat {
     /// Multiplies the class's base regen rate.
     ResourceRegen,
     MoveSpeed,
-    // Damage-bucket scaling — multiplies abilities whose
-    // `Scaling` matches.
-    WeaponDamage,
-    SpellDamage,
+    /// Global ability-range multiplier. Each `+1.0` here adds
+    /// +100 % to projectile travel distance / beam length / AoE
+    /// radius. Roll values are percent (e.g. `0.10` = +10 %).
+    Range,
     // Elemental scaling — multiplies abilities whose
     // `Element` matches.
     PhysicalDamage,
@@ -102,23 +102,23 @@ impl Stat {
     /// Display name (singular, capitalised).
     pub fn name(self) -> &'static str {
         match self {
+            Stat::Strength => "Strength",
+            Stat::Agility => "Agility",
+            Stat::Intellect => "Intellect",
             Stat::CritChance => "Crit Chance",
             Stat::CritDamage => "Crit Damage",
             Stat::AttackSpeed => "Attack Speed",
             Stat::Health => "Health",
-            Stat::Vitality => "Vitality",
             Stat::Armor => "Armor",
             Stat::Evasion => "Evasion",
             Stat::HealthRegen => "Health Regen",
-            Stat::PhysicalResist => "Physical Resist",
             Stat::ElementalResist => "Elemental Resist",
             Stat::HealingReceived => "Healing Received",
             Stat::MaxResource => "Max Essence",
             Stat::CooldownReduction => "Cooldown Reduction",
             Stat::ResourceRegen => "Essence Regen",
             Stat::MoveSpeed => "Move Speed",
-            Stat::WeaponDamage => "Weapon Damage",
-            Stat::SpellDamage => "Spell Damage",
+            Stat::Range => "Range",
             Stat::PhysicalDamage => "Physical Damage",
             Stat::FireDamage => "Fire Damage",
             Stat::IceDamage => "Ice Damage",
@@ -142,12 +142,10 @@ impl Stat {
                 | Stat::CooldownReduction
                 | Stat::ResourceRegen
                 | Stat::MoveSpeed
+                | Stat::Range
                 | Stat::Evasion
-                | Stat::PhysicalResist
                 | Stat::ElementalResist
                 | Stat::HealingReceived
-                | Stat::WeaponDamage
-                | Stat::SpellDamage
                 | Stat::PhysicalDamage
                 | Stat::FireDamage
                 | Stat::IceDamage
@@ -222,7 +220,9 @@ pub struct StatBlock {
 
 impl StatBlock {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Append `(stat, value)`. Duplicates are kept; [`Self::get`]
@@ -298,21 +298,15 @@ pub struct CharacterStats {
     /// Bonus to incoming heals, 0..1 (`+0.20` = +20% heals
     /// received). Multiplied onto direct heals + HoT ticks.
     pub healing_received: f32,
-    /// Damage reduction vs. `Element::Physical`, 0..0.75.
-    pub physical_resist: f32,
     /// Damage reduction vs. `Element::{Fire,Ice,Lightning}`,
-    /// 0..0.75.
+    /// 0..0.75. Physical damage is mitigated solely by `armor`.
     pub elemental_resist: f32,
-    /// Flat armor — mirrors `Stat::Armor`. Consumed via
+    /// Flat armor — mirrors `Stat::Armor`, with Strength folded
+    /// in as a percent bonus. Consumed via
     /// [`CharacterStats::armor_damage_reduction`].
     pub armor: f32,
     /// Evasion chance, 0..1 — mirrors `Stat::Evasion`.
     pub evasion: f32,
-    /// Total defense rating (class base × primary-attr scaling).
-    /// Kept separate from `armor` because classes still talk about
-    /// "defense" as a single number; once the combat layer is
-    /// unified we can collapse the two.
-    pub defense: f32,
 
     // --- Offensive --------------------------------------------------
     /// Base outgoing damage — class base scaled by primary
@@ -335,8 +329,9 @@ pub struct CharacterStats {
     /// Cooldown reduction, 0..1 (capped at 0.75). Mirrors
     /// `Stat::CooldownReduction`.
     pub cooldown_reduction: f32,
-    /// Effective ability range in metres (class base, no affix
-    /// source yet).
+    /// Global ability-range multiplier (`1.0` = no change). Scales
+    /// projectile travel distance, beam length, and AoE radius
+    /// uniformly at the cast site.
     pub range: f32,
 
     // --- Elemental -------------------------------------------------
@@ -345,12 +340,6 @@ pub struct CharacterStats {
     pub ice_damage: f32,
     pub lightning_damage: f32,
     pub physical_damage: f32,
-
-    // --- Damage buckets --------------------------------------------
-    /// Multiplies abilities whose `Scaling` is `Weapon`. 0..1.
-    pub weapon_damage: f32,
-    /// Multiplies abilities whose `Scaling` is `Spell`. 0..1.
-    pub spell_damage: f32,
 
     // --- Archetype scaling -----------------------------------------
     pub projectile_damage: f32,
@@ -377,21 +366,6 @@ impl CharacterStats {
     ) -> Self {
         let class = &HERO;
         let primary = class.primary_attribute;
-        let primary_value = attrs.get(primary) as f32;
-
-        // Per-attribute scaling. Each point of primary -> +1 % damage.
-        let primary_dmg_mult = 1.0 + primary_value * 0.01;
-        // Primary +0.5 %, Strength +0.8 % defense per point.
-        let attr_defense_mult =
-            1.0 + primary_value * 0.005 + attrs.strength as f32 * 0.008;
-        // Vitality -> +3 flat HP per point.
-        let attr_hp_bonus = attrs.vitality as f32 * 3.0;
-        // Agility -> +0.1 % crit, +0.5 % attack speed per point.
-        let attr_crit_bonus = attrs.agility as f32 * 0.001;
-        let attr_aspd_bonus = attrs.agility as f32 * 0.005;
-
-        // Class-level scaling.
-        let class_hp = class.base_hp + class.hp_per_level * level as f32;
 
         // Helper: equipment + modifiers.flat sum for a stat.
         let flat = |s: Stat| equipment.get(s) + modifiers.flat.get(s);
@@ -399,45 +373,67 @@ impl CharacterStats {
         // contributions). Talents / buffs only.
         let pct = |s: Stat| 1.0 + modifiers.percent.get(s);
 
+        // Fold item-rolled attribute bonuses into the manual
+        // `Attributes` block before any scaling reads from it.
+        // Items roll flat points (`+14 Strength`) that stack with
+        // the point-spend screen 1:1 — gear and manual investment
+        // are interchangeable in the formula, which keeps the
+        // numbers honest.
+        let strength = attrs.strength as f32 + flat(Stat::Strength);
+        let agility = attrs.agility as f32 + flat(Stat::Agility);
+        let intellect = attrs.intellect as f32 + flat(Stat::Intellect);
+        let primary_value = match primary {
+            crate::attributes::AttributeType::Strength => strength,
+            crate::attributes::AttributeType::Agility => agility,
+            crate::attributes::AttributeType::Intellect => intellect,
+            crate::attributes::AttributeType::Vitality => attrs.vitality as f32,
+        };
+
+        // Per-attribute scaling. Each point of primary -> +1 % damage.
+        let primary_dmg_mult = 1.0 + primary_value * 0.01;
+        // Strength -> +0.8 % armor per point. Folds into the
+        // flat armor pool as a percent multiplier alongside the
+        // talent-channel `Stat::Armor` percent line.
+        let strength_armor_mult = 1.0 + strength * 0.008;
+        // Vitality -> +3 flat HP per point.
+        let attr_hp_bonus = attrs.vitality as f32 * 3.0;
+        // Agility -> +0.1 % crit, +0.5 % attack speed per point.
+        let attr_crit_bonus = agility * 0.001;
+        let attr_aspd_bonus = agility * 0.005;
+        // Intellect -> +2 flat max essence per point.
+        let attr_resource_bonus = intellect * 2.0;
+
+        // Class-level scaling.
+        let class_hp = class.base_hp + class.hp_per_level * level as f32;
+
         Self {
-            max_hp: (class_hp
-                + attr_hp_bonus
-                + flat(Stat::Health)
-                + flat(Stat::Vitality))
-                * pct(Stat::Health),
+            max_hp: (class_hp + attr_hp_bonus + flat(Stat::Health)) * pct(Stat::Health),
             max_resource: (class.base_resource
                 + class.resource_per_level * level as f32
+                + attr_resource_bonus
                 + flat(Stat::MaxResource))
                 * pct(Stat::MaxResource),
-            resource_regen: class.base_resource_regen
-                * (1.0 + flat(Stat::ResourceRegen)),
+            resource_regen: class.base_resource_regen * (1.0 + flat(Stat::ResourceRegen)),
             health_regen: flat(Stat::HealthRegen).max(0.0),
             healing_received: flat(Stat::HealingReceived),
-            physical_resist: flat(Stat::PhysicalResist).clamp(0.0, 0.75),
             elemental_resist: flat(Stat::ElementalResist).clamp(0.0, 0.75),
-            armor: flat(Stat::Armor) * pct(Stat::Armor),
+            armor: flat(Stat::Armor) * pct(Stat::Armor) * strength_armor_mult,
             evasion: flat(Stat::Evasion),
-            defense: class.base_defense * attr_defense_mult,
 
             damage: class.base_damage * primary_dmg_mult,
-            crit_chance: class.base_crit_chance
-                + attr_crit_bonus
-                + flat(Stat::CritChance),
+            crit_chance: class.base_crit_chance + attr_crit_bonus + flat(Stat::CritChance),
             crit_damage: 0.5 + flat(Stat::CritDamage),
             attack_speed: class.base_attack_speed
                 * (1.0 + attr_aspd_bonus + flat(Stat::AttackSpeed)),
 
             move_speed: class.base_move_speed * (1.0 + flat(Stat::MoveSpeed)),
             cooldown_reduction: flat(Stat::CooldownReduction).min(0.75),
-            range: class.base_range,
+            range: 1.0 + flat(Stat::Range),
 
             fire_damage: flat(Stat::FireDamage),
             ice_damage: flat(Stat::IceDamage),
             lightning_damage: flat(Stat::LightningDamage),
             physical_damage: flat(Stat::PhysicalDamage),
-
-            weapon_damage: flat(Stat::WeaponDamage),
-            spell_damage: flat(Stat::SpellDamage),
 
             projectile_damage: flat(Stat::ProjectileDamage),
             beam_damage: flat(Stat::BeamDamage),
@@ -467,12 +463,7 @@ impl CharacterStats {
     /// `Archetype::Movement`/`Utility`) contributes `× 1`, so
     /// utility abilities pass through untouched.
     pub fn ability_damage_mult(&self, ability: &crate::abilities::Ability) -> f32 {
-        use crate::abilities::{Archetype, Element, Scaling};
-        let scaling = match ability.scaling {
-            Scaling::Weapon => 1.0 + self.weapon_damage,
-            Scaling::Spell => 1.0 + self.spell_damage,
-            Scaling::None => 1.0,
-        };
+        use crate::abilities::{Archetype, Element};
         let element = match ability.element {
             Element::Physical => 1.0 + self.physical_damage,
             Element::Fire => 1.0 + self.fire_damage,
@@ -487,7 +478,7 @@ impl CharacterStats {
             Archetype::Melee => 1.0 + self.melee_damage,
             Archetype::Movement | Archetype::Utility => 1.0,
         };
-        scaling * element * archetype
+        element * archetype
     }
 
     /// Fraction of incoming damage absorbed by armor, 0..0.75.
@@ -504,16 +495,47 @@ impl CharacterStats {
     }
 
     /// Resist multiplier on incoming damage of `element` (1.0 =
-    /// no resist, 0.25 = 75 % reduction, the cap). `Physical`
-    /// uses `physical_resist`; the three elements share
-    /// `elemental_resist`. `None` (untyped) is unresisted.
+    /// no resist, 0.25 = 75 % reduction, the cap). The three
+    /// elements share `elemental_resist`. `Physical` is unresisted
+    /// here — armor handles physical mitigation via
+    /// [`armor_damage_reduction`]. `None` (untyped) is unresisted.
     pub fn incoming_resist_mult(&self, element: crate::abilities::Element) -> f32 {
         use crate::abilities::Element;
         let r = match element {
-            Element::Physical => self.physical_resist,
             Element::Fire | Element::Ice | Element::Lightning => self.elemental_resist,
-            Element::None => 0.0,
+            Element::Physical | Element::None => 0.0,
         };
         (1.0 - r.clamp(0.0, 0.75)).max(0.0)
+    }
+
+    /// Effective per-hit damage of `ability` against an
+    /// unmitigated target, *excluding* per-ability affix amplify
+    /// mods (`AmplifyAbilityDamage`) which live on
+    /// [`AbilityMods`] outside this struct. Reproduces the cast
+    /// pipeline's `base_damage × damage_scalar × ability_mult`
+    /// — the number the player would deal to a target with no
+    /// armor / resist before a crit roll.
+    ///
+    /// For `Channel` / `AoeZone` abilities the returned value is
+    /// per-tick (matches the server's per-tick application);
+    /// callers that want a total can multiply by the tick count.
+    pub fn ability_effective_damage(&self, ability: &crate::abilities::Ability) -> f32 {
+        // `damage_scalar = stats.damage / HERO.base_damage`. We
+        // re-derive it here so this fn stays self-contained
+        // (no `ServerPlayer` dependency for the client tooltip
+        // path).
+        let base = HERO.base_damage;
+        let dmg_scalar = if base <= 0.0 { 1.0 } else { self.damage / base };
+        ability.base_damage * dmg_scalar * self.ability_damage_mult(ability)
+    }
+
+    /// Crit-weighted average damage of one hit — the per-hit
+    /// number folded by the player's crit chance × crit damage.
+    /// Useful for tooltips that want to show "expected" damage
+    /// without burying the player in two lines per ability.
+    pub fn ability_avg_damage(&self, ability: &crate::abilities::Ability) -> f32 {
+        let per_hit = self.ability_effective_damage(ability);
+        let chance = self.crit_chance.clamp(0.0, 1.0);
+        per_hit * (1.0 + chance * self.crit_damage)
     }
 }

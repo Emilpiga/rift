@@ -264,12 +264,35 @@ impl<'a> Tooltip<'a> {
                     );
                     cursor_y += divider_h + divider_margin;
                 } else {
-                    ui.draw_text(
-                        Pos2::new(rect.x() + pad, cursor_y),
-                        ln.text,
-                        ln.size,
-                        ln.color,
-                    );
+                    // Detect a trailing roll-quality token like
+                    // `… +5 Intellect  [42%]`. The item-tooltip
+                    // builder appends it with two leading spaces;
+                    // when present we split the line so the
+                    // `[NN%]` chunk renders at a dimmed alpha —
+                    // information, not a primary stat read.
+                    let (head, tail) = match ln.text.rsplit_once("  [") {
+                        Some((h, t)) if t.ends_with("%]") => (h, format!("  [{}", t)),
+                        _ => (ln.text, String::new()),
+                    };
+                    ui.draw_text(Pos2::new(rect.x() + pad, cursor_y), head, ln.size, ln.color);
+                    if !tail.is_empty() {
+                        let head_w = ui.measure_text(head, ln.size);
+                        let [r, g, b, _] = ln.color.0;
+                        // Mute saturation toward neutral and drop
+                        // alpha so the bracketed roll-quality
+                        // reads as secondary metadata next to
+                        // the main stat text.
+                        let dim_r = r * 0.55 + 0.18;
+                        let dim_g = g * 0.55 + 0.18;
+                        let dim_b = b * 0.55 + 0.18;
+                        let dim = Color::rgba(dim_r, dim_g, dim_b, 0.55);
+                        ui.draw_text(
+                            Pos2::new(rect.x() + pad + head_w, cursor_y),
+                            &tail,
+                            ln.size,
+                            dim,
+                        );
+                    }
                     cursor_y += ln.size + 2.0 * theme.scale;
                 }
             }

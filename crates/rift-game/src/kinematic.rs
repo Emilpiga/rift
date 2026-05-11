@@ -126,7 +126,13 @@ pub struct Kinematic {
 ///
 /// Falls back to button bits if `move_dir` is empty, so a hand-crafted
 /// test client without aim/move axes can still drive movement.
-pub fn apply_input(k: &mut Kinematic, move_dir: [f32; 2], aim_dir: [f32; 2], buttons: u16) {
+pub fn apply_input(
+    k: &mut Kinematic,
+    move_dir: [f32; 2],
+    aim_dir: [f32; 2],
+    buttons: u16,
+    move_speed: f32,
+) {
     // Aim updates always apply, even mid-roll, so the spine twist
     // tracks the cursor while rolling.
     if aim_dir[0] != 0.0 || aim_dir[1] != 0.0 {
@@ -177,8 +183,8 @@ pub fn apply_input(k: &mut Kinematic, move_dir: [f32; 2], aim_dir: [f32; 2], but
         wish = wish.normalize();
     }
     let air_factor = if k.airborne { 0.85 } else { 1.0 };
-    k.velocity.x = wish.x * PLAYER_SPEED * air_factor;
-    k.velocity.z = wish.z * PLAYER_SPEED * air_factor;
+    k.velocity.x = wish.x * move_speed * air_factor;
+    k.velocity.z = wish.z * move_speed * air_factor;
 
     // Jumping is disabled — this is an ARPG with grid-based
     // locomotion. The JUMP button bit and `JUMP_VELOCITY`

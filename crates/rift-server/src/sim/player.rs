@@ -9,16 +9,16 @@ use std::collections::HashMap;
 
 use hecs::Entity;
 use rift_dungeon::Floor;
-use rift_net::{
-    messages::{button_bits, InputCmd},
-    ClientId, NetId,
-};
 use rift_game::attributes::Attributes;
 use rift_game::experience::{Experience, LevelUpReward};
 use rift_game::hero::HERO;
 use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::loadout::Loadout;
 use rift_game::stats::CharacterStats;
+use rift_net::{
+    messages::{button_bits, InputCmd},
+    ClientId, NetId,
+};
 
 /// Default per-player level until the persisted level field is
 /// wired through. Drives `CharacterStats::compute`.
@@ -376,8 +376,8 @@ impl ServerPlayer {
             return;
         }
         if self.resource < self.stats.max_resource {
-            self.resource = (self.resource + self.stats.resource_regen * dt)
-                .min(self.stats.max_resource);
+            self.resource =
+                (self.resource + self.stats.resource_regen * dt).min(self.stats.max_resource);
         }
     }
 
@@ -434,7 +434,11 @@ const STICKY_BUTTONS: u16 = button_bits::JUMP
 /// Merge a fresh input into a possibly-already-pending one for the
 /// same client. Drops out-of-order packets and OR-folds sticky
 /// buttons forward.
-pub fn merge_pending(pending: &mut HashMap<ClientId, InputCmd>, client_id: ClientId, cmd: InputCmd) {
+pub fn merge_pending(
+    pending: &mut HashMap<ClientId, InputCmd>,
+    client_id: ClientId,
+    cmd: InputCmd,
+) {
     if let Some(existing) = pending.get(&client_id) {
         if cmd.seq.wrapping_sub(existing.seq) as i32 <= 0 {
             return;
@@ -469,7 +473,16 @@ pub fn apply_inputs(
                     p.k.velocity = glam::Vec3::ZERO;
                     continue;
                 }
-                kinematic::apply_input(&mut p.k, cmd.move_dir, cmd.aim_dir, cmd.buttons);
+                // Snapshot the authoritative move speed before
+                // taking the mutable `p.k` borrow below.
+                let move_speed = p.stats.move_speed;
+                kinematic::apply_input(
+                    &mut p.k,
+                    cmd.move_dir,
+                    cmd.aim_dir,
+                    cmd.buttons,
+                    move_speed,
+                );
             }
         }
     }

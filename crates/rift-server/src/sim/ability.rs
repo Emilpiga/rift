@@ -184,6 +184,13 @@ pub struct AcceptedCast {
     /// the `AbilityKind::Projectiles` dispatch arm. `0` for
     /// AI casts and players without a matching mod.
     pub extra_projectiles: u32,
+    /// Global range multiplier from the caster's `Stat::Range`
+    /// rolls (`1.0` = no change). Dispatch arms multiply the
+    /// per-kind range parameters by this so projectile travel
+    /// distance, AoE radius, and beam length all scale with the
+    /// same affix. `1.0` for AI casts — enemies don't roll
+    /// player gear stats.
+    pub range_mult: f32,
     /// Active ability transform (e.g. `FrostRayShatter`)
     /// contributed by a legendary affix. Dispatch arms that
     /// recognise the variant alter their behaviour
@@ -247,6 +254,7 @@ pub fn submit(
             let affix_dmg = p_ref.ability_mods.damage_for(ability.id);
             let affix_cd = p_ref.ability_mods.cooldown_for(ability.id);
             let stat_cdr = p_ref.stats.cooldown_reduction;
+            let range_mult = p_ref.stats.range.max(0.1);
             let extra_projectiles = p_ref
                 .ability_mods
                 .extra_projectiles_for(ability.id);
@@ -278,7 +286,8 @@ pub fn submit(
                     let (te, tpos) = found?;
                     let d = tpos - body;
                     let dist2 = d.x * d.x + d.z * d.z;
-                    if dist2 > ability.range * ability.range {
+                    let max_range = ability.range * range_mult;
+                    if dist2 > max_range * max_range {
                         return None;
                     }
                     if !floor.line_of_sight(body, tpos) {
@@ -361,6 +370,7 @@ pub fn submit(
                 }),
                 target_position,
                 extra_projectiles,
+                range_mult,
                 transform,
             })
         }
@@ -401,6 +411,7 @@ pub fn submit(
                 target_net_id: None,
                 target_position: None,
                 extra_projectiles: 0,
+                range_mult: 1.0,
                 transform: None,
             })
         }
@@ -455,6 +466,11 @@ pub fn dispatch(
         AbilityKind::Projectiles {
             count, spread, speed, ttl, pierce, apply_debuff,
         } => {
+            // Global `Stat::Range` scales projectile travel
+            // distance. Multiplying `ttl` (rather than `speed`)
+            // keeps projectile feel the same — same launch
+            // velocity, just flies longer before despawning.
+            let ttl = ttl * accepted.range_mult;
             // Affix-driven extra projectiles (legendary
             // `+N projectiles to <ability>`) stack on top of
             // the registry-authored count. The original
@@ -507,6 +523,8 @@ pub fn dispatch(
         AbilityKind::AoeZone {
             radius, duration, tick_interval, apply_debuff,
         } => {
+            // Global `Stat::Range` scales AoE radius.
+            let radius = radius * accepted.range_mult;
             let pos = accepted
                 .placed_target
                 .unwrap_or(accepted.origin + accepted.aim * 5.0);
@@ -530,6 +548,30 @@ pub fn dispatch(
         AbilityKind::Channel {
             duration, tick_interval, effect, apply_debuff, cancel_on_move,
         } => {
+            // Apply the caster's global range multiplier to the
+            // per-tick spatial parameter of the channel effect
+            // (beam length / aura radius) so `Stat::Range`
+            // grows channels the same way it grows projectiles.
+            let effect = match effect {
+                rift_game::abilities::ChannelEffect::AuraAroundCaster {
+                    radius,
+                    damage_per_tick,
+                } => rift_game::abilities::ChannelEffect::AuraAroundCaster {
+                    radius: radius * accepted.range_mult,
+                    damage_per_tick,
+                },
+                rift_game::abilities::ChannelEffect::Beam {
+                    range,
+                    width,
+                    damage_per_tick,
+                    pierce_targets,
+                } => rift_game::abilities::ChannelEffect::Beam {
+                    range: range * accepted.range_mult,
+                    width,
+                    damage_per_tick,
+                    pierce_targets,
+                },
+            };
             // Channels need a caster entity to attach to. AI
             // casts pass `None`; if a future enemy ever wants
             // to channel we'll pipe its entity through

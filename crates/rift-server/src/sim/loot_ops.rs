@@ -103,7 +103,6 @@ impl Sim {
             }
         }
 
-        let _ = self.world.despawn(loot_entity);
         // Items picked up inside an active rift are flagged
         // "unstable": they live only in the in-memory
         // `ServerPlayer` snapshot until the run extracts. Hub
@@ -113,30 +112,39 @@ impl Sim {
         if !self.is_hub() {
             item.unstable = true;
         }
-        // Push onto the picker's `ServerPlayer.inventory` so the
-        // authoritative server-side bag stays in sync with what
-        // the client mirrors. Long-term DB persistence is handled
-        // by the caller (server main) which also has the
-        // `PersistenceHandle`.
-        if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(player_entity) {
-            if place_inventory_item(&mut p.inventory, item.clone()).is_none() {
-                // No anchor fit — put the loot back on the
-                // ground and tell the client. We don't
-                // re-spawn the despawned loot entity; the
-                // caller can re-drop it via the standard
-                // path. For now log and reject.
+        // Try to place into the picker's `ServerPlayer.inventory`
+        // *before* despawning the ground entity. If no anchor
+        // fits the item's multi-cell footprint we reject and
+        // leave the loot row alive so the player can sort
+        // their bag and retry. Despawning first (the previous
+        // ordering) and then rejecting left the entity gone
+        // server-side but visually still on the ground for the
+        // client — every subsequent pickup attempt silently
+        // failed with `Err(None)` because the net id no
+        // longer resolved, and the player had no way to tell
+        // why the drop became un-pickupable.
+        let placed = if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(player_entity) {
+            let ok = place_inventory_item(&mut p.inventory, item.clone()).is_some();
+            if ok {
                 log::debug!(
-                    "sim: inventory full for {:?}, no anchor fits item footprint",
-                    client_id
+                    "sim: inventory for {:?} now has {} item(s)",
+                    client_id,
+                    count_filled(&p.inventory)
                 );
-                return Err(Some(rift_net::messages::PickupRejectReason::InventoryFull));
             }
+            ok
+        } else {
+            false
+        };
+        if !placed {
             log::debug!(
-                "sim: inventory for {:?} now has {} item(s)",
-                client_id,
-                count_filled(&p.inventory)
+                "sim: inventory full for {:?}, no anchor fits item footprint",
+                client_id
             );
+            return Err(Some(rift_net::messages::PickupRejectReason::InventoryFull));
         }
+        // Placed successfully — only now drop the ground entity.
+        let _ = self.world.despawn(loot_entity);
         Ok(item)
     }
 

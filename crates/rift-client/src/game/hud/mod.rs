@@ -31,9 +31,7 @@ pub use world_overlays::{
 
 use glam::Vec3;
 use rift_engine::ecs::components::{Effects, Health, LocalPlayer, Player};
-use rift_engine::ui::im::{
-    hp_color, Banner, Color, Id, ItemSlot, Pos2, ProgressBar, Rect, Tooltip, TooltipLine, Ui,
-};
+use rift_engine::ui::im::{Banner, Color, Id, Pos2, ProgressBar, Rect, Tooltip, TooltipLine, Ui};
 
 use super::rift_state::RiftState;
 use crate::game::PlayerState;
@@ -63,17 +61,20 @@ pub fn render_hud(
     // `Ui::begin` from min(screen_w/1920, screen_h/1080).
     let s = theme.scale;
 
-    // HP + XP bars: stacked, centered above the ability bar so the
-    // player's vital stats sit right under their character.
+    // HP / Essence / XP vitals stack. Rendered by
+    // [`rift_ui::hud::frame_vitals`] inside a carved-stone
+    // plaque so the cluster reads as one surface; the host's
+    // only job here is to flatten the live game state into the
+    // view (server-authoritative HP percent, mirrored essence
+    // fraction, experience progress) and pre-format the inline
+    // labels.
     //
     // Server-authoritative HP: `world_sync` writes
-    // `h.current = h.max * snapshot.health_pct`, where
-    // `health_pct = server.hp / server.hp_max`. Because the
-    // server already accounts for gear / level bonuses in its
-    // `hp_max`, the client's `h.current / h.max` is the right
-    // 0..1 fraction. Adding `max_hp_bonus` to the denominator
-    // here would double-count the bonus and prevent the bar
-    // from ever reaching 100% on a geared character.
+    // `h.current = h.max * snapshot.health_pct`. The server
+    // already accounts for gear / level bonuses in its
+    // `hp_max`, so `h.current / h.max` is the right 0..1
+    // fraction — adding `max_hp_bonus` to the denominator
+    // would double-count.
     let hp_pct = world
         .query::<(&Health, &Player, &LocalPlayer)>()
         .iter()
@@ -81,105 +82,42 @@ pub fn render_hud(
         .next()
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
+    let resource_pct = player_state.resource_pct.clamp(0.0, 1.0);
+    let xp_pct = player_state.experience.progress().clamp(0.0, 1.0);
 
-    let bar_w = 360.0 * s;
-    let bar_h = 22.0 * s;
-    let essence_h = 12.0 * s;
-    let xp_h = 9.0 * s;
-    let bars_total_h = bar_h + 2.0 * s + essence_h + 2.0 * s + xp_h;
-    let bar_x = (sw - bar_w) / 2.0;
-    let bar_y = sh - 80.0 * s - 16.0 * s - bars_total_h;
-
-    // HP bar.
-    ProgressBar::new(hp_pct)
-        .fill(hp_color(hp_pct))
-        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
-        .show(ui, Rect::from_xywh(bar_x, bar_y, bar_w, bar_h));
-    let hp_max = player_state.stats().max_hp;
+    let stats = player_state.stats();
+    let hp_max = stats.max_hp;
     let hp_now = (hp_pct * hp_max).round();
     let hp_label = format!("{hp_now:.0} / {hp_max:.0}");
-    let hp_text_size = 13.0 * s;
-    let hp_text_w = ui.measure_text(&hp_label, hp_text_size);
-    ui.draw_text(
-        Pos2::new(
-            bar_x + (bar_w - hp_text_w) * 0.5,
-            bar_y + (bar_h - hp_text_size) * 0.5,
-        ),
-        &hp_label,
-        hp_text_size,
-        Color::rgba(0.96, 0.96, 0.98, 0.95),
+    let essence_max = stats.max_resource;
+    let essence_now = (resource_pct * essence_max).round();
+    let essence_label = format!("{essence_now:.0} / {essence_max:.0}");
+    let xp_label = format!(
+        "{} / {} XP",
+        player_state.experience.current_xp,
+        player_state.experience.xp_to_next_level()
     );
+    let vitals_view = rift_ui_types::hud::HudVitalsView {
+        hp_fraction: hp_pct,
+        hp_label: hp_label.as_str(),
+        essence_fraction: resource_pct,
+        essence_label: essence_label.as_str(),
+        xp_fraction: xp_pct,
+        xp_label: xp_label.as_str(),
+        level: player_state.experience.level,
+    };
+    // Sit flush against the top of the ability bar plaque so
+    // the two HUD surfaces read as one column. The widget
+    // exports the exact offset (ability bar plaque height +
+    // bottom gap) so this stays in sync if either constant
+    // moves.
+    let plaque_rect =
+        rift_ui::hud::frame_vitals(ui, &vitals_view, rift_ui::hud::VITALS_BOTTOM_OFFSET_BASE);
+    let bar_x = plaque_rect.x();
+    let bar_y = plaque_rect.y();
 
-    // Essence bar (universal ability resource — see
-    // `CharacterStats::max_resource`). Sits directly under HP so
-    // the eye reads "vital pools" as a single block. Max value
-    // comes from the local cached stat sheet; current fraction
-    // is the server-mirrored `resource_pct`.
-    let resource_pct = player_state.resource_pct.clamp(0.0, 1.0);
-    let essence_y = bar_y + bar_h + 2.0 * s;
-    ProgressBar::new(resource_pct)
-        .fill(Color::rgba(0.32, 0.55, 0.95, 0.95))
-        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
-        .rounded(false)
-        .show(ui, Rect::from_xywh(bar_x, essence_y, bar_w, essence_h));
-    let max_resource = player_state.stats().max_resource;
-    let essence_now = (resource_pct * max_resource).round();
-    let essence_label = format!("{essence_now:.0} / {max_resource:.0}");
-    let essence_text_size = 11.0 * s;
-    let essence_text_w = ui.measure_text(&essence_label, essence_text_size);
-    ui.draw_text(
-        Pos2::new(
-            bar_x + (bar_w - essence_text_w) * 0.5,
-            essence_y + (essence_h - essence_text_size) * 0.5,
-        ),
-        &essence_label,
-        essence_text_size,
-        Color::rgba(0.94, 0.96, 1.0, 0.95),
-    );
-
-    // XP bar (slimmer, directly under the essence bar).
-    let xp_pct = player_state.experience.progress().clamp(0.0, 1.0);
-    let xp_y = essence_y + essence_h + 2.0 * s;
-    let xp_now = player_state.experience.current_xp;
-    let xp_need = player_state.experience.xp_to_next_level();
-    let xp_label = format!("{xp_now} / {xp_need} XP");
-    ProgressBar::new(xp_pct)
-        .fill(Color::rgba(0.45, 0.30, 0.85, 0.95))
-        .border(Color::rgba(0.30, 0.30, 0.32, 0.9))
-        .rounded(false)
-        .show(ui, Rect::from_xywh(bar_x, xp_y, bar_w, xp_h));
-    let xp_text_size = 11.0 * s;
-    let xp_text_w = ui.measure_text(&xp_label, xp_text_size);
-    ui.draw_text(
-        Pos2::new(bar_x + (bar_w - xp_text_w) * 0.5, xp_y - 1.0 * s),
-        &xp_label,
-        xp_text_size,
-        Color::rgba(0.92, 0.92, 0.96, 0.95),
-    );
-
-    // Level pip floats just to the left of the HP bar.
-    let level_text = format!("Lv.{}", player_state.experience.level);
-    ui.draw_text(
-        Pos2::new(bar_x - 50.0 * s, bar_y + 4.0 * s),
-        &level_text,
-        15.0 * s,
-        Color::rgba(0.92, 0.92, 0.92, 1.0),
-    );
-
-    // Shard balance: salvage currency. Drawn just under the
-    // level pip so the player's "wallet" sits with their other
-    // persistent stats. The diamond glyph is a Unicode
-    // fallback — once a dedicated shard icon ships we can swap
-    // this for a small textured quad.
-    let shard_text = format!("\u{25C6} {}", player_state.shards);
-    ui.draw_text(
-        Pos2::new(bar_x - 50.0 * s, bar_y + 22.0 * s),
-        &shard_text,
-        13.0 * s,
-        Color::rgba(0.55, 0.85, 0.95, 1.0),
-    );
-
-    // Active buff / debuff strip.
+    // Active buff / debuff strip — anchored above the vitals
+    // plaque.
     let local_effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
         .query::<(&Effects, &LocalPlayer)>()
         .iter()
@@ -321,158 +259,133 @@ pub fn render_ability_bar(
     // max_resource`). Drives the unaffordable-slot tint and the
     // cost line in the tooltip.
     current_essence: f32,
+    // Resolved character sheet for damage / crit tooltip math.
+    // Reads only — used to reproduce the cast pipeline's
+    // `base_damage × damage_scalar × ability_mult` against the
+    // current gear / attribute state so the tooltip damage
+    // number matches what the player will actually deal.
+    stats: &rift_game::stats::CharacterStats,
     targeting_slot: Option<usize>,
 ) -> Option<usize> {
-    const AB_SIZE_BASE: f32 = 64.0;
-    const AB_GAP_BASE: f32 = 6.0;
     const AB_KEYS: [&str; 6] = ["LMB", "1", "2", "3", "4", "5"];
 
-    let theme = *ui.theme();
-    let s = theme.scale;
-    let ab_size = AB_SIZE_BASE * s;
-    let ab_gap = AB_GAP_BASE * s;
-    let screen = ui.screen_size();
-    let ab_total_w = 6.0 * ab_size + 5.0 * ab_gap;
-    let ab_x = (screen.x - ab_total_w) * 0.5;
-    let ab_y = screen.y - ab_size - 16.0 * s;
-
-    let mut hovered_idx: Option<usize> = None;
-    let mut clicked_idx: Option<usize> = None;
-
-    for (i, slot) in abilities.slots.iter().enumerate() {
-        let pos = Pos2::new(ab_x + i as f32 * (ab_size + ab_gap), ab_y);
-        let id = Id::root("ability_bar").child(i);
-        let slot_unlocked = rift_game::loadout::is_slot_unlocked(i, player_level);
-
-        let mut sb = ItemSlot::new(ab_size).key_label(AB_KEYS[i]);
-        if targeting_slot == Some(i) {
-            sb = sb.selected(true);
-        }
-        if !slot_unlocked {
-            sb = sb
-                .enabled(false)
-                .fallback_glyph('\u{1F512}')
-                .fallback_color(Color::rgba(0.55, 0.25, 0.25, 0.9));
-        } else if let Some(state) = slot {
-            let remaining = 1.0 - state.cooldown_progress();
-            sb = sb.cooldown(remaining);
-            // Tint slots the player can't afford red. Cost-0
-            // abilities (Melee, Evasive Roll, free triggers)
-            // are always affordable. The slot stays clickable
-            // — gameplay code in `tick_ability_keybinds`
-            // refuses the actual cast and the server is the
-            // final authority.
-            if state.ability.resource_cost > current_essence + 1e-3 {
-                sb = sb.unaffordable(true);
-            }
-            if let Some(name) = state.ability.icon {
-                sb = sb.icon(name);
-            } else {
-                let abbrev = ability_abbrev(state.ability.name);
-                if let Some(ch) = abbrev.chars().next() {
-                    sb = sb
-                        .fallback_glyph(ch)
-                        .fallback_color(Color::rgba(0.6, 0.85, 1.0, 0.95));
-                }
-            }
-        }
-
-        let resp = sb.show(ui, pos, id);
-        if resp.hovered && slot.is_some() && slot_unlocked {
-            hovered_idx = Some(i);
-        }
-        if resp.clicked && slot_unlocked {
-            clicked_idx = Some(i);
-        }
-
-        if !slot_unlocked {
-            let lvl = rift_game::loadout::SLOT_UNLOCK_LEVELS[i];
-            ui.draw_text(
-                Pos2::new(pos.x, pos.y + ab_size + 2.0 * s),
-                format!("Lv {lvl}").as_str(),
-                theme.fonts.size_sm,
-                Color::rgba(0.65, 0.30, 0.30, 0.9),
-            );
-        }
-    }
-
-    if let Some(idx) = hovered_idx {
-        if let Some(Some(state)) = abilities.slots.get(idx) {
-            let stats = if state.ability.cooldown > 0.0 {
-                format!(
-                    "CD: {:.1}s | Dmg: {:.0}%",
-                    state.ability.cooldown,
-                    state.ability.damage_mult * 100.0
-                )
-            } else {
-                format!("Dmg: {:.0}%", state.ability.damage_mult * 100.0)
-            };
-            let cost_line = if state.ability.channel_cost_per_sec > 0.0 {
-                Some(format!(
-                    "Essence: {:.0} / sec",
-                    state.ability.channel_cost_per_sec
-                ))
-            } else if state.ability.resource_cost > 0.0 {
-                Some(format!("Essence: {:.0}", state.ability.resource_cost))
-            } else {
-                None
-            };
-            let proj = if state.ability.projectile_count > 1 {
-                Some(format!("Projectiles: {}", state.ability.projectile_count))
-            } else {
-                None
-            };
-            let mut lines = vec![
-                TooltipLine::new(
-                    state.ability.name,
-                    theme.fonts.size_md,
-                    Color::rgba(1.0, 0.9, 0.5, 1.0),
-                ),
-                TooltipLine::new(
-                    state.ability.description,
-                    theme.fonts.size_sm,
-                    Color::rgba(0.8, 0.8, 0.8, 1.0),
-                ),
-                TooltipLine::new(
-                    stats.as_str(),
-                    theme.fonts.size_sm,
-                    Color::rgba(0.6, 0.8, 1.0, 0.9),
-                ),
-            ];
-            if let Some(ref p) = proj {
-                lines.push(TooltipLine::new(
-                    p.as_str(),
-                    theme.fonts.size_sm,
-                    Color::rgba(0.7, 0.7, 0.7, 0.8),
-                ));
-            }
-            if let Some(ref c) = cost_line {
-                let affordable = state.ability.resource_cost <= current_essence + 1e-3;
-                let color = if affordable {
-                    Color::rgba(0.55, 0.75, 0.95, 0.95)
+    // Build the flat view the widget consumes. Owned strings
+    // (damage / crit / cost lines) live in the slot tooltips
+    // themselves — same allocation lifetime as the view, so
+    // they're trivially valid for the single `frame_ability_bar`
+    // call.
+    let abbrev_chars: Vec<Option<char>> = abilities
+        .slots
+        .iter()
+        .map(|slot| {
+            slot.as_ref().and_then(|state| {
+                if state.ability.icon.is_some() {
+                    None
                 } else {
-                    Color::rgba(0.85, 0.45, 0.45, 0.95)
-                };
-                lines.push(TooltipLine::new(c.as_str(), theme.fonts.size_sm, color));
-            }
-            let slot_rect = Rect::from_xywh(
-                ab_x + idx as f32 * (ab_size + ab_gap),
-                ab_y,
-                ab_size,
-                ab_size,
-            );
-            Tooltip::new()
-                .min_width(220.0)
-                .anchor_to(slot_rect)
-                .show(
-                    ui,
-                    Pos2::new(slot_rect.x(), slot_rect.y() - 90.0 * s),
-                    &lines,
-                );
-        }
-    }
+                    ability_abbrev(state.ability.name).chars().next()
+                }
+            })
+        })
+        .collect();
 
-    clicked_idx
+    let mut slots = std::array::from_fn::<rift_ui_types::hud::AbilitySlotView<'_>, 6, _>(|i| {
+        let slot = &abilities.slots[i];
+        let unlocked = rift_game::loadout::is_slot_unlocked(i, player_level);
+        let unlock_level = rift_game::loadout::SLOT_UNLOCK_LEVELS[i];
+        let (icon, fallback_glyph, cooldown_remaining, affordable, tooltip) = match slot {
+            Some(state) if unlocked => {
+                let cd = (1.0 - state.cooldown_progress()).clamp(0.0, 1.0);
+                let affordable = state.ability.resource_cost <= current_essence + 1e-3;
+
+                let per_hit = stats.ability_effective_damage(&state.ability);
+                let avg = stats.ability_avg_damage(&state.ability);
+                let damage_line = if per_hit > 0.01 {
+                    use rift_game::abilities::AbilityKind;
+                    let unit = match state.ability.kind {
+                        AbilityKind::Channel { .. } | AbilityKind::AoeZone { .. } => " / tick",
+                        _ => "",
+                    };
+                    if state.ability.cooldown > 0.0 {
+                        Some(format!(
+                            "CD: {:.1}s  |  {:.0}{} damage",
+                            state.ability.cooldown, per_hit, unit
+                        ))
+                    } else {
+                        Some(format!("{:.0}{} damage", per_hit, unit))
+                    }
+                } else if state.ability.cooldown > 0.0 {
+                    Some(format!("CD: {:.1}s", state.ability.cooldown))
+                } else {
+                    None
+                };
+                let crit_line = if per_hit > 0.01 && stats.crit_chance > 0.001 {
+                    Some(format!(
+                        "~{:.0} avg  ({:.0}% crit, +{:.0}% dmg)",
+                        avg,
+                        stats.crit_chance * 100.0,
+                        stats.crit_damage * 100.0
+                    ))
+                } else {
+                    None
+                };
+                let cost_line = if state.ability.channel_cost_per_sec > 0.0 {
+                    Some(format!(
+                        "Essence: {:.0} / sec",
+                        state.ability.channel_cost_per_sec
+                    ))
+                } else if state.ability.resource_cost > 0.0 {
+                    Some(format!("Essence: {:.0}", state.ability.resource_cost))
+                } else {
+                    None
+                };
+                let projectiles_line = if state.ability.projectile_count > 1 {
+                    Some(format!("Projectiles: {}", state.ability.projectile_count))
+                } else {
+                    None
+                };
+
+                let tip = rift_ui_types::hud::AbilityTooltip {
+                    name: state.ability.name,
+                    description: state.ability.description,
+                    damage_line,
+                    crit_line,
+                    cost_line,
+                    cost_affordable: affordable,
+                    projectiles_line,
+                };
+                (
+                    state.ability.icon,
+                    abbrev_chars[i],
+                    cd,
+                    affordable,
+                    Some(tip),
+                )
+            }
+            _ => (None, None, 0.0, true, None),
+        };
+
+        rift_ui_types::hud::AbilitySlotView {
+            key_hint: AB_KEYS[i],
+            icon,
+            fallback_glyph,
+            cooldown_remaining,
+            unlocked,
+            unlock_level,
+            affordable,
+            selected: targeting_slot == Some(i),
+            tooltip,
+        }
+    });
+    // Silence the inevitable "mut not needed" if all six slots
+    // happen to be empty — the array is initialised in-place,
+    // but the field-by-field assignment in `from_fn` keeps the
+    // binding "mutable" semantically.
+    let _ = &mut slots;
+    let view = rift_ui_types::hud::AbilityBarView { slots };
+
+    rift_ui::hud::frame_ability_bar(ui, &view).map(|action| match action {
+        rift_ui_types::hud::HudAction::AbilitySlotClicked(idx) => idx,
+    })
 }
 
 /// Screen-space buff / debuff pip strip. Anchors the strip's
@@ -547,8 +460,18 @@ pub(crate) fn draw_effect_pip_strip(
             // a bright icon or a dark drain.
             let lx = pip.max.x - lw - 2.0;
             let ly = pip.max.y - lbl_size - 1.0;
-            ui.draw_text(Pos2::new(lx + 1.0, ly + 1.0), &lbl, lbl_size, Color::rgba(0.0, 0.0, 0.0, 0.85));
-            ui.draw_text(Pos2::new(lx, ly), &lbl, lbl_size, Color::rgba(1.0, 1.0, 1.0, 0.95));
+            ui.draw_text(
+                Pos2::new(lx + 1.0, ly + 1.0),
+                &lbl,
+                lbl_size,
+                Color::rgba(0.0, 0.0, 0.0, 0.85),
+            );
+            ui.draw_text(
+                Pos2::new(lx, ly),
+                &lbl,
+                lbl_size,
+                Color::rgba(1.0, 1.0, 1.0, 0.95),
+            );
         }
         if interactive {
             let id = Id::root("hud_effect_pip").child((eff.id as u32, i));
