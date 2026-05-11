@@ -100,7 +100,7 @@ pub struct NetClient {
     /// connection. Gates the auto-send in `step` so we don't
     /// spam the wire while waiting for `Authenticated`.
     auth_sent: bool,
-    /// Auth signer used to mint the `AuthCredential` for
+    /// Auth signer used to mint the opaque ticket for `Hello`.
     /// `Hello`. `None` until the binary plumbs one in via
     /// [`Self::set_signer`]; `send_hello` is a no-op until
     /// then so a misconfigured client can't ship a placeholder
@@ -381,14 +381,18 @@ pub struct NetClient {
     /// regeneration mixes in the same per-floor offset the server
     /// does. Stays stable for the lifetime of the connection.
     rift_seed: u64,
-    /// Account identity we plan to ship in the next `Hello`.
-    /// Set by `request_roster` from the account-entry screen
-    /// (the field name is legacy from the pre-auth flow). With
-    /// dev auth this is the user-typed identity; with Steam
-    /// it's filled in by the auth resolver. Cleared / re-armed
-    /// when a different identity is queued so we always log in
-    /// as whatever the most recent account-entry confirmed.
-    pub(super) pending_account_for_auth: Option<String>,
+    /// `true` once the account-entry screen (or the startup
+    /// auth resolver, in dev mode) has confirmed an identity
+    /// for this connection — i.e. the player has said "I
+    /// want to log in now". The signer mints the credential
+    /// at `Hello` time, so the string identity used to live
+    /// here is no longer needed; this is just a gate that
+    /// lets `send_hello` know it's time to fire.
+    pub(super) auth_armed: bool,
+    /// Per-frame accumulator for the handshake diagnostic log
+    /// (rate-limited to ~1 Hz so a stuck client doesn't spam
+    /// the terminal but still surfaces *why* it's stuck).
+    pub(super) handshake_diag_accum: f32,
     /// Latest roster reply from the server (carried inside
     /// `ServerMsg::Authenticated`). `None` means "never
     /// authenticated" or "authenticated but reply not yet
@@ -472,7 +476,8 @@ impl NetClient {
             pending_floor: None,
             floor_index: 0,
             rift_seed: 0,
-            pending_account_for_auth: None,
+            auth_armed: false,
+            handshake_diag_accum: 0.0,
             roster: None,
             display_name: None,
             fatal_reject_reason: None,
@@ -502,11 +507,29 @@ impl NetClient {
         //      with `Welcome` and the avatar spawns.
         if !self.auth_sent
             && self.handle.client.is_connected()
-            && self.pending_account_for_auth.is_some()
+            && self.auth_armed
             && self.signer.is_some()
         {
             self.send_hello();
             self.auth_sent = true;
+        }
+
+        // Diagnostic: once per second, log the handshake gate
+        // state if we haven't shipped Hello yet. Helps an
+        // operator tell at a glance whether the bottleneck is
+        // renet connectivity, missing arm signal, or missing
+        // signer.
+        if !self.auth_sent {
+            self.handshake_diag_accum += dt.as_secs_f32();
+            if self.handshake_diag_accum >= 1.0 {
+                self.handshake_diag_accum = 0.0;
+                log::debug!(
+                    "net: waiting to send Hello — connected={}, auth_armed={}, signer={}",
+                    self.handle.client.is_connected(),
+                    self.auth_armed,
+                    self.signer.is_some(),
+                );
+            }
         }
         if !self.enter_world_sent
             && self.auth_sent
@@ -602,9 +625,9 @@ impl NetClient {
     }
 
     fn send_hello(&mut self) {
-        let Some(account_name) = self.pending_account_for_auth.clone() else {
+        if !self.auth_armed {
             return;
-        };
+        }
         // Mint a fresh credential from the installed signer.
         // For the dev issuer this is an HMAC of the typed/randomised
         // identity; the server's `auth::resolve` re-verifies before
@@ -621,14 +644,15 @@ impl NetClient {
             );
             return;
         };
-        let auth = signer.mint();
+        let auth_ticket = signer.mint();
         let issuer = signer.identity_hint();
+        let ticket_len = auth_ticket.len();
         let msg = ClientMsg::Hello {
             protocol_version: PROTOCOL_VERSION,
-            auth,
+            auth_ticket,
         };
         self.send(Channel::Control, &msg);
-        log::info!("net: sent Hello (issuer={issuer}) for account {account_name:?}");
+        log::debug!("net: sent Hello (issuer={issuer}, ticket_len={ticket_len})");
     }
 
     fn send_enter_world(&mut self) {

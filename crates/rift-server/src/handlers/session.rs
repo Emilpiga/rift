@@ -2,7 +2,7 @@
 //! flow split into named phases so each step is short and
 //! independently testable.
 
-use rift_net::{AuthCredential, Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
+use rift_net::{Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
 
 use super::{item_to_blob, place_at_slot_index};
 use crate::Server;
@@ -63,7 +63,7 @@ impl Server {
         &mut self,
         from: ClientId,
         protocol_version: u16,
-        auth: AuthCredential,
+        auth_ticket: Vec<u8>,
     ) {
         if protocol_version != PROTOCOL_VERSION {
             // User-visible string: the client surfaces this verbatim
@@ -91,7 +91,7 @@ impl Server {
         // returns an issuer-tagged `AccountKey`. Phase 3 will
         // promote this onto a background task so a slow Steam
         // round-trip can't stall the sim loop.
-        let account_key = match crate::auth::resolve(&self.auth_config, &auth) {
+        let account_key = match crate::auth::resolve(&self.auth_config, &auth_ticket) {
             Ok(k) => k,
             Err(err) => {
                 let reason = err.user_message();
@@ -104,48 +104,48 @@ impl Server {
             }
         };
 
-        // Persistence is still keyed on the legacy bare
-        // `account_name` string; Phase 4's migration moves it
-        // onto the issuer-tagged storage form. Until then we
-        // pass the legacy form into `lookup_roster` /
-        // `load_player_state` so existing rows keep loading.
-        let account_name = account_key.legacy_account_name();
-
-        // Re-validate the resolved identity before it touches
-        // persistence or any broadcast. Even with auth in place
-        // a hostile or buggy client can ship pathological
-        // identity strings — empty, megabyte-long, or laced
-        // with control characters that would mangle log lines
-        // and chat fan-out.
-        let account_name = match validate_name(&account_name, MAX_NAME_CHARS, "Account name") {
-            Ok(s) => s,
-            Err(reason) => {
-                log::warn!("{} rejecting Hello: {reason}", self.client_tag(from));
-                self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
-                return;
-            }
-        };
+        // Persistence keys on the issuer-tagged storage form
+        // (`accounts.account_key`, e.g. `"dev:alice"` /
+        // `"steam:76561198..."`). The legacy `accounts.name`
+        // column is no longer read — migration
+        // `20260511000000_account_key_required.sql` dropped its
+        // UNIQUE + NOT NULL constraints and the persistence
+        // layer now looks up by `account_key`.
+        //
+        // No post-resolve length / control-char re-validation
+        // here: the dev path's `verify()` already enforces
+        // `MAX_DEV_IDENTITY_CHARS` + control-free + non-empty,
+        // and the Steam path's resolved identity is server-
+        // derived (built from the validated SteamID64) and
+        // therefore trusted.
+        let account_storage = account_key.as_storage_string();
+        let account_display = account_key.display_name();
 
         log::info!(
-            "{} Hello: authenticated as account={account_name:?}",
+            "{} Hello: authenticated as account_key={account_storage:?} (display={account_display:?})",
             self.client_tag(from)
         );
 
         // Stash the resolved identity on the session so the
         // follow-up `EnterWorld` can hydrate the chosen
-        // character without re-running auth.
+        // character without re-running auth. We store the
+        // storage form because every downstream lookup
+        // (`load_or_create_blocking`, `list_account_characters_blocking`)
+        // keys on it; the display name rides alongside it so
+        // first-insert into the `accounts` table can populate
+        // `display_name` without re-resolving.
         if let Some(s) = self.sessions.get_mut(from) {
-            s.account_name = Some(account_name.clone());
+            s.account_name = Some(account_storage.clone());
+            s.account_display_name = Some(account_display.clone());
         }
 
-        let roster = self.lookup_roster(&account_name);
-        let display_name = account_name.clone();
+        let roster = self.lookup_roster(&account_storage, &account_display);
         self.send_to(
             from,
             Channel::Control,
             &ServerMsg::Authenticated {
                 your_client_id: from,
-                display_name,
+                display_name: account_display,
                 roster,
             },
         );
@@ -170,8 +170,11 @@ impl Server {
         class_id: String,
         gender: Gender,
     ) {
-        let Some(account_name) = self.sessions.get(from).and_then(|s| s.account_name.clone())
-        else {
+        let session_info = self
+            .sessions
+            .get(from)
+            .and_then(|s| s.account_name.clone().zip(s.account_display_name.clone()));
+        let Some((account_key, account_display)) = session_info else {
             let reason = "Cannot enter world: client has not authenticated.".to_string();
             log::warn!("{} rejecting EnterWorld: {reason}", self.client_tag(from));
             self.send_to(from, Channel::Control, &ServerMsg::Reject { reason });
@@ -205,7 +208,7 @@ impl Server {
         };
 
         log::info!(
-            "{} EnterWorld: account={account_name:?} name={character_name:?} class={class_id:?} gender={gender:?}",
+            "{} EnterWorld: account_key={account_key:?} name={character_name:?} class={class_id:?} gender={gender:?}",
             self.client_tag(from)
         );
 
@@ -213,7 +216,14 @@ impl Server {
         // Each step is a small named method so the dispatch is
         // legible and individual stages are unit-testable in
         // isolation later if we want.
-        self.load_player_state(from, &account_name, &character_name, &class_id, gender);
+        self.load_player_state(
+            from,
+            &account_key,
+            &account_display,
+            &character_name,
+            &class_id,
+            gender,
+        );
         let net_id = self.spawn_player_session(from, &class_id);
         let loaded_bag = self.hydrate_player_state(from);
         self.send_initial_packets(from, net_id, &loaded_bag);
@@ -228,7 +238,8 @@ impl Server {
     fn load_player_state(
         &mut self,
         from: ClientId,
-        account_name: &str,
+        account_key: &str,
+        account_display: &str,
         character_name: &str,
         class_id: &str,
         gender: Gender,
@@ -238,9 +249,16 @@ impl Server {
         // to an in-memory record if persistence is disabled or
         // unreachable, so dev iteration without `docker compose up`
         // still works.
-        let record = self.load_character_record(account_name, character_name, class_id, gender);
+        let record = self.load_character_record(
+            account_key,
+            account_display,
+            character_name,
+            class_id,
+            gender,
+        );
         if let Some(s) = self.sessions.get_mut(from) {
-            s.account_name = Some(account_name.to_string());
+            s.account_name = Some(account_key.to_string());
+            s.account_display_name = Some(account_display.to_string());
             s.character_name = Some(character_name.to_string());
             s.class_id = Some(class_id.to_string());
             s.gender = Some(gender);

@@ -344,8 +344,8 @@ impl Server {
         match msg {
             ClientMsg::Hello {
                 protocol_version,
-                auth,
-            } => self.handle_hello(from, protocol_version, auth),
+                auth_ticket,
+            } => self.handle_hello(from, protocol_version, auth_ticket),
             ClientMsg::EnterWorld {
                 character_name,
                 class_id,

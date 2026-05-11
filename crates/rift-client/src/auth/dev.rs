@@ -1,6 +1,6 @@
-//! Dev-issuer signer. Builds a fresh
-//! [`AuthCredential::Dev`] on demand from a shared HMAC key
-//! plus a per-process identity.
+//! Dev-issuer signer. Mints fresh opaque tickets in the
+//! [`rift_net::auth_dev`] format on demand from a shared HMAC
+//! key plus a per-process identity.
 //!
 //! Identity selection rule (first match wins):
 //!
@@ -15,8 +15,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rift_net::auth_dev::{sign, MAX_DEV_IDENTITY_CHARS};
-use rift_net::AuthCredential;
+use rift_net::auth_dev::{encode_dev_ticket, sign, MAX_DEV_IDENTITY_CHARS};
 
 /// Read the shared HMAC key + identity from environment and
 /// build a dev signer. Returns a user-facing reason on failure
@@ -59,21 +58,16 @@ impl DevSigner {
         &self.identity
     }
 
-    /// Build a fresh credential to ship in the next `Hello`.
+    /// Build a fresh ticket to ship in the next `Hello`.
     /// Stamps the current wall-clock + a random nonce so back-
     /// to-back `Hello`s never produce a byte-identical
     /// payload (which would make replay-detection harder for
     /// any future intermediary).
-    pub fn mint(&self) -> AuthCredential {
+    pub fn mint(&self) -> Vec<u8> {
         let nonce = random_u64();
         let timestamp_unix = unix_now();
         let signature = sign(&self.key, &self.identity, nonce, timestamp_unix);
-        AuthCredential::Dev {
-            identity: self.identity.clone(),
-            nonce,
-            timestamp_unix,
-            signature,
-        }
+        encode_dev_ticket(&self.identity, nonce, timestamp_unix, &signature)
     }
 }
 
@@ -81,9 +75,8 @@ impl DevSigner {
 /// the server-side decoder so a bad key fails the same way on
 /// either end.
 fn decode_key(hex_str: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(hex_str).map_err(|e| {
-        format!("RIFT_DEV_AUTH_KEY is not valid hex ({e}); expected 64 hex chars")
-    })?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| format!("RIFT_DEV_AUTH_KEY is not valid hex ({e}); expected 64 hex chars"))?;
     if bytes.len() != 32 {
         return Err(format!(
             "RIFT_DEV_AUTH_KEY decoded to {} bytes; expected 32 (64 hex chars)",
@@ -103,12 +96,23 @@ fn pick_identity() -> String {
     if let Ok(raw) = std::env::var("RIFT_DEV_USER") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            // Truncate to the server's max so the round-trip
-            // doesn't reject us. Iterate by char (Unicode
-            // scalar) rather than byte to avoid splitting
-            // multibyte characters in the middle.
-            let truncated: String = trimmed.chars().take(MAX_DEV_IDENTITY_CHARS).collect();
-            return truncated;
+            // Strip control characters, refuse the reserved
+            // issuer separator `:`, truncate to the server's
+            // max so the round-trip doesn't reject us. Iterate
+            // by char (Unicode scalar) rather than byte to
+            // avoid splitting multibyte characters in the
+            // middle. If sanitization leaves us with nothing
+            // we fall through to the random `dev-XXXXXX` path
+            // instead of shipping an empty identity (which the
+            // server would reject anyway).
+            let cleaned: String = trimmed
+                .chars()
+                .filter(|c| !c.is_control() && *c != ':')
+                .take(MAX_DEV_IDENTITY_CHARS)
+                .collect();
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
         }
     }
     // Six hex chars = 16.7 M possibilities — collision-free
@@ -184,9 +188,7 @@ mod tests {
             return;
         }
         assert_eq!(id.len(), 4 + 6);
-        assert!(id["dev-".len()..]
-            .chars()
-            .all(|c| c.is_ascii_hexdigit()));
+        assert!(id["dev-".len()..].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

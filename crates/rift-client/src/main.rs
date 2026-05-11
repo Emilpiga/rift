@@ -148,9 +148,11 @@ impl RiftApp {
         // Forward any pending roster lookup the player just
         // confirmed on the account-entry screen. Must happen
         // before `net.step` so the request goes out on the same
-        // frame.
-        if let Some(account_name) = state.net.roster_request.take() {
-            net.request_roster(account_name);
+        // frame. The string content is only used for UI
+        // ("Loading roster for 'alice'..."); the net layer
+        // only needs the arm signal.
+        if state.net.roster_request.take().is_some() {
+            net.arm_auth();
         }
 
         net.step(Duration::from_secs_f32(dt), Some(input));
@@ -1424,15 +1426,19 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut state = GameState::new();
-    // If auth resolved at startup, queue the dev/steam identity
-    // straight into the net layer so the binary can skip the
-    // account-entry screen entirely. The net client is gated on
-    // both a queued identity and an installed signer so this is
-    // safe to set even in SP mode (the net layer just won't fire).
-    if let Some(signer) = auth_config.signer.as_ref() {
-        let identity = signer.identity_hint();
-        state.net.roster_request = Some(identity.clone());
-        state.character_select_skip_to_loading(identity);
+    // If auth resolved at startup AND we actually have a
+    // network session, queue the dev/steam identity straight
+    // into the net layer so the binary can skip the
+    // account-entry screen entirely. Skipping in SP mode would
+    // jump the UI to `LoadingRoster` with no NetClient to ever
+    // deliver `Authenticated`, which hangs the player forever
+    // on the loading screen.
+    if net.is_some() {
+        if let Some(signer) = auth_config.signer.as_ref() {
+            let identity = signer.identity_hint();
+            state.net.roster_request = Some(identity.clone());
+            state.character_select_skip_to_loading(identity);
+        }
     }
 
     let window = Window::new("Rift Crawler", 1280, 720);

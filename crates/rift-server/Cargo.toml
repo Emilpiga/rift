@@ -27,12 +27,15 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 hex = { workspace = true }
+steamworks = { workspace = true, optional = true }
 
 [features]
-# When enabled, links the `steamworks`-driven Steam ticket
-# verifier into the auth resolver. Off by default so the
-# dedicated-server build stays free of the Steamworks SDK
-# requirement; production server builds set this. The Phase 2
-# stub keeps the feature compiling without yet calling the
-# Steam Web API — the actual HTTP integration lands later.
-steam-auth = []
+# When enabled, links the Steamworks Game Server SDK and routes
+# auth through `ISteamGameServer::BeginAuthSession`. Off by
+# default so non-production builds (CI, dev loop, headless
+# integration tests) don't pull the SDK redistributable or
+# require Steam at runtime. Production server builds set this;
+# the runtime side needs Steam reachable over the network.
+# Today we run against Spacewar appid 480 for end-to-end
+# testing — see BEFORE_PUBLISHING.md.
+steam-auth = ["dep:steamworks"]

@@ -246,8 +246,8 @@ impl CharacterSelect {
         gender: Gender,
     ) -> Option<hecs::Entity> {
         let (model_path, tex_path) = hero::base_model_paths(gender);
-        let skinned = match SkinnedMesh::from_gltf_filtered(model_path, |n| {
-            super::avatar_cosmetics::is_body_mesh_name(n)
+        let skinned = match SkinnedMesh::from_gltf_filtered(model_path, |node, mesh| {
+            super::avatar_cosmetics::is_body_mesh_name(node, mesh)
         }) {
             Ok(s) => s,
             Err(e) => {

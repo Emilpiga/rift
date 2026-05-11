@@ -142,22 +142,23 @@ impl NetClient {
         }
     }
 
-    /// Queue an account identity for the next `Hello`. The
-    /// actual auth send happens once renet reports the
-    /// connection is live (see `step`). Calling this with a
-    /// different identity than is already pending re-arms the
-    /// send so we always log in as whatever the most recent
-    /// account-entry confirmed.
+    /// Arm the auth handshake: tell the net layer the player
+    /// has confirmed an identity and we should ship `Hello` as
+    /// soon as renet reports the connection live. Idempotent;
+    /// safe to call multiple times. The actual credential is
+    /// minted by the installed [`crate::auth::Signer`] at send
+    /// time, so this method takes no identity argument \u2014 the
+    /// signer is the authority.
     ///
-    /// Field name is legacy from the pre-auth flow when this
-    /// triggered a separate `RequestRoster` packet — the
-    /// roster now arrives bundled with `Authenticated`.
-    pub fn request_roster(&mut self, account_name: String) {
-        let same_pending = self.pending_account_for_auth.as_deref() == Some(account_name.as_str());
-        if !same_pending {
+    /// Name is historical: the pre-auth flow had a separate
+    /// `RequestRoster` packet keyed on a typed account name.
+    /// That role now belongs to `Authenticated`, which carries\n    /// the roster as part of the auth reply.
+    pub fn arm_auth(&mut self) {
+        if !self.auth_armed {
+            self.auth_armed = true;
+            // Force a fresh `Hello` if the previous one was\n            // sent against a now-stale signer. In practice\n            // this is a no-op (callers arm before connect),\n            // but it costs nothing to be defensive.
             self.auth_sent = false;
         }
-        self.pending_account_for_auth = Some(account_name);
     }
 
     /// Drain the most recent roster reply, if any. Returns `None`

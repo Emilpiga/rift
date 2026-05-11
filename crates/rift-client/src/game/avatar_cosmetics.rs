@@ -34,9 +34,7 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use hecs::Entity;
 
-use rift_engine::ecs::components::{
-    AttachmentPiece, Skinned, SkinnedAttachments, Transform,
-};
+use rift_engine::ecs::components::{AttachmentPiece, Skinned, SkinnedAttachments, Transform};
 use rift_engine::renderer::mesh::SkinnedMesh;
 use rift_engine::Renderer;
 
@@ -101,17 +99,19 @@ fn hair_tint(gender: Gender) -> Vec3 {
     }
 }
 
-/// True when `name` looks like the body sibling inside one of
-/// the base-character glTFs (and *not* the `Eyes` / `Eyebrows`
-/// siblings). Used as a name-filter when loading the body so it
-/// only contains body geometry — eyes and eyebrows are loaded
-/// separately as cosmetic attachments. The female body mesh is
-/// `Superhero_Female`, the male is `SuperHero_Male` (different
-/// casing in the source assets), so we just exclude anything
-/// containing "eye" or "brow".
-pub fn is_body_mesh_name(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    !n.contains("eye") && !n.contains("brow")
+/// True when a glTF primitive belongs to the body sibling (and
+/// *not* the `Eyes` / `Eyebrows` siblings) inside one of the
+/// base-character glTFs. Receives both the node and mesh name
+/// because exporters disagree about which one carries the
+/// meaningful label (see `SkinnedMesh::from_gltf_filtered`).
+/// Excludes anything containing "eye" or "brow" in *either*
+/// name so eyes/eyebrows aren't pulled into the body load on
+/// the male asset (where the meshes are named
+/// `Face`/`Face.001`).
+pub fn is_body_mesh_name(node: &str, mesh: &str) -> bool {
+    let n = node.to_ascii_lowercase();
+    let m = mesh.to_ascii_lowercase();
+    !n.contains("eye") && !n.contains("brow") && !m.contains("eye") && !m.contains("brow")
 }
 
 /// Process-wide cache of remapped cosmetic meshes. Keyed by
@@ -121,6 +121,11 @@ pub fn is_body_mesh_name(name: &str) -> bool {
 #[derive(Default)]
 pub struct AvatarCosmeticsCache {
     meshes: HashMap<(String, String, usize), Arc<SkinnedMesh>>,
+    /// Negative cache: entries we've already tried and failed
+    /// to load. Avoids per-frame warn-spam (and per-frame gltf
+    /// re-parsing) for character-select avatars whose assets
+    /// don't include an `Eyes` / `Eyebrows` sub-mesh.
+    failed: std::collections::HashSet<(String, String, usize)>,
 }
 
 impl AvatarCosmeticsCache {
@@ -139,20 +144,30 @@ impl AvatarCosmeticsCache {
         host_joint_names: &HashMap<String, u16>,
         host_joint_count: usize,
     ) -> Option<Arc<SkinnedMesh>> {
-        let key = (body_path.to_string(), "Eyes#white".to_string(), host_joint_count);
+        let key = (
+            body_path.to_string(),
+            "Eyes#white".to_string(),
+            host_joint_count,
+        );
         if let Some(m) = self.meshes.get(&key) {
             return Some(m.clone());
         }
-        let want = "Eyes".to_string();
-        let mut mesh = match SkinnedMesh::from_gltf_filtered(body_path, |n| n == want) {
+        if self.failed.contains(&key) {
+            return None;
+        }
+        let mut mesh = match SkinnedMesh::from_gltf_filtered(body_path, |node, mesh| {
+            node == "Eyes" || mesh == "Eyes"
+        }) {
             Ok(m) => m,
             Err(e) => {
                 log::warn!("avatar eyes load failed for {:?}: {}", body_path, e);
+                self.failed.insert(key);
                 return None;
             }
         };
         if !mesh.remap_joint_indices_to(host_joint_names) {
             log::warn!("avatar eyes joint remap failed for {:?}", body_path);
+            self.failed.insert(key);
             return None;
         }
         mesh.override_vertex_colors(Vec3::ONE);
@@ -174,23 +189,25 @@ impl AvatarCosmeticsCache {
     ) -> Option<Arc<SkinnedMesh>> {
         // Tint encoded in the cache key so a re-tint (different
         // gender visiting same path) doesn't collide.
-        let key_name = format!(
-            "tint:{:.3},{:.3},{:.3}",
-            tint.x, tint.y, tint.z
-        );
+        let key_name = format!("tint:{:.3},{:.3},{:.3}", tint.x, tint.y, tint.z);
         let key = (path.to_string(), key_name, host_joint_count);
         if let Some(m) = self.meshes.get(&key) {
             return Some(m.clone());
+        }
+        if self.failed.contains(&key) {
+            return None;
         }
         let mut mesh = match SkinnedMesh::from_gltf(path) {
             Ok(m) => m,
             Err(e) => {
                 log::warn!("avatar hair load failed for {:?}: {}", path, e);
+                self.failed.insert(key);
                 return None;
             }
         };
         if !mesh.remap_joint_indices_to(host_joint_names) {
             log::warn!("avatar hair joint remap failed for {:?}", path);
+            self.failed.insert(key);
             return None;
         }
         mesh.override_vertex_colors(tint);
@@ -242,12 +259,20 @@ pub fn apply_avatar_cosmetics(
 
     let mut pieces: Vec<CosmeticPiece> = Vec::with_capacity(2);
     if let Some(eyes) = cache.fetch_eyes_white(body_path, &host_joint_names, host_joint_count) {
-        pieces.push(CosmeticPiece { tag: TAG_EYES, mesh: eyes, texture: None });
+        pieces.push(CosmeticPiece {
+            tag: TAG_EYES,
+            mesh: eyes,
+            texture: None,
+        });
     }
     if let Some(hair) =
         cache.fetch_hair_tinted(hair_p, hair_color, &host_joint_names, host_joint_count)
     {
-        pieces.push(CosmeticPiece { tag: TAG_HAIR, mesh: hair, texture: None });
+        pieces.push(CosmeticPiece {
+            tag: TAG_HAIR,
+            mesh: hair,
+            texture: None,
+        });
     }
 
     // Ensure the entity has a SkinnedAttachments component.

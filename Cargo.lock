@@ -3095,6 +3095,7 @@ dependencies = [
  "rift-math",
  "rift-net",
  "sha2",
+ "steamworks",
  "winit",
 ]
 
@@ -3196,6 +3197,7 @@ dependencies = [
  "rift-net",
  "rift-persistence",
  "sha2",
+ "steamworks",
  "subtle",
 ]
 
@@ -3809,6 +3811,24 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "steamworks"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a79d6f059322f73a4586cc2d0ca595ce1583104b2b1574ae1bb87f2c05bf4c67"
+dependencies = [
+ "bitflags 1.3.2",
+ "lazy_static",
+ "steamworks-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "steamworks-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef6b00f8fe8eaaaff22cb9b70822a48c1a5d772bc682c202a57c0b438175845"
 
 [[package]]
 name = "strict-num"

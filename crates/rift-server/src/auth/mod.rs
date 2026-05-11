@@ -1,42 +1,37 @@
-//! Authentication for the dedicated server.
+//! Server-side authentication.
 //!
-//! Two issuers are supported: **Steam** (production) and **Dev**
-//! (local iteration / playtest). Both pipe through a single
-//! [`resolve`] entry point that turns a wire-level
-//! [`AuthCredential`] into an [`AccountKey`] — the issuer-tagged
-//! identifier the rest of the server uses for persistence keys,
-//! party invites, log lines, etc.
+//! Exactly one verifier is configured at startup. In a
+//! production build (`--features steam-auth` + `STEAM_WEBAPI_KEY`
+//! set) that's the Steam verifier, which validates the opaque
+//! ticket against `ISteamUserAuth/AuthenticateUserTicket`. In a
+//! dev build (`RIFT_DEV_AUTH_KEY` set) it's the Dev verifier,
+//! which parses the local HMAC-signed ticket format owned by
+//! [`rift_net::auth_dev`]. Dev mode is conceptually "local fake
+//! Steam": same opaque-bytes wire shape, different verifier.
 //!
-//! The Phase-2 implementation lands the real verification logic
-//! (HMAC-SHA256 for dev, Steam Web API stub for steam) and
-//! keeps the call site synchronous. The Phase-3 promotion onto
-//! a background task / mpsc reply channel is **deferred** until
-//! a concrete async issuer lands: HMAC verification is
-//! microseconds and the Steam path is a stub today, so spinning
-//! up a worker thread now would add complexity without payoff.
-//! When the real Steam Web API integration arrives (`reqwest` /
-//! `ureq` HTTP call out of `verify_ticket`), promote `resolve`
-//! to push the request onto a `mpsc::Sender<AuthRequest>` and
-//! poll the result channel from `Server::step` — the existing
-//! `handle_hello` callsite is structured so the swap is local.
+//! Both verifiers consume `Hello.auth_ticket: Vec<u8>` and
+//! return a single [`AccountKey`] type. The rest of the server
+//! never branches on which verifier produced the result.
 
-use rift_net::AuthCredential;
+use std::sync::Arc;
 
 pub mod dev;
+#[cfg(feature = "steam-auth")]
 pub mod steam;
 
-/// Issuer-tagged account identity. The string form (`steam:1234`,
-/// `dev:alice`) is what the persistence layer keys character
-/// rows on, so the issuer prefix means a Steam player and a
-/// dev player who happened to pick the same identity string
-/// can never collide on the same account row.
-///
-/// `Steam` is constructed only from the steam stub today;
-/// silenced until the Steam Web API integration lands.
+/// Issuer-tagged account identity. The string form
+/// (`steam:76561198…`, `dev:alice`) is what the persistence
+/// layer stores in `accounts.account_key`, so the issuer
+/// prefix guarantees a Steam player and a dev player who
+/// happened to pick the same identity string can never
+/// collide on the same account row.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum AccountKey {
-    /// Steam SteamID64 as returned by `AuthenticateUserTicket`.
+    /// Steam SteamID64 returned by the validated ticket.
+    /// Currently unreachable (the Steam path is a stub); kept
+    /// in the enum so dispatch + persistence are ready for the
+    /// real HTTP integration.
+    #[allow(dead_code)]
     Steam(u64),
     /// Dev identity string (free-form, post-validation).
     Dev(String),
@@ -45,10 +40,7 @@ pub enum AccountKey {
 impl AccountKey {
     /// Encode as the `issuer:identity` string the persistence
     /// layer stores in `accounts.account_key`. Stable wire /
-    /// disk format — never change without a migration. Used
-    /// by the Phase-4 migration; allowed to be unused until
-    /// then.
-    #[allow(dead_code)]
+    /// disk format — never change without a migration.
     pub fn as_storage_string(&self) -> String {
         match self {
             AccountKey::Steam(id) => format!("steam:{id}"),
@@ -56,54 +48,41 @@ impl AccountKey {
         }
     }
 
-    /// Human-readable display form. For Steam this is
-    /// currently the SteamID64; once Steam Web API integration
-    /// lands the persona name will be threaded through here
-    /// instead. For Dev it's just the identity string.
+    /// Human-readable display form. For Steam this is the
+    /// SteamID64 today; once the Web API call lands the persona
+    /// name will be threaded through here instead. For Dev it's
+    /// just the identity string.
     pub fn display_name(&self) -> String {
         match self {
             AccountKey::Steam(id) => format!("steam:{id}"),
             AccountKey::Dev(name) => name.clone(),
         }
     }
-
-    /// The bare identity slice the legacy `account_name`-keyed
-    /// persistence path expects. Dropped once Phase 4 migrates
-    /// the storage layer to `account_key`.
-    pub fn legacy_account_name(&self) -> String {
-        self.display_name()
-    }
 }
 
-/// Reasons an auth resolution can fail. Each variant carries a
-/// short user-facing message because the client surfaces the
-/// rejection verbatim and exits.
-///
-/// The string payloads on `BadIdentity` and `SteamRejected`
-/// only flow through `Debug` log lines today, which dead-code
-/// analysis can't see — silenced explicitly so the warning
-/// doesn't drown out real ones.
+/// Reasons a ticket verification can fail. The string payloads
+/// are only logged; the user-visible message routed through
+/// `Reject` lives on [`AuthError::user_message`] and is kept
+/// deliberately non-leaky.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum AuthError {
-    /// Server has no `RIFT_DEV_AUTH_KEY` configured but the
-    /// client presented a [`AuthCredential::Dev`]. Production
-    /// servers should always hit this for dev credentials.
-    DevAuthDisabled,
-    /// Dev credential's HMAC signature did not match. Either a
-    /// wrong key, a tampered payload, or a key rotation the
-    /// client hasn't picked up yet.
+    /// Ticket bytes were the wrong shape for the configured
+    /// verifier (truncated, bad version byte, bad UTF-8, …).
+    MalformedTicket(String),
+    /// Dev: HMAC signature didn't match.
     BadSignature,
-    /// Dev credential's `timestamp_unix` was outside the
-    /// `±DEV_AUTH_REPLAY_WINDOW_SECS` window. Stops captured
-    /// credentials from being replayed indefinitely.
+    /// Dev: `timestamp_unix` fell outside the replay window.
     StaleTimestamp,
-    /// Identity string was empty, too long, or contained
-    /// control characters.
+    /// Dev: identity string failed validation (empty, too
+    /// long, reserved `:` separator, control chars).
     BadIdentity(String),
-    /// Steam ticket validation failed (network error, invalid
-    /// ticket, or the Phase-2 stub refusing because the
-    /// `steam-auth` feature isn't compiled in).
+    /// Dev: `(identity, nonce)` pair was already accepted
+    /// inside the replay window — captured packet replay.
+    ReplayDetected,
+    /// Steam: Web API call rejected the ticket (or, today, the
+    /// stub returns this verbatim because the HTTP integration
+    /// hasn't landed).
     SteamRejected(String),
 }
 
@@ -111,78 +90,219 @@ impl AuthError {
     /// User-visible string the server ships back in
     /// [`rift_net::ServerMsg::Reject`]. Kept short and
     /// non-leaky — we don't want to tell a malicious client
-    /// *which* part of their credential was wrong.
+    /// *which* part of their ticket was wrong.
     pub fn user_message(&self) -> String {
         match self {
-            AuthError::DevAuthDisabled => {
-                "This server is not configured to accept dev credentials.".to_string()
-            }
-            AuthError::BadSignature | AuthError::StaleTimestamp | AuthError::BadIdentity(_) => {
-                "Authentication failed.".to_string()
-            }
             AuthError::SteamRejected(_) => "Steam authentication failed.".to_string(),
+            _ => "Authentication failed.".to_string(),
         }
     }
 }
 
-/// Server-side auth configuration. Built once at startup from
-/// environment variables; threaded into [`resolve`] on every
-/// `Hello`. Cheap to clone — the dev key is 32 bytes.
-#[derive(Clone, Debug, Default)]
+/// One configured verifier. Selected once at startup; the rest
+/// of the server holds a [`Verifier`] inside [`AuthConfig`] and
+/// calls [`Verifier::verify`] on every `Hello`.
+///
+/// `None` means the server refused to enable any verifier at
+/// startup (e.g. no `RIFT_DEV_AUTH_KEY` set and the
+/// `steam-auth` feature wasn't compiled in). In that state
+/// every incoming `Hello` is rejected, which is the right
+/// behaviour: silently accepting unverified clients would
+/// undo the whole point of the auth flow.
+#[derive(Clone)]
+pub enum Verifier {
+    /// Production path. Validates tickets against the Steam
+    /// Game Server SDK (`ISteamGameServer::BeginAuthSession`).
+    /// Only available when the `steam-auth` cargo feature is
+    /// enabled — default builds get a dev-only `Verifier`.
+    #[cfg(feature = "steam-auth")]
+    Steam(steam::SteamVerifier),
+    /// Local-iteration path. Parses the `rift_net::auth_dev`
+    /// ticket layout, verifies the HMAC against the shared
+    /// key, and tracks accepted nonces to defang single-packet
+    /// replay.
+    ///
+    /// Compiled in all builds (the verifier's tests rely on
+    /// it) but unreachable from `AuthConfig::from_env` when
+    /// `steam-auth` is on — a production server forces Steam.
+    #[cfg_attr(feature = "steam-auth", allow(dead_code))]
+    Dev(dev::DevVerifier),
+}
+
+impl Verifier {
+    /// Validate a wire ticket. Returns the resolved account
+    /// identity on success.
+    pub fn verify(&self, ticket: &[u8]) -> Result<AccountKey, AuthError> {
+        match self {
+            #[cfg(feature = "steam-auth")]
+            Verifier::Steam(v) => v.verify(ticket),
+            Verifier::Dev(v) => v.verify(ticket),
+        }
+    }
+
+    /// Short label for log lines. Helps `cargo run` output
+    /// make it obvious which verifier is active.
+    pub fn label(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "steam-auth")]
+            Verifier::Steam(_) => "steam",
+            Verifier::Dev(_) => "dev",
+        }
+    }
+}
+
+/// Server-side auth configuration. Built once at startup; held
+/// on `Server` and threaded into every `Hello` resolution. The
+/// inner verifier is `Arc`-wrapped so cloning the config (e.g.
+/// for an async worker promotion later) is cheap.
+#[derive(Clone, Default)]
 pub struct AuthConfig {
-    /// Optional shared HMAC key for dev auth, hex-decoded from
-    /// `RIFT_DEV_AUTH_KEY`. `None` disables the entire dev
-    /// auth path: any `AuthCredential::Dev` is rejected with
-    /// [`AuthError::DevAuthDisabled`]. Production servers
-    /// should always leave this unset.
-    pub dev_key: Option<[u8; 32]>,
+    /// `None` disables auth entirely — every `Hello` is
+    /// rejected with `AuthError::SteamRejected("...")`. This
+    /// is the safe-by-default state when neither
+    /// `RIFT_DEV_AUTH_KEY` nor the `steam-auth` feature is
+    /// configured. Production servers run with `Steam`; dev
+    /// loop runs with `Dev`.
+    pub verifier: Option<Arc<Verifier>>,
 }
 
 impl AuthConfig {
-    /// Read configuration from environment variables. Logs
-    /// loudly when dev auth is enabled — operators should
-    /// never see this on a production server.
+    /// Pick a verifier based on cargo features + environment
+    /// variables, logging loudly so an operator can tell which
+    /// path is active.
+    ///
+    /// Precedence:
+    /// 1. `--features steam-auth` → Steam verifier (production).
+    /// 2. `RIFT_DEV_AUTH_KEY` set → Dev verifier.
+    /// 3. Neither → disabled; every `Hello` is rejected.
+    ///
+    /// Mixing — running with both the feature on and the dev
+    /// key set — picks Steam and logs a warning so a
+    /// misconfigured prod box can't accept HMAC tickets by
+    /// accident.
     pub fn from_env() -> Self {
-        let dev_key = match std::env::var("RIFT_DEV_AUTH_KEY") {
-            Ok(hex) => match dev::decode_key(&hex) {
-                Ok(k) => {
-                    log::warn!(
-                        "auth: DEV credential issuer ENABLED via RIFT_DEV_AUTH_KEY \
-                         (do not set this on a production server)"
-                    );
-                    Some(k)
+        #[cfg(feature = "steam-auth")]
+        {
+            if std::env::var("RIFT_DEV_AUTH_KEY").is_ok() {
+                log::warn!(
+                    "auth: RIFT_DEV_AUTH_KEY is set but `steam-auth` feature is enabled \
+                     — ignoring dev key, using Steam verifier"
+                );
+            }
+            match steam::SteamVerifier::from_env() {
+                Ok(v) => {
+                    log::info!("auth: Steam verifier active");
+                    return Self {
+                        verifier: Some(Arc::new(Verifier::Steam(v))),
+                    };
                 }
                 Err(e) => {
-                    log::error!(
-                        "auth: RIFT_DEV_AUTH_KEY is set but malformed ({e}); \
-                         dev auth remains DISABLED"
-                    );
-                    None
+                    log::error!("auth: Steam verifier failed to initialize ({e}); auth DISABLED");
+                    return Self::default();
                 }
-            },
-            Err(_) => None,
-        };
-        Self { dev_key }
+            }
+        }
+
+        #[cfg(not(feature = "steam-auth"))]
+        {
+            match dev::DevVerifier::from_env() {
+                Ok(v) => {
+                    log::warn!(
+                        "auth: DEV verifier active (RIFT_DEV_AUTH_KEY set) — \
+                         do not run this build against a production server"
+                    );
+                    Self {
+                        verifier: Some(Arc::new(Verifier::Dev(v))),
+                    }
+                }
+                Err(reason) => {
+                    log::error!("auth: no verifier configured ({reason}); auth DISABLED");
+                    Self::default()
+                }
+            }
+        }
     }
 }
 
-/// Resolve a wire credential into an account key. Synchronous
-/// today; see the module docs for the deferred Phase-3
-/// promotion onto a background task once Steam HTTP integration
-/// makes async actually pay for itself.
-pub fn resolve(cfg: &AuthConfig, credential: &AuthCredential) -> Result<AccountKey, AuthError> {
-    match credential {
-        AuthCredential::Dev {
-            identity,
-            nonce,
-            timestamp_unix,
-            signature,
-        } => {
-            let Some(key) = cfg.dev_key.as_ref() else {
-                return Err(AuthError::DevAuthDisabled);
-            };
-            dev::verify(key, identity, *nonce, *timestamp_unix, signature)
+/// Resolve a wire ticket into an account key. The single entry
+/// point the dispatcher calls on every `Hello`. Returns an
+/// explicit `SteamRejected` when no verifier is configured so
+/// the rejection reason in the user-facing `Reject` is honest
+/// rather than misleading the player into thinking their
+/// credential was bad.
+pub fn resolve(cfg: &AuthConfig, ticket: &[u8]) -> Result<AccountKey, AuthError> {
+    let Some(verifier) = cfg.verifier.as_ref() else {
+        return Err(AuthError::SteamRejected(
+            "This server has no authentication verifier configured.".to_string(),
+        ));
+    };
+    verifier.verify(ticket)
+}
+
+/// One-shot replay defence shared by every verifier that
+/// accepts retryable tickets. Tracks `(identity, nonce)` pairs
+/// for the duration of [`rift_net::auth_dev::DEV_AUTH_REPLAY_WINDOW_SECS`]
+/// and rejects exact retries. GC on every check keeps the map
+/// from growing unbounded.
+#[derive(Debug, Default)]
+pub struct ReplayCache {
+    entries: std::collections::HashMap<(String, u64), u64>,
+}
+
+impl ReplayCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reject the credential if `(identity, nonce)` was already
+    /// accepted inside the replay window; otherwise record it
+    /// and return `Ok(())`.
+    pub fn check_and_record(
+        &mut self,
+        identity: &str,
+        nonce: u64,
+        now: u64,
+    ) -> Result<(), AuthError> {
+        self.gc(now);
+        if self.entries.contains_key(&(identity.to_string(), nonce)) {
+            return Err(AuthError::ReplayDetected);
         }
-        AuthCredential::Steam { steam_id, ticket } => steam::verify_ticket(*steam_id, ticket),
+        self.entries.insert((identity.to_string(), nonce), now);
+        Ok(())
+    }
+
+    fn gc(&mut self, now: u64) {
+        use rift_net::auth_dev::DEV_AUTH_REPLAY_WINDOW_SECS;
+        self.entries
+            .retain(|_, recorded| now.saturating_sub(*recorded) <= DEV_AUTH_REPLAY_WINDOW_SECS);
+    }
+}
+
+/// Wall-clock seconds since the Unix epoch; pre-epoch clocks
+/// (which would indicate a wildly broken host) become `0` so
+/// the replay-window math stays sane.
+pub(crate) fn unix_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// Manual Debug so an accidental `{cfg:?}` doesn't dump the HMAC key.
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field(
+                "verifier",
+                &self.verifier.as_ref().map(|v| v.label()).unwrap_or("none"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Verifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple(self.label()).finish()
     }
 }

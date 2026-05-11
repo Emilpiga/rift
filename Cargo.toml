@@ -41,6 +41,17 @@ sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
 
+# Steamworks Game Server / Client SDK bindings, used by the
+# production Steam auth path. Opt-in via the `steam-auth`
+# cargo feature on both rift-client and rift-server so default
+# builds stay free of the SDK redistributable. `steamworks-sys`
+# bundles the public Steamworks SDK redist as part of its
+# source, so no manual `STEAM_SDK_LOCATION` setup is needed at
+# compile time; the runtime requirement (Steam client running,
+# or steam_appid.txt next to the binary) is documented in
+# BEFORE_PUBLISHING.md.
+steamworks = "0.11"
+
 # `kira` (and its decoder dependencies) decode audio in the
 # audio thread; built unoptimised it cannot keep up with even a
 # handful of simultaneous OGG sounds and produces audible

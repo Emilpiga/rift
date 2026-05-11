@@ -21,10 +21,21 @@ pub struct ClientSession {
     pub client_id: ClientId,
     /// `None` until the client's `Hello` has been processed.
     pub character_name: Option<String>,
-    /// Account display name supplied with `Hello`. Used to
-    /// resolve / create the persistent `accounts` row that owns
-    /// this session's character.
+    /// Issuer-tagged account storage key (`"dev:alice"` /
+    /// `"steam:76561198..."`) resolved from the `Hello`'s
+    /// `AuthCredential`. Drives every persistence lookup
+    /// (`load_or_create_blocking`, `list_account_characters_blocking`)
+    /// and the `accounts.account_key` column. Field name is
+    /// historical — the value used to be a plain user-typed
+    /// account name before the Steam-auth migration.
     pub account_name: Option<String>,
+    /// Human-readable display label that accompanied the
+    /// `account_name` resolution. Persisted as
+    /// `accounts.display_name` on first-insert (Steam persona
+    /// name once the Web API lands; the dev identity string
+    /// otherwise). Used to recreate the account row from the
+    /// follow-up `EnterWorld` without re-running auth.
+    pub account_display_name: Option<String>,
     /// Profile fields (set on Hello). `None` until welcomed.
     pub class_id: Option<String>,
     pub gender: Option<Gender>,
@@ -52,6 +63,7 @@ impl ClientSession {
             client_id,
             character_name: None,
             account_name: None,
+            account_display_name: None,
             class_id: None,
             gender: None,
             net_id: None,

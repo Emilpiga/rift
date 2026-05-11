@@ -20,7 +20,7 @@
 use std::thread;
 
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::{PgPoolOptions, PgPool};
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::{mpsc, oneshot};
 pub use uuid::Uuid;
 
@@ -132,15 +132,21 @@ pub struct PersistenceHandle {
 pub enum PersistenceMsg {
     /// Look up the character by `character_name`; if it doesn't
     /// exist, create it under the account identified by
-    /// `account_name` (creating the account too if missing). The
+    /// `account_key` (creating the account too if missing). The
     /// reply contains the freshly-loaded or freshly-created
     /// [`CharacterRecord`].
+    ///
+    /// `account_key` is the issuer-tagged storage form
+    /// (`"dev:<name>"` / `"steam:<id>"`); `display_name` is
+    /// the human-readable label persisted alongside it for the
+    /// roster reply / future UI.
     ///
     /// Server typically `blocking_recv()`s on the reply during
     /// the `Hello` handshake — we can't accept the player into
     /// the world without their level / xp.
     LoadOrCreate {
-        account_name: String,
+        account_key: String,
+        display_name: String,
         character_name: String,
         class_id: String,
         gender: i16,
@@ -153,22 +159,26 @@ pub enum PersistenceMsg {
     /// disconnect.
     Save { record: CharacterRecord },
 
-    /// List every character row that belongs to `account_name`.
+    /// List every character row that belongs to `account_key`.
     /// Creates the account row if it doesn't exist yet so the
     /// caller can immediately offer "Create New Character". The
     /// reply contains `(account_id, characters)`; an empty
     /// `characters` vec means a brand-new account.
+    ///
+    /// `account_key` is the issuer-tagged storage form;
+    /// `display_name` is only used on first-insert (it's not
+    /// touched if the row already exists, so a Steam persona
+    /// rename will be picked up by `LoadOrCreate` next session).
     ListAccountCharacters {
-        account_name: String,
+        account_key: String,
+        display_name: String,
         reply: oneshot::Sender<Result<(Uuid, Vec<CharacterRecord>), PersistenceError>>,
     },
 
     /// Drain the queue and stop the worker. The reply fires once
     /// every preceding message has been processed (so the server
     /// can rely on this for a clean shutdown that loses no writes).
-    Shutdown {
-        reply: oneshot::Sender<()>,
-    },
+    Shutdown { reply: oneshot::Sender<()> },
 
     /// Load every inventory row belonging to `character_id`. The
     /// reply contains the items in `acquired_at` order so the
@@ -209,9 +219,8 @@ pub enum PersistenceMsg {
     /// Used at Hello time.
     LoadStash {
         character_id: Uuid,
-        reply: oneshot::Sender<
-            Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError>,
-        >,
+        reply:
+            oneshot::Sender<Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError>>,
     },
 
     /// Replace every `stash_items` + `stash_tabs` row owned by
@@ -241,7 +250,8 @@ impl PersistenceHandle {
     /// the worker replies. Intended for the `Hello` handshake.
     pub fn load_or_create_blocking(
         &self,
-        account_name: String,
+        account_key: String,
+        display_name: String,
         character_name: String,
         class_id: String,
         gender: i16,
@@ -249,14 +259,16 @@ impl PersistenceHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(PersistenceMsg::LoadOrCreate {
-                account_name,
+                account_key,
+                display_name,
                 character_name,
                 class_id,
                 gender,
                 reply,
             })
             .map_err(|_| PersistenceError::WorkerGone)?;
-        rx.blocking_recv().map_err(|_| PersistenceError::WorkerGone)?
+        rx.blocking_recv()
+            .map_err(|_| PersistenceError::WorkerGone)?
     }
 
     /// Queue a fire-and-forget save. Returns `false` if the worker
@@ -266,20 +278,26 @@ impl PersistenceHandle {
         self.tx.send(PersistenceMsg::Save { record }).is_ok()
     }
 
-    /// List the characters belonging to `account_name`, creating
+    /// List the characters belonging to `account_key`, creating
     /// the account row if missing. Blocks the calling thread until
     /// the worker replies — server uses this during the
-    /// `RequestRoster` handshake before the player has picked a
+    /// `Hello` handshake before the player has picked a
     /// character to play.
     pub fn list_account_characters_blocking(
         &self,
-        account_name: String,
+        account_key: String,
+        display_name: String,
     ) -> Result<(Uuid, Vec<CharacterRecord>), PersistenceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(PersistenceMsg::ListAccountCharacters { account_name, reply })
+            .send(PersistenceMsg::ListAccountCharacters {
+                account_key,
+                display_name,
+                reply,
+            })
             .map_err(|_| PersistenceError::WorkerGone)?;
-        rx.blocking_recv().map_err(|_| PersistenceError::WorkerGone)?
+        rx.blocking_recv()
+            .map_err(|_| PersistenceError::WorkerGone)?
     }
 
     /// Block until the worker has processed every queued message
@@ -302,9 +320,13 @@ impl PersistenceHandle {
     ) -> Result<Vec<PersistedItem>, PersistenceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(PersistenceMsg::LoadInventory { character_id, reply })
+            .send(PersistenceMsg::LoadInventory {
+                character_id,
+                reply,
+            })
             .map_err(|_| PersistenceError::WorkerGone)?;
-        rx.blocking_recv().map_err(|_| PersistenceError::WorkerGone)?
+        rx.blocking_recv()
+            .map_err(|_| PersistenceError::WorkerGone)?
     }
 
     /// Queue a fire-and-forget inventory append. Returns `false`
@@ -319,13 +341,12 @@ impl PersistenceHandle {
     /// inventory row owned by `character_id` with `items` in a
     /// single transaction. Used after equip / unequip; see
     /// [`PersistenceMsg::ResetCharacterInventory`].
-    pub fn reset_character_inventory(
-        &self,
-        character_id: Uuid,
-        items: Vec<PersistedItem>,
-    ) -> bool {
+    pub fn reset_character_inventory(&self, character_id: Uuid, items: Vec<PersistedItem>) -> bool {
         self.tx
-            .send(PersistenceMsg::ResetCharacterInventory { character_id, items })
+            .send(PersistenceMsg::ResetCharacterInventory {
+                character_id,
+                items,
+            })
             .is_ok()
     }
 
@@ -339,9 +360,13 @@ impl PersistenceHandle {
     ) -> Result<(Vec<PersistedStashTab>, Vec<PersistedItem>), PersistenceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(PersistenceMsg::LoadStash { character_id, reply })
+            .send(PersistenceMsg::LoadStash {
+                character_id,
+                reply,
+            })
             .map_err(|_| PersistenceError::WorkerGone)?;
-        rx.blocking_recv().map_err(|_| PersistenceError::WorkerGone)?
+        rx.blocking_recv()
+            .map_err(|_| PersistenceError::WorkerGone)?
     }
 
     /// Queue a fire-and-forget stash rewrite. Replaces every
@@ -354,7 +379,11 @@ impl PersistenceHandle {
         items: Vec<PersistedItem>,
     ) -> bool {
         self.tx
-            .send(PersistenceMsg::ResetCharacterStash { character_id, tabs, items })
+            .send(PersistenceMsg::ResetCharacterStash {
+                character_id,
+                tabs,
+                items,
+            })
             .is_ok()
     }
 }
@@ -408,12 +437,20 @@ pub fn spawn(database_url: String) -> anyhow::Result<PersistenceHandle> {
 async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMsg>) {
     while let Some(msg) = rx.recv().await {
         match msg {
-            PersistenceMsg::LoadOrCreate { account_name, character_name, class_id, gender, reply } => {
+            PersistenceMsg::LoadOrCreate {
+                account_key,
+                display_name,
+                character_name,
+                class_id,
+                gender,
+                reply,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
                     let res = load_or_create(
                         &pool,
-                        &account_name,
+                        &account_key,
+                        &display_name,
                         &character_name,
                         &class_id,
                         gender,
@@ -430,10 +467,14 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                     }
                 });
             }
-            PersistenceMsg::ListAccountCharacters { account_name, reply } => {
+            PersistenceMsg::ListAccountCharacters {
+                account_key,
+                display_name,
+                reply,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
-                    let res = list_account_characters(&pool, &account_name).await;
+                    let res = list_account_characters(&pool, &account_key, &display_name).await;
                     let _ = reply.send(res);
                 });
             }
@@ -446,7 +487,10 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                 let _ = reply.send(());
                 return;
             }
-            PersistenceMsg::LoadInventory { character_id, reply } => {
+            PersistenceMsg::LoadInventory {
+                character_id,
+                reply,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
                     let res = load_inventory(&pool, character_id).await;
@@ -457,36 +501,41 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                 let pool = pool.clone();
                 tokio::spawn(async move {
                     if let Err(e) = append_inventory_item(&pool, character_id, &item).await {
-                        log::warn!(
-                            "persistence: append item failed for {character_id}: {e}"
-                        );
+                        log::warn!("persistence: append item failed for {character_id}: {e}");
                     }
                 });
             }
-            PersistenceMsg::ResetCharacterInventory { character_id, items } => {
+            PersistenceMsg::ResetCharacterInventory {
+                character_id,
+                items,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
                     if let Err(e) = reset_character_inventory(&pool, character_id, &items).await {
-                        log::warn!(
-                            "persistence: reset inventory failed for {character_id}: {e}"
-                        );
+                        log::warn!("persistence: reset inventory failed for {character_id}: {e}");
                     }
                 });
             }
-            PersistenceMsg::LoadStash { character_id, reply } => {
+            PersistenceMsg::LoadStash {
+                character_id,
+                reply,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
                     let res = load_stash(&pool, character_id).await;
                     let _ = reply.send(res);
                 });
             }
-            PersistenceMsg::ResetCharacterStash { character_id, tabs, items } => {
+            PersistenceMsg::ResetCharacterStash {
+                character_id,
+                tabs,
+                items,
+            } => {
                 let pool = pool.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = reset_character_stash(&pool, character_id, &tabs, &items).await {
-                        log::warn!(
-                            "persistence: reset stash failed for {character_id}: {e}"
-                        );
+                    if let Err(e) = reset_character_stash(&pool, character_id, &tabs, &items).await
+                    {
+                        log::warn!("persistence: reset stash failed for {character_id}: {e}");
                     }
                 });
             }
@@ -498,11 +547,16 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
 
 /// Look up `character_name` in `characters`. If absent, create the
 /// row — reusing the existing `accounts` row keyed by
-/// `account_name` if one already exists, otherwise inserting a
+/// `account_key` if one already exists, otherwise inserting a
 /// fresh account in the same transaction.
+///
+/// `account_key` is the issuer-tagged storage form
+/// (`"dev:<name>"` / `"steam:<id>"`). `display_name` is
+/// persisted on first-insert and ignored thereafter.
 async fn load_or_create(
     pool: &PgPool,
-    account_name: &str,
+    account_key: &str,
+    display_name: &str,
     character_name: &str,
     class_id: &str,
     gender: i16,
@@ -511,22 +565,31 @@ async fn load_or_create(
 
     // Look up or create the parent account. Plain SELECT…INSERT
     // is fine here — we hold a transaction so a concurrent insert
-    // would block on the unique-name constraint, and we re-check
+    // would block on the unique-key constraint, and we re-check
     // after commit on the next handshake.
     let existing_account: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE name = $1")
-            .bind(account_name)
+        sqlx::query_as("SELECT id FROM accounts WHERE account_key = $1")
+            .bind(account_key)
             .fetch_optional(&mut *tx)
             .await?;
     let account_id = match existing_account {
         Some((id,)) => id,
         None => {
             let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO accounts (id, name) VALUES ($1, $2)")
-                .bind(id)
-                .bind(account_name)
-                .execute(&mut *tx)
-                .await?;
+            // `accounts.name` is now nullable, but populating it
+            // alongside `account_key` keeps any in-flight tooling /
+            // dashboards that still display the legacy column
+            // useful. Identical value to `account_key` so there's
+            // no semantic drift between the two.
+            sqlx::query(
+                "INSERT INTO accounts (id, account_key, display_name, name) \
+                 VALUES ($1, $2, $3, $2)",
+            )
+            .bind(id)
+            .bind(account_key)
+            .bind(display_name)
+            .execute(&mut *tx)
+            .await?;
             id
         }
     };
@@ -574,28 +637,34 @@ async fn load_or_create(
     })
 }
 
-/// Resolve `account_name` and return every character row that
-/// belongs to it. Creates the account row if missing so a
-/// brand-new player still gets a stable `account_id`.
+/// Resolve `account_key` and return every character row that
+/// belongs to it. Creates the account row if missing (using
+/// `display_name` for the human-readable label) so a brand-new
+/// player still gets a stable `account_id`.
 async fn list_account_characters(
     pool: &PgPool,
-    account_name: &str,
+    account_key: &str,
+    display_name: &str,
 ) -> Result<(Uuid, Vec<CharacterRecord>), PersistenceError> {
     let mut tx = pool.begin().await?;
     let existing: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE name = $1")
-            .bind(account_name)
+        sqlx::query_as("SELECT id FROM accounts WHERE account_key = $1")
+            .bind(account_key)
             .fetch_optional(&mut *tx)
             .await?;
     let account_id = match existing {
         Some((id,)) => id,
         None => {
             let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO accounts (id, name) VALUES ($1, $2)")
-                .bind(id)
-                .bind(account_name)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO accounts (id, account_key, display_name, name) \
+                 VALUES ($1, $2, $3, $2)",
+            )
+            .bind(id)
+            .bind(account_key)
+            .bind(display_name)
+            .execute(&mut *tx)
+            .await?;
             id
         }
     };
@@ -642,24 +711,22 @@ async fn fetch_by_account_and_name(
     .bind(name)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(
-        row.map(
-            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
-                CharacterRecord {
-                    id,
-                    account_id,
-                    name,
-                    class_id,
-                    gender,
-                    level,
-                    xp,
-                    loadout: loadout_from_vec(loadout),
-                    deepest_cleared_floor,
-                    shards,
-                }
-            },
-        ),
-    )
+    Ok(row.map(
+        |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
+            CharacterRecord {
+                id,
+                account_id,
+                name,
+                class_id,
+                gender,
+                level,
+                xp,
+                loadout: loadout_from_vec(loadout),
+                deepest_cleared_floor,
+                shards,
+            }
+        },
+    ))
 }
 
 async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
@@ -705,29 +772,41 @@ async fn load_inventory(
     pool: &PgPool,
     character_id: Uuid,
 ) -> Result<Vec<PersistedItem>, PersistenceError> {
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, Option<i16>, i32, bool, Option<Vec<Uuid>>)> =
-        sqlx::query_as(
-            "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance \
+    let rows: Vec<(
+        String,
+        i16,
+        i32,
+        sqlx::types::Json<Vec<AffixJson>>,
+        Option<i16>,
+        i32,
+        bool,
+        Option<Vec<Uuid>>,
+    )> = sqlx::query_as(
+        "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance \
              FROM inventory_items \
              WHERE character_id = $1 \
              ORDER BY equipped_slot NULLS LAST, slot_index, acquired_at, id",
-        )
-        .bind(character_id)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(character_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance)| PersistedItem {
-            base_id,
-            rarity,
-            ilvl,
-            affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
-            equipped_slot,
-            slot_index,
-            anchored,
-            tab_index: 0,
-            provenance,
-        })
+        .map(
+            |(base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance)| {
+                PersistedItem {
+                    base_id,
+                    rarity,
+                    ilvl,
+                    affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
+                    equipped_slot,
+                    slot_index,
+                    anchored,
+                    tab_index: 0,
+                    provenance,
+                }
+            },
+        )
         .collect())
 }
 
@@ -789,7 +868,10 @@ async fn reset_character_inventory(
         let affixes_json: Vec<AffixJson> = item
             .affixes
             .iter()
-            .map(|(id, v)| AffixJson { id: id.clone(), v: *v })
+            .map(|(id, v)| AffixJson {
+                id: id.clone(),
+                v: *v,
+            })
             .collect();
         sqlx::query(
             "INSERT INTO inventory_items \
@@ -835,32 +917,48 @@ async fn load_stash(
     .await?;
     let tabs: Vec<PersistedStashTab> = tab_rows
         .into_iter()
-        .map(|(tab_index, name, color)| PersistedStashTab { tab_index, name, color })
+        .map(|(tab_index, name, color)| PersistedStashTab {
+            tab_index,
+            name,
+            color,
+        })
         .collect();
 
-    let rows: Vec<(String, i16, i32, sqlx::types::Json<Vec<AffixJson>>, i32, bool, i16, Option<Vec<Uuid>>)> =
-        sqlx::query_as(
-            "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance \
+    let rows: Vec<(
+        String,
+        i16,
+        i32,
+        sqlx::types::Json<Vec<AffixJson>>,
+        i32,
+        bool,
+        i16,
+        Option<Vec<Uuid>>,
+    )> = sqlx::query_as(
+        "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance \
              FROM stash_items \
              WHERE character_id = $1 \
              ORDER BY tab_index, slot_index, acquired_at, id",
-        )
-        .bind(character_id)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(character_id)
+    .fetch_all(pool)
+    .await?;
     let items = rows
         .into_iter()
-        .map(|(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance)| PersistedItem {
-            base_id,
-            rarity,
-            ilvl,
-            affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
-            equipped_slot: None,
-            slot_index,
-            anchored,
-            tab_index,
-            provenance,
-        })
+        .map(
+            |(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance)| {
+                PersistedItem {
+                    base_id,
+                    rarity,
+                    ilvl,
+                    affixes: affixes.0.into_iter().map(|a| (a.id, a.v)).collect(),
+                    equipped_slot: None,
+                    slot_index,
+                    anchored,
+                    tab_index,
+                    provenance,
+                }
+            },
+        )
         .collect();
     Ok((tabs, items))
 }
@@ -901,7 +999,10 @@ async fn reset_character_stash(
         let affixes_json: Vec<AffixJson> = item
             .affixes
             .iter()
-            .map(|(id, v)| AffixJson { id: id.clone(), v: *v })
+            .map(|(id, v)| AffixJson {
+                id: id.clone(),
+                v: *v,
+            })
             .collect();
         sqlx::query(
             "INSERT INTO stash_items \

@@ -87,36 +87,38 @@ pub fn spawn_character_entity(
 ) -> anyhow::Result<hecs::Entity> {
     let (mesh_path, tex_path) = rift_game::hero::base_model_paths(cfg.gender);
 
-    let (object_index, skinned_component) =
-        match SkinnedMesh::from_gltf_filtered(mesh_path, |n| is_body_mesh_name(n)) {
-            Ok(skinned) => {
-                let idx = renderer.add_skinned_mesh(
-                    &skinned.bind_vertices,
-                    &skinned.vertex_skin,
-                    &skinned.indices,
-                    Mat4::from_translation(cfg.position),
-                    0.0,
-                )?;
-                if let Err(e) = renderer.set_object_texture(
-                    idx,
-                    rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
-                ) {
-                    log::warn!("Character texture load failed: {}", e);
-                }
-                let comp = Skinned {
-                    mesh: Arc::new(skinned),
-                    scratch: Vec::new(),
-                    joint_worlds: Vec::new(),
-                };
-                (idx, Some(comp))
+    let (object_index, skinned_component) = match SkinnedMesh::from_gltf_filtered(
+        mesh_path,
+        |node, mesh| is_body_mesh_name(node, mesh),
+    ) {
+        Ok(skinned) => {
+            let idx = renderer.add_skinned_mesh(
+                &skinned.bind_vertices,
+                &skinned.vertex_skin,
+                &skinned.indices,
+                Mat4::from_translation(cfg.position),
+                0.0,
+            )?;
+            if let Err(e) = renderer.set_object_texture(
+                idx,
+                rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
+            ) {
+                log::warn!("Character texture load failed: {}", e);
             }
-            Err(e) => {
-                log::warn!("Falling back to procedural character mesh: {}", e);
-                let cube = Mesh::cube();
-                renderer.add_mesh(&cube, Mat4::from_translation(cfg.position))?;
-                (renderer.objects.len() - 1, None)
-            }
-        };
+            let comp = Skinned {
+                mesh: Arc::new(skinned),
+                scratch: Vec::new(),
+                joint_worlds: Vec::new(),
+            };
+            (idx, Some(comp))
+        }
+        Err(e) => {
+            log::warn!("Falling back to procedural character mesh: {}", e);
+            let cube = Mesh::cube();
+            renderer.add_mesh(&cube, Mat4::from_translation(cfg.position))?;
+            (renderer.objects.len() - 1, None)
+        }
+    };
 
     let entity = world.spawn((
         Transform::from_position(cfg.position),

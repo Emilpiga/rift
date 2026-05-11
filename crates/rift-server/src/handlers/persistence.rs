@@ -3,8 +3,8 @@
 //! roster lookups. These are split out of `main.rs` so the
 //! database integration points live in one file.
 
-use rift_net::{ClientId, Gender};
 use rift_net::messages::{RosterEntry, ServerMsg};
+use rift_net::{ClientId, Gender};
 use rift_persistence::{CharacterRecord, Uuid};
 
 use super::{gender_from_i16, loadout_to_u8};
@@ -53,7 +53,9 @@ impl Server {
     /// existing value (boss kills can land in any order
     /// across rerolls).
     pub(crate) fn bump_deepest_cleared_floor(&mut self, client_id: ClientId, floor: u32) {
-        let Some(s) = self.sessions.get_mut(client_id) else { return };
+        let Some(s) = self.sessions.get_mut(client_id) else {
+            return;
+        };
         let Some(rec) = s.record.as_mut() else { return };
         let new_value = (floor as i32).max(0);
         if new_value <= rec.deepest_cleared_floor {
@@ -76,9 +78,15 @@ impl Server {
     /// play — their progress just won't survive a restart. The
     /// fallback record uses a random UUID so subsequent saves on
     /// the same name don't collide with a real DB row by accident.
+    ///
+    /// `account_key` is the issuer-tagged storage form, used
+    /// for the persistence lookup; `account_display` is the
+    /// human-readable label written to `accounts.display_name`
+    /// on first insert.
     pub(crate) fn load_character_record(
         &self,
-        account_name: &str,
+        account_key: &str,
+        account_display: &str,
         character_name: &str,
         class_id: &str,
         gender: Gender,
@@ -86,16 +94,17 @@ impl Server {
         let gender_id = gender as i16;
         if let Some(handle) = &self.persistence {
             match handle.load_or_create_blocking(
-                account_name.to_string(),
+                account_key.to_string(),
+                account_display.to_string(),
                 character_name.to_string(),
                 class_id.to_string(),
                 gender_id,
             ) {
                 Ok(rec) => {
                     log::info!(
-                        "persistence: loaded {} on account {} (level={}, xp={})",
+                        "persistence: loaded {} on account_key={} (level={}, xp={})",
                         rec.name,
-                        account_name,
+                        account_key,
                         rec.level,
                         rec.xp,
                     );
@@ -103,7 +112,7 @@ impl Server {
                 }
                 Err(e) => {
                     log::warn!(
-                        "persistence: load_or_create failed for account={account_name:?} name={character_name:?}: {e}; using in-memory record"
+                        "persistence: load_or_create failed for account_key={account_key:?} name={character_name:?}: {e}; using in-memory record"
                     );
                 }
             }
@@ -127,14 +136,22 @@ impl Server {
         }
     }
 
-    /// Resolve `account_name` to its character roster. Falls back
+    /// Resolve `account_key` to its character roster. Falls back
     /// to an empty list when persistence is disabled or the DB
     /// query fails — the client is then free to create a fresh
     /// character, which load_character_record will persist on the
     /// next Hello.
-    pub(crate) fn lookup_roster(&self, account_name: &str) -> Vec<RosterEntry> {
-        let Some(handle) = &self.persistence else { return Vec::new() };
-        match handle.list_account_characters_blocking(account_name.to_string()) {
+    pub(crate) fn lookup_roster(
+        &self,
+        account_key: &str,
+        account_display: &str,
+    ) -> Vec<RosterEntry> {
+        let Some(handle) = &self.persistence else {
+            return Vec::new();
+        };
+        match handle
+            .list_account_characters_blocking(account_key.to_string(), account_display.to_string())
+        {
             Ok((_account_id, records)) => records
                 .into_iter()
                 .map(|r| {
@@ -169,7 +186,7 @@ impl Server {
                 .collect(),
             Err(e) => {
                 log::warn!(
-                    "persistence: list_account_characters failed for {account_name:?}: {e}; returning empty roster"
+                    "persistence: list_account_characters failed for account_key={account_key:?}: {e}; returning empty roster"
                 );
                 Vec::new()
             }
@@ -181,7 +198,9 @@ impl Server {
     /// auto-save tick. Cheap when no characters are connected or
     /// when persistence is disabled.
     pub(crate) fn auto_save_all(&self) {
-        let Some(handle) = &self.persistence else { return };
+        let Some(handle) = &self.persistence else {
+            return;
+        };
         let mut count = 0usize;
         for s in self.sessions.iter() {
             if let Some(rec) = &s.record {

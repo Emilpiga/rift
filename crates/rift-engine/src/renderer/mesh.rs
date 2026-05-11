@@ -69,8 +69,8 @@ impl Mesh {
     /// to a wisp tail) + glowing eyes. Floats slightly off the ground.
     /// (Arms are rendered separately by PlayerArms.)
     pub fn player() -> Self {
-        let body = Vec3::new(0.35, 0.65, 1.30);     // bright spectral blue HDR
-        let eye  = Vec3::new(1.60, 1.40, 0.50);     // gold (HDR)
+        let body = Vec3::new(0.35, 0.65, 1.30); // bright spectral blue HDR
+        let eye = Vec3::new(1.60, 1.40, 0.50); // gold (HDR)
         Self::wraith(body, body * 0.5, eye, 0.32, 1.45, 0.15)
     }
 
@@ -142,8 +142,8 @@ impl Mesh {
     /// to the hand at z=1.0. Designed to be scaled (e.g. (0.10, 0.10, 0.55)) and
     /// rotated to point in the player's aim direction.
     pub fn player_arm() -> Self {
-        let skin = Vec3::new(0.55, 0.42, 0.32);  // muted leather/skin tone
-        let cuff = Vec3::new(0.30, 0.22, 0.16);  // darker at the hand
+        let skin = Vec3::new(0.55, 0.42, 0.32); // muted leather/skin tone
+        let cuff = Vec3::new(0.30, 0.22, 0.16); // darker at the hand
         let v = |pos: [f32; 3], normal: [f32; 3], color: Vec3| Vertex {
             position: Vec3::from(pos),
             normal: Vec3::from(normal),
@@ -156,43 +156,39 @@ impl Mesh {
         let vertices = vec![
             // Front face (z = 1, hand)
             v([-0.5, -0.5, 1.0], [0.0, 0.0, 1.0], cuff),
-            v([ 0.5, -0.5, 1.0], [0.0, 0.0, 1.0], cuff),
-            v([ 0.5,  0.5, 1.0], [0.0, 0.0, 1.0], cuff),
-            v([-0.5,  0.5, 1.0], [0.0, 0.0, 1.0], cuff),
+            v([0.5, -0.5, 1.0], [0.0, 0.0, 1.0], cuff),
+            v([0.5, 0.5, 1.0], [0.0, 0.0, 1.0], cuff),
+            v([-0.5, 0.5, 1.0], [0.0, 0.0, 1.0], cuff),
             // Back face (z = 0, shoulder)
-            v([ 0.5, -0.5, 0.0], [0.0, 0.0, -1.0], skin),
+            v([0.5, -0.5, 0.0], [0.0, 0.0, -1.0], skin),
             v([-0.5, -0.5, 0.0], [0.0, 0.0, -1.0], skin),
-            v([-0.5,  0.5, 0.0], [0.0, 0.0, -1.0], skin),
-            v([ 0.5,  0.5, 0.0], [0.0, 0.0, -1.0], skin),
+            v([-0.5, 0.5, 0.0], [0.0, 0.0, -1.0], skin),
+            v([0.5, 0.5, 0.0], [0.0, 0.0, -1.0], skin),
             // Top face (y = 0.5)
             v([-0.5, 0.5, 0.0], [0.0, 1.0, 0.0], skin),
-            v([ 0.5, 0.5, 0.0], [0.0, 1.0, 0.0], skin),
-            v([ 0.5, 0.5, 1.0], [0.0, 1.0, 0.0], cuff),
+            v([0.5, 0.5, 0.0], [0.0, 1.0, 0.0], skin),
+            v([0.5, 0.5, 1.0], [0.0, 1.0, 0.0], cuff),
             v([-0.5, 0.5, 1.0], [0.0, 1.0, 0.0], cuff),
             // Bottom face (y = -0.5)
             v([-0.5, -0.5, 1.0], [0.0, -1.0, 0.0], cuff),
-            v([ 0.5, -0.5, 1.0], [0.0, -1.0, 0.0], cuff),
-            v([ 0.5, -0.5, 0.0], [0.0, -1.0, 0.0], skin),
+            v([0.5, -0.5, 1.0], [0.0, -1.0, 0.0], cuff),
+            v([0.5, -0.5, 0.0], [0.0, -1.0, 0.0], skin),
             v([-0.5, -0.5, 0.0], [0.0, -1.0, 0.0], skin),
             // Right face (x = 0.5)
             v([0.5, -0.5, 0.0], [1.0, 0.0, 0.0], skin),
             v([0.5, -0.5, 1.0], [1.0, 0.0, 0.0], cuff),
-            v([0.5,  0.5, 1.0], [1.0, 0.0, 0.0], cuff),
-            v([0.5,  0.5, 0.0], [1.0, 0.0, 0.0], skin),
+            v([0.5, 0.5, 1.0], [1.0, 0.0, 0.0], cuff),
+            v([0.5, 0.5, 0.0], [1.0, 0.0, 0.0], skin),
             // Left face (x = -0.5)
             v([-0.5, -0.5, 1.0], [-1.0, 0.0, 0.0], cuff),
             v([-0.5, -0.5, 0.0], [-1.0, 0.0, 0.0], skin),
-            v([-0.5,  0.5, 0.0], [-1.0, 0.0, 0.0], skin),
-            v([-0.5,  0.5, 1.0], [-1.0, 0.0, 0.0], cuff),
+            v([-0.5, 0.5, 0.0], [-1.0, 0.0, 0.0], skin),
+            v([-0.5, 0.5, 1.0], [-1.0, 0.0, 0.0], cuff),
         ];
 
         let indices = vec![
-            0,  1,  2,  2,  3,  0,
-            4,  5,  6,  6,  7,  4,
-            8,  9,  10, 10, 11, 8,
-            12, 13, 14, 14, 15, 12,
-            16, 17, 18, 18, 19, 16,
-            20, 21, 22, 22, 23, 20,
+            0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4, 8, 9, 10, 10, 11, 8, 12, 13, 14, 14, 15, 12, 16,
+            17, 18, 18, 19, 16, 20, 21, 22, 22, 23, 20,
         ];
 
         Self { vertices, indices }
@@ -215,38 +211,38 @@ impl Mesh {
 
         let vertices = vec![
             // Front face (z+)
-            v([-0.5, 0.0,  0.5], [0.0, 0.0, 1.0], [0.0, 0.0]),
-            v([ 0.5, 0.0,  0.5], [0.0, 0.0, 1.0], [1.0, 0.0]),
-            v([ 0.5, h,    0.5], [0.0, 0.0, 1.0], [1.0, h]),
-            v([-0.5, h,    0.5], [0.0, 0.0, 1.0], [0.0, h]),
+            v([-0.5, 0.0, 0.5], [0.0, 0.0, 1.0], [0.0, 0.0]),
+            v([0.5, 0.0, 0.5], [0.0, 0.0, 1.0], [1.0, 0.0]),
+            v([0.5, h, 0.5], [0.0, 0.0, 1.0], [1.0, h]),
+            v([-0.5, h, 0.5], [0.0, 0.0, 1.0], [0.0, h]),
             // Back face (z-)
-            v([ 0.5, 0.0, -0.5], [0.0, 0.0, -1.0], [0.0, 0.0]),
+            v([0.5, 0.0, -0.5], [0.0, 0.0, -1.0], [0.0, 0.0]),
             v([-0.5, 0.0, -0.5], [0.0, 0.0, -1.0], [1.0, 0.0]),
-            v([-0.5, h,   -0.5], [0.0, 0.0, -1.0], [1.0, h]),
-            v([ 0.5, h,   -0.5], [0.0, 0.0, -1.0], [0.0, h]),
+            v([-0.5, h, -0.5], [0.0, 0.0, -1.0], [1.0, h]),
+            v([0.5, h, -0.5], [0.0, 0.0, -1.0], [0.0, h]),
             // Top face (y+)
-            v([-0.5, h,  0.5], [0.0, 1.0, 0.0], [0.0, 0.0]),
-            v([ 0.5, h,  0.5], [0.0, 1.0, 0.0], [1.0, 0.0]),
-            v([ 0.5, h, -0.5], [0.0, 1.0, 0.0], [1.0, 1.0]),
+            v([-0.5, h, 0.5], [0.0, 1.0, 0.0], [0.0, 0.0]),
+            v([0.5, h, 0.5], [0.0, 1.0, 0.0], [1.0, 0.0]),
+            v([0.5, h, -0.5], [0.0, 1.0, 0.0], [1.0, 1.0]),
             v([-0.5, h, -0.5], [0.0, 1.0, 0.0], [0.0, 1.0]),
             // Right face (x+)
-            v([ 0.5, 0.0,  0.5], [1.0, 0.0, 0.0], [0.0, 0.0]),
-            v([ 0.5, 0.0, -0.5], [1.0, 0.0, 0.0], [1.0, 0.0]),
-            v([ 0.5, h,   -0.5], [1.0, 0.0, 0.0], [1.0, h]),
-            v([ 0.5, h,    0.5], [1.0, 0.0, 0.0], [0.0, h]),
+            v([0.5, 0.0, 0.5], [1.0, 0.0, 0.0], [0.0, 0.0]),
+            v([0.5, 0.0, -0.5], [1.0, 0.0, 0.0], [1.0, 0.0]),
+            v([0.5, h, -0.5], [1.0, 0.0, 0.0], [1.0, h]),
+            v([0.5, h, 0.5], [1.0, 0.0, 0.0], [0.0, h]),
             // Left face (x-)
             v([-0.5, 0.0, -0.5], [-1.0, 0.0, 0.0], [0.0, 0.0]),
-            v([-0.5, 0.0,  0.5], [-1.0, 0.0, 0.0], [1.0, 0.0]),
-            v([-0.5, h,    0.5], [-1.0, 0.0, 0.0], [1.0, h]),
-            v([-0.5, h,   -0.5], [-1.0, 0.0, 0.0], [0.0, h]),
+            v([-0.5, 0.0, 0.5], [-1.0, 0.0, 0.0], [1.0, 0.0]),
+            v([-0.5, h, 0.5], [-1.0, 0.0, 0.0], [1.0, h]),
+            v([-0.5, h, -0.5], [-1.0, 0.0, 0.0], [0.0, h]),
         ];
 
         let indices = vec![
-            0,  1,  2,  2,  3,  0,   // front
-            4,  5,  6,  6,  7,  4,   // back
-            8,  9,  10, 10, 11, 8,   // top
-            12, 13, 14, 14, 15, 12,  // right
-            16, 17, 18, 18, 19, 16,  // left
+            0, 1, 2, 2, 3, 0, // front
+            4, 5, 6, 6, 7, 4, // back
+            8, 9, 10, 10, 11, 8, // top
+            12, 13, 14, 14, 15, 12, // right
+            16, 17, 18, 18, 19, 16, // left
         ];
 
         Self { vertices, indices }
@@ -263,7 +259,14 @@ impl Mesh {
     /// - `radius`: max body half-width.
     /// - `height`: total tip-to-base height.
     /// - `float_h`: how far the bottom hem floats off the ground.
-    pub fn wraith(body: Vec3, hood: Vec3, eye: Vec3, radius: f32, height: f32, float_h: f32) -> Self {
+    pub fn wraith(
+        body: Vec3,
+        hood: Vec3,
+        eye: Vec3,
+        radius: f32,
+        height: f32,
+        float_h: f32,
+    ) -> Self {
         // Profile curve: list of (t, r) pairs where t is normalized height
         // [0..1] (0 = bottom hem, 1 = top of head) and r is the radius at that
         // height as a fraction of `radius`. This is the silhouette of one half
@@ -292,7 +295,15 @@ impl Mesh {
 
         let azimuth_segments = 32u32;
         let mut m = Self::empty();
-        m.append_lathe(profile, body, hood, radius, height, float_h, azimuth_segments);
+        m.append_lathe(
+            profile,
+            body,
+            hood,
+            radius,
+            height,
+            float_h,
+            azimuth_segments,
+        );
 
         // Eyes — placed on the front of the head where the profile says
         // r ≈ 0.78. Use the head's t-range center.
@@ -302,8 +313,20 @@ impl Mesh {
         let eye_r = (radius * 0.10).clamp(0.025, 0.07);
         let eye_x = eye_r_at * 0.32;
         let eye_z = eye_r_at * 0.95;
-        m.append_ellipsoid(Vec3::new(eye_r, eye_r, eye_r * 0.7), Vec3::new(-eye_x, eye_y, eye_z), eye, 6, 4);
-        m.append_ellipsoid(Vec3::new(eye_r, eye_r, eye_r * 0.7), Vec3::new( eye_x, eye_y, eye_z), eye, 6, 4);
+        m.append_ellipsoid(
+            Vec3::new(eye_r, eye_r, eye_r * 0.7),
+            Vec3::new(-eye_x, eye_y, eye_z),
+            eye,
+            6,
+            4,
+        );
+        m.append_ellipsoid(
+            Vec3::new(eye_r, eye_r, eye_r * 0.7),
+            Vec3::new(eye_x, eye_y, eye_z),
+            eye,
+            6,
+            4,
+        );
         m
     }
 
@@ -323,7 +346,9 @@ impl Mesh {
         float_h: f32,
         segments: u32,
     ) {
-        if profile.len() < 2 || segments < 3 { return; }
+        if profile.len() < 2 || segments < 3 {
+            return;
+        }
 
         let base = self.vertices.len() as u32;
         let stacks = profile.len() as u32;
@@ -347,7 +372,11 @@ impl Mesh {
             let hem_amount = (1.0 - (t / 0.18).clamp(0.0, 1.0)).powi(2);
             // Surface tangent in the profile plane (used to estimate normals).
             let (t_prev, rf_prev) = if i == 0 { profile[0] } else { profile[i - 1] };
-            let (t_next, rf_next) = if i + 1 == profile.len() { profile[profile.len() - 1] } else { profile[i + 1] };
+            let (t_next, rf_next) = if i + 1 == profile.len() {
+                profile[profile.len() - 1]
+            } else {
+                profile[i + 1]
+            };
             let dy = (t_next - t_prev) * height;
             let dr = (rf_next - rf_prev) * radius;
             // Profile-plane normal (pointing outward from axis): rotate tangent
@@ -371,14 +400,20 @@ impl Mesh {
                     let n0 = hash(j * 13 + 7);
                     let n1 = hash(j * 29 + 113) * 0.5;
                     (n0 + n1) * 0.18 * hem_amount
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let r = (rf + wobble).max(0.0) * radius;
 
                 let pos = Vec3::new(s * r, y, c * r);
                 let normal = Vec3::new(s * n_r, n_y, c * n_r).normalize_or_zero();
                 self.vertices.push(Vertex {
                     position: pos,
-                    normal: if normal == Vec3::ZERO { Vec3::Y } else { normal },
+                    normal: if normal == Vec3::ZERO {
+                        Vec3::Y
+                    } else {
+                        normal
+                    },
                     color,
                     uv: Vec2::new(0.5, 0.5),
                 });
@@ -399,16 +434,30 @@ impl Mesh {
 
     /// Empty mesh — useful as a starting point for compositional builders.
     pub fn empty() -> Self {
-        Self { vertices: Vec::new(), indices: Vec::new() }
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
     }
 
     /// Append an ellipsoid to this mesh. The ellipsoid is a unit UV sphere
     /// non-uniformly scaled by `scale` and translated to `offset`. Normals are
     /// rescaled by `1/scale` to remain (approximately) correct under the
     /// non-uniform deformation.
-    pub fn append_ellipsoid(&mut self, scale: Vec3, offset: Vec3, color: Vec3, slices: u32, stacks: u32) {
+    pub fn append_ellipsoid(
+        &mut self,
+        scale: Vec3,
+        offset: Vec3,
+        color: Vec3,
+        slices: u32,
+        stacks: u32,
+    ) {
         let base = self.vertices.len() as u32;
-        let inv_scale = Vec3::new(1.0 / scale.x.max(1e-4), 1.0 / scale.y.max(1e-4), 1.0 / scale.z.max(1e-4));
+        let inv_scale = Vec3::new(
+            1.0 / scale.x.max(1e-4),
+            1.0 / scale.y.max(1e-4),
+            1.0 / scale.z.max(1e-4),
+        );
 
         // Generate a UV sphere. Stacks span [0, PI] (south pole to north pole),
         // slices span [0, TAU].
@@ -429,7 +478,11 @@ impl Mesh {
                 let normal = (Vec3::new(nx, ny, nz) * inv_scale).normalize_or_zero();
                 self.vertices.push(Vertex {
                     position: pos,
-                    normal: if normal == Vec3::ZERO { Vec3::Y } else { normal },
+                    normal: if normal == Vec3::ZERO {
+                        Vec3::Y
+                    } else {
+                        normal
+                    },
                     color,
                     uv: Vec2::new(0.5, 0.5),
                 });
@@ -510,8 +563,12 @@ impl Mesh {
             });
 
             indices.extend_from_slice(&[
-                base_idx, base_idx + 2, base_idx + 1,
-                base_idx, base_idx + 3, base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 1,
+                base_idx,
+                base_idx + 3,
+                base_idx + 2,
             ]);
         }
 
@@ -538,10 +595,7 @@ impl Mesh {
     /// stands above or below the lip — the engine renders
     /// with backface culling and we may see the skirt from
     /// either direction depending on camera angle.
-    pub fn dungeon_floor_skirts(
-        floor: &rift_dungeon::Floor,
-        floor_num: u32,
-    ) -> Self {
+    pub fn dungeon_floor_skirts(floor: &rift_dungeon::Floor, floor_num: u32) -> Self {
         Self::dungeon_floor_skirts_filtered(floor, floor_num, |_, _| true)
     }
 
@@ -597,12 +651,17 @@ impl Mesh {
             let u1 = b.x + b.z;
             let v0 = low_y;
             let v1 = high_y;
-            let p_al = Vec3::new(a.x, low_y,  a.z);
-            let p_bl = Vec3::new(b.x, low_y,  b.z);
+            let p_al = Vec3::new(a.x, low_y, a.z);
+            let p_bl = Vec3::new(b.x, low_y, b.z);
             let p_bh = Vec3::new(b.x, high_y, b.z);
             let p_ah = Vec3::new(a.x, high_y, a.z);
             let push = |v: &mut Vec<Vertex>, p: Vec3, n: Vec3, uv: Vec2| {
-                v.push(Vertex { position: p, normal: n, color: base_color, uv });
+                v.push(Vertex {
+                    position: p,
+                    normal: n,
+                    color: base_color,
+                    uv,
+                });
             };
             // Front face (normal pointing toward the lower
             // tile — the side a player on the lower floor
@@ -611,10 +670,7 @@ impl Mesh {
             push(&mut vertices, p_bl, normal, Vec2::new(u1, v0));
             push(&mut vertices, p_bh, normal, Vec2::new(u1, v1));
             push(&mut vertices, p_ah, normal, Vec2::new(u0, v1));
-            indices.extend_from_slice(&[
-                base, base + 1, base + 2,
-                base, base + 2, base + 3,
-            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             // Back face (opposite normal). Same vertex
             // positions, opposite winding + flipped normal.
             let back = vertices.len() as u32;
@@ -622,10 +678,7 @@ impl Mesh {
             push(&mut vertices, p_bl, -normal, Vec2::new(u1, v0));
             push(&mut vertices, p_bh, -normal, Vec2::new(u1, v1));
             push(&mut vertices, p_ah, -normal, Vec2::new(u0, v1));
-            indices.extend_from_slice(&[
-                back, back + 2, back + 1,
-                back, back + 3, back + 2,
-            ]);
+            indices.extend_from_slice(&[back, back + 2, back + 1, back, back + 3, back + 2]);
         };
 
         // East-west adjacencies (compare tile (x, z) with (x+1, z)).
@@ -635,7 +688,9 @@ impl Mesh {
                 let i_b = z * floor.width + (x + 1);
                 if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
                     if (ya - yb).abs() > 1.0e-4 {
-                        if !accept((x, z), (x + 1, z)) { continue; }
+                        if !accept((x, z), (x + 1, z)) {
+                            continue;
+                        }
                         let edge_x = (x as f32) + 0.5; // shared edge X
                         let z_lo = (z as f32) - 0.5;
                         let z_hi = (z as f32) + 0.5;
@@ -649,7 +704,8 @@ impl Mesh {
                         emit_quad(
                             Vec3::new(edge_x, 0.0, z_lo),
                             Vec3::new(edge_x, 0.0, z_hi),
-                            low, high,
+                            low,
+                            high,
                             Vec3::new(nx, 0.0, 0.0),
                         );
                     }
@@ -664,7 +720,9 @@ impl Mesh {
                 let i_b = (z + 1) * floor.width + x;
                 if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
                     if (ya - yb).abs() > 1.0e-4 {
-                        if !accept((x, z), (x, z + 1)) { continue; }
+                        if !accept((x, z), (x, z + 1)) {
+                            continue;
+                        }
                         let edge_z = (z as f32) + 0.5;
                         let x_lo = (x as f32) - 0.5;
                         let x_hi = (x as f32) + 0.5;
@@ -674,7 +732,8 @@ impl Mesh {
                         emit_quad(
                             Vec3::new(x_lo, 0.0, edge_z),
                             Vec3::new(x_hi, 0.0, edge_z),
-                            low, high,
+                            low,
+                            high,
                             Vec3::new(0.0, 0.0, nz),
                         );
                     }
@@ -727,7 +786,11 @@ impl Mesh {
                     StairDir::PosZ => sz > 0.0,
                     StairDir::NegZ => sz < 0.0,
                 };
-                if on_rise { step_y } else { 0.0 }
+                if on_rise {
+                    step_y
+                } else {
+                    0.0
+                }
             };
 
             // Slope normal: cross product of along-slope and
@@ -736,17 +799,12 @@ impl Mesh {
             // → normal = (-step_y, 1, 0).normalised.
             let normal = match dir {
                 StairDir::PosX => Vec3::new(-step_y, 1.0, 0.0).normalize(),
-                StairDir::NegX => Vec3::new( step_y, 1.0, 0.0).normalize(),
+                StairDir::NegX => Vec3::new(step_y, 1.0, 0.0).normalize(),
                 StairDir::PosZ => Vec3::new(0.0, 1.0, -step_y).normalize(),
-                StairDir::NegZ => Vec3::new(0.0, 1.0,  step_y).normalize(),
+                StairDir::NegZ => Vec3::new(0.0, 1.0, step_y).normalize(),
             };
 
-            let corners = [
-                (-0.5_f32, -0.5_f32),
-                ( 0.5,     -0.5),
-                ( 0.5,      0.5),
-                (-0.5,      0.5),
-            ];
+            let corners = [(-0.5_f32, -0.5_f32), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)];
             for (sx, sz) in corners {
                 let p = *pos + Vec3::new(sx, lift(sx, sz), sz);
                 vertices.push(Vertex {
@@ -758,8 +816,12 @@ impl Mesh {
             }
 
             indices.extend_from_slice(&[
-                base_idx, base_idx + 2, base_idx + 1,
-                base_idx, base_idx + 3, base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 1,
+                base_idx,
+                base_idx + 3,
+                base_idx + 2,
             ]);
         }
 
@@ -777,7 +839,13 @@ impl Mesh {
     /// spans (e.g. `uv_scale = 1.0 / 12.0` means one tile covers
     /// 12 m before the sampler wraps). Lower values reduce visible
     /// repetition for large discs.
-    pub fn ground_disc(center: Vec3, radius: f32, segments: u32, color: Vec3, uv_scale: f32) -> Self {
+    pub fn ground_disc(
+        center: Vec3,
+        radius: f32,
+        segments: u32,
+        color: Vec3,
+        uv_scale: f32,
+    ) -> Self {
         let segments = segments.max(8);
         let mut vertices = Vec::with_capacity((segments + 1) as usize);
         let mut indices = Vec::with_capacity((segments * 3) as usize);
@@ -791,7 +859,11 @@ impl Mesh {
         });
         for i in 0..segments {
             let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let p = Vec3::new(center.x + a.cos() * radius, center.y, center.z + a.sin() * radius);
+            let p = Vec3::new(
+                center.x + a.cos() * radius,
+                center.y,
+                center.z + a.sin() * radius,
+            );
             vertices.push(Vertex {
                 position: p,
                 normal: Vec3::Y,
@@ -816,17 +888,41 @@ impl Mesh {
     /// the floating-platform edge so the silhouette of the island
     /// reads against the dark sky / abyss. Vertex colors carry the
     /// glow tint directly so callers don't need a material.
-    pub fn ring(center: Vec3, inner_radius: f32, outer_radius: f32, segments: u32, color: Vec3) -> Self {
+    pub fn ring(
+        center: Vec3,
+        inner_radius: f32,
+        outer_radius: f32,
+        segments: u32,
+        color: Vec3,
+    ) -> Self {
         let segments = segments.max(8);
         let mut vertices = Vec::with_capacity((segments * 2) as usize);
         let mut indices = Vec::with_capacity((segments * 6) as usize);
         for i in 0..segments {
             let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
             let (cos, sin) = (a.cos(), a.sin());
-            let inner = Vec3::new(center.x + cos * inner_radius, center.y, center.z + sin * inner_radius);
-            let outer = Vec3::new(center.x + cos * outer_radius, center.y, center.z + sin * outer_radius);
-            vertices.push(Vertex { position: inner, normal: Vec3::Y, color, uv: Vec2::new(inner.x, inner.z) });
-            vertices.push(Vertex { position: outer, normal: Vec3::Y, color, uv: Vec2::new(outer.x, outer.z) });
+            let inner = Vec3::new(
+                center.x + cos * inner_radius,
+                center.y,
+                center.z + sin * inner_radius,
+            );
+            let outer = Vec3::new(
+                center.x + cos * outer_radius,
+                center.y,
+                center.z + sin * outer_radius,
+            );
+            vertices.push(Vertex {
+                position: inner,
+                normal: Vec3::Y,
+                color,
+                uv: Vec2::new(inner.x, inner.z),
+            });
+            vertices.push(Vertex {
+                position: outer,
+                normal: Vec3::Y,
+                color,
+                uv: Vec2::new(outer.x, outer.z),
+            });
         }
         for i in 0..segments {
             let next = (i + 1) % segments;
@@ -867,7 +963,10 @@ impl Mesh {
         // Cheap fbm-ish height: blend two hash octaves so the
         // silhouette has both narrow spikes and wider massifs.
         let hash = |i: u32, salt: u64| -> f32 {
-            let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(seed).wrapping_add(salt);
+            let mut x = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(seed)
+                .wrapping_add(salt);
             x ^= x >> 33;
             x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
             x ^= x >> 33;
@@ -1009,24 +1108,17 @@ impl Mesh {
 
         let vertices = vec![
             v([0.0, h, 0.0], [0.0, 1.0, 0.0]),   // 0: top
-            v([0.0, -h, 0.0], [0.0, -1.0, 0.0]),  // 1: bottom
-            v([s, 0.0, 0.0], [1.0, 0.0, 0.0]),    // 2: +x
-            v([-s, 0.0, 0.0], [-1.0, 0.0, 0.0]),  // 3: -x
-            v([0.0, 0.0, s], [0.0, 0.0, 1.0]),    // 4: +z
-            v([0.0, 0.0, -s], [0.0, 0.0, -1.0]),  // 5: -z
+            v([0.0, -h, 0.0], [0.0, -1.0, 0.0]), // 1: bottom
+            v([s, 0.0, 0.0], [1.0, 0.0, 0.0]),   // 2: +x
+            v([-s, 0.0, 0.0], [-1.0, 0.0, 0.0]), // 3: -x
+            v([0.0, 0.0, s], [0.0, 0.0, 1.0]),   // 4: +z
+            v([0.0, 0.0, -s], [0.0, 0.0, -1.0]), // 5: -z
         ];
 
         let indices = vec![
             // Top pyramid
-            0, 2, 4,
-            0, 4, 3,
-            0, 3, 5,
-            0, 5, 2,
-            // Bottom pyramid
-            1, 4, 2,
-            1, 3, 4,
-            1, 5, 3,
-            1, 2, 5,
+            0, 2, 4, 0, 4, 3, 0, 3, 5, 0, 5, 2, // Bottom pyramid
+            1, 4, 2, 1, 3, 4, 1, 5, 3, 1, 2, 5,
         ];
 
         Self { vertices, indices }
@@ -1039,7 +1131,7 @@ impl Mesh {
 
         let segments = 64u32;
         let y = 0.08; // safely above floor (y=0) to avoid z-fighting
-        // Boost color far above 1.0 so it survives texture multiplication and lighting.
+                      // Boost color far above 1.0 so it survives texture multiplication and lighting.
         let bright = Vec3::new(color[0] * 8.0, color[1] * 8.0, color[2] * 8.0);
         let dim = Vec3::new(color[0] * 4.0, color[1] * 4.0, color[2] * 4.0);
 
@@ -1055,16 +1147,50 @@ impl Mesh {
             let uv = Vec2::new(0.5, 0.5);
 
             // 0 = inner_a0, 1 = outer_a0, 2 = outer_a1, 3 = inner_a1
-            vertices.push(Vertex { position: Vec3::new(a0.cos() * inner_r, y, a0.sin() * inner_r), normal: Vec3::Y, color: dim, uv });
-            vertices.push(Vertex { position: Vec3::new(a0.cos() * outer_r, y, a0.sin() * outer_r), normal: Vec3::Y, color: bright, uv });
-            vertices.push(Vertex { position: Vec3::new(a1.cos() * outer_r, y, a1.sin() * outer_r), normal: Vec3::Y, color: bright, uv });
-            vertices.push(Vertex { position: Vec3::new(a1.cos() * inner_r, y, a1.sin() * inner_r), normal: Vec3::Y, color: dim, uv });
+            vertices.push(Vertex {
+                position: Vec3::new(a0.cos() * inner_r, y, a0.sin() * inner_r),
+                normal: Vec3::Y,
+                color: dim,
+                uv,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a0.cos() * outer_r, y, a0.sin() * outer_r),
+                normal: Vec3::Y,
+                color: bright,
+                uv,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a1.cos() * outer_r, y, a1.sin() * outer_r),
+                normal: Vec3::Y,
+                color: bright,
+                uv,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a1.cos() * inner_r, y, a1.sin() * inner_r),
+                normal: Vec3::Y,
+                color: dim,
+                uv,
+            });
 
             // Render double-sided so it's visible regardless of camera angle / winding.
             // Front faces (normal up): 0,3,2 and 0,2,1
-            indices.extend_from_slice(&[base_idx, base_idx+3, base_idx+2,  base_idx, base_idx+2, base_idx+1]);
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 3,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 1,
+            ]);
             // Back faces (normal down): 0,1,2 and 0,2,3
-            indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2,  base_idx, base_idx+2, base_idx+3]);
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 3,
+            ]);
         }
 
         Self { vertices, indices }
@@ -1081,7 +1207,7 @@ impl Mesh {
         let height = 1.0_f32; // scaled by model matrix externally
         let num_planes = 3; // 3 planes at 60° intervals = 6 "blades"
         let base_width = 0.12_f32; // wider for visibility
-        let top_width = 0.04_f32;  // tapers at top
+        let top_width = 0.04_f32; // tapers at top
 
         // Bright at base, fading upward
         let base_color = Vec3::new(color[0], color[1], color[2]);
@@ -1137,20 +1263,74 @@ impl Mesh {
 
                 let base_idx = vertices.len() as u32;
                 // Front side
-                vertices.push(Vertex { position: Vec3::new(-sin_a * w0, y0, -cos_a * w0), normal, color: c0, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new( sin_a * w0, y0,  cos_a * w0), normal, color: c0, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new( sin_a * w1, y1,  cos_a * w1), normal, color: c1, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new(-sin_a * w1, y1, -cos_a * w1), normal, color: c1, uv: Vec2::ZERO });
-                indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
+                vertices.push(Vertex {
+                    position: Vec3::new(-sin_a * w0, y0, -cos_a * w0),
+                    normal,
+                    color: c0,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(sin_a * w0, y0, cos_a * w0),
+                    normal,
+                    color: c0,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(sin_a * w1, y1, cos_a * w1),
+                    normal,
+                    color: c1,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(-sin_a * w1, y1, -cos_a * w1),
+                    normal,
+                    color: c1,
+                    uv: Vec2::ZERO,
+                });
+                indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx + 2,
+                    base_idx + 3,
+                    base_idx,
+                ]);
 
                 // Back side (so visible from both directions)
                 let base_idx2 = vertices.len() as u32;
                 let normal2 = -normal;
-                vertices.push(Vertex { position: Vec3::new( sin_a * w0, y0,  cos_a * w0), normal: normal2, color: c0, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new(-sin_a * w0, y0, -cos_a * w0), normal: normal2, color: c0, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new(-sin_a * w1, y1, -cos_a * w1), normal: normal2, color: c1, uv: Vec2::ZERO });
-                vertices.push(Vertex { position: Vec3::new( sin_a * w1, y1,  cos_a * w1), normal: normal2, color: c1, uv: Vec2::ZERO });
-                indices.extend_from_slice(&[base_idx2, base_idx2+1, base_idx2+2, base_idx2+2, base_idx2+3, base_idx2]);
+                vertices.push(Vertex {
+                    position: Vec3::new(sin_a * w0, y0, cos_a * w0),
+                    normal: normal2,
+                    color: c0,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(-sin_a * w0, y0, -cos_a * w0),
+                    normal: normal2,
+                    color: c0,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(-sin_a * w1, y1, -cos_a * w1),
+                    normal: normal2,
+                    color: c1,
+                    uv: Vec2::ZERO,
+                });
+                vertices.push(Vertex {
+                    position: Vec3::new(sin_a * w1, y1, cos_a * w1),
+                    normal: normal2,
+                    color: c1,
+                    uv: Vec2::ZERO,
+                });
+                indices.extend_from_slice(&[
+                    base_idx2,
+                    base_idx2 + 1,
+                    base_idx2 + 2,
+                    base_idx2 + 2,
+                    base_idx2 + 3,
+                    base_idx2,
+                ]);
             }
         }
 
@@ -1164,12 +1344,39 @@ impl Mesh {
             let a1 = ((i + 1) as f32 / ring_segments as f32) * std::f32::consts::TAU;
             let base_idx = vertices.len() as u32;
 
-            vertices.push(Vertex { position: Vec3::new(a0.cos() * ring_inner, ring_y, a0.sin() * ring_inner), normal: Vec3::Y, color: base_color, uv: Vec2::ZERO });
-            vertices.push(Vertex { position: Vec3::new(a1.cos() * ring_inner, ring_y, a1.sin() * ring_inner), normal: Vec3::Y, color: base_color, uv: Vec2::ZERO });
-            vertices.push(Vertex { position: Vec3::new(a1.cos() * ring_outer, ring_y, a1.sin() * ring_outer), normal: Vec3::Y, color: top_color, uv: Vec2::ZERO });
-            vertices.push(Vertex { position: Vec3::new(a0.cos() * ring_outer, ring_y, a0.sin() * ring_outer), normal: Vec3::Y, color: top_color, uv: Vec2::ZERO });
+            vertices.push(Vertex {
+                position: Vec3::new(a0.cos() * ring_inner, ring_y, a0.sin() * ring_inner),
+                normal: Vec3::Y,
+                color: base_color,
+                uv: Vec2::ZERO,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a1.cos() * ring_inner, ring_y, a1.sin() * ring_inner),
+                normal: Vec3::Y,
+                color: base_color,
+                uv: Vec2::ZERO,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a1.cos() * ring_outer, ring_y, a1.sin() * ring_outer),
+                normal: Vec3::Y,
+                color: top_color,
+                uv: Vec2::ZERO,
+            });
+            vertices.push(Vertex {
+                position: Vec3::new(a0.cos() * ring_outer, ring_y, a0.sin() * ring_outer),
+                normal: Vec3::Y,
+                color: top_color,
+                uv: Vec2::ZERO,
+            });
 
-            indices.extend_from_slice(&[base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx]);
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx + 2,
+                base_idx + 3,
+                base_idx,
+            ]);
         }
 
         Self { vertices, indices }
@@ -1188,21 +1395,20 @@ impl Mesh {
             color: c,
             uv: Vec2::new(0.5, 0.5),
         };
-        let tip   = v([0.0, 0.0, -len], [0.0, 0.0, -1.0]);
-        let tail  = v([0.0, 0.0,  len], [0.0, 0.0,  1.0]);
-        let east  = v([ r, 0.0, 0.0], [ 1.0, 0.0, 0.0]);
-        let west  = v([-r, 0.0, 0.0], [-1.0, 0.0, 0.0]);
-        let up    = v([0.0,  r, 0.0], [0.0,  1.0, 0.0]);
-        let down  = v([0.0, -r, 0.0], [0.0, -1.0, 0.0]);
+        let tip = v([0.0, 0.0, -len], [0.0, 0.0, -1.0]);
+        let tail = v([0.0, 0.0, len], [0.0, 0.0, 1.0]);
+        let east = v([r, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        let west = v([-r, 0.0, 0.0], [-1.0, 0.0, 0.0]);
+        let up = v([0.0, r, 0.0], [0.0, 1.0, 0.0]);
+        let down = v([0.0, -r, 0.0], [0.0, -1.0, 0.0]);
 
         let vertices = vec![tip, tail, east, west, up, down];
         // Index layout:
         // 0=tip, 1=tail, 2=east, 3=west, 4=up, 5=down
         let indices = vec![
             // Front cone (toward tip)
-            0, 4, 2,  0, 2, 5,  0, 5, 3,  0, 3, 4,
-            // Back cone (toward tail)
-            1, 2, 4,  1, 5, 2,  1, 3, 5,  1, 4, 3,
+            0, 4, 2, 0, 2, 5, 0, 5, 3, 0, 3, 4, // Back cone (toward tail)
+            1, 2, 4, 1, 5, 2, 1, 3, 5, 1, 4, 3,
         ];
         Self { vertices, indices }
     }
@@ -1217,7 +1423,7 @@ impl Mesh {
         };
 
         let shaft_color = [1.0, 0.85, 0.3]; // bright golden shaft
-        let tip_color = [1.0, 1.0, 1.0];    // white-hot tip
+        let tip_color = [1.0, 1.0, 1.0]; // white-hot tip
         let fletch_color = [1.0, 0.5, 0.1]; // orange fletching (glow)
 
         // Shaft: visible box along -Z axis
@@ -1255,18 +1461,14 @@ impl Mesh {
 
         let mut indices = vec![
             // Shaft top
-            0, 1, 2, 2, 3, 0,
-            // Shaft bottom
-            4, 5, 6, 6, 7, 4,
-            // Shaft left
-            8, 9, 10, 10, 11, 8,
-            // Shaft right
-            12, 13, 14, 14, 15, 12,
-            // Tip (4 triangular faces)
-            16, 17, 18,  // top
-            16, 18, 19,  // right
-            16, 19, 20,  // bottom
-            16, 20, 17,  // left
+            0, 1, 2, 2, 3, 0, // Shaft bottom
+            4, 5, 6, 6, 7, 4, // Shaft left
+            8, 9, 10, 10, 11, 8, // Shaft right
+            12, 13, 14, 14, 15, 12, // Tip (4 triangular faces)
+            16, 17, 18, // top
+            16, 18, 19, // right
+            16, 19, 20, // bottom
+            16, 20, 17, // left
         ];
 
         // Fletching: two crossed diamond fins at the back
@@ -1284,8 +1486,18 @@ impl Mesh {
         vertices.push(v([fin_w, 0.0, -fin_len], [0.0, 1.0, 0.0], fletch_color));
         vertices.push(v([-fin_w, 0.0, -fin_len], [0.0, 1.0, 0.0], fletch_color));
         indices.extend_from_slice(&[
-            base_idx, base_idx+1, base_idx+2, base_idx+2, base_idx+3, base_idx,
-            base_idx+4, base_idx+5, base_idx+6, base_idx+6, base_idx+7, base_idx+4,
+            base_idx,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx + 2,
+            base_idx + 3,
+            base_idx,
+            base_idx + 4,
+            base_idx + 5,
+            base_idx + 6,
+            base_idx + 6,
+            base_idx + 7,
+            base_idx + 4,
         ]);
 
         Self { vertices, indices }
@@ -1306,7 +1518,7 @@ impl Mesh {
         // HDR core / edge — bloom picks these up so the projectile
         // looks like a self-lit ball of fire even before the trail
         // particles draw on top of it.
-        let core = glam::Vec3::new(4.5, 3.8, 1.6);  // white-hot HDR core
+        let core = glam::Vec3::new(4.5, 3.8, 1.6); // white-hot HDR core
         let edge = glam::Vec3::new(2.4, 0.6, 0.05); // saturated orange flame
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity((stacks + 1) * (sectors + 1));
@@ -1422,9 +1634,9 @@ impl Mesh {
         // Spawn sites that know where the portal leads should
         // call [`Self::portal_with_palette`] instead.
         Self::portal_with_palette(
-            Vec3::new(0.42, 0.66, 0.92),  // generic cyan zenith
-            Vec3::new(0.85, 0.88, 0.92),  // pale horizon
-            Vec3::new(0.05, 0.04, 0.04),  // dark rim
+            Vec3::new(0.42, 0.66, 0.92), // generic cyan zenith
+            Vec3::new(0.85, 0.88, 0.92), // pale horizon
+            Vec3::new(0.05, 0.04, 0.04), // dark rim
         )
     }
 
@@ -1512,7 +1724,11 @@ impl Mesh {
                 let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
                 // Wobble only on the outermost ring so inner
                 // rings don't clip the contour.
-                let w = if (t - 1.0).abs() < 1e-3 { wobble(a) } else { 0.0 };
+                let w = if (t - 1.0).abs() < 1e-3 {
+                    wobble(a)
+                } else {
+                    0.0
+                };
                 let scale = 1.0 + w;
                 let r_xz = r_base * scale;
                 let r_y = r_y_base * scale;
@@ -1535,11 +1751,7 @@ impl Mesh {
         // Core fan: centre → first ring.
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[
-                center_idx,
-                front_starts[0] + i,
-                front_starts[0] + next,
-            ]);
+            indices.extend_from_slice(&[center_idx, front_starts[0] + i, front_starts[0] + next]);
         }
         // Outer bands: ring[k] → ring[k+1] quads.
         for k in 0..(front_starts.len() - 1) {
@@ -1572,11 +1784,7 @@ impl Mesh {
         }
         for i in 0..disc_segments {
             let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[
-                back_center,
-                back_starts[0] + next,
-                back_starts[0] + i,
-            ]);
+            indices.extend_from_slice(&[back_center, back_starts[0] + next, back_starts[0] + i]);
         }
         for k in 0..(back_starts.len() - 1) {
             let inner = back_starts[k];
@@ -1627,11 +1835,17 @@ impl Mesh {
             std::path::PathBuf::from("../..").join(&original),
             std::path::PathBuf::from("../../..").join(&original),
         ];
-        let resolved = candidates.iter().find(|p| p.exists()).cloned()
-            .ok_or_else(|| anyhow::anyhow!(
-                "gltf file not found in any candidate path (cwd={:?}): {:?}",
-                std::env::current_dir().ok(), original
-            ))?;
+        let resolved = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gltf file not found in any candidate path (cwd={:?}): {:?}",
+                    std::env::current_dir().ok(),
+                    original
+                )
+            })?;
         log::info!("Loading glTF from {:?}", resolved);
 
         // Load the document and buffers but skip images — we don't sample
@@ -1639,17 +1853,28 @@ impl Mesh {
         // would otherwise cause the whole import to fail.
         let gltf = gltf::Gltf::open(&resolved)
             .map_err(|e| anyhow::anyhow!("gltf open failed for {:?}: {}", resolved, e))?;
-        let base_dir = resolved.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let base_dir = resolved
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let buffers = gltf::import_buffers(&gltf.document, Some(base_dir), gltf.blob.clone())
             .map_err(|e| anyhow::anyhow!("gltf buffer load failed for {:?}: {}", resolved, e))?;
         let doc = gltf.document;
 
         let mut mesh = Self::empty();
-        let scene = doc.default_scene().or_else(|| doc.scenes().next())
+        let scene = doc
+            .default_scene()
+            .or_else(|| doc.scenes().next())
             .ok_or_else(|| anyhow::anyhow!("gltf has no scenes: {:?}", resolved))?;
 
         for node in scene.nodes() {
-            visit_node_inner(&node, glam::Mat4::IDENTITY, &buffers, base_dir, assets, &mut mesh);
+            visit_node_inner(
+                &node,
+                glam::Mat4::IDENTITY,
+                &buffers,
+                base_dir,
+                assets,
+                &mut mesh,
+            );
         }
 
         if mesh.vertices.is_empty() {
@@ -1701,9 +1926,8 @@ fn visit_node_inner(
                 .read_tex_coords(0)
                 .map(|tc| tc.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.5, 0.5]; positions.len()]);
-            let colors: Option<Vec<[f32; 3]>> = reader
-                .read_colors(0)
-                .map(|c| c.into_rgb_f32().collect());
+            let colors: Option<Vec<[f32; 3]>> =
+                reader.read_colors(0).map(|c| c.into_rgb_f32().collect());
 
             // Material base colour: factor + (optional) texture sampled
             // at each vertex's UV and baked into vertex colour. This is
@@ -1713,12 +1937,12 @@ fn visit_node_inner(
             let pbr = prim.material().pbr_metallic_roughness();
             let base_color = pbr.base_color_factor();
             let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
-            let base_tex = pbr.base_color_texture().and_then(|info| {
-                match info.texture().source().source() {
-                    gltf::image::Source::Uri { uri, .. } => assets.load_image(base_dir, uri),
-                    _ => None,
-                }
-            });
+            let base_tex =
+                pbr.base_color_texture()
+                    .and_then(|info| match info.texture().source().source() {
+                        gltf::image::Source::Uri { uri, .. } => assets.load_image(base_dir, uri),
+                        _ => None,
+                    });
 
             let base_idx = out.vertices.len() as u32;
             for i in 0..positions.len() {
@@ -1735,7 +1959,11 @@ fn visit_node_inner(
                 }
                 out.vertices.push(Vertex {
                     position: p_world,
-                    normal: if n_world == glam::Vec3::ZERO { glam::Vec3::Y } else { n_world },
+                    normal: if n_world == glam::Vec3::ZERO {
+                        glam::Vec3::Y
+                    } else {
+                        n_world
+                    },
                     color,
                     uv: glam::Vec2::from(uvs[i]),
                 });
@@ -1828,7 +2056,9 @@ pub fn extract_base_color_image_bytes<P: AsRef<std::path::Path>>(
         None => return Ok(None),
     };
     let gltf = gltf::Gltf::open(&resolved)?;
-    let base_dir = resolved.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let base_dir = resolved
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let buffers = gltf::import_buffers(&gltf.document, Some(base_dir), gltf.blob.clone())?;
     let doc = gltf.document;
 
@@ -1867,18 +2097,23 @@ impl SkinnedMesh {
     /// uses that skin are merged into one buffer in model space (i.e. skin
     /// space — the space referenced by inverseBindMatrices).
     pub fn from_gltf<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
-        Self::from_gltf_filtered(path, |_| true)
+        Self::from_gltf_filtered(path, |_, _| true)
     }
 
     /// Same as [`from_gltf`], but only includes primitives whose owning
-    /// glTF mesh's `name` passes `mesh_name_filter`. Lets callers split a
-    /// multi-mesh authored asset (e.g. base-character `Eyes` / `Eyebrows`
-    /// / body siblings under one skin) into separate `SkinnedMesh`es so
-    /// each can be rendered as its own attachment with its own texture.
+    /// glTF node + mesh names pass `mesh_name_filter(node_name, mesh_name)`.
+    /// Lets callers split a multi-mesh authored asset (e.g. base-character
+    /// `Eyes` / `Eyebrows` / body siblings under one skin) into separate
+    /// `SkinnedMesh`es so each can be rendered as its own attachment with
+    /// its own texture. Both names are passed because exporters disagree
+    /// about which one carries the meaningful label: the female base-
+    /// character gltf names its meshes `Eyes`/`Eyebrows`; the male variant
+    /// names the *nodes* that, with the meshes themselves named
+    /// `Face`/`Face.001`.
     pub fn from_gltf_filtered<P, F>(path: P, mut mesh_name_filter: F) -> anyhow::Result<Self>
     where
         P: AsRef<std::path::Path>,
-        F: FnMut(&str) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
         let original = path.as_ref().to_path_buf();
         let candidates = [
@@ -1887,28 +2122,37 @@ impl SkinnedMesh {
             std::path::PathBuf::from("../..").join(&original),
             std::path::PathBuf::from("../../..").join(&original),
         ];
-        let resolved = candidates.iter().find(|p| p.exists()).cloned()
-            .ok_or_else(|| anyhow::anyhow!(
-                "skinned gltf file not found in any candidate path (cwd={:?}): {:?}",
-                std::env::current_dir().ok(), original
-            ))?;
+        let resolved = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "skinned gltf file not found in any candidate path (cwd={:?}): {:?}",
+                    std::env::current_dir().ok(),
+                    original
+                )
+            })?;
         log::info!("Loading skinned glTF from {:?}", resolved);
 
         let gltf = gltf::Gltf::open(&resolved)
             .map_err(|e| anyhow::anyhow!("gltf open failed for {:?}: {}", resolved, e))?;
-        let base_dir = resolved.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let base_dir = resolved
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let buffers = gltf::import_buffers(&gltf.document, Some(base_dir), gltf.blob.clone())
             .map_err(|e| anyhow::anyhow!("gltf buffer load failed for {:?}: {}", resolved, e))?;
         let doc = gltf.document;
 
-        let skin = doc.skins().next()
+        let skin = doc
+            .skins()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("gltf has no skin: {:?}", resolved))?;
 
         // ---- Build the skeleton (flat joint array) ----
         // Map glTF node index -> our joint index, in the order glTF's skin lists them
         // (this is also the order inverseBindMatrices uses).
-        let joint_node_indices: Vec<u32> =
-            skin.joints().map(|n| n.index() as u32).collect();
+        let joint_node_indices: Vec<u32> = skin.joints().map(|n| n.index() as u32).collect();
         let joint_index_by_node: std::collections::HashMap<u32, u16> = joint_node_indices
             .iter()
             .enumerate()
@@ -1923,8 +2167,7 @@ impl SkinnedMesh {
             .unwrap_or_else(|| vec![glam::Mat4::IDENTITY; joint_node_indices.len()]);
 
         // For each joint node, record local TRS (its bind-pose local) and parent.
-        let mut parent_of: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
+        let mut parent_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
         for node in doc.nodes() {
             for child in node.children() {
                 parent_of.insert(child.index() as u32, node.index() as u32);
@@ -1947,7 +2190,10 @@ impl SkinnedMesh {
                 name,
                 parent,
                 local_bind: local,
-                inverse_bind: inverse_binds.get(i).copied().unwrap_or(glam::Mat4::IDENTITY),
+                inverse_bind: inverse_binds
+                    .get(i)
+                    .copied()
+                    .unwrap_or(glam::Mat4::IDENTITY),
                 node_index: node_idx,
             });
         }
@@ -1962,10 +2208,23 @@ impl SkinnedMesh {
         let target_skin_idx = skin.index();
 
         for node in doc.nodes() {
-            let Some(node_skin) = node.skin() else { continue };
-            if node_skin.index() != target_skin_idx { continue }
+            let Some(node_skin) = node.skin() else {
+                continue;
+            };
+            if node_skin.index() != target_skin_idx {
+                continue;
+            }
             let Some(gmesh) = node.mesh() else { continue };
-            if !mesh_name_filter(gmesh.name().unwrap_or("")) { continue }
+            // Pass both names to the filter — exporters disagree about
+            // which one carries the meaningful label. The female base-
+            // character gltf labels its meshes `Eyes`/`Eyebrows`; the
+            // male variant labels the *nodes* that and the meshes
+            // `Face`/`Face.001`.
+            let node_name = node.name().unwrap_or("");
+            let mesh_name = gmesh.name().unwrap_or("");
+            if !mesh_name_filter(node_name, mesh_name) {
+                continue;
+            }
 
             for prim in gmesh.primitives() {
                 let reader = prim.reader(|b| Some(&buffers[b.index()]));
@@ -1992,9 +2251,8 @@ impl SkinnedMesh {
 
                 let base_color = prim.material().pbr_metallic_roughness().base_color_factor();
                 let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
-                let colors: Option<Vec<[f32; 3]>> = reader
-                    .read_colors(0)
-                    .map(|c| c.into_rgb_f32().collect());
+                let colors: Option<Vec<[f32; 3]>> =
+                    reader.read_colors(0).map(|c| c.into_rgb_f32().collect());
 
                 let base_idx = bind_vertices.len() as u32;
                 for i in 0..positions.len() {
@@ -2014,11 +2272,17 @@ impl SkinnedMesh {
                     let sum = w[0] + w[1] + w[2] + w[3];
                     if sum > 1e-5 {
                         let inv = 1.0 / sum;
-                        w[0] *= inv; w[1] *= inv; w[2] *= inv; w[3] *= inv;
+                        w[0] *= inv;
+                        w[1] *= inv;
+                        w[2] *= inv;
+                        w[3] *= inv;
                     } else {
                         w = [1.0, 0.0, 0.0, 0.0];
                     }
-                    vertex_skin.push(VertexSkin { joints: joints_attr[i], weights: w });
+                    vertex_skin.push(VertexSkin {
+                        joints: joints_attr[i],
+                        weights: w,
+                    });
                 }
 
                 if let Some(idx_iter) = reader.read_indices() {
@@ -2062,7 +2326,9 @@ impl SkinnedMesh {
     }
 
     /// Number of joints (palette size needed for rendering).
-    pub fn joint_count(&self) -> usize { self.joints.len() }
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
 
     /// Override every bind-vertex's `color` with `rgb`. Used by the
     /// avatar-cosmetic pass to force the eye-ball mesh to render as
@@ -2129,20 +2395,28 @@ impl SkinnedMesh {
     /// their parent chain.
     pub fn upper_body_mask(&self) -> Vec<f32> {
         const UPPER_TOKENS: &[&str] = &[
-            "spine", "chest", "neck", "head",
-            "clavicle", "shoulder",
-            "upperarm", "forearm", "lowerarm", "hand", "finger", "thumb",
-            "weapon", "prop", "tool",
+            "spine", "chest", "neck", "head", "clavicle", "shoulder", "upperarm", "forearm",
+            "lowerarm", "hand", "finger", "thumb", "weapon", "prop", "tool",
         ];
         // First pass: direct hits.
-        let mut weight: Vec<f32> = self.joints.iter().map(|j| {
-            let n = j.name.to_ascii_lowercase();
-            if UPPER_TOKENS.iter().any(|tok| n.contains(tok)) { 1.0 } else { 0.0 }
-        }).collect();
+        let mut weight: Vec<f32> = self
+            .joints
+            .iter()
+            .map(|j| {
+                let n = j.name.to_ascii_lowercase();
+                if UPPER_TOKENS.iter().any(|tok| n.contains(tok)) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         // Second pass: propagate from any matched ancestor down to descendants.
         // Joints in skin order have parents earlier in the array (per glTF spec).
         for i in 0..self.joints.len() {
-            if weight[i] >= 1.0 { continue }
+            if weight[i] >= 1.0 {
+                continue;
+            }
             if let Some(p) = self.joints[i].parent {
                 if weight[p as usize] >= 1.0 {
                     weight[i] = 1.0;
@@ -2172,7 +2446,11 @@ impl SkinnedMesh {
                 || n.contains(".l")
                 || n.contains("_l_")
                 || n.contains("lhand");
-            if is_hand && is_left { Some(i) } else { None }
+            if is_hand && is_left {
+                Some(i)
+            } else {
+                None
+            }
         })
     }
 
@@ -2199,7 +2477,11 @@ impl SkinnedMesh {
                 || n.contains(".r")
                 || n.contains("_r_")
                 || n.contains("rhand");
-            if is_hand && is_right { Some(i) } else { None }
+            if is_hand && is_right {
+                Some(i)
+            } else {
+                None
+            }
         })
     }
 
@@ -2215,10 +2497,10 @@ impl SkinnedMesh {
         let mut right = None;
         for (i, j) in self.joints.iter().enumerate() {
             let n = lc(&j.name);
-            let is_foot = n.contains("foot")
-                && !n.contains("toe")
-                && !n.contains("ball");
-            if !is_foot { continue; }
+            let is_foot = n.contains("foot") && !n.contains("toe") && !n.contains("ball");
+            if !is_foot {
+                continue;
+            }
             let is_left = n.contains("left")
                 || n.ends_with("_l")
                 || n.contains(".l")
@@ -2229,8 +2511,12 @@ impl SkinnedMesh {
                 || n.contains(".r")
                 || n.contains("_r_")
                 || n.contains("rfoot");
-            if is_left && left.is_none() { left = Some(i); }
-            if is_right && right.is_none() { right = Some(i); }
+            if is_left && left.is_none() {
+                left = Some(i);
+            }
+            if is_right && right.is_none() {
+                right = Some(i);
+            }
         }
         (left, right)
     }
@@ -2246,14 +2532,19 @@ impl SkinnedMesh {
         let is_spine = |i: usize| lower(&self.joints[i].name).contains("spine");
         for (i, _) in self.joints.iter().enumerate() {
             if is_spine(i) {
-                let parent_is_spine = self.joints[i].parent
+                let parent_is_spine = self.joints[i]
+                    .parent
                     .map(|p| is_spine(p as usize))
                     .unwrap_or(false);
-                if !parent_is_spine { return Some(i); }
+                if !parent_is_spine {
+                    return Some(i);
+                }
             }
         }
         // Fallback: any matched spine joint.
-        self.joints.iter().position(|j| j.name.to_ascii_lowercase().contains("spine"))
+        self.joints
+            .iter()
+            .position(|j| j.name.to_ascii_lowercase().contains("spine"))
     }
 
     /// Build a bone palette that produces the bind pose (i.e. an identity
@@ -2267,7 +2558,8 @@ impl SkinnedMesh {
     pub fn bind_world_transforms(&self) -> Vec<glam::Mat4> {
         let mut out = vec![glam::Mat4::IDENTITY; self.joints.len()];
         for (i, j) in self.joints.iter().enumerate() {
-            let parent = j.parent
+            let parent = j
+                .parent
                 .map(|p| out[p as usize])
                 .unwrap_or(glam::Mat4::IDENTITY);
             out[i] = parent * j.local_bind;
@@ -2298,7 +2590,9 @@ impl SkinnedMesh {
             let mut m = glam::Mat4::ZERO;
             for k in 0..4 {
                 let w = s.weights[k];
-                if w == 0.0 { continue }
+                if w == 0.0 {
+                    continue;
+                }
                 let idx = s.joints[k] as usize;
                 if idx < bone_palette.len() {
                     m += bone_palette[idx] * w;

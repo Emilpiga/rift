@@ -44,20 +44,21 @@ Steam's session ticket is the identity; the dev HMAC path
 (see below) exists only for local development.
 
 - [x] Wire-protocol split for authenticated handshake.
-      `Hello { protocol_version, auth: AuthCredential }` →
+      `Hello { protocol_version, auth_ticket: Vec<u8> }` →
       `Authenticated { your_client_id, display_name, roster }`
       → `EnterWorld { character_name, class_id, gender }` →
-      `Welcome`. `AuthCredential::{ Steam, Dev }` defined in
-      `rift-net::messages`; shared HMAC payload schema lives
-      in `rift-net::auth_dev` so client and server agree
-      byte-for-byte.
+      `Welcome`. The ticket is opaque on the wire: the dev
+      issuer produces an HMAC envelope (schema in
+      `rift-net::auth_dev`); the Steam issuer produces
+      `[steam_id_u64_LE | raw_GetAuthSessionTicket_bytes]`.
+      `Hello.auth_ticket: Vec<u8>`, `PROTOCOL_VERSION = 5`.
 - [x] Server-side auth resolver (`rift-server::auth`) with
       `AccountKey::{ Steam(u64), Dev(String) }`, an
-      `AuthConfig::from_env()` reader, and a `resolve()`
-      that verifies the HMAC dev path or rejects to a stub
-      Steam path. 8 dev-auth unit tests passing. Loud WARN
-      log when `RIFT_DEV_AUTH_KEY` is set; ERROR on a
-      malformed key.
+      `AuthConfig::from_env()` reader, and a `Verifier`
+      enum picked once at startup (`Steam` when built with
+      `--features steam-auth`, `Dev` otherwise). 10 dev-auth
+      unit tests passing. Loud WARN log when
+      `RIFT_DEV_AUTH_KEY` is set; ERROR on a malformed key.
 - [x] Client-side signer (`rift-client::auth`) with
       `Signer::{ Dev, Steam }`, env-driven config, and a
       `mint()` that produces a fresh credential per `Hello`.
@@ -76,38 +77,57 @@ Steam's session ticket is the identity; the dev HMAC path
       locally without manual setup. `DEPLOYMENT.md` documents
       the env vars and the production rule (never set the
       dev key, build with `--features steam-auth`).
-- [ ] **Real Steam ticket verification.** Today
-      `rift-server::auth::steam` is a stub that always
-      rejects. Wire up `STEAM_WEBAPI_KEY` →
-      `ISteamUserAuth/AuthenticateUserTicket` Web API call
-      from the server, validate the ticket, derive the
-      `SteamID` → `AccountKey::Steam(u64)`. Promote
-      `auth::resolve` onto a worker thread + mpsc reply
-      channel polled in `Server::step` once this becomes a
-      real HTTP round-trip (the call site is structured for
-      a local swap; see the module docs in
-      `crates/rift-server/src/auth/mod.rs`).
-- [ ] **Real Steam ticket minting on the client.**
-      `rift-client::auth::steam::mint_stub()` returns a
-      placeholder. Integrate the Steamworks SDK behind
-      `--features steam-auth`, call
-      `ISteamUser::GetAuthSessionTicket`, ship the ticket
-      bytes inside `AuthCredential::Steam`. Until then the
-      `steam-auth` feature is reserved scaffolding only.
-- [ ] **Lock down dev auth in production builds.** Plan: the
-      server's `AuthConfig::from_env()` should refuse to
-      enable the dev path when built with the `steam-auth`
-      feature (and/or when a `RIFT_PRODUCTION=1` env var is
-      set), so a misconfigured prod box can't accidentally
-      accept HMAC creds. Today it's a documentation-only
-      guarantee.
-- [ ] **Switch persistence reads off `accounts.name` and
-      onto `account_key`.** The Phase-4 migration is
-      additive; the server still keys lookups via
-      `account_key.legacy_account_name()`. Follow-up
-      migration: backfill complete → `account_key NOT NULL
-    UNIQUE` → swap `rift-persistence` queries → drop the
-      legacy fallback.
+- [x] **Real Steam ticket verification.**
+      `rift-server::auth::steam::SteamVerifier` now owns a
+      Steamworks Game Server SDK `Server` handle
+      (`ServerMode::Authentication`) with `set_product` +
+      `set_game_description` + `log_on_anonymous` so ticket
+      validation callbacks actually fire. A 20 Hz callback-pump
+      thread (RAII-joined on drop) drives
+      `SteamServersConnected` / `SteamServerConnectFailure` /
+      `SteamServersDisconnected` to a shared
+      `AtomicBool`, and `verify()` blocks briefly on that
+      flag so the first `Hello` doesn't race the anonymous
+      logon. `ValidateAuthTicketResponse` results route
+      through `Arc<Mutex<HashMap<u64, mpsc::SyncSender>>>`
+      keyed by `SteamID`; `verify()` uses `recv_timeout(5s)`
+      and always calls `end_authentication_session` on the
+      way out. Family-Sharing sessions are logged but
+      allowed. Replaces the rejecting Web-API stub. Built
+      with `--features steam-auth`; `STEAM_WEBAPI_KEY` is no
+      longer used (Web API was the wrong tier for a
+      published game-server build).
+- [x] **Real Steam ticket minting on the client.**
+      `rift-client::auth::steam::SteamSigner::from_env`
+      runs `steamworks::Client::init_app(RIFT_STEAM_APPID,
+    default 480 = Spacewar)`, writes `steam_appid.txt`,
+      and spawns a matching 20 Hz pump. `mint()` calls
+      `authentication_session_ticket(NetworkingIdentity::new())`
+      and ships the bytes as
+      `[steam_id_u64_LE | raw_ticket]` inside the opaque
+      `Hello.auth_ticket: Vec<u8>` (PROTOCOL_VERSION 5).
+      The `steam-auth` cargo feature is now load-bearing,
+      not scaffolding.
+- [x] **Lock down dev auth in production builds.**
+      `AuthConfig::from_env` refuses to enable the dev path
+      when built with `--features steam-auth`: if
+      `RIFT_DEV_AUTH_KEY` is also set we log a loud `WARN`
+      and use the Steam verifier anyway. A production box
+      built with the feature flag cannot accidentally accept
+      HMAC creds.
+- [x] **Switch persistence reads off `accounts.name` and
+      onto `account_key`.** Migration
+      `20260511000000_account_key_required.sql` promotes
+      `account_key` to `NOT NULL UNIQUE`, drops the legacy
+      `accounts.name` UNIQUE + NOT NULL constraints, and the
+      `rift-persistence` API now keys
+      `load_or_create_blocking` / `list_account_characters_blocking`
+      on the issuer-tagged storage form (`"dev:..."` /
+      `"steam:..."`) plus a separate `display_name`. Server
+      threads both through `ClientSession.account_name` +
+      `account_display_name` and `AccountKey::legacy_account_name()`
+      is gone. Dropping the now-vestigial `accounts.name`
+      column entirely is a follow-up cleanup migration.
 - [ ] Per-account session tokens / reconnect path. Once the
       Steam ticket is verified the server should mint a
       short-lived session token the client can present on

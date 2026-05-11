@@ -49,48 +49,19 @@ pub enum PickupRejectReason {
 }
 
 // ─── Authentication ──────────────────────────────────────────────────────
-
-/// Issuer-tagged credential the client presents in
-/// [`ClientMsg::Hello`]. The server resolves it into a stable
-/// account identity before any other state lookup. Wire-stable:
-/// don't reorder variants, only append new ones.
-///
-/// The two paths are intentionally asymmetric:
-///
-/// * [`AuthCredential::Steam`] is the production path. Players
-///   are already signed into the Steam client; the game asks
-///   Steamworks for an opaque `ticket`, ships it here, and the
-///   server validates it via the Steam Web API. Authoritative
-///   identity comes out of the validation response, not the
-///   `steam_id` hint on this struct.
-/// * [`AuthCredential::Dev`] is the local-iteration path. The
-///   client signs a (identity, nonce, timestamp) tuple with a
-///   shared HMAC key (`RIFT_DEV_AUTH_KEY`); the server verifies
-///   the signature and treats the identity string as the account
-///   key. Refused at runtime if the server isn't configured with
-///   a dev key (`AuthError::DevAuthDisabled`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AuthCredential {
-    /// Real Steam session ticket. Server validates against the
-    /// Steam Web API; failure → `Reject`. The 64-bit `steam_id`
-    /// is included as a hint so the server can short-circuit
-    /// obvious mismatches before the round-trip to Steam, but
-    /// the *authoritative* SteamID is whatever the validation
-    /// response returns.
-    Steam { steam_id: u64, ticket: Vec<u8> },
-    /// Dev / playtest auth. `identity` is a free-form short
-    /// string (typically `"dev-<6 hex>"` or `RIFT_DEV_USER`).
-    /// `signature` is HMAC-SHA256(key, identity || nonce || ts)
-    /// with `nonce` and `ts` fed in as little-endian u64s. The
-    /// server enforces a ±60 s `timestamp_unix` window to make
-    /// captured credentials short-lived.
-    Dev {
-        identity: String,
-        nonce: u64,
-        timestamp_unix: u64,
-        signature: [u8; 32],
-    },
-}
+//
+// The wire carries an opaque `Vec<u8>` ticket. The server has
+// exactly one verifier configured at startup (Steam in prod, Dev
+// for local iteration) — so there's no issuer tag to ship and no
+// branching on the wire format. Dev mode is conceptually "local
+// fake Steam": same opaque byte interface, different verifier.
+//
+// The Steam ticket layout is owned by Valve (we treat the bytes
+// from `ISteamUser::GetAuthSessionTicket` as fully opaque and
+// hand them to `ISteamUserAuth/AuthenticateUserTicket` for
+// validation). The Dev ticket layout is owned by
+// `rift_net::auth_dev`; its encoder picks an internal version
+// byte so we can evolve it without bumping `PROTOCOL_VERSION`.
 
 // ─── Client → Server ─────────────────────────────────────────────────────
 
@@ -109,7 +80,13 @@ pub enum ClientMsg {
     /// character at connection time.
     Hello {
         protocol_version: u16,
-        auth: AuthCredential,
+        /// Opaque authentication ticket. In a production build
+        /// this is whatever `ISteamUser::GetAuthSessionTicket`
+        /// returned; in a dev build it's a signed blob produced
+        /// by [`crate::auth_dev::encode_dev_ticket`]. The server
+        /// has exactly one verifier configured at startup and
+        /// the byte format is whatever that verifier expects.
+        auth_ticket: Vec<u8>,
     },
 
     /// Sent after the client has received the post-auth roster in

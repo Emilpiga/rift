@@ -1,199 +1,264 @@
-//! Dev auth: HMAC-SHA256 over `(identity, nonce, timestamp)`
-//! with a shared 32-byte key supplied via `RIFT_DEV_AUTH_KEY`.
+//! Dev verifier — "local fake Steam".
 //!
-//! The signing payload + `sign` helper live in
-//! [`rift_net::auth_dev`] so the client and server compute
-//! byte-identical signatures from one source of truth. This
-//! module owns verification: replay-window enforcement,
-//! identity validation, constant-time signature compare, and
-//! key decoding from environment hex.
-//!
-//! Threat model is intentionally narrow — this exists so devs
-//! and playtesters can spin up multiple "logged in" clients
-//! without standing up Steam. It is not a substitute for a
-//! real identity provider:
-//!
-//! * Anyone with the shared key can mint credentials for any
-//!   identity. Treat the key like a password.
-//! * The replay window is short but not zero; an attacker on
-//!   the wire can resubmit a fresh credential within
-//!   [`rift_net::auth_dev::DEV_AUTH_REPLAY_WINDOW_SECS`].
-//! * There is no per-identity revocation. Rotating the key
-//!   revokes everyone.
-//!
-//! All three caveats are acceptable for a closed-network dev
-//! environment and unacceptable for production — which is why
-//! the production server should leave `RIFT_DEV_AUTH_KEY`
-//! unset and rely solely on Steam.
+//! Parses the [`rift_net::auth_dev`] ticket layout, verifies the
+//! HMAC against the shared key, enforces the replay window, and
+//! returns an [`AccountKey::Dev`] on success. The dev path is
+//! deliberately the same shape as the production Steam path:
+//! one opaque-bytes `verify` entry point that yields either a
+//! resolved account identity or an [`AuthError`].
 
-use rift_net::auth_dev::{sign, DEV_AUTH_REPLAY_WINDOW_SECS, MAX_DEV_IDENTITY_CHARS};
+use std::sync::Mutex;
+
+use rift_net::auth_dev::{
+    decode_dev_ticket, sign, DevTicketDecodeError, DEV_AUTH_REPLAY_WINDOW_SECS,
+    MAX_DEV_IDENTITY_CHARS,
+};
 use subtle::ConstantTimeEq;
 
-use super::AuthError;
-use crate::auth::AccountKey;
+use super::{unix_now, AccountKey, AuthError, ReplayCache};
 
-/// Decode a 64-character hex string into the 32-byte HMAC key.
-/// Whitespace around the value is trimmed so users can paste
-/// without worrying about trailing newlines.
-pub fn decode_key(hex_str: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("not valid hex: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!(
-            "expected 32 bytes (64 hex chars), got {}",
-            bytes.len()
-        ));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+/// Stateful dev verifier. Owns the shared HMAC key plus the
+/// nonce-replay cache. `Mutex` is fine here — the verify path
+/// is a millisecond-scale handshake step, not a hot game-loop
+/// path.
+#[cfg_attr(feature = "steam-auth", allow(dead_code))]
+pub struct DevVerifier {
+    key: [u8; 32],
+    replay_cache: Mutex<ReplayCache>,
 }
 
-/// Verify a dev credential. Constant-time compare on the
-/// signature; replay-window check on the timestamp; basic
-/// shape check on the identity.
-pub fn verify(
-    key: &[u8; 32],
-    identity: &str,
-    nonce: u64,
-    timestamp_unix: u64,
-    signature: &[u8; 32],
-) -> Result<AccountKey, AuthError> {
-    let trimmed = identity.trim();
-    if trimmed.is_empty() {
+impl Clone for DevVerifier {
+    fn clone(&self) -> Self {
+        // We never actually clone the verifier in practice
+        // (it's behind `Arc` in `AuthConfig`), but the enum
+        // wrapping it derives `Clone` and that requires this
+        // impl to exist. Clone shares neither cache state nor
+        // identity — callers shouldn't depend on it.
+        Self {
+            key: self.key,
+            replay_cache: Mutex::new(ReplayCache::new()),
+        }
+    }
+}
+
+impl DevVerifier {
+    /// Pull `RIFT_DEV_AUTH_KEY` (hex-encoded 32 bytes) from the
+    /// environment and build a verifier. Returns the loud
+    /// error string used in the startup log if the env var is
+    /// missing or malformed.
+    #[cfg_attr(feature = "steam-auth", allow(dead_code))]
+    pub fn from_env() -> Result<Self, String> {
+        let raw = std::env::var("RIFT_DEV_AUTH_KEY")
+            .map_err(|_| "RIFT_DEV_AUTH_KEY is not set; dev auth verifier disabled".to_string())?;
+        let key = decode_key(&raw)
+            .ok_or_else(|| "RIFT_DEV_AUTH_KEY must be 64 hex chars (32 bytes)".to_string())?;
+        Ok(Self {
+            key,
+            replay_cache: Mutex::new(ReplayCache::new()),
+        })
+    }
+
+    /// Validate a wire ticket and (on success) return the
+    /// resolved dev identity.
+    pub fn verify(&self, ticket: &[u8]) -> Result<AccountKey, AuthError> {
+        let parsed = decode_dev_ticket(ticket).map_err(|e| match e {
+            DevTicketDecodeError::Truncated => {
+                AuthError::MalformedTicket("dev ticket truncated".to_string())
+            }
+            DevTicketDecodeError::UnknownVersion(v) => {
+                AuthError::MalformedTicket(format!("dev ticket version {v} not supported"))
+            }
+            DevTicketDecodeError::BadIdentityUtf8 => {
+                AuthError::MalformedTicket("dev ticket identity not UTF-8".to_string())
+            }
+            DevTicketDecodeError::BadIdentityLength => {
+                AuthError::MalformedTicket("dev ticket identity length out of range".to_string())
+            }
+        })?;
+
+        validate_identity(&parsed.identity)?;
+
+        // Replay window: timestamp must be within
+        // `DEV_AUTH_REPLAY_WINDOW_SECS` of server clock, on
+        // either side, to survive sloppy NTP.
+        let now = unix_now();
+        let delta = now.abs_diff(parsed.timestamp_unix);
+        if delta > DEV_AUTH_REPLAY_WINDOW_SECS {
+            return Err(AuthError::StaleTimestamp);
+        }
+
+        // HMAC compare in constant time. Mismatched secrets
+        // are the most common dev cause of `BadSignature`.
+        let expected = sign(
+            &self.key,
+            &parsed.identity,
+            parsed.nonce,
+            parsed.timestamp_unix,
+        );
+        if expected.ct_eq(&parsed.signature).unwrap_u8() != 1 {
+            return Err(AuthError::BadSignature);
+        }
+
+        // Single-packet replay: lock + check + record.
+        // Holding the lock across the whole check is fine —
+        // verify is not on a hot loop.
+        let mut cache = self
+            .replay_cache
+            .lock()
+            .expect("dev replay cache mutex poisoned");
+        cache.check_and_record(&parsed.identity, parsed.nonce, now)?;
+
+        Ok(AccountKey::Dev(parsed.identity))
+    }
+}
+
+/// Reject identity strings that would either collide with the
+/// `issuer:identity` storage convention or sneak control
+/// characters past the player-name UI.
+fn validate_identity(identity: &str) -> Result<(), AuthError> {
+    if identity.is_empty() {
         return Err(AuthError::BadIdentity("identity is empty".to_string()));
     }
-    let len = trimmed.chars().count();
-    if len > MAX_DEV_IDENTITY_CHARS {
+    if identity.chars().count() > MAX_DEV_IDENTITY_CHARS {
         return Err(AuthError::BadIdentity(format!(
-            "identity too long ({len} chars)"
+            "identity exceeds {MAX_DEV_IDENTITY_CHARS} chars"
         )));
     }
-    if trimmed.chars().any(|c| c.is_control()) {
+    if identity.contains(':') {
+        return Err(AuthError::BadIdentity(
+            "identity contains reserved character ':'".to_string(),
+        ));
+    }
+    if identity.chars().any(char::is_control) {
         return Err(AuthError::BadIdentity(
             "identity contains control characters".to_string(),
         ));
     }
-
-    // Replay window: signed-distance from "now". `saturating_sub`
-    // on both sides handles the edge case where the system clock
-    // jumped (e.g. a container start before NTP sync) so we
-    // reject loudly instead of underflowing into "fresh".
-    let now = unix_now();
-    let drift = now.max(timestamp_unix) - now.min(timestamp_unix);
-    if drift > DEV_AUTH_REPLAY_WINDOW_SECS {
-        return Err(AuthError::StaleTimestamp);
-    }
-
-    let expected = sign(key, trimmed, nonce, timestamp_unix);
-    if expected.ct_eq(signature).into() {
-        Ok(AccountKey::Dev(trimmed.to_string()))
-    } else {
-        Err(AuthError::BadSignature)
-    }
+    Ok(())
 }
 
-/// Wall-clock seconds since the Unix epoch, monotonically
-/// best-effort: we treat any pre-epoch clock (which would
-/// indicate a wildly broken host) as `0` so the replay-window
-/// math stays sane instead of panicking.
-fn unix_now() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// Decode a 64-char hex string into a 32-byte key. Accepts
+/// upper or lower case; ignores nothing else.
+#[cfg_attr(feature = "steam-auth", allow(dead_code))]
+fn decode_key(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = hex_digit(chunk[0])?;
+        let lo = hex_digit(chunk[1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+#[cfg_attr(feature = "steam-auth", allow(dead_code))]
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rift_net::auth_dev::{encode_dev_ticket, sign};
 
-    fn test_key() -> [u8; 32] {
-        // Deterministic non-zero key so each test byte differs.
-        let mut k = [0u8; 32];
-        for (i, b) in k.iter_mut().enumerate() {
-            *b = i as u8;
+    fn mint(key: &[u8; 32], identity: &str, nonce: u64, ts: u64) -> Vec<u8> {
+        let sig = sign(key, identity, nonce, ts);
+        encode_dev_ticket(identity, nonce, ts, &sig)
+    }
+
+    fn make_verifier(key: [u8; 32]) -> DevVerifier {
+        DevVerifier {
+            key,
+            replay_cache: Mutex::new(ReplayCache::new()),
         }
-        k
     }
 
     #[test]
-    fn round_trip_accepts() {
-        let key = test_key();
-        let now = unix_now();
-        let sig = sign(&key, "alice", 42, now);
-        let resolved = verify(&key, "alice", 42, now, &sig).expect("valid credential");
-        assert_eq!(resolved, AccountKey::Dev("alice".to_string()));
+    fn accepts_valid_ticket() {
+        let key = [9u8; 32];
+        let v = make_verifier(key);
+        let ticket = mint(&key, "alice", 1, unix_now());
+        let acct = v.verify(&ticket).expect("valid ticket accepted");
+        assert_eq!(acct, AccountKey::Dev("alice".to_string()));
     }
 
     #[test]
     fn rejects_bad_signature() {
-        let key = test_key();
-        let now = unix_now();
-        let sig = sign(&key, "alice", 1, now);
-        let mut tampered = sig;
-        tampered[0] ^= 0x01;
-        assert!(matches!(
-            verify(&key, "alice", 1, now, &tampered),
-            Err(AuthError::BadSignature)
-        ));
-    }
-
-    #[test]
-    fn rejects_wrong_identity() {
-        let key = test_key();
-        let now = unix_now();
-        let sig = sign(&key, "alice", 1, now);
-        assert!(matches!(
-            verify(&key, "bob", 1, now, &sig),
-            Err(AuthError::BadSignature)
-        ));
+        let v = make_verifier([1u8; 32]);
+        let ticket = mint(&[2u8; 32], "alice", 1, unix_now());
+        assert!(matches!(v.verify(&ticket), Err(AuthError::BadSignature)));
     }
 
     #[test]
     fn rejects_stale_timestamp() {
-        let key = test_key();
-        let stale = unix_now().saturating_sub(DEV_AUTH_REPLAY_WINDOW_SECS + 5);
-        let sig = sign(&key, "alice", 1, stale);
-        assert!(matches!(
-            verify(&key, "alice", 1, stale, &sig),
-            Err(AuthError::StaleTimestamp)
-        ));
+        let key = [3u8; 32];
+        let v = make_verifier(key);
+        let ticket = mint(&key, "alice", 1, unix_now() - 10_000);
+        assert!(matches!(v.verify(&ticket), Err(AuthError::StaleTimestamp)));
+    }
+
+    #[test]
+    fn rejects_replay_within_window() {
+        let key = [4u8; 32];
+        let v = make_verifier(key);
+        let ticket = mint(&key, "alice", 7, unix_now());
+        v.verify(&ticket).expect("first accept");
+        assert!(matches!(v.verify(&ticket), Err(AuthError::ReplayDetected)));
+    }
+
+    #[test]
+    fn rejects_issuer_prefix_identity() {
+        let key = [5u8; 32];
+        let v = make_verifier(key);
+        let ticket = mint(&key, "steam:bob", 1, unix_now());
+        assert!(matches!(v.verify(&ticket), Err(AuthError::BadIdentity(_))));
     }
 
     #[test]
     fn rejects_empty_identity() {
-        let key = test_key();
-        let now = unix_now();
-        let sig = sign(&key, "", 0, now);
+        let key = [6u8; 32];
+        let v = make_verifier(key);
+        let ticket = mint(&key, "", 1, unix_now());
+        assert!(matches!(v.verify(&ticket), Err(AuthError::BadIdentity(_))));
+    }
+
+    #[test]
+    fn rejects_oversized_identity() {
+        let key = [7u8; 32];
+        let v = make_verifier(key);
+        let too_long: String = "a".repeat(MAX_DEV_IDENTITY_CHARS + 1);
+        let ticket = mint(&key, &too_long, 1, unix_now());
+        assert!(matches!(v.verify(&ticket), Err(AuthError::BadIdentity(_))));
+    }
+
+    #[test]
+    fn rejects_malformed_ticket() {
+        let v = make_verifier([0u8; 32]);
+        let mut ticket = mint(&[0u8; 32], "x", 1, unix_now());
+        ticket.truncate(10);
         assert!(matches!(
-            verify(&key, "", 0, now, &sig),
-            Err(AuthError::BadIdentity(_))
+            v.verify(&ticket),
+            Err(AuthError::MalformedTicket(_))
         ));
     }
 
     #[test]
-    fn rejects_long_identity() {
-        let key = test_key();
-        let long = "a".repeat(MAX_DEV_IDENTITY_CHARS + 1);
-        let now = unix_now();
-        let sig = sign(&key, &long, 0, now);
-        assert!(matches!(
-            verify(&key, &long, 0, now, &sig),
-            Err(AuthError::BadIdentity(_))
-        ));
-    }
-
-    #[test]
-    fn decode_key_round_trips() {
-        let raw = test_key();
-        let s = hex::encode(raw);
-        assert_eq!(decode_key(&s).unwrap(), raw);
-        assert_eq!(decode_key(&format!("  {s}\n")).unwrap(), raw);
+    fn decode_key_round_trip() {
+        let expected = [0xab; 32];
+        let hex = "ab".repeat(32);
+        assert_eq!(decode_key(&hex), Some(expected));
     }
 
     #[test]
     fn decode_key_rejects_wrong_length() {
-        assert!(decode_key("deadbeef").is_err());
+        assert!(decode_key("abcd").is_none());
+        assert!(decode_key(&"a".repeat(63)).is_none());
     }
 }

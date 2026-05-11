@@ -21,6 +21,15 @@ param(
 
     [switch]$Release,
 
+    # Build with the real Steamworks-backed auth verifier on
+    # both client and server (`--features steam-auth`). When
+    # set, the dev-auth key is left untouched but ignored at
+    # runtime; the server refuses to enable both verifiers at
+    # once. Requires Steam running locally; defaults to the
+    # Spacewar sandbox appid (480) unless `RIFT_STEAM_APPID`
+    # is set.
+    [switch]$Steam,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -62,32 +71,89 @@ if (-not $env:RIFT_DEV_AUTH_KEY) {
 
 $BuildProfile = if ($Release) { "release" } else { "debug" }
 
+if ($Steam) {
+    if (-not $env:RIFT_STEAM_APPID) {
+        # Spacewar — Valve's public sandbox appid. Anyone with
+        # a Steam account can sign / validate tickets against
+        # it without owning a real product. Swap to your real
+        # appid once you've onboarded with Valve.
+        $env:RIFT_STEAM_APPID = "480"
+        Write-Host "rift: RIFT_STEAM_APPID not set, defaulting to 480 (Spacewar sandbox)"
+    }
+    Write-Host "rift: building with --features steam-auth (RIFT_STEAM_APPID=$($env:RIFT_STEAM_APPID))"
+}
+
 function Invoke-Cargo {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    if ($Release) { & cargo build --release @Args } else { & cargo build @Args }
+    $featureArgs = @()
+    if ($Steam) { $featureArgs = @("--features", "steam-auth") }
+    if ($Release) {
+        & cargo build --release @featureArgs @Args
+    } else {
+        & cargo build @featureArgs @Args
+    }
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
 }
 
-function Build-Server { Invoke-Cargo -p rift-server }
-function Build-Client { Invoke-Cargo -p rift-client }
+function Build-Server { Invoke-Cargo -p rift-server; Copy-SteamDll }
+function Build-Client { Invoke-Cargo -p rift-client; Copy-SteamDll }
 function Run-Server   { $env:RUST_LOG = $ServerLog; & ".\target\$BuildProfile\rift-server.exe" --bind $ServerBind @Rest }
 function Run-Client   { $env:RUST_LOG = $ClientLog; & ".\target\$BuildProfile\rift.exe" --connect $ClientCnx @Rest }
+
+# `steamworks-sys` builds `steam_api64.dll` into its OUT_DIR
+# but does NOT copy it next to the produced binaries, so
+# launching either exe fails with "steam_api64.dll was not
+# found". Fish it out of the build directory and drop it next
+# to the binaries. No-op when `-Steam` is not set.
+function Copy-SteamDll {
+    if (-not $Steam) { return }
+    $buildDir = ".\target\$BuildProfile\build"
+    if (-not (Test-Path $buildDir)) { return }
+    $dll = Get-ChildItem -Path $buildDir -Recurse -Filter "steam_api64.dll" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $dll) {
+        Write-Warning "rift: steam_api64.dll not found under $buildDir; Steam build will fail at launch"
+        return
+    }
+    $dest = ".\target\$BuildProfile\steam_api64.dll"
+    # The DLL is loaded by any running rift-server.exe /
+    # rift.exe, which holds an exclusive lock on it. If the
+    # destination already exists and is identical to the
+    # source, skip; otherwise warn and continue rather than
+    # erroring out so a `client build` while the server is
+    # running still succeeds.
+    if (Test-Path $dest) {
+        $srcLen = (Get-Item $dll.FullName).Length
+        $dstLen = (Get-Item $dest).Length
+        if ($srcLen -eq $dstLen) { return }
+    }
+    try {
+        Copy-Item -Path $dll.FullName -Destination $dest -Force -ErrorAction Stop
+    } catch [System.IO.IOException] {
+        Write-Warning "rift: could not refresh $dest (in use by a running process). Stop the running server/client and rebuild if the SDK version changed."
+    }
+}
 
 switch ($Command) {
     "server" {
         if ($Sub -eq "build") { Build-Server; return }
         if ($Sub -eq "start") { Build-Server }
         Run-Server
-        if ($Sub -eq "run") { Run-Server }
     }
     "client" {
         if ($Sub -eq "build") { Build-Client; return }
         if ($Sub -eq "start") { Build-Client }
         Run-Client
-        if ($Sub -eq "run") { Run-Client }
     }
     "both" {
-        Invoke-Cargo --workspace
+        if ($Steam) {
+            # `--features steam-auth` is per-crate, so we can't
+            # build the workspace in one shot when it's set.
+            Build-Server
+            Build-Client
+        } else {
+            Invoke-Cargo --workspace
+        }
         $prevLog = $env:RUST_LOG
         $env:RUST_LOG = $ServerLog
         $srv = Start-Process -PassThru -NoNewWindow `
@@ -97,7 +163,14 @@ switch ($Command) {
         Start-Sleep -Milliseconds 500
         try { Run-Client } finally { if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force } }
     }
-    "build" { Invoke-Cargo --workspace }
+    "build" {
+        if ($Steam) {
+            Build-Server
+            Build-Client
+        } else {
+            Invoke-Cargo --workspace
+        }
+    }
     default {
         Write-Host @"
 rift dev launcher
@@ -107,7 +180,13 @@ rift dev launcher
   .\scripts\rift.ps1 both
   .\scripts\rift.ps1 build
 
-Env: RIFT_SERVER_BIND, RIFT_CONNECT, RIFT_SERVER_LOG, RIFT_CLIENT_LOG
+Env: RIFT_SERVER_BIND, RIFT_CONNECT, RIFT_SERVER_LOG, RIFT_CLIENT_LOG, RIFT_STEAM_APPID
+
+Flags:
+  -Release     Build the release profile.
+  -Steam       Build both crates with --features steam-auth.
+               Requires Steam running; defaults to Spacewar
+               sandbox (appid 480) unless RIFT_STEAM_APPID set.
 "@
     }
 }

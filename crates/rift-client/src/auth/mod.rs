@@ -1,16 +1,18 @@
 //! Client-side authentication.
 //!
 //! Mirrors the server's `auth` module: there are two issuers
-//! (Steam and Dev), both produce a wire-level
-//! [`rift_net::AuthCredential`] the net client ships in
-//! `Hello`. The client picks an issuer at startup based on the
-//! environment + cargo features:
+//! (Steam and Dev), both produce an opaque `Vec<u8>` ticket the
+//! net client ships in `Hello.auth_ticket`. The client picks an
+//! issuer at startup based on environment + cargo features:
 //!
 //! * **Dev** — when `RIFT_DEV_AUTH_KEY` is set and the
 //!   `steam-auth` cargo feature is **off**. Reads
 //!   `RIFT_DEV_USER` for an explicit identity, falling back to
 //!   a per-process random `dev-XXXXXX` so several local
-//!   clients can be "logged in" simultaneously.
+//!   clients can be "logged in" simultaneously. Dev mode is
+//!   conceptually "local fake Steam" — same opaque-bytes wire
+//!   shape, just a different ticket format under the hood
+//!   (HMAC-signed via [`rift_net::auth_dev`]).
 //! * **Steam** — when the `steam-auth` cargo feature is on.
 //!   Currently a stub; future work fetches the session ticket
 //!   from Steamworks and ships it untouched.
@@ -20,16 +22,15 @@
 //!   netcode.
 //!
 //! All variants are wire-compatible — the server cares only
-//! about the resolved [`AuthCredential`], not which build
-//! produced it.
+//! about the resolved account identity, not which build
+//! produced the ticket.
 
 pub mod dev;
+#[cfg(feature = "steam-auth")]
 pub mod steam;
 
-use rift_net::AuthCredential;
-
-/// Resolver capable of minting fresh
-/// [`AuthCredential`]s for outgoing `Hello` messages.
+/// Resolver capable of minting fresh auth tickets for outgoing
+/// `Hello` messages.
 ///
 /// One instance per process, built at startup from
 /// [`Config::from_env`]. The net client clones the contained
@@ -43,18 +44,22 @@ pub enum Signer {
     /// every call so two `Hello`s from the same client are
     /// never byte-identical.
     Dev(dev::DevSigner),
-    /// Steam path — currently a stub that returns a
-    /// placeholder credential the server's stub will reject.
-    /// Real implementation calls into Steamworks.
-    Steam,
+    /// Steam path. Holds an initialised Steamworks `Client`
+    /// and a background callback pump; `mint()` fetches a
+    /// fresh session ticket via `GetAuthSessionTicket` and
+    /// prefixes it with the local SteamID64 for the server's
+    /// `BeginAuthSession` call.
+    #[cfg(feature = "steam-auth")]
+    Steam(steam::SteamSigner),
 }
 
 impl Signer {
-    /// Mint a credential to ship in the next `Hello`.
-    pub fn mint(&self) -> AuthCredential {
+    /// Mint a ticket to ship in the next `Hello`.
+    pub fn mint(&self) -> Vec<u8> {
         match self {
             Signer::Dev(d) => d.mint(),
-            Signer::Steam => steam::mint_stub(),
+            #[cfg(feature = "steam-auth")]
+            Signer::Steam(s) => s.mint(),
         }
     }
 
@@ -64,7 +69,8 @@ impl Signer {
     pub fn identity_hint(&self) -> String {
         match self {
             Signer::Dev(d) => d.identity().to_string(),
-            Signer::Steam => "steam".to_string(),
+            #[cfg(feature = "steam-auth")]
+            Signer::Steam(s) => s.identity(),
         }
     }
 }
@@ -96,11 +102,21 @@ impl Config {
         // fall back to dev auth.
         #[cfg(feature = "steam-auth")]
         {
-            log::info!("auth: Steam issuer selected (cargo feature `steam-auth` enabled)");
-            return Config {
-                signer: Some(Signer::Steam),
-                disabled_reason: None,
-            };
+            match steam::SteamSigner::from_env() {
+                Ok(signer) => {
+                    return Config {
+                        signer: Some(Signer::Steam(signer)),
+                        disabled_reason: None,
+                    };
+                }
+                Err(reason) => {
+                    log::error!("auth: Steam signer failed to initialize ({reason})");
+                    return Config {
+                        signer: None,
+                        disabled_reason: Some(reason),
+                    };
+                }
+            }
         }
 
         #[cfg(not(feature = "steam-auth"))]

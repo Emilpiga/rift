@@ -20,14 +20,18 @@ env_logger = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+steamworks = { workspace = true, optional = true }
 
 [features]
-# When enabled, the client mints `AuthCredential::Steam`
-# instead of dev credentials. The Phase-5 stub returns a
-# placeholder that the server's matching stub rejects, so the
-# feature exists today only to make the cfg paths legal —
-# real Steamworks integration lands later.
-steam-auth = []
+# When enabled, the client mints a real Steam session ticket
+# via the Steamworks SDK (`ISteamUser::GetAuthSessionTicket`)
+# and ships it in `Hello.auth_ticket`. Off by default so the
+# default dev loop doesn't require Steam to be running. With
+# this feature on, the runtime requires Steam reachable + a
+# `steam_appid.txt` next to the binary (`480` for the Spacewar
+# sandbox during pre-release testing; the real appid once we
+# onboard with Valve).
+steam-auth = ["dep:steamworks"]
 
 [[bin]]
 name = "rift"

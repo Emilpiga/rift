@@ -10,14 +10,19 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 /// Wire-format version. Increment on any breaking message change.
 ///
 /// Version history (most recent first):
-/// - **v4** (2026-05-11): `Hello.account_name` replaced with
+/// - **v5** (2026-05-11): `Hello.auth: AuthCredential` enum
+///   collapsed to `Hello.auth_ticket: Vec<u8>`. Dev and Steam
+///   now share one opaque-ticket wire shape; the server's
+///   installed verifier (chosen at startup) decides how to
+///   parse the bytes.
+/// - v4 (2026-05-11): `Hello.account_name` replaced with
 ///   `Hello.auth: AuthCredential`; `RequestRoster` removed; the
 ///   roster is now bundled into `Welcome.roster` so the client
 ///   can render character-select straight after the auth round-
 ///   trip.
 /// - v3: previous schema (free-form `account_name` string,
 ///   pre-Hello `RequestRoster` lookup).
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Hard cap on simultaneous connected clients per server. Matches the
 /// design target of 4-player co-op (one slot is the host on a listen
