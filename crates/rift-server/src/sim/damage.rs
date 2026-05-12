@@ -36,6 +36,12 @@ pub(super) fn apply_player_damage(
     next_projectile_net_id: &mut u32,
     tick: NetTick,
     pending: Vec<combat_ctx::PlayerHit>,
+    // Free-cast requests emitted by OnDodge / OnLowHealth
+    // `ProcAction::CastAbility` procs (Mirrorglass Amulet pool).
+    // Each row is `(caster_entity, request)`. Drained by the
+    // caller after this function returns so the cast pipeline
+    // sees a clean world borrow.
+    proc_cast_out: &mut Vec<(hecs::Entity, procs::ProcCastRequest)>,
 ) {
     use rift_game::abilities::Element;
     use rift_game::loot::ProcEvent;
@@ -89,15 +95,18 @@ pub(super) fn apply_player_damage(
             let seed = projectile::mix64(
                 (tick.0 as u64)
                     ^ ((net_id.0 as u64) << 8)
-                    ^ ((ability_id as u64) << 24)
+                    ^ ((ability_id.raw() as u64) << 24)
                     ^ idx_salt.rotate_left(13),
             );
             let r = (seed >> 40) as f32 / (1u32 << 24) as f32;
             if r < evasion {
+                let mut proc_casts: Vec<procs::ProcCastRequest> = Vec::new();
                 let mut sink = procs::ProcSink {
                     aoe_zones,
                     next_projectile_net_id,
                     tick,
+                    proc_casts: &mut proc_casts,
+                    events,
                 };
                 let origin = procs::ProcOrigin {
                     position,
@@ -107,6 +116,13 @@ pub(super) fn apply_player_damage(
                     salt: idx_salt ^ 0xD0D6_E5EE,
                 };
                 procs::dispatch(ProcEvent::OnDodge, &dodge_procs, &origin, &mut sink);
+                // OnDodge `CastAbility` procs route back to the
+                // caller via `proc_cast_out`. Drained after
+                // `apply_player_damage` returns so the cast
+                // pipeline has a clean world borrow.
+                for req in proc_casts {
+                    proc_cast_out.push((player_entity, req));
+                }
                 continue;
             }
         }
@@ -188,10 +204,13 @@ pub(super) fn apply_player_damage(
                 .map(|p| !p.low_hp_proc_armed)
                 .unwrap_or(false);
             if crossed {
+                let mut proc_casts: Vec<procs::ProcCastRequest> = Vec::new();
                 let mut sink = procs::ProcSink {
                     aoe_zones,
                     next_projectile_net_id,
                     tick,
+                    proc_casts: &mut proc_casts,
+                    events,
                 };
                 let origin = procs::ProcOrigin {
                     position,
@@ -201,6 +220,12 @@ pub(super) fn apply_player_damage(
                     salt: idx_salt ^ 0x10AE_4ED1,
                 };
                 procs::dispatch(ProcEvent::OnLowHealth, &low_procs, &origin, &mut sink);
+                // OnLowHealth `CastAbility` procs route back
+                // to the caller via `proc_cast_out`; see the
+                // OnDodge branch above for the rationale.
+                for req in proc_casts {
+                    proc_cast_out.push((player_entity, req));
+                }
             }
         }
     }

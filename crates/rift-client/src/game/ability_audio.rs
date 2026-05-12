@@ -1,49 +1,27 @@
-//! Per-ability sound recipe.
+//! Client-side audio adaptation for ability cues.
 //!
-//! Pure client-side: maps an ability's `wire_id` to optional
-//! cast / travel / impact sample paths. The server doesn't
-//! see this; gameplay timing flows through the existing
-//! `AbilityCast` / projectile snapshot / projectile despawn
-//! events, and this table just decorates each event with a
-//! one-shot or looping audio cue.
+//! The per-ability sound recipe (cast / travel / impact paths)
+//! now lives next to the rest of the ability data in
+//! [`rift_game::abilities::Ability::audio`], so this module is
+//! a thin client-side adapter: it looks the recipe up by wire
+//! id and wraps the `&'static str` asset paths in
+//! [`SoundSpec`] values with the right falloff / volume /
+//! looping flags for cast / travel / impact roles.
 //!
-//! Adding a new ability sound is a one-line edit to
-//! [`audio_for`]. Returning `None` means the ability is
-//! silent — every call site falls through cleanly.
+//! Returning a silent default means an ability with no `audio`
+//! authored simply ships muted — every call site falls through
+//! cleanly.
 
 use rift_audio::SoundSpec;
-use rift_game::abilities::id;
-
-/// Audio recipe for one ability.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AbilityAudio {
-    /// Played once at cast time, anchored at the caster's
-    /// hand height. `None` for abilities with no cast sound.
-    pub cast: Option<&'static str>,
-    /// Looping emitter that follows the projectile while it
-    /// travels. `None` for non-projectile abilities and
-    /// projectiles we don't want to attach a loop to.
-    pub travel: Option<&'static str>,
-    /// Played once at the projectile's impact / detonation
-    /// position. `None` for abilities with no impact sound.
-    pub impact: Option<&'static str>,
-}
+pub use rift_game::abilities::AbilityAudio;
 
 /// Look up the audio recipe for `wire_id`. Falls back to a
-/// silent default for abilities not listed here.
-pub const fn audio_for(wire_id: u8) -> AbilityAudio {
-    match wire_id {
-        x if x == id::FIRE_BALL => AbilityAudio {
-            cast: Some("vfx/abilities/fireball/fireball_cast.mp3"),
-            travel: Some("vfx/abilities/fireball/fireball_travel.mp3"),
-            impact: Some("vfx/abilities/fireball/fireball_impact.mp3"),
-        },
-        _ => AbilityAudio {
-            cast: None,
-            travel: None,
-            impact: None,
-        },
-    }
+/// silent default for abilities the registry doesn't know
+/// about (synthetic transforms, defensive guards).
+pub fn audio_for(wire_id: rift_game::abilities::AbilityWireId) -> AbilityAudio {
+    rift_game::abilities::lookup(wire_id)
+        .map(|a| a.audio)
+        .unwrap_or(AbilityAudio::SILENT)
 }
 
 /// Volume + falloff used for a one-shot cast cue. Loud and

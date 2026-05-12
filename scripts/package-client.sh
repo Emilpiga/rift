@@ -34,8 +34,13 @@ else
     echo "==> no server baked in; clients will need --connect"
 fi
 
-echo "==> cargo build --release -p rift-client"
-cargo build --release -p rift-client
+echo "==> cargo build --release -p rift-client --features steam-auth"
+# Playtest / release bundles must ship the Steam auth path. Without
+# --features steam-auth the binary has no auth issuer at runtime
+# (RIFT_DEV_AUTH_KEY is a dev-only fallback) and exits immediately
+# with "Cannot connect: no auth issuer".
+export RIFT_STEAM_APPID="${RIFT_STEAM_APPID:-480}"
+cargo build --release -p rift-client --features steam-auth
 
 # Pick the right binary name. Cargo writes `rift` (the bin name
 # inside rift-client) on every platform; on Windows it grows the
@@ -57,6 +62,23 @@ mkdir -p "$STAGE"
 echo "==> staging binary + assets"
 cp "target/release/$BIN" "$STAGE/"
 cp -R assets "$STAGE/assets"
+# Steamworks looks for this next to the binary on startup.
+cp steam_appid.txt "$STAGE/steam_appid.txt"
+
+# steamworks-sys drops steam_api64.dll (or libsteam_api.so /
+# .dylib) into its OUT_DIR but doesn't place it next to the
+# linked binary. Locate it and stage it.
+case "${OSTYPE:-}" in
+    msys*|cygwin*|win32) STEAM_LIB=steam_api64.dll ;;
+    darwin*)             STEAM_LIB=libsteam_api.dylib ;;
+    *)                   STEAM_LIB=libsteam_api.so ;;
+esac
+STEAM_LIB_PATH=$(find target/release/build -name "$STEAM_LIB" -type f 2>/dev/null | head -n 1 || true)
+if [[ -z "$STEAM_LIB_PATH" ]]; then
+    echo "ERROR: $STEAM_LIB not found under target/release/build; steam-auth build did not produce it." >&2
+    exit 1
+fi
+cp "$STEAM_LIB_PATH" "$STAGE/$STEAM_LIB"
 
 # Generate (or refresh) the third-party license attribution
 # file and stage it next to the binary. Required by every

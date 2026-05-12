@@ -144,6 +144,22 @@ impl NetClient {
                             }
                         }
                     }
+                    // And the rigid weapon prop, if any. Dynamic
+                    // meshes don't have a free path — once the
+                    // entity is despawned, `update_weapon_transforms`
+                    // stops touching the renderer slot, so without
+                    // this the wand/sword stays frozen in mid-air
+                    // at the disconnecting player's last hand pose.
+                    // Zero the model matrix so it draws nothing;
+                    // the slot itself is leaked (same policy used
+                    // for weapon swaps).
+                    if let Ok(att) =
+                        world.get::<&crate::game::weapon_visuals::WeaponAttachment>(entity)
+                    {
+                        if let Some(obj) = renderer.objects.get_mut(att.object_index) {
+                            obj.model_matrix = Mat4::ZERO;
+                        }
+                    }
                     let _ = world.despawn(entity);
                 }
 
@@ -664,7 +680,9 @@ impl NetClient {
                 // from the same point. Silent for abilities
                 // whose audio table entry has no `impact`.
                 if let (Some(ability_id), Some(audio)) = (ability_id, audio.as_deref_mut()) {
-                    let recipe = crate::game::ability_audio::audio_for(ability_id);
+                    let recipe = crate::game::ability_audio::audio_for(
+                        rift_game::abilities::AbilityWireId::new(ability_id),
+                    );
                     if let Some(path) = recipe.impact {
                         let mut spec = crate::game::ability_audio::impact_spec(path);
                         crate::game::ability_audio::jitter_one_shot(&mut spec);
@@ -698,7 +716,9 @@ impl NetClient {
             // declares a non-projectile shape — defensive
             // guards, both should always succeed for a
             // snapshot-borne `EntityKind::Projectile`.
-            let Some(ab) = rift_game::abilities::lookup(ability as u8) else {
+            let Some(ab) = rift_game::abilities::lookup(rift_game::abilities::AbilityWireId::new(
+                ability as u8,
+            )) else {
                 continue;
             };
             let ShapeVisuals::Projectile {
@@ -730,7 +750,9 @@ impl NetClient {
                 // registry uses.
                 self.projectile_ability.insert(net_id, ability as u8);
                 if let Some(audio) = audio.as_deref_mut() {
-                    let recipe = crate::game::ability_audio::audio_for(ability as u8);
+                    let recipe = crate::game::ability_audio::audio_for(
+                        rift_game::abilities::AbilityWireId::new(ability as u8),
+                    );
                     if let Some(path) = recipe.travel {
                         let spec = crate::game::ability_audio::travel_spec(path);
                         if let Some(em) = audio.spawn_emitter(&spec, pos) {

@@ -34,7 +34,12 @@ New-Item -ItemType Directory -Force -Path dist | Out-Null
 # (--manifest-path) so we don't list server-only deps in the
 # client-facing notices file.
 Write-Host '==> generating dist\THIRD_PARTY.txt'
-$argList = @('about', 'generate', '--config', 'about.toml', '--manifest-path', 'crates\rift-client\Cargo.toml') + $ExtraArgs + @('about.hbs')
-cargo @argList | Set-Content -Encoding UTF8 -Path 'dist\THIRD_PARTY.txt'
+# Use `--output-file` rather than piping into `Set-Content`:
+# cargo-about detects redirected stdout in PowerShell and
+# refuses, because the default UTF-16 encoding mangles
+# non-ASCII license text. `-o` writes UTF-8 directly.
+$argList = @('about', 'generate', '--config', 'about.toml', '--manifest-path', 'crates\rift-client\Cargo.toml', '-o', 'dist\THIRD_PARTY.txt') + $ExtraArgs + @('about.hbs')
+cargo @argList
+if ($LASTEXITCODE -ne 0) { throw "cargo about failed (exit $LASTEXITCODE)" }
 
 Write-Host 'done: dist\THIRD_PARTY.txt'

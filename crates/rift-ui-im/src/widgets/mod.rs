@@ -24,5 +24,5 @@ pub use item_slot::{ItemSlot, SlotInteraction};
 pub use mini_button::{MiniButton, MiniButtonFills, MiniButtonResponse};
 pub use progress_bar::{hp_color, ProgressBar};
 pub use text_field::{label, text_field, title, TextField};
-pub use tooltip::{item_tooltip_lines, tooltip_at_mouse, Tooltip, TooltipLine};
+pub use tooltip::{item_tooltip_lines, tooltip_at_mouse, Tooltip, TooltipLine, TooltipLineDecor};
 pub use two_stage_confirm::{TwoStageConfirm, TwoStageOutcome};

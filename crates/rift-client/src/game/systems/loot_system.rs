@@ -281,7 +281,15 @@ pub fn on_loot_dropped(
         &blob.affixes,
         blob.anchored,
         blob.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v)),
-    ).map(|mut it| { it.unstable = blob.unstable; it }) else {
+        blob.unique_id
+            .as_deref()
+            .and_then(|s| rift_game::loot::uniques::find(s).map(|u| u.id)),
+        blob.unique_pick,
+    ).map(|mut it| {
+        it.unstable = blob.unstable;
+        it.rift_touched = rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
+        it
+    }) else {
         log::warn!(
             "loot drop {loot_id:?} has unknown indices base={} affixes={:?}; skipping visual",
             blob.base_id,

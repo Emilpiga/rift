@@ -17,7 +17,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
-use rift_game::abilities::ChannelEffect;
+use rift_game::abilities::{AbilityWireId, ChannelEffect};
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
 use super::enemies::ServerEnemy;
@@ -33,7 +33,7 @@ use rift_game::loot::AbilityVariant;
 /// `Enemy`-team channels).
 #[derive(Clone, Debug)]
 pub struct ServerChannel {
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub team: Team,
     /// Attacker kind for the TAKEN-tab breakdown. Mirrors
     /// [`super::projectile::ServerProjectile::attacker_kind`]
@@ -71,6 +71,23 @@ pub struct ServerChannel {
     /// detonation, etc.). `None` for casts without a
     /// matching equipped legendary.
     pub transform: Option<AbilityVariant>,
+    /// Pulse-cycle period (seconds) for transforms that
+    /// telegraph their finisher via a traveling beam pulse
+    /// (currently `FrostRayShatter`). Authored once at
+    /// channel insertion from
+    /// [`super::transforms::transform_pulse_period`]; `0.0`
+    /// disables the mechanic. The accumulator below ticks up
+    /// each frame and, when it crosses this threshold, fires
+    /// [`super::transforms::on_channel_pulse`] and emits the
+    /// next [`WorldEvent::ChannelPulse`] so the client knows
+    /// when the next bead starts traveling.
+    pub pulse_period: f32,
+    /// Seconds since the current pulse cycle started.
+    /// Compared against `pulse_period` each tick. Reset to
+    /// the overshoot (`-= pulse_period`) on fire so cycles
+    /// stay phase-locked even if a frame straddles the
+    /// boundary by more than one full period.
+    pub pulse_acc: f32,
 }
 
 /// Tick every active channel and queue damage / debuff
@@ -99,7 +116,7 @@ pub fn tick(
 ) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, Option<Entity>, u8, u8)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, Option<Entity>, AbilityWireId, u8)> = Vec::new();
     let mut to_strip: Vec<Entity> = Vec::new();
     // Snapshots of channels that ended this tick, for the
     // transform finisher pass that runs after all world
@@ -107,6 +124,12 @@ pub fn tick(
     // keeps transform behavior in one place
     // (`super::transforms`).
     let mut ended: Vec<ChannelEndSnapshot> = Vec::new();
+    // Snapshots of channel pulses that fired this tick. Same
+    // borrow-deferral pattern as `ended` — the dispatch in
+    // `transforms::on_channel_pulse` mutates `world` (spawns
+    // shard projectiles) so we collect first and dispatch
+    // after the channel iteration releases its borrow.
+    let mut pulses: Vec<ChannelEndSnapshot> = Vec::new();
 
     // 1. Player-attached channels.
     for (entity, (player, channel)) in world.query_mut::<(&mut ServerPlayer, &mut ServerChannel)>()
@@ -153,7 +176,7 @@ pub fn tick(
             channel.tick_acc -= channel.tick_interval;
             ctx.events.push(WorldEvent::ChannelTick {
                 caster: caster_net_id,
-                ability: channel.ability_id as u16,
+                ability: channel.ability_id.raw() as u16,
                 position: caster_pos.to_array(),
                 dir: [channel.aim.x, channel.aim.z],
                 tick: tick_now,
@@ -172,11 +195,38 @@ pub fn tick(
                 &mut player_debuffs,
             );
         }
+        // Pulse-cycle driver. Generic over any transform that
+        // returns a non-zero `transform_pulse_period(...)` —
+        // currently `FrostRayShatter`. Tick the accumulator,
+        // and when it crosses the threshold queue an
+        // `on_channel_pulse` snapshot + emit the next cycle's
+        // `ChannelPulse` event so the client knows the new
+        // bead's start time. The shatter (or whatever the
+        // variant fires) is dispatched in the post-borrow
+        // pulse pass below, mirroring the channel-end
+        // structure.
+        if channel.remaining > 0.0 && channel.pulse_period > 0.0 {
+            channel.pulse_acc += dt;
+            while channel.pulse_acc >= channel.pulse_period {
+                channel.pulse_acc -= channel.pulse_period;
+                pulses.push(ChannelEndSnapshot::from_channel(
+                    channel,
+                    entity,
+                    caster_pos,
+                    caster_net_id,
+                ));
+                ctx.events.push(WorldEvent::ChannelPulse {
+                    caster: caster_net_id,
+                    ability: channel.ability_id.raw() as u16,
+                    travel_time: channel.pulse_period,
+                });
+            }
+        }
         if channel.remaining <= 0.0 {
             to_strip.push(entity);
             ctx.events.push(WorldEvent::ChannelEnd {
                 caster: caster_net_id,
-                ability: channel.ability_id as u16,
+                ability: channel.ability_id.raw() as u16,
             });
             // Snapshot for the transform finisher pass.
             // Cheap (POD copy) so we do it unconditionally
@@ -216,7 +266,7 @@ pub fn tick(
             channel.tick_acc -= channel.tick_interval;
             ctx.events.push(WorldEvent::ChannelTick {
                 caster: caster_net_id,
-                ability: channel.ability_id as u16,
+                ability: channel.ability_id.raw() as u16,
                 position: caster_pos.to_array(),
                 dir: [channel.aim.x, channel.aim.z],
                 tick: tick_now,
@@ -239,13 +289,13 @@ pub fn tick(
             to_strip.push(entity);
             ctx.events.push(WorldEvent::ChannelEnd {
                 caster: caster_net_id,
-                ability: channel.ability_id as u16,
+                ability: channel.ability_id.raw() as u16,
             });
         }
     }
 
     // 3. Apply queued enemy-side hits.
-    apply_hits_to_enemies(world, hits, ctx);
+    apply_hits_to_enemies(world, floor, hits, ctx);
 
     // 4. Apply queued player-side debuffs (rare path; flag-gated
     //    on `apply_debuff = Some(_)` per channel).
@@ -265,6 +315,13 @@ pub fn tick(
     //    `super::transforms`; this site is just the dispatch.
     for snap in ended {
         transforms::on_channel_end(world, ctx.events, ctx.next_projectile_net_id, &snap);
+    }
+    // 7. Same dispatch shape, but for the pulse cycle. Fires
+    //    the per-variant on-arrival effect (shatter shards
+    //    for Frost Ray) at the beam terminus each time a
+    //    channel's pulse accumulator wraps.
+    for snap in pulses {
+        transforms::on_channel_pulse(world, floor, ctx.events, ctx.next_projectile_net_id, &snap);
     }
 
     player_damage
@@ -286,11 +343,11 @@ fn collect_hits_for_effect(
     players: &[(Entity, Vec3)],
     hits: &mut Vec<Hit>,
     player_damage: &mut Vec<super::combat_ctx::PlayerHit>,
-    player_debuffs: &mut Vec<(Entity, u8, Option<Entity>, u8, u8)>,
+    player_debuffs: &mut Vec<(Entity, u8, Option<Entity>, AbilityWireId, u8)>,
 ) {
     let crit_chance = channel.crit_chance;
     let crit_damage = channel.crit_damage;
-    let salt = (channel.ability_id as u64) ^ (channel.tick_acc.to_bits() as u64);
+    let salt = (channel.ability_id.raw() as u64) ^ (channel.tick_acc.to_bits() as u64);
     // Build the per-target seed once — every hit on this tick
     // shares the salt and caster, only the target id varies.
     let seed_for = |target_id: u64| -> u64 {
@@ -509,7 +566,7 @@ pub fn clear_all(world: &mut hecs::World) {
 pub fn cancel(
     world: &mut hecs::World,
     entity: Entity,
-    ability_id: u8,
+    ability_id: AbilityWireId,
     events: &mut Vec<WorldEvent>,
     next_projectile_net_id: &mut u32,
 ) {
@@ -535,7 +592,7 @@ pub fn cancel(
     let _ = world.remove_one::<ServerChannel>(entity);
     events.push(WorldEvent::ChannelEnd {
         caster: snap.caster_net_id,
-        ability: ability_id as u16,
+        ability: ability_id.raw() as u16,
     });
     transforms::on_channel_end(world, events, next_projectile_net_id, &snap);
 }

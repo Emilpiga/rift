@@ -6,6 +6,7 @@
 //! mutate these fields directly through the struct.
 
 use crate::game::combat_system::{EntityTargeting, PlacedTargeting};
+use rift_engine::ui::im::Rect;
 
 #[derive(Default)]
 pub struct FrameState {
@@ -82,6 +83,14 @@ pub struct FrameState {
     pub last_left_plant_seq: u32,
     pub last_right_plant_seq: u32,
     pub step_rotation: u8,
+    /// HUD widget rects that should swallow gameplay LMB clicks.
+    /// Pushed by HUD render passes during `ui_phase` (ability
+    /// bar plaque, alt-hold loot labels, etc.); read on the
+    /// **next** frame by `combat_phase` to decide whether the
+    /// click was a UI interaction rather than a basic-attack
+    /// cast. Cleared at the top of every `ui_phase` tick so
+    /// rects only ever survive one frame.
+    pub hud_consume_rects: Vec<Rect>,
 }
 
 impl FrameState {
@@ -106,5 +115,6 @@ impl FrameState {
         self.descend_prompt = false;
         self.party_click_target_name = None;
         self.party_click_target_net_id = None;
+        self.hud_consume_rects.clear();
     }
 }

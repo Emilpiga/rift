@@ -110,6 +110,7 @@ impl Sim {
         target_net_id: Option<NetId>,
         tick: NetTick,
     ) {
+        let ability_id = rift_game::abilities::AbilityWireId::new(ability_id);
         // Sanitise client-supplied coordinates before they
         // touch the ability dispatch. NaN / infinity in
         // `client_origin` would bypass the eligibility radius
@@ -152,7 +153,7 @@ impl Sim {
         // dispatch ever runs, so dispatch never has to.
         self.pending_events.push(WorldEvent::AbilityCast {
             caster: accepted.caster,
-            ability: accepted.ability_id as u16,
+            ability: accepted.ability_id.raw() as u16,
             origin: accepted.origin.to_array(),
             dir: [accepted.aim.x, accepted.aim.z],
             target: accepted.placed_target.map(|t| t.to_array()),
@@ -242,6 +243,7 @@ impl Sim {
     /// if the player isn't channeling that ability so a duplicate
     /// release packet doesn't error.
     pub fn end_channel(&mut self, client_id: ClientId, ability_id: u8) {
+        let ability_id = rift_game::abilities::AbilityWireId::new(ability_id);
         let Some(&entity) = self.sessions.get(&client_id) else {
             return;
         };

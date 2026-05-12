@@ -106,7 +106,10 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         }
         entities.push(EntitySnapshot {
             net_id: en.net_id,
-            kind: EntityKind::Enemy { role: en.role.to_wire_byte(), anim },
+            kind: EntityKind::Enemy {
+                role: en.role.to_wire_byte(),
+                anim,
+            },
             position: en.k.position.to_array(),
             yaw: en.k.yaw,
             velocity: en.k.velocity.to_array(),
@@ -127,7 +130,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         entities.push(EntitySnapshot {
             net_id: proj.net_id,
             kind: EntityKind::Projectile {
-                ability: proj.ability_id as u16,
+                ability: proj.ability_id.raw() as u16,
             },
             position: proj.position.to_array(),
             yaw,
@@ -146,8 +149,13 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         if !in_view(viewer_pos, loot_row.position) {
             continue;
         }
-        let (base_id, rarity, ilvl, affixes, anchored) = loot_row.item.to_wire();
-        let provenance = loot_row.item.provenance.as_ref().map(|p| p.eligible.clone());
+        let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) =
+            loot_row.item.to_wire();
+        let provenance = loot_row
+            .item
+            .provenance
+            .as_ref()
+            .map(|p| p.eligible.clone());
         entities.push(EntitySnapshot {
             net_id: loot_row.net_id,
             kind: EntityKind::Loot {
@@ -159,6 +167,9 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                     anchored,
                     unstable: loot_row.item.unstable,
                     provenance,
+                    unique_id: unique_id.map(|s| s.to_string()),
+                    unique_pick,
+                    rift_touched: loot_row.item.rift_touched_to_wire(),
                 },
             },
             position: loot_row.position.to_array(),
@@ -175,8 +186,8 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     // landmarks the HUD wants to render even from a distance
     // (and there's at most one per floor anyway).
     for (_e, shrine) in world.query::<&ServerReviveShrine>().iter() {
-        let progress_norm = (shrine.progress / rift_net::messages::SHRINE_CHANNEL_DURATION)
-            .clamp(0.0, 1.0);
+        let progress_norm =
+            (shrine.progress / rift_net::messages::SHRINE_CHANNEL_DURATION).clamp(0.0, 1.0);
         let progress = (progress_norm * 255.0).round() as u8;
         entities.push(EntitySnapshot {
             net_id: shrine.net_id,
@@ -195,7 +206,11 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         });
     }
 
-    Snapshot { tick, ack_seq, entities }
+    Snapshot {
+        tick,
+        ack_seq,
+        entities,
+    }
 }
 
 fn in_view(viewer: Option<Vec3>, pos: Vec3) -> bool {

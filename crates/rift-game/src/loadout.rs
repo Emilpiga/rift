@@ -1,13 +1,13 @@
 //! Player ability loadout — the six wire ids the player has slotted
 //! into their action bar.
 //!
-//! A [`Loadout`] is purely declarative: six `u8` wire ids matching
-//! entries in [`crate::abilities::REGISTRY`]. The runtime
+//! A [`Loadout`] is purely declarative: six [`AbilityWireId`] entries
+//! matching rows in [`crate::abilities::REGISTRY`]. The runtime
 //! [`AbilitySlot`](crate::abilities::AbilitySlot) is built from a
 //! loadout by looking up each wire id in the registry. Switching
 //! abilities = mutate the loadout and re-materialize the slot.
 //!
-//! The wire id [`EMPTY_SLOT`] (`u8::MAX`) is the sentinel for an
+//! The sentinel [`EMPTY_SLOT`] (`AbilityWireId(u8::MAX)`) marks an
 //! empty action-bar slot. Empty slots also fall out of
 //! [`Loadout::materialize`] naturally because they don't match
 //! any registry entry.
@@ -18,15 +18,15 @@
 //! with each ability's own [`Ability::unlock_level`], this gates
 //! the loadout editor.
 
-use crate::abilities::{lookup, Ability, AbilityState, AbilitySlot, REGISTRY};
+use crate::abilities::{lookup, Ability, AbilitySlot, AbilityState, AbilityWireId, REGISTRY};
 
 /// Number of action-bar slots. Mirrors `AbilitySlot::slots.len()`.
 pub const SLOT_COUNT: usize = 6;
 
-/// Sentinel wire id meaning "this action-bar slot is empty". Set
-/// to `u8::MAX` so it can never collide with a real ability wire
-/// id (the player range is 0..64, the enemy range starts at 64).
-pub const EMPTY_SLOT: u8 = u8::MAX;
+/// Sentinel meaning "this action-bar slot is empty". The inner
+/// byte is `u8::MAX` so it can never collide with a real ability
+/// wire id (the player range is 0..64, enemies start at 64).
+pub const EMPTY_SLOT: AbilityWireId = AbilityWireId::new(u8::MAX);
 
 /// Character level required to unlock each action-bar slot, by
 /// slot index. Slot 0 is always available; the rest scale up so
@@ -46,24 +46,46 @@ pub fn is_slot_unlocked(index: usize, player_level: u32) -> bool {
 /// The six wire ids the player has slotted on the action bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loadout {
-    pub slots: [u8; SLOT_COUNT],
+    pub slots: [AbilityWireId; SLOT_COUNT],
 }
 
 impl Loadout {
-    /// Build a loadout from raw wire ids. Unknown ids are kept
-    /// verbatim — they'll materialize to an empty slot.
-    /// Duplicate non-sentinel ids are normalized so only the
-    /// last occurrence wins (mirrors the
-    /// last-write-wins semantics of [`Self::set_slot`]) — this
-    /// is the load-time defense for a persisted row that
-    /// somehow ended up with the same ability in two slots
-    /// (older builds didn't dedupe before saving). Call
-    /// [`Self::is_valid`] to additionally check that every
+    /// Build a loadout from raw wire bytes (the
+    /// wire / persistence layout). Unknown ids are kept verbatim
+    /// — they'll materialize to an empty slot. Duplicate
+    /// non-sentinel ids are normalized so only the last
+    /// occurrence wins (mirrors the last-write-wins semantics of
+    /// [`Self::set_slot`]) — this is the load-time defense for a
+    /// persisted row that somehow ended up with the same ability
+    /// in two slots (older builds didn't dedupe before saving).
+    /// Call [`Self::is_valid`] to additionally check that every
     /// non-sentinel id resolves to a player-castable ability.
-    pub fn from_slots(slots: [u8; SLOT_COUNT]) -> Self {
+    pub fn from_slots(bytes: [u8; SLOT_COUNT]) -> Self {
+        let slots = [
+            AbilityWireId::new(bytes[0]),
+            AbilityWireId::new(bytes[1]),
+            AbilityWireId::new(bytes[2]),
+            AbilityWireId::new(bytes[3]),
+            AbilityWireId::new(bytes[4]),
+            AbilityWireId::new(bytes[5]),
+        ];
         let mut s = Self { slots };
         s.normalize();
         s
+    }
+
+    /// Inverse of [`Self::from_slots`]: project the typed slot
+    /// array back to raw wire bytes for serialisation /
+    /// persistence boundaries.
+    pub fn to_wire_bytes(&self) -> [u8; SLOT_COUNT] {
+        [
+            self.slots[0].raw(),
+            self.slots[1].raw(),
+            self.slots[2].raw(),
+            self.slots[3].raw(),
+            self.slots[4].raw(),
+            self.slots[5].raw(),
+        ]
     }
 
     /// Default starter loadout — only Fireball in slot 0,
@@ -111,7 +133,7 @@ impl Loadout {
     /// `true` if `wire_id` is one of the six slotted abilities.
     /// Server uses this to gate cast requests. Empty slots never
     /// match.
-    pub fn contains(&self, wire_id: u8) -> bool {
+    pub fn contains(&self, wire_id: AbilityWireId) -> bool {
         wire_id != EMPTY_SLOT && self.slots.contains(&wire_id)
     }
 
@@ -141,7 +163,7 @@ impl Loadout {
     /// expected). Caller is responsible for re-materializing
     /// the [`AbilitySlot`] afterwards (cooldowns reset on
     /// swap).
-    pub fn set_slot(&mut self, index: usize, wire_id: u8) {
+    pub fn set_slot(&mut self, index: usize, wire_id: AbilityWireId) {
         if index >= SLOT_COUNT {
             return;
         }
@@ -186,8 +208,8 @@ impl Default for Loadout {
 
 /// `true` if `wire_id` belongs to an ability the player is allowed
 /// to slot. Excludes enemy-only abilities and the empty sentinel.
-pub fn is_player_ability(wire_id: u8) -> bool {
-    if wire_id == EMPTY_SLOT || wire_id >= 64 {
+pub fn is_player_ability(wire_id: AbilityWireId) -> bool {
+    if wire_id == EMPTY_SLOT || wire_id.raw() >= 64 {
         return false;
     }
     lookup(wire_id).is_some()
@@ -196,16 +218,16 @@ pub fn is_player_ability(wire_id: u8) -> bool {
 /// `true` if `wire_id` is unlocked for a character at
 /// `player_level`. Empty / enemy / unknown ids are never
 /// unlocked.
-pub fn is_ability_unlocked(wire_id: u8, player_level: u32) -> bool {
+pub fn is_ability_unlocked(wire_id: AbilityWireId, player_level: u32) -> bool {
     let Some(ab) = lookup(wire_id) else { return false };
-    ab.wire_id < 64 && player_level >= ab.unlock_level
+    ab.wire_id.raw() < 64 && player_level >= ab.unlock_level
 }
 
 /// Iterator over every player-castable ability in the registry,
 /// in registry order. Used by the spellbook UI to render the
 /// pickable pool.
 pub fn player_abilities() -> impl Iterator<Item = &'static Ability> {
-    REGISTRY.iter().filter(|a| a.wire_id < 64)
+    REGISTRY.iter().filter(|a| a.wire_id.raw() < 64)
 }
 
 #[cfg(test)]
@@ -215,7 +237,16 @@ mod tests {
 
     #[test]
     fn set_slot_dedupes_when_same_ability_assigned_elsewhere() {
-        let mut l = Loadout::from_slots([id::FIRE_BALL, id::FROST_RAY, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        let mut l = Loadout {
+            slots: [
+                id::FIRE_BALL,
+                id::FROST_RAY,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+            ],
+        };
         l.set_slot(2, id::FIRE_BALL);
         // Slot 0 cleared, slot 2 now holds the ability.
         assert_eq!(l.slots[0], EMPTY_SLOT);
@@ -226,7 +257,16 @@ mod tests {
 
     #[test]
     fn set_slot_to_empty_does_not_clear_other_empties() {
-        let mut l = Loadout::from_slots([id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        let mut l = Loadout {
+            slots: [
+                id::FIRE_BALL,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+            ],
+        };
         l.set_slot(0, EMPTY_SLOT);
         assert_eq!(l.slots, [EMPTY_SLOT; SLOT_COUNT]);
     }
@@ -234,7 +274,14 @@ mod tests {
     #[test]
     fn from_slots_normalizes_persisted_duplicates() {
         // Pretend a buggy older row stored the same ability twice.
-        let l = Loadout::from_slots([id::FIRE_BALL, id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT]);
+        let l = Loadout::from_slots([
+            id::FIRE_BALL.raw(),
+            id::FIRE_BALL.raw(),
+            EMPTY_SLOT.raw(),
+            EMPTY_SLOT.raw(),
+            EMPTY_SLOT.raw(),
+            EMPTY_SLOT.raw(),
+        ]);
         assert!(l.is_valid());
         // Only one slot retained the ability.
         let count = l.slots.iter().filter(|&&s| s == id::FIRE_BALL).count();
@@ -245,7 +292,16 @@ mod tests {
     fn is_valid_rejects_duplicates() {
         // Construct directly (skipping `from_slots`' normalize)
         // to verify the validator catches the bad state.
-        let l = Loadout { slots: [id::FIRE_BALL, id::FIRE_BALL, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT, EMPTY_SLOT] };
+        let l = Loadout {
+            slots: [
+                id::FIRE_BALL,
+                id::FIRE_BALL,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+                EMPTY_SLOT,
+            ],
+        };
         assert!(!l.is_valid());
     }
 }

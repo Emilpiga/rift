@@ -98,6 +98,27 @@ pub struct PersistedItem {
     ///
     /// Stored in the `provenance` column as `UUID[] NULL`.
     pub provenance: Option<Vec<Uuid>>,
+    /// Stable string id of the matched
+    /// `rift_game::loot::uniques::UniqueDef`. `None` for
+    /// procedural legendaries and non-legendaries. Stored as
+    /// `unique_id TEXT NULL`.
+    pub unique_id: Option<String>,
+    /// Per-instance pool index for pool-roll uniques (today
+    /// Mirrorglass). `None` for `Fixed` uniques and non-uniques.
+    /// Stored as `unique_pick SMALLINT NULL` (-1 sentinel on
+    /// load is converted to `None` defensively).
+    pub unique_pick: Option<i16>,
+    /// Rift-touched bonus line earned past
+    /// [`rift_game::loot::RIFT_TOUCHED_MIN_FLOOR`]. Stored as
+    /// three nullable columns: `rift_touched_id TEXT NULL`,
+    /// `rift_touched_value REAL NULL`,
+    /// `rift_touched_depth SMALLINT NULL`. `Some` only when
+    /// all three are populated; we never store a partial row.
+    /// Survives extraction (it's a permanent identity line) so
+    /// the wipe path leaves the column untouched. Defaults to
+    /// `None` so legacy rows + the migration's default fill
+    /// hydrate cleanly.
+    pub rift_touched: Option<(String, f32, i16)>,
 }
 
 /// One persisted stash-tab metadata row. Items live in their
@@ -118,6 +139,22 @@ pub struct PersistedStashTab {
 struct AffixJson {
     id: String,
     v: f32,
+}
+
+/// Defensive packer for the three rift-touched columns. Returns
+/// `Some(_)` only when **all three** are populated; a partial row
+/// (any subset of the three is `NULL`) decodes as `None`,
+/// matching the migration's intent that the trio is written
+/// atomically.
+fn rift_touched_from_columns(
+    id: Option<String>,
+    value: Option<f32>,
+    depth: Option<i16>,
+) -> Option<(String, f32, i16)> {
+    match (id, value, depth) {
+        (Some(i), Some(v), Some(d)) => Some((i, v, d)),
+        _ => None,
+    }
 }
 
 /// Worker mailbox. Constructed by [`spawn`]; cloneable so multiple
@@ -781,8 +818,14 @@ async fn load_inventory(
         i32,
         bool,
         Option<Vec<Uuid>>,
+        Option<String>,
+        Option<i16>,
+        Option<String>,
+        Option<f32>,
+        Option<i16>,
     )> = sqlx::query_as(
-        "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance \
+        "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, \
+                rift_touched_id, rift_touched_value, rift_touched_depth \
              FROM inventory_items \
              WHERE character_id = $1 \
              ORDER BY equipped_slot NULLS LAST, slot_index, acquired_at, id",
@@ -793,7 +836,21 @@ async fn load_inventory(
     Ok(rows
         .into_iter()
         .map(
-            |(base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance)| {
+            |(
+                base_id,
+                rarity,
+                ilvl,
+                affixes,
+                equipped_slot,
+                slot_index,
+                anchored,
+                provenance,
+                unique_id,
+                unique_pick,
+                rt_id,
+                rt_value,
+                rt_depth,
+            )| {
                 PersistedItem {
                     base_id,
                     rarity,
@@ -804,6 +861,9 @@ async fn load_inventory(
                     anchored,
                     tab_index: 0,
                     provenance,
+                    unique_id,
+                    unique_pick,
+                    rift_touched: rift_touched_from_columns(rt_id, rt_value, rt_depth),
                 }
             },
         )
@@ -830,10 +890,10 @@ async fn append_inventory_item(
     // collide on a stale client-side counter.
     sqlx::query(
         "INSERT INTO inventory_items \
-         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance) \
+         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, \
             COALESCE((SELECT MAX(slot_index) + 1 FROM inventory_items \
-                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8, $9)",
+                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(Uuid::new_v4())
     .bind(character_id)
@@ -844,6 +904,11 @@ async fn append_inventory_item(
     .bind(item.equipped_slot)
     .bind(item.anchored)
     .bind(item.provenance.as_deref())
+    .bind(item.unique_id.as_deref())
+    .bind(item.unique_pick)
+    .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
+    .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
+    .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
     .execute(pool)
     .await?;
     Ok(())
@@ -875,8 +940,8 @@ async fn reset_character_inventory(
             .collect();
         sqlx::query(
             "INSERT INTO inventory_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -888,6 +953,11 @@ async fn reset_character_inventory(
         .bind(item.slot_index)
         .bind(item.anchored)
         .bind(item.provenance.as_deref())
+        .bind(item.unique_id.as_deref())
+        .bind(item.unique_pick)
+        .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
+        .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
+        .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
         .execute(&mut *tx)
         .await?;
     }
@@ -933,8 +1003,14 @@ async fn load_stash(
         bool,
         i16,
         Option<Vec<Uuid>>,
+        Option<String>,
+        Option<i16>,
+        Option<String>,
+        Option<f32>,
+        Option<i16>,
     )> = sqlx::query_as(
-        "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance \
+        "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance, unique_id, unique_pick, \
+                rift_touched_id, rift_touched_value, rift_touched_depth \
              FROM stash_items \
              WHERE character_id = $1 \
              ORDER BY tab_index, slot_index, acquired_at, id",
@@ -945,7 +1021,21 @@ async fn load_stash(
     let items = rows
         .into_iter()
         .map(
-            |(base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance)| {
+            |(
+                base_id,
+                rarity,
+                ilvl,
+                affixes,
+                slot_index,
+                anchored,
+                tab_index,
+                provenance,
+                unique_id,
+                unique_pick,
+                rt_id,
+                rt_value,
+                rt_depth,
+            )| {
                 PersistedItem {
                     base_id,
                     rarity,
@@ -956,6 +1046,9 @@ async fn load_stash(
                     anchored,
                     tab_index,
                     provenance,
+                    unique_id,
+                    unique_pick,
+                    rift_touched: rift_touched_from_columns(rt_id, rt_value, rt_depth),
                 }
             },
         )
@@ -1006,8 +1099,8 @@ async fn reset_character_stash(
             .collect();
         sqlx::query(
             "INSERT INTO stash_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -1019,6 +1112,11 @@ async fn reset_character_stash(
         .bind(item.anchored)
         .bind(item.tab_index)
         .bind(item.provenance.as_deref())
+        .bind(item.unique_id.as_deref())
+        .bind(item.unique_pick)
+        .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
+        .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
+        .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
         .execute(&mut *tx)
         .await?;
     }

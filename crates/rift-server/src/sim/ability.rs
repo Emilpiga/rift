@@ -25,13 +25,10 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 use hecs::Entity;
 use rift_dungeon::Floor;
-use rift_net::{
-    messages::WorldEvent,
-    ClientId, NetId, NetTick,
-};
+use rift_net::{messages::WorldEvent, ClientId, NetId, NetTick};
 
 pub use rift_game::abilities::id;
-pub use rift_game::abilities::{lookup, AbilityKind, TargetingMode};
+pub use rift_game::abilities::{lookup, AbilityKind, AbilityWireId, TargetingMode};
 
 use super::player::ServerPlayer;
 use super::projectile::{ServerAoeZone, ServerProjectile, Team};
@@ -83,7 +80,7 @@ pub enum CombatIntent {
     /// teleport the projectile spawn).
     Player {
         client_id: ClientId,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         client_origin: Vec3,
         aim: Vec3,
         placed_target: Option<Vec3>,
@@ -102,7 +99,7 @@ pub enum CombatIntent {
         /// projectile / zone / channel it spawns. Drives the
         /// receiving player's TAKEN-tab attribution.
         attacker_kind: u8,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         origin: Vec3,
         aim: Vec3,
         damage_mult: f32,
@@ -133,7 +130,7 @@ pub struct AcceptedCast {
     /// AI casts pass `None` — enemies don't currently target
     /// effects at their own entity.
     pub caster_entity: Option<Entity>,
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Authoritative body position of the caster.
     pub origin: Vec3,
     /// Spawn position for projectile-shaped abilities. For
@@ -197,7 +194,34 @@ pub struct AcceptedCast {
     /// accordingly; everyone else ignores it. `None` when no
     /// transform is equipped or for AI casts.
     pub transform: Option<rift_game::loot::AbilityVariant>,
+    /// `true` when this cast was synthesised by the proc
+    /// dispatcher (Mirrorglass Amulet pool, OnDodge /
+    /// OnLowHealth / OnHit `CastAbility` procs). Distinguishes
+    /// a free, momentary trigger from a manual cast the
+    /// player can control. Read by the `AbilityKind::Channel`
+    /// arm to:
+    ///   * skip if the caster is already mid-channel (the
+    ///     focused cast they actually started has priority
+    ///     and must not be silently replaced — replacing a
+    ///     `ServerChannel` doesn't emit `ChannelEnd`, which
+    ///     orphans the previous beam's client VFX);
+    ///   * clamp infinite-duration channels (Frost Ray) to
+    ///     a short burst with `cancel_on_move = false` so a
+    ///     proc-cast doesn't lock the player into a held
+    ///     channel they never opted into.
+    /// Always `false` for player / AI casts that went through
+    /// `submit`.
+    pub is_proc: bool,
 }
+
+/// Burst duration applied when a proc-cast targets an
+/// [`AbilityKind::Channel`] ability. Tuned so the burst lands
+/// a couple of damage ticks (the channel's `tick_interval`
+/// dictates the count) without freezing the player's pose for
+/// long enough to interrupt their actual input. Short enough
+/// that the channel ends well before the proc owner's cast
+/// rhythm could trigger another proc.
+pub const PROC_CHANNEL_BURST_SECS: f32 = 0.6;
 
 /// Validate a [`CombatIntent`] and produce an
 /// [`AcceptedCast`], or return `None` if the intent should be
@@ -255,9 +279,7 @@ pub fn submit(
             let affix_cd = p_ref.ability_mods.cooldown_for(ability.id);
             let stat_cdr = p_ref.stats.cooldown_reduction;
             let range_mult = p_ref.stats.range.max(0.1);
-            let extra_projectiles = p_ref
-                .ability_mods
-                .extra_projectiles_for(ability.id);
+            let extra_projectiles = p_ref.ability_mods.extra_projectiles_for(ability.id);
             let transform = p_ref.ability_mods.transform_for(ability.id);
             drop(p_ref);
 
@@ -298,10 +320,20 @@ pub fn submit(
                     (None, None)
                 };
 
-            let cds = cooldowns
-                .entry(client_id)
-                .or_insert([0.0; COOLDOWN_SLOTS]);
-            let slot = (ability_id as usize).min(COOLDOWN_SLOTS - 1);
+            // Placed-AoE LoS gate. Matches the client-side
+            // visualizer (red ring): we refuse to drop the
+            // zone behind a wall so a misbehaving client
+            // can't bypass the check.
+            if let (TargetingMode::Placed { .. }, Some(target_pos)) =
+                (ability.targeting, placed_target)
+            {
+                if !floor.line_of_sight(body, target_pos) {
+                    return None;
+                }
+            }
+
+            let cds = cooldowns.entry(client_id).or_insert([0.0; COOLDOWN_SLOTS]);
+            let slot = (ability_id.raw() as usize).min(COOLDOWN_SLOTS - 1);
             if cds[slot] > 0.0 {
                 return None;
             }
@@ -322,10 +354,7 @@ pub fn submit(
             //         × (1 - stat_cdr) (gear-wide `CooldownReduction` stat)
             // Floor at 0.05 s so a stack of cdr can't burn the
             // server in a tight cast loop.
-            let effective_cd = (ability.cooldown
-                * affix_cd
-                * (1.0 - stat_cdr).max(0.0))
-            .max(0.05);
+            let effective_cd = (ability.cooldown * affix_cd * (1.0 - stat_cdr).max(0.0)).max(0.05);
             cds[slot] = effective_cd;
 
             // Trust the client's hand-position origin within a
@@ -365,13 +394,12 @@ pub fn submit(
                 // Resolved net id may differ from the request:
                 // a `None` wire id was rewritten to the caster
                 // for self-cast.
-                target_net_id: target_entity.map(|_| {
-                    target_net_id.unwrap_or(net_id)
-                }),
+                target_net_id: target_entity.map(|_| target_net_id.unwrap_or(net_id)),
                 target_position,
                 extra_projectiles,
                 range_mult,
                 transform,
+                is_proc: false,
             })
         }
         CombatIntent::Ai {
@@ -413,6 +441,7 @@ pub fn submit(
                 extra_projectiles: 0,
                 range_mult: 1.0,
                 transform: None,
+                is_proc: false,
             })
         }
     }
@@ -464,8 +493,130 @@ pub fn dispatch(
     match ability.kind {
         // ── Player-shaped kinds ─────────────────────────────────
         AbilityKind::Projectiles {
-            count, spread, speed, ttl, pierce, apply_debuff,
+            count,
+            spread,
+            speed,
+            ttl,
+            pierce,
+            apply_debuff,
         } => {
+            // FireballToBeam transform (Embercrown Helm) —
+            // turns the discrete projectile fan into a short
+            // forward beam channel. Hooked at the top of the
+            // Projectiles arm so it short-circuits the
+            // projectile spawn entirely; the rest of the arm
+            // is the unaffected baseline.
+            if accepted.transform == Some(rift_game::loot::AbilityVariant::FireballToBeam) {
+                if let Some(entity) = accepted.caster_entity {
+                    // Proc-cast guard: same reasoning as the
+                    // generic Channel arm below. If the
+                    // caster is already mid-channel, skip
+                    // rather than stomp `ServerChannel` (a
+                    // silent replace doesn't emit
+                    // `ChannelEnd`, orphaning the previous
+                    // beam's client VFX).
+                    if accepted.is_proc
+                        && world.get::<&super::channel::ServerChannel>(entity).is_ok()
+                    {
+                        return;
+                    }
+                    // Beam shape derived from the projectile's
+                    // ttl × speed (reach the original bolt would
+                    // have travelled), with a short duration so
+                    // the spell still feels like a one-shot cast
+                    // rather than a hold-to-channel ability. The
+                    // damage budget is folded into a per-tick
+                    // value so the total beam DPS matches the
+                    // single-projectile hit damage at the
+                    // canonical pierce of 1 enemy.
+                    const BEAM_DURATION: f32 = 0.55;
+                    const BEAM_TICK_INTERVAL: f32 = 0.11;
+                    let ticks = (BEAM_DURATION / BEAM_TICK_INTERVAL).round().max(1.0);
+                    // Beam reach matches the registry-authored
+                    // ability range (12 m) — *not* the
+                    // projectile's `speed * ttl`, which is the
+                    // distance a bolt would coast before
+                    // despawning (~40 m for Fireball) and felt
+                    // unbounded compared to the channel
+                    // animation. `range_mult` still applies so
+                    // +Range gear scales the beam.
+                    let range = 12.0_f32 * accepted.range_mult;
+                    let damage_per_tick = scaled_damage / ticks;
+                    // Re-stamp the AbilityCast wire event so
+                    // clients render the beam — Fireball's
+                    // own visual shape is `Projectile` and
+                    // carries no beam recipe. `FIREBALL_BEAM`
+                    // is a synthetic registry row that
+                    // authors `ShapeVisuals::Beam`; the
+                    // client looks up the visual shape by
+                    // wire id when handling ChannelTick, so
+                    // we need the inserted ServerChannel to
+                    // use that id (and we re-emit the
+                    // AbilityCast under the same id so the
+                    // cast pose / SFX match).
+                    sinks.events.push(WorldEvent::AbilityCast {
+                        caster: accepted.caster,
+                        ability: id::FIREBALL_BEAM.raw() as u16,
+                        origin: accepted.spawn_origin.to_array(),
+                        dir: [accepted.aim.x, accepted.aim.z],
+                        target: None,
+                        start_tick: tick,
+                    });
+                    let _ = world.insert_one(
+                        entity,
+                        super::channel::ServerChannel {
+                            ability_id: id::FIREBALL_BEAM,
+                            team: accepted.team,
+                            attacker_kind: accepted.attacker_kind,
+                            remaining: BEAM_DURATION,
+                            elapsed: 0.0,
+                            tick_interval: BEAM_TICK_INTERVAL,
+                            tick_acc: 0.0,
+                            effect: rift_game::abilities::ChannelEffect::Beam {
+                                range,
+                                width: 1.0,
+                                damage_per_tick,
+                                pierce_targets: 32,
+                            },
+                            crit_chance: accepted.crit_chance,
+                            crit_damage: accepted.crit_damage,
+                            apply_debuff,
+                            aim: accepted.aim,
+                            // Fireball is an instant cast — the
+                            // transformed beam mirrors that
+                            // ergonomically by ignoring move
+                            // cancel.
+                            cancel_on_move: false,
+                            transform: accepted.transform,
+                            pulse_period: accepted
+                                .transform
+                                .map(super::transforms::transform_pulse_period)
+                                .unwrap_or(0.0),
+                            pulse_acc: 0.0,
+                        },
+                    );
+                    // Fire the initial `ChannelPulse` so the
+                    // client starts the bead animation in
+                    // step with the server's accumulator.
+                    // (Subsequent pulses are emitted from the
+                    // channel-tick driver.)
+                    if let Some(period) = accepted
+                        .transform
+                        .map(super::transforms::transform_pulse_period)
+                        .filter(|p| *p > 0.0)
+                    {
+                        sinks.events.push(WorldEvent::ChannelPulse {
+                            caster: accepted.caster,
+                            ability: id::FIREBALL_BEAM.raw() as u16,
+                            travel_time: period,
+                        });
+                    }
+                }
+                // Silence the unused-binding warning for
+                // pierce / spread on this short-circuit path.
+                let _ = (pierce, spread, speed, ttl);
+                return;
+            }
             // Global `Stat::Range` scales projectile travel
             // distance. Multiplying `ttl` (rather than `speed`)
             // keeps projectile feel the same — same launch
@@ -478,11 +629,11 @@ pub fn dispatch(
             // single-shot ability that picks up `+2 projectiles`
             // becomes a tight 3-shot fan rather than firing
             // straight overlapping bolts; pre-fanned abilities
-            // (Multi Shot etc.) widen proportionally.
+            // (Fireball Volley etc.) widen proportionally.
             let total_count = count.saturating_add(accepted.extra_projectiles);
             // Default fan width when the registry left the base
             // ability single-shot but an affix added projectiles.
-            // ~22° matches the existing Multi Shot feel without
+            // ~22° matches the existing Fireball Volley feel without
             // making `extra_projectiles == 1` overlap visually.
             let effective_spread = if count <= 1 && total_count > 1 {
                 0.4 // ~23°
@@ -521,7 +672,10 @@ pub fn dispatch(
             }
         }
         AbilityKind::AoeZone {
-            radius, duration, tick_interval, apply_debuff,
+            radius,
+            duration,
+            tick_interval,
+            apply_debuff,
         } => {
             // Global `Stat::Range` scales AoE radius.
             let radius = radius * accepted.range_mult;
@@ -546,7 +700,11 @@ pub fn dispatch(
             });
         }
         AbilityKind::Channel {
-            duration, tick_interval, effect, apply_debuff, cancel_on_move,
+            duration,
+            tick_interval,
+            effect,
+            apply_debuff,
+            cancel_on_move,
         } => {
             // Apply the caster's global range multiplier to the
             // per-tick spatial parameter of the channel effect
@@ -578,6 +736,50 @@ pub fn dispatch(
             // `AcceptedCast.caster_entity` (insert directly
             // with `team: Team::Enemy`).
             if let Some(entity) = accepted.caster_entity {
+                // Proc-cast safety net. A free cast of a
+                // Channel ability fired by an on-hit / on-
+                // dodge / on-low-health proc (Mirrorglass
+                // Amulet pool) has two failure modes the
+                // manual path doesn't:
+                //
+                //   1. If the caster is already mid-channel
+                //      (typically Fireball-as-beam from
+                //      Embercrown's transform), naively
+                //      inserting a fresh `ServerChannel`
+                //      stomps the existing one. `insert_one`
+                //      replaces the component silently \u2014 no
+                //      `ChannelEnd` is emitted, so the
+                //      previous beam's client VFX is
+                //      orphaned and renders forever.
+                //   2. Channels like Frost Ray are authored
+                //      with `duration = f32::INFINITY` and
+                //      end on key release. A proc-cast has
+                //      no key to release, so the channel
+                //      latches indefinitely (only essence
+                //      drain or movement-cancel can end it).
+                //
+                // The two guards below address both: skip
+                // when a focused channel is already active
+                // (their cast takes priority), and otherwise
+                // clamp the proc-cast to a short burst with
+                // movement-cancel disabled so it always
+                // self-terminates.
+                let (duration, cancel_on_move) = if accepted.is_proc {
+                    if world.get::<&super::channel::ServerChannel>(entity).is_ok() {
+                        // Caster is already channeling \u2014
+                        // their focused cast wins. Skip the
+                        // proc to keep the active VFX /
+                        // damage stream intact.
+                        return;
+                    }
+                    (duration.min(PROC_CHANNEL_BURST_SECS), false)
+                } else {
+                    (duration, cancel_on_move)
+                };
+                let pulse_period = accepted
+                    .transform
+                    .map(super::transforms::transform_pulse_period)
+                    .unwrap_or(0.0);
                 let _ = world.insert_one(
                     entity,
                     super::channel::ServerChannel {
@@ -595,8 +797,17 @@ pub fn dispatch(
                         aim: accepted.aim,
                         cancel_on_move,
                         transform: accepted.transform,
+                        pulse_period,
+                        pulse_acc: 0.0,
                     },
                 );
+                if pulse_period > 0.0 {
+                    sinks.events.push(WorldEvent::ChannelPulse {
+                        caster: accepted.caster,
+                        ability: accepted.ability_id.raw() as u16,
+                        travel_time: pulse_period,
+                    });
+                }
             }
         }
         AbilityKind::ClientOnly => {
@@ -617,7 +828,13 @@ pub fn dispatch(
         }
         // ── AI-shaped kinds ─────────────────────────────────────
         AbilityKind::EnemyProjectiles {
-            count, spread, speed, ttl, windup: _, size, apply_debuff,
+            count,
+            spread,
+            speed,
+            ttl,
+            windup: _,
+            size,
+            apply_debuff,
         } => {
             for i in 0..count {
                 let angle_offset = if count > 1 {
@@ -677,7 +894,7 @@ pub fn dispatch(
             // fires the shockwave.
             sinks.events.push(WorldEvent::AbilityCast {
                 caster: accepted.caster,
-                ability: id::GROUND_SLAM_IMPACT as u16,
+                ability: id::GROUND_SLAM_IMPACT.raw() as u16,
                 origin: accepted.origin.to_array(),
                 dir: [effective_radius, 0.0],
                 target: Some(accepted.origin.to_array()),
@@ -685,7 +902,11 @@ pub fn dispatch(
             });
         }
         AbilityKind::Summon {
-            count, role, hp_mult, ring_radius, windup: _,
+            count,
+            role,
+            hp_mult,
+            ring_radius,
+            windup: _,
         } => {
             // Spawn enemies in a ring at evenly-spaced
             // angles. Net-id allocation stays in `Sim::step`
@@ -694,8 +915,7 @@ pub fn dispatch(
             let n = count.max(1) as i32;
             for i in 0..n {
                 let theta = std::f32::consts::TAU * (i as f32) / (n as f32);
-                let pos = accepted.origin
-                    + Vec3::new(theta.cos(), 0.0, theta.sin()) * ring_radius;
+                let pos = accepted.origin + Vec3::new(theta.cos(), 0.0, theta.sin()) * ring_radius;
                 sinks.summons.push((pos, role, hp_mult));
             }
         }
@@ -728,9 +948,7 @@ pub fn dispatch(
             // The buff system keeps its own tick clock — we
             // just refresh / apply at the registry's default
             // duration (tooltip says 10 s, registry agrees).
-            if let Ok(mut stack) =
-                world.get::<&mut super::effect::EffectStack>(target)
-            {
+            if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(target) {
                 stack.apply(
                     apply_buff,
                     None,
@@ -741,4 +959,131 @@ pub fn dispatch(
             }
         }
     }
+}
+
+/// Free-cast helper for proc-driven ability casts (Mirrorglass
+/// Amulet's OnHit `CastAbility` pool, future on-kill/on-dodge
+/// triggers, …). Bypasses the player's cooldown table, loadout
+/// gate, and essence cost — the proc itself already paid the
+/// "cost" by rolling — but otherwise reuses the standard
+/// player-cast pipeline so the spawned effect is fully
+/// replicated, fully scaled by gear, and visible to every
+/// client through the same `WorldEvent` traffic as a manual
+/// cast.
+///
+/// `caster` is the player ECS entity whose proc fired; this is
+/// the player who gets the damage / meter attribution for the
+/// resulting effect. `position` is the trigger-time anchor
+/// (enemy hit position, player dodge position, low-HP latch
+/// position) — used both to direct the cast (aim from the
+/// caster toward `position` when far enough away) and as the
+/// fallback spawn origin for any placement-driven ability.
+///
+/// No-ops silently when the caster is missing, dead, or the
+/// ability id is unknown — proc dispatch shouldn't error out
+/// the per-tick step.
+pub fn dispatch_proc_cast(
+    world: &mut hecs::World,
+    caster: Entity,
+    request: super::procs::ProcCastRequest,
+    sinks: &mut DispatchSinks<'_>,
+    tick: NetTick,
+) {
+    let ability = match rift_game::abilities::lookup_by_id(request.ability) {
+        Some(a) => a,
+        None => return,
+    };
+    let wire_id = ability.wire_id;
+    // Snapshot all caster state in one immutable borrow so the
+    // dispatch call below can re-borrow `world` mutably.
+    let (
+        body,
+        net_id,
+        aim_yaw,
+        dmg_scalar,
+        crit_chance,
+        crit_damage,
+        ability_mult,
+        affix_dmg,
+        range_mult,
+        extra_projectiles,
+        transform,
+    ) = {
+        let Ok(p) = world.get::<&ServerPlayer>(caster) else {
+            return;
+        };
+        if p.hp <= 0.0 {
+            return;
+        }
+        (
+            p.k.position,
+            p.net_id,
+            p.k.aim_yaw,
+            p.damage_scalar(),
+            p.stats.crit_chance,
+            p.stats.crit_damage,
+            p.stats.ability_damage_mult(ability),
+            p.ability_mods.damage_for(ability.id),
+            p.stats.range.max(0.1),
+            p.ability_mods.extra_projectiles_for(ability.id),
+            p.ability_mods.transform_for(ability.id),
+        )
+    };
+
+    // Aim selection — prefer pointing the cast at the proc
+    // trigger position when it's meaningfully separated from
+    // the caster (OnHit: enemy_pos); fall back to the
+    // caster's facing yaw for self-anchored procs (OnDodge,
+    // OnLowHealth).
+    let mut delta = request.position - body;
+    delta.y = 0.0;
+    let aim = if delta.length_squared() > 0.25 {
+        delta.normalize_or_zero()
+    } else {
+        Vec3::new(aim_yaw.sin(), 0.0, aim_yaw.cos())
+    };
+    let aim = if aim.length_squared() < 1.0e-4 {
+        Vec3::Z
+    } else {
+        aim
+    };
+    let spawn_origin = body + Vec3::Y * 1.25 + aim * 0.25;
+    let placed_target = Some(request.position);
+
+    // Wire a minimal `WorldEvent::AbilityCast` so clients
+    // play the standard cast SFX / animation cue. Without
+    // this the proc-cast would silently spawn effects with
+    // no audio/visual "tell" for the player.
+    sinks.events.push(WorldEvent::AbilityCast {
+        caster: net_id,
+        ability: wire_id.raw() as u16,
+        origin: spawn_origin.to_array(),
+        dir: [aim.x, aim.z],
+        target: Some(request.position.to_array()),
+        start_tick: tick,
+    });
+
+    let accepted = AcceptedCast {
+        caster: net_id,
+        attacker_kind: super::meters::ATTACKER_KIND_OTHER,
+        caster_entity: Some(caster),
+        ability_id: wire_id,
+        origin: body,
+        spawn_origin,
+        aim,
+        placed_target,
+        damage_scalar: dmg_scalar * ability_mult * affix_dmg,
+        crit_chance,
+        crit_damage,
+        team: request.team,
+        param_a: 0.0,
+        target_entity: None,
+        target_net_id: None,
+        target_position: None,
+        extra_projectiles,
+        range_mult,
+        transform,
+        is_proc: true,
+    };
+    dispatch(world, accepted, sinks, tick);
 }

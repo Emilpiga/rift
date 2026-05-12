@@ -74,7 +74,8 @@ impl Server {
         }
         if let Some(handle) = &self.persistence {
             if let Some(rec) = self.sessions.get(from).and_then(|s| s.record.as_ref()) {
-                let (base_id, rarity, ilvl, affixes, anchored) = item.to_persisted();
+                let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) =
+                    item.to_persisted();
                 let persisted = PersistedItem {
                     base_id,
                     rarity: rarity as i16,
@@ -88,6 +89,9 @@ impl Server {
                     anchored,
                     tab_index: 0,
                     provenance: super::provenance_to_persisted(&item),
+                    unique_id,
+                    unique_pick: unique_pick.map(|p| p as i16),
+                    rift_touched: item.rift_touched_to_persisted(),
                 };
                 if !handle.append_inventory_item(rec.id, persisted) {
                     log::warn!("persistence: append_inventory_item dropped for {from:?}");
@@ -251,7 +255,8 @@ impl Server {
         let rows: Vec<PersistedItem> = dump
             .into_iter()
             .map(|(slot, slot_index, item)| {
-                let (base_id, rarity, ilvl, affixes, anchored) = item.to_persisted();
+                let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) =
+                    item.to_persisted();
                 PersistedItem {
                     base_id,
                     rarity: rarity as i16,
@@ -262,6 +267,9 @@ impl Server {
                     anchored,
                     tab_index: 0,
                     provenance: super::provenance_to_persisted(&item),
+                    unique_id,
+                    unique_pick: unique_pick.map(|p| p as i16),
+                    rift_touched: item.rift_touched_to_persisted(),
                 }
             })
             .collect();
@@ -499,7 +507,8 @@ impl Server {
             });
             for (slot_index, opt) in tab.items.into_iter().enumerate() {
                 let Some(item) = opt else { continue };
-                let (base_id, rarity, ilvl, affixes, anchored) = item.to_persisted();
+                let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) =
+                    item.to_persisted();
                 item_rows.push(PersistedItem {
                     base_id,
                     rarity: rarity as i16,
@@ -510,6 +519,9 @@ impl Server {
                     anchored,
                     tab_index: tab_index as i16,
                     provenance: super::provenance_to_persisted(&item),
+                    unique_id,
+                    unique_pick: unique_pick.map(|p| p as i16),
+                    rift_touched: item.rift_touched_to_persisted(),
                 });
             }
         }

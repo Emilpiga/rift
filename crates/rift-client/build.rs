@@ -4,4 +4,5 @@
 // when the var flips between two `cargo build` invocations.
 fn main() {
     println!("cargo:rerun-if-env-changed=RIFT_DEFAULT_SERVER");
+    println!("cargo:rerun-if-env-changed=RIFT_DEV_AUTH_KEY");
 }

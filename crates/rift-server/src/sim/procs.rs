@@ -4,8 +4,9 @@
 //! happens to a player, roll `chance` deterministically off the
 //! current tick + a per-call salt; on success, run `action`.
 //! Events: `OnCrit`, `OnHit`, `OnKill`, `OnDodge`,
-//! `OnLowHealth`. Actions: `Explosion` (wired), `CastAbility`
-//! and `ChainLightning` (declared, not yet routed).
+//! `OnLowHealth`. Actions: `Explosion` (wired) and
+//! `CastAbility` (wired by [`dispatch`] queuing into
+//! `sink.proc_casts`).
 //!
 //! Call sites:
 //! * `OnHit` / `OnCrit` — `projectile::apply_hits_to_enemies`
@@ -23,11 +24,13 @@
 //! then one match arm in [`dispatch`].
 
 use glam::Vec3;
+use rift_game::abilities::AbilityWireId;
 use rift_game::loot::ability_mods::Proc;
 use rift_game::loot::{ProcAction, ProcEvent};
 use rift_net::{NetId, NetTick};
 
 use super::projectile::{mix64, ServerAoeZone, Team};
+use rift_net::messages::{vfx_event_kind, WorldEvent};
 
 /// Sinks the proc dispatcher writes into. The same set of
 /// pools the rest of the combat pipeline already touches —
@@ -37,6 +40,48 @@ pub struct ProcSink<'a> {
     pub aoe_zones: &'a mut Vec<ServerAoeZone>,
     pub next_projectile_net_id: &'a mut u32,
     pub tick: NetTick,
+    /// Queue of free-cast requests emitted by
+    /// [`ProcAction::CastAbility`] procs this dispatch. The
+    /// caller drains it and routes each entry through the
+    /// normal cast pipeline at a safe point in the frame
+    /// (i.e. outside the per-hit loop that owns mutable
+    /// borrows of the world). Empty when the dispatcher
+    /// produced no `CastAbility` fires.
+    pub proc_casts: &'a mut Vec<ProcCastRequest>,
+    /// Outbound wire events. `ProcAction::Explosion` pushes a
+    /// `WorldEvent::Vfx { kind: PROC_EXPLOSION, position }` so
+    /// clients spawn a visible shockwave at the proc origin
+    /// (the spawned `ServerAoeZone` is server-only and never
+    /// serializes, so without this the explosion would have
+    /// no visual at all).
+    pub events: &'a mut Vec<WorldEvent>,
+}
+
+/// One pending free-cast request emitted by a
+/// [`ProcAction::CastAbility`] proc. The caster identity is
+/// implied by the caller (the same player whose hit / dodge /
+/// low-health event produced the proc) — we only carry the
+/// spatial / targeting context that doesn't live on the player.
+///
+/// Fields are `#[allow(dead_code)]` for the Phase 4 launch:
+/// the dispatcher writes them but the cast-pipeline drain that
+/// reads them is the documented Phase 4 follow-up. Keeping the
+/// fields populated now means the consumer can land without
+/// touching the per-hit / per-dodge / per-low-HP call sites
+/// again.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct ProcCastRequest {
+    /// Ability to cast — routed through the normal cast
+    /// pipeline but free (ignores cooldown + resource cost).
+    pub ability: rift_game::abilities::AbilityId,
+    /// World-space anchor for the cast (typically the hit /
+    /// dodge / low-health event position). The cast pipeline
+    /// uses this as the origin for projectile spawns or AoE
+    /// zone placement.
+    pub position: Vec3,
+    /// Side the cast is friendly to.
+    pub team: Team,
 }
 
 /// One per-fire context. `team` decides who the spawned AoE
@@ -50,7 +95,7 @@ pub struct ProcOrigin {
     /// Wire ability id of the source action (for meter
     /// attribution). Use `super::meters::ABILITY_ID_OTHER` for
     /// non-attributable triggers (OnDodge / OnLowHealth).
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub team: Team,
     /// Salt for the deterministic chance roll. Mix in something
     /// hit-unique (enemy net-id, frame counter) so multiple
@@ -68,23 +113,22 @@ fn roll(tick: NetTick, salt: u64, marker: u64, chance: f32) -> bool {
     if chance <= 0.0 {
         return false;
     }
-    let seed = mix64((tick.0 as u64).wrapping_add(salt).wrapping_add(marker.rotate_left(11)));
+    let seed = mix64(
+        (tick.0 as u64)
+            .wrapping_add(salt)
+            .wrapping_add(marker.rotate_left(11)),
+    );
     let r = (seed >> 40) as f32 / (1u32 << 24) as f32;
     r < chance
 }
 
 /// Dispatch every proc in `procs` whose `event` matches.
-/// Today's only fully-modeled action is `Explosion`, which
-/// pushes a single-tick AoE zone into `sink.aoe_zones`. Other
-/// actions (`CastAbility`, `ChainLightning`) are no-ops; adding
-/// them is one match arm here once their concrete spawn paths
-/// land.
-pub fn dispatch(
-    event: ProcEvent,
-    procs: &[Proc],
-    origin: &ProcOrigin,
-    sink: &mut ProcSink<'_>,
-) {
+/// `Explosion` actions push a single-tick AoE zone into
+/// `sink.aoe_zones`. `CastAbility` actions enqueue a free
+/// cast request into `sink.proc_casts` so the caller can
+/// route it through the standard cast pipeline (the proc
+/// dispatcher itself doesn't own the cast machinery).
+pub fn dispatch(event: ProcEvent, procs: &[Proc], origin: &ProcOrigin, sink: &mut ProcSink<'_>) {
     let mut idx: u64 = 0;
     for p in procs {
         idx = idx.wrapping_add(1);
@@ -98,10 +142,13 @@ pub fn dispatch(
             ProcAction::Explosion { radius, damage } => {
                 spawn_explosion(origin, radius, damage, sink);
             }
-            // Other actions: not yet wired. Filter is intentional —
-            // the call site does't have to gate by action kind, and
-            // adding a new payload becomes one arm here.
-            ProcAction::CastAbility(_) | ProcAction::ChainLightning { .. } => {}
+            ProcAction::CastAbility(ability) => {
+                sink.proc_casts.push(ProcCastRequest {
+                    ability,
+                    position: origin.position,
+                    team: origin.team,
+                });
+            }
         }
     }
 }
@@ -109,6 +156,14 @@ pub fn dispatch(
 fn spawn_explosion(origin: &ProcOrigin, radius: f32, damage: f32, sink: &mut ProcSink<'_>) {
     let zone_net_id = NetId(*sink.next_projectile_net_id);
     *sink.next_projectile_net_id = sink.next_projectile_net_id.wrapping_add(1).max(1);
+    // Visual cue. The AoE zone itself is server-only, so
+    // without this event the explosion lands invisibly —
+    // damage numbers pop in the world but the player has no
+    // way to know *what* caused them.
+    sink.events.push(WorldEvent::Vfx {
+        kind: vfx_event_kind::PROC_EXPLOSION,
+        position: origin.position.to_array(),
+    });
     sink.aoe_zones.push(ServerAoeZone {
         owner: zone_net_id,
         ability_id: origin.ability_id,
@@ -138,8 +193,18 @@ mod tests {
     /// Tick / origin / sink scaffolding used by every test —
     /// keeps each test body focused on the behaviour under
     /// inspection rather than the boilerplate around it.
-    fn ctx() -> (Vec<ServerAoeZone>, u32, NetTick, ProcOrigin) {
+    #[allow(clippy::type_complexity)]
+    fn ctx() -> (
+        Vec<ServerAoeZone>,
+        Vec<ProcCastRequest>,
+        Vec<WorldEvent>,
+        u32,
+        NetTick,
+        ProcOrigin,
+    ) {
         let zones: Vec<ServerAoeZone> = Vec::new();
+        let proc_casts: Vec<ProcCastRequest> = Vec::new();
+        let events: Vec<WorldEvent> = Vec::new();
         let next_id: u32 = 0x4000_0000;
         let tick = NetTick(42);
         let origin = ProcOrigin {
@@ -149,7 +214,7 @@ mod tests {
             team: Team::Player,
             salt: 0xABCD_1234_5678_9ABC,
         };
-        (zones, next_id, tick, origin)
+        (zones, proc_casts, events, next_id, tick, origin)
     }
 
     fn explosion(event: ProcEvent, chance: f32) -> Proc {
@@ -167,11 +232,13 @@ mod tests {
     /// inherits the origin's position / team / ability id.
     #[test]
     fn always_fires_at_chance_one_and_spawns_zone() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
         let procs = [explosion(ProcEvent::OnHit, 1.0)];
         dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
@@ -190,11 +257,13 @@ mod tests {
     /// in `roll`.
     #[test]
     fn never_fires_at_chance_zero() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
         let procs = [explosion(ProcEvent::OnHit, 0.0)];
         dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
@@ -205,11 +274,13 @@ mod tests {
     /// Guards the `p.event != event` filter.
     #[test]
     fn event_filter_isolates_unrelated_procs() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
         // Mix of OnCrit / OnDodge / OnLowHealth procs — none
         // should fire when we dispatch OnHit.
@@ -233,11 +304,13 @@ mod tests {
         let procs = [explosion(ProcEvent::OnHit, 0.5)];
         let mut firsts: Vec<usize> = Vec::new();
         for _ in 0..3 {
-            let (mut zones, mut next_id, tick, origin) = ctx();
+            let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
             let mut sink = ProcSink {
                 aoe_zones: &mut zones,
                 next_projectile_net_id: &mut next_id,
                 tick,
+                proc_casts: &mut proc_casts,
+                events: &mut events,
             };
             dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
             firsts.push(zones.len());
@@ -256,11 +329,13 @@ mod tests {
     /// misses, not all-or-nothing).
     #[test]
     fn proc_index_decorrelates_rolls() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
         let procs = vec![explosion(ProcEvent::OnHit, 0.5); 20];
         dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
@@ -276,34 +351,33 @@ mod tests {
         );
     }
 
-    /// `CastAbility` and `ChainLightning` are intentionally
-    /// no-op match arms today. Hitting them must not spawn a
-    /// zone or panic.
+    /// `CastAbility` procs queue a `ProcCastRequest` into the
+    /// sink rather than spawning a zone — the actual cast is
+    /// performed by the caller once the per-hit loop releases
+    /// its borrows. The dispatch must produce no zone and
+    /// exactly one queued cast per fire.
     #[test]
-    fn unimplemented_actions_are_silent_noops() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+    fn cast_ability_action_queues_request() {
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
-        let procs = [
-            Proc {
-                event: ProcEvent::OnHit,
-                action: ProcAction::CastAbility(rift_game::abilities::FIRE_BALL),
-                chance: 1.0,
-            },
-            Proc {
-                event: ProcEvent::OnHit,
-                action: ProcAction::ChainLightning {
-                    max_targets: 3,
-                    damage: 10.0,
-                },
-                chance: 1.0,
-            },
-        ];
+        let procs = [Proc {
+            event: ProcEvent::OnHit,
+            action: ProcAction::CastAbility(rift_game::abilities::FIRE_BALL),
+            chance: 1.0,
+        }];
         dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
-        assert!(zones.is_empty());
+        assert!(zones.is_empty(), "CastAbility must not spawn an AoE zone");
+        assert_eq!(proc_casts.len(), 1);
+        let req = &proc_casts[0];
+        assert_eq!(req.ability, rift_game::abilities::FIRE_BALL);
+        assert_eq!(req.position, origin.position);
+        assert_eq!(req.team, Team::Player);
     }
 
     /// Spawned zones must consume from the shared net-id
@@ -311,12 +385,14 @@ mod tests {
     /// projectile / AoE pool.
     #[test]
     fn spawned_zone_consumes_net_id() {
-        let (mut zones, mut next_id, tick, origin) = ctx();
+        let (mut zones, mut proc_casts, mut events, mut next_id, tick, origin) = ctx();
         let start = next_id;
         let mut sink = ProcSink {
             aoe_zones: &mut zones,
             next_projectile_net_id: &mut next_id,
             tick,
+            proc_casts: &mut proc_casts,
+            events: &mut events,
         };
         let procs = [explosion(ProcEvent::OnHit, 1.0)];
         dispatch(ProcEvent::OnHit, &procs, &origin, &mut sink);
@@ -325,4 +401,3 @@ mod tests {
         assert_eq!(next_id, start.wrapping_add(1));
     }
 }
-

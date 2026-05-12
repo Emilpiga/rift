@@ -102,6 +102,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         sw,
         sh,
     );
+    // Clear last frame's HUD click-swallow rects before any
+    // HUD widget repopulates them. `combat_phase` already read
+    // them earlier this frame, so the slate is safe to wipe.
+    state.frame.hud_consume_rects.clear();
     if state.frame.damage_flash > 0.001 {
         hud::render_damage_flash(&mut ui, state.frame.damage_flash);
     }
@@ -119,6 +123,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         state.player_state.experience.level,
         state.player_state.resource_pct * state.player_state.stats().max_resource,
         state.player_state.stats(),
+        state.player_state.ability_mods(),
+        &mut state.frame.hud_consume_rects,
         // Highlight whichever slot is mid-targeting so the
         // player has a clear "you're aiming this one" cue.
         state
@@ -138,6 +144,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         hud::render_boss_arrow(&mut ui, &state.world, view_proj);
         hud::render_remote_player_health_bars(&mut ui, &state.world, view_proj);
     }
+    // Alt-hold loot nameplates. Drawn after world HP bars so
+    // labels sort on top, before the minimap / inventory so an
+    // open bag still occludes them.
+    hud::render_loot_labels(
+        &mut ui,
+        &mut state.loot,
+        view_proj,
+        &mut state.frame.hud_consume_rects,
+    );
     hud::render_minimap(
         &mut ui,
         &state.world,

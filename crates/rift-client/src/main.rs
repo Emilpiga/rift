@@ -349,6 +349,18 @@ impl RiftApp {
             WorldEvent::ChannelEnd { caster, ability } => {
                 self.handle_channel_end_event(caster, ability);
             }
+            WorldEvent::ChannelPulse {
+                caster,
+                ability,
+                travel_time,
+            } => {
+                rift_client::game::state::on_channel_pulse(
+                    &mut self.state,
+                    caster,
+                    ability as u8,
+                    travel_time,
+                );
+            }
             WorldEvent::PlayerGhosted { entity, position } => {
                 self.handle_player_ghosted_event(entity, position, renderer);
             }
@@ -375,6 +387,9 @@ impl RiftApp {
                 // unless you actually want to debug telegraphs.
                 log::trace!("net: EnemyTelegraph source={source:?} kind={kind} pos={position:?}");
                 let _ = (source, kind, position, renderer);
+            }
+            WorldEvent::Vfx { kind, position } => {
+                self.handle_vfx_event(kind, position, renderer);
             }
         }
     }
@@ -612,6 +627,26 @@ impl RiftApp {
         }
     }
 
+    /// Spawn the one-shot VFX for a `WorldEvent::Vfx` event.
+    /// `kind` is a [`rift_net::messages::vfx_event_kind`] wire id.
+    /// Used today by legendary `ProcAction::Explosion` fires
+    /// (Splinterstep, Mirrorglass) which spawn server-side AoE
+    /// zones that don't otherwise replicate any visual.
+    fn handle_vfx_event(&mut self, kind: u8, position: [f32; 3], renderer: &mut Renderer) {
+        use rift_net::messages::vfx_event_kind;
+        let pos = Vec3::from_array(position);
+        match kind {
+            vfx_event_kind::PROC_EXPLOSION => {
+                renderer
+                    .vfx_system
+                    .spawn_bundle(rift_engine::renderer::vfx::presets::proc_explosion(), pos);
+            }
+            _ => {
+                log::trace!("net: unknown Vfx kind={kind}");
+            }
+        }
+    }
+
     /// Spawn the AoE-zone visual for a server-confirmed cast and
     /// trigger the upper-body cast pose on remote casters. The
     /// local caster's pose is already running from `tick_combat`
@@ -636,7 +671,7 @@ impl RiftApp {
         // Centred on `target` (= caster position at cast). No
         // pose / cast-spark — these are emitted from enemy AI,
         // not the player cast pipeline.
-        match ability as u8 {
+        match rift_game::abilities::AbilityWireId::new(ability as u8) {
             rift_game::abilities::id::GROUND_SLAM_WINDUP => {
                 let centre = target_pos.unwrap_or(cast_origin);
                 let radius = dir[0].max(0.5);
@@ -658,7 +693,9 @@ impl RiftApp {
             }
             _ => {}
         }
-        let Some(def) = rift_game::abilities::from_wire_id(ability as u8) else {
+        let Some(def) = rift_game::abilities::from_wire_id(
+            rift_game::abilities::AbilityWireId::new(ability as u8),
+        ) else {
             return;
         };
 
@@ -828,7 +865,7 @@ impl RiftApp {
         // Channel-end requests (button release / movement-cancel
         // during a hold-to-channel ability).
         for ability_id in state.channel.pending_ends.drain(..) {
-            net.request_end_channel(ability_id);
+            net.request_end_channel(rift_game::abilities::AbilityWireId::new(ability_id));
         }
 
         // Loot-pickup requests. The server validates range and
@@ -1117,10 +1154,21 @@ impl RiftApp {
                         // unstable flag on top so server
                         // state survives the round-trip.
                         rift_game::loot::Item::from_wire(
-                            b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov,
+                            b.base_id,
+                            b.rarity,
+                            b.ilvl,
+                            &b.affixes,
+                            b.anchored,
+                            prov,
+                            b.unique_id
+                                .as_deref()
+                                .and_then(|s| rift_game::loot::uniques::find(s).map(|u| u.id)),
+                            b.unique_pick,
                         )
                         .map(|mut it| {
                             it.unstable = b.unstable;
+                            it.rift_touched =
+                                rift_game::loot::Item::rift_touched_from_wire(b.rift_touched);
                             it
                         })
                     })
@@ -1148,9 +1196,15 @@ impl RiftApp {
                     blob.provenance
                         .clone()
                         .map(|v| rift_game::loot::LootProvenance::from_ids(v)),
+                    blob.unique_id
+                        .as_deref()
+                        .and_then(|s| rift_game::loot::uniques::find(s).map(|u| u.id)),
+                    blob.unique_pick,
                 )
                 .map(|mut it| {
                     it.unstable = blob.unstable;
+                    it.rift_touched =
+                        rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
                     it
                 }) else {
                     continue;
@@ -1172,6 +1226,7 @@ impl RiftApp {
             // exists.
             state.loot.equipment_visuals_dirty = true;
             rift_client::game::equipment_visuals::apply_local_equipment_visuals(state, renderer);
+            rift_client::game::weapon_visuals::apply_local_weapon_visual(state, renderer);
             if rift_client::game::equipment_visuals::has_local_player(&state.world) {
                 state.loot.equipment_visuals_dirty = false;
             }
@@ -1198,10 +1253,22 @@ impl RiftApp {
                                     .clone()
                                     .map(|v| rift_game::loot::LootProvenance::from_ids(v));
                                 rift_game::loot::Item::from_wire(
-                                    b.base_id, b.rarity, b.ilvl, &b.affixes, b.anchored, prov,
+                                    b.base_id,
+                                    b.rarity,
+                                    b.ilvl,
+                                    &b.affixes,
+                                    b.anchored,
+                                    prov,
+                                    b.unique_id.as_deref().and_then(|s| {
+                                        rift_game::loot::uniques::find(s).map(|u| u.id)
+                                    }),
+                                    b.unique_pick,
                                 )
                                 .map(|mut it| {
                                     it.unstable = b.unstable;
+                                    it.rift_touched = rift_game::loot::Item::rift_touched_from_wire(
+                                        b.rift_touched,
+                                    );
                                     it
                                 })
                             })
@@ -1280,6 +1347,14 @@ impl RiftApp {
                 entity,
                 &desired,
             );
+            rift_client::game::weapon_visuals::apply_weapon_visual_for_base_ids(
+                &mut state.world,
+                renderer,
+                &mut state.weapon_visual_cache,
+                entity,
+                &base_ids,
+                gender,
+            );
         }
 
         // Authoritative rift-progress snapshots.
@@ -1328,6 +1403,7 @@ impl RiftApp {
             && rift_client::game::equipment_visuals::has_local_player(&state.world)
         {
             rift_client::game::equipment_visuals::apply_local_equipment_visuals(state, renderer);
+            rift_client::game::weapon_visuals::apply_local_weapon_visual(state, renderer);
             state.loot.equipment_visuals_dirty = false;
         }
     }

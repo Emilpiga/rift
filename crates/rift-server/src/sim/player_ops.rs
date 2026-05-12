@@ -150,7 +150,7 @@ impl Sim {
     ) -> Option<[u8; 6]> {
         let &entity = self.sessions.get(&client_id)?;
         let p = self.world.get::<&ServerPlayer>(entity).ok()?;
-        Some(p.loadout.slots)
+        Some(p.loadout.to_wire_bytes())
     }
 
     /// Mutate one slot of the player's ability bar. Validates:
@@ -178,16 +178,17 @@ impl Sim {
         if !rift_game::loadout::is_slot_unlocked(slot_idx, player_level) {
             return None;
         }
+        let ability = rift_game::abilities::AbilityWireId::new(ability_id);
         // Allow either the empty sentinel (clearing the slot) or
         // an unlocked player-castable ability.
-        let allow_empty = ability_id == rift_game::loadout::EMPTY_SLOT;
-        let allow_ability = rift_game::loadout::is_player_ability(ability_id)
-            && rift_game::loadout::is_ability_unlocked(ability_id, player_level);
+        let allow_empty = ability == rift_game::loadout::EMPTY_SLOT;
+        let allow_ability = rift_game::loadout::is_player_ability(ability)
+            && rift_game::loadout::is_ability_unlocked(ability, player_level);
         if !allow_empty && !allow_ability {
             return None;
         }
-        p.loadout.set_slot(slot_idx, ability_id);
-        Some(p.loadout.slots)
+        p.loadout.set_slot(slot_idx, ability);
+        Some(p.loadout.to_wire_bytes())
     }
 
     /// Spawn (or look up the existing) player entity for a freshly-

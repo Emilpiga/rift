@@ -326,16 +326,23 @@ impl Server {
                 // build) falls through to the bag's first free
                 // slot so the player never silently loses the item.
                 for r in rows {
-                    let Some(item) = rift_game::loot::Item::from_persisted(
+                    let Some(mut item) = rift_game::loot::Item::from_persisted(
                         &r.base_id,
                         r.rarity as u8,
                         r.ilvl as u16,
                         &r.affixes,
                         r.anchored,
                         super::provenance_from_persisted(r.provenance),
+                        r.unique_id.as_deref(),
+                        r.unique_pick.map(|p| p as u8),
                     ) else {
                         continue;
                     };
+                    item.rift_touched = rift_game::loot::Item::rift_touched_from_persisted(
+                        r.rift_touched
+                            .as_ref()
+                            .map(|(id, v, d)| (id.as_str(), *v, *d)),
+                    );
                     match r.equipped_slot {
                         Some(b) => match rift_game::loot::EquipSlot::from_u8(b as u8) {
                             Some(slot) if rift_game::loot::Equipment::accepts(slot, &item) => {
@@ -403,16 +410,23 @@ impl Server {
                 };
                 let mut total_items = 0usize;
                 for r in item_rows {
-                    let Some(item) = rift_game::loot::Item::from_persisted(
+                    let Some(mut item) = rift_game::loot::Item::from_persisted(
                         &r.base_id,
                         r.rarity as u8,
                         r.ilvl as u16,
                         &r.affixes,
                         r.anchored,
                         super::provenance_from_persisted(r.provenance),
+                        r.unique_id.as_deref(),
+                        r.unique_pick.map(|p| p as u8),
                     ) else {
                         continue;
                     };
+                    item.rift_touched = rift_game::loot::Item::rift_touched_from_persisted(
+                        r.rift_touched
+                            .as_ref()
+                            .map(|(id, v, d)| (id.as_str(), *v, *d)),
+                    );
                     let tab_idx = (r.tab_index as usize).min(tabs.len().saturating_sub(1));
                     place_at_slot_index(&mut tabs[tab_idx].items, r.slot_index, item);
                     total_items += 1;

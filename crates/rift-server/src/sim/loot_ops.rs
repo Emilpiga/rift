@@ -195,7 +195,7 @@ impl Sim {
         if self.next_loot_net_id >= 0x4000_0000 {
             self.next_loot_net_id = 0x2000_0000;
         }
-        let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
+        let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) = item.to_wire();
         let provenance = item.provenance.as_ref().map(|p| p.eligible.clone());
         let blob = ItemBlob {
             base_id,
@@ -207,6 +207,9 @@ impl Sim {
             // yet; the unstable lifecycle starts at pickup.
             unstable: item.unstable,
             provenance,
+            unique_id: unique_id.map(|s| s.to_string()),
+            unique_pick,
+            rift_touched: item.rift_touched_to_wire(),
         };
         let loot = loot::ServerLoot {
             net_id,

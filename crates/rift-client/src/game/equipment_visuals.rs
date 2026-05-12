@@ -85,12 +85,14 @@ impl EquipmentVisualCache {
 /// `Equipment` mirror, picking the gender-specific mesh from
 /// each item's `BaseItem::models`. Items without a model entry
 /// (or without art for `gender`) are skipped.
-pub fn desired_visuals_for_equipment(
-    equip: &Equipment,
-    gender: Gender,
-) -> Vec<(u8, &'static str)> {
+///
+/// The `Weapon` slot is intentionally excluded — weapons are
+/// rigid props attached to the casting-hand joint by
+/// [`super::weapon_visuals`], not skinned outfit pieces.
+pub fn desired_visuals_for_equipment(equip: &Equipment, gender: Gender) -> Vec<(u8, &'static str)> {
     equip
         .iter()
+        .filter(|(slot, _)| *slot != rift_game::loot::items::EquipSlot::Weapon)
         .filter_map(|(slot, item)| {
             item.base
                 .models
@@ -103,15 +105,16 @@ pub fn desired_visuals_for_equipment(
 
 /// Build the desired set from a list of `BaseItem` indices
 /// (the `PeerEquipmentVisuals` wire shape) for an avatar of
-/// the given `gender`.
-pub fn desired_visuals_for_base_ids(
-    base_ids: &[u16],
-    gender: Gender,
-) -> Vec<(u8, &'static str)> {
+/// the given `gender`. Excludes the `Weapon` slot — see
+/// [`desired_visuals_for_equipment`] for the rationale.
+pub fn desired_visuals_for_base_ids(base_ids: &[u16], gender: Gender) -> Vec<(u8, &'static str)> {
     base_ids
         .iter()
         .filter_map(|&bid| {
             let base = BASE_ITEMS.get(bid as usize)?;
+            if base.equip_slot == rift_game::loot::items::EquipSlot::Weapon {
+                return None;
+            }
             base.models
                 .as_ref()
                 .and_then(|m| m.for_gender(gender))
@@ -159,8 +162,7 @@ pub fn apply_equipment_visuals(
     // borrow on the SkinnedAttachments component, so the cache
     // (which itself is borrowed mutably) doesn't fight the world
     // borrow.
-    let mut resolved: Vec<(u8, Arc<SkinnedMesh>, &'static str)> =
-        Vec::with_capacity(desired.len());
+    let mut resolved: Vec<(u8, Arc<SkinnedMesh>, &'static str)> = Vec::with_capacity(desired.len());
     for &(slot, path) in desired {
         if let Some(mesh) = cache.fetch(path, &host_joint_names, host_joint_count) {
             resolved.push((slot, mesh, path));

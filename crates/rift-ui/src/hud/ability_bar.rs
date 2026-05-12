@@ -176,6 +176,22 @@ pub fn frame_ability_bar(ui: &mut Ui<'_>, view: &AbilityBarView<'_>) -> Option<H
                     Color::rgba(0.7, 0.7, 0.7, 0.8),
                 ));
             }
+            if let Some(ref t) = tip.transform_line {
+                lines.push(TooltipLine::new(
+                    t.as_str(),
+                    theme.fonts.size_md,
+                    // Legendary-orange to match unique-item
+                    // tooltip flavour lines.
+                    Color::rgba(0.95, 0.55, 0.25, 0.95),
+                ));
+            }
+            if let Some(ref b) = tip.bonus_line {
+                lines.push(TooltipLine::new(
+                    b.as_str(),
+                    theme.fonts.size_md,
+                    Color::rgba(0.95, 0.55, 0.25, 0.95),
+                ));
+            }
             if let Some(ref c) = tip.cost_line {
                 let color = if tip.cost_affordable {
                     Color::rgba(0.55, 0.75, 0.95, 0.95)

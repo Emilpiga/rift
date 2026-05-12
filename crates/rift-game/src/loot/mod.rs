@@ -52,10 +52,17 @@ pub mod item;
 pub mod items;
 pub mod rarity;
 pub mod rng;
+pub mod roll;
+pub mod tooltip;
+pub mod uniques;
+pub mod wire;
 
 pub use crate::stats::{Stat, StatBlock};
 pub use ability_mods::AbilityMods;
-pub use affixes::{AbilityVariant, AffixDef, AffixEffect, ProcAction, ProcEvent, AFFIX_POOL};
+pub use affixes::{
+    AbilityVariant, AffixDef, AffixEffect, ProcAction, ProcEvent, AFFIX_POOL,
+    RIFT_TOUCHED_MIN_FLOOR, RIFT_TOUCHED_POOL,
+};
 pub use drops::{
     table_for, BaseItemSelector, LootEntry, LootTable, SlotFilter, BOSS_TABLE, BRUTE_TABLE,
     CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
@@ -63,7 +70,7 @@ pub use drops::{
 pub use equipment::Equipment;
 pub use families::{Archetype, Attribute, BaseFamily, Element};
 pub use inventory::{Inventory, Loadout};
-pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix};
+pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix, RolledRiftTouched};
 pub use items::{
     tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, GenderedModel, ItemSlot, WeaponKind,
     BASE_ITEMS,
@@ -71,3 +78,6 @@ pub use items::{
 pub use rarity::salvage_yield;
 pub use rarity::Rarity;
 pub use rng::LootRng;
+pub use roll::{roll_percentile, roll_range, roll_rift_touched, ANCHORED_CHANCE};
+pub use tooltip::{TooltipKind, TooltipLine};
+pub use uniques::{BespokeId, LegendaryEffect, UniqueDef, UniqueRoll, UNIQUES};

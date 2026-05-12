@@ -311,6 +311,12 @@ pub struct FloorManager {
     /// from scratch, so a future re-entry into char-select
     /// (after a disconnect) regenerates the backdrop.
     pub char_select_backdrop_built: bool,
+    /// Rift-floor void embers. Spawned at the end of every
+    /// rift-floor [`Self::generate`], anchored ~10 m below
+    /// the player every frame so the field of glowing motes
+    /// rises through the abyss around the playable area.
+    /// `None` on the hub and on char-select.
+    pub void_embers: Option<rift_engine::renderer::vfx::EffectId>,
 }
 
 impl FloorManager {
@@ -331,6 +337,7 @@ impl FloorManager {
             hub_haze: None,
             hub_wind: None,
             char_select_backdrop_built: false,
+            void_embers: None,
         }
     }
 
@@ -378,6 +385,15 @@ impl FloorManager {
         // particle system slots; leaving them around would
         // leak emitter capacity.
         self.torches.clear(renderer);
+        // Same story for the previous rift floor's void
+        // embers. Stops spawning; the in-flight particles
+        // finish their natural lifetimes (4–8 s) and the
+        // slot is reused once the pool drains. Cheaper than
+        // a hard `clear_all` and keeps existing wisps from
+        // popping out of frame mid-transition.
+        if let Some(id) = self.void_embers.take() {
+            renderer.vfx_system.despawn(id);
+        }
 
         let config = FloorConfig::for_floor(rift.floor);
         let seed = seed_override
@@ -941,6 +957,17 @@ impl FloorManager {
         // without going through the network layer.
         self.dungeon = Some(floor);
 
+        // Spawn the crimson void-ember field. Anchor is set
+        // every frame in `render_phase` ~10 m below the
+        // player so embers rise from the abyss past the
+        // floor's outer edges. Initial anchor is the spawn
+        // point at the same depth so a player who pauses on
+        // step zero still sees a populated field.
+        self.void_embers = Some(renderer.vfx_system.spawn(
+            rift_engine::renderer::vfx::presets::rift_void_embers(),
+            self.spawn_pos - Vec3::new(0.0, 10.0, 0.0),
+        ));
+
         Ok(())
     }
 
@@ -1078,6 +1105,12 @@ impl FloorManager {
         // `TorchSystem::update_lights`, scattering stale lights
         // across the hub at random dungeon coordinates.
         self.torches.clear(renderer);
+        // Same idea for rift-floor void embers — the hub has
+        // its own backdrop and doesn't want crimson motes
+        // rising past its platform.
+        if let Some(id) = self.void_embers.take() {
+            renderer.vfx_system.despawn(id);
+        }
         // Wipe the per-frame light vecs so no leftover entries
         // from the previous floor (torch sconces, vfx trails)
         // can paint a single stray frame in the hub before the

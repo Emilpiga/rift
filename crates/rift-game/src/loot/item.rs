@@ -1,48 +1,22 @@
 //! A rolled drop: base item + rarity + a list of [`RolledAffix`].
 //!
-//! Items are immutable once rolled — [`Item::roll`] is the only way
-//! to produce one. Save/load rehydrates by serialising
-//! `(base_id, rarity, ilvl, [(affix_id, value)])` and reconstructing
-//! here.
+//! Items are immutable once rolled — [`Item::roll`] (in
+//! [`super::roll`]) is the only way to produce one. Save/load
+//! rehydrates via [`Item::from_wire`] / [`Item::from_persisted`]
+//! (in [`super::wire`]).
+//!
+//! This file holds the struct definitions and the small,
+//! gameplay-derived accessors (`footprint`, `stats`,
+//! `required_level`) plus the regression-test module that
+//! exercises the whole pipeline. The actual roll dispatch lives
+//! in [`super::roll`]; tooltip rendering lives in
+//! [`super::tooltip`]; wire / persistence (de)serialisation lives
+//! in [`super::wire`].
 
-use super::affixes::{AffixDef, AffixEffect, AFFIX_POOL};
+use super::affixes::{AffixDef, AffixEffect};
 use super::items::BaseItem;
 use super::rarity::Rarity;
-use super::rng::LootRng;
 use crate::stats::StatBlock;
-
-/// Roll a single affix's magnitude, scaled by item-level. Pulled
-/// out of `Item::roll` because both phases (signature + bonus +
-/// legendary effect) need the same formula.
-fn roll_value(def: &AffixDef, ilvl: u32, rng: &mut LootRng) -> f32 {
-    let scale = ilvl.saturating_sub(1) as f32 * def.ilvl_scale;
-    if def.roll.0 == def.roll.1 {
-        def.roll.0
-    } else {
-        rng.frange(def.roll.0 + scale, def.roll.1 + scale)
-    }
-}
-
-/// The `(min, max)` magnitude range an affix can roll at the given
-/// item-level. Used both by [`Item::roll`] (indirectly via
-/// [`roll_value`]) and tooltip rendering — the player sees what
-/// part of the range a drop landed on.
-pub fn roll_range(def: &AffixDef, ilvl: u32) -> (f32, f32) {
-    let scale = ilvl.saturating_sub(1) as f32 * def.ilvl_scale;
-    (def.roll.0 + scale, def.roll.1 + scale)
-}
-
-/// Where `value` lands in `(lo, hi)`, expressed as a 0..1 fraction.
-/// Returns `None` when the range is degenerate (Transform / fixed
-/// rolls — there's no scale to talk about).
-pub fn roll_percentile(def: &AffixDef, ilvl: u32, value: f32) -> Option<f32> {
-    let (lo, hi) = roll_range(def, ilvl);
-    if (hi - lo).abs() < 1e-6 {
-        None
-    } else {
-        Some(((value - lo) / (hi - lo)).clamp(0.0, 1.0))
-    }
-}
 
 /// One realised affix on an item.
 #[derive(Clone, Debug)]
@@ -51,46 +25,6 @@ pub struct RolledAffix {
     /// Magnitude rolled within the affix's range. Meaning depends
     /// on `def.effect` (see [`AffixEffect`] docs).
     pub value: f32,
-}
-
-impl RolledAffix {
-    /// Render the line for tooltips. Effects with no numeric value
-    /// (Transform) ignore the template's `{}` placeholder.
-    ///
-    /// `ilvl` is the item-level the affix was rolled at \u2014 needed
-    /// to recover the per-ilvl roll range and append a roll-quality
-    /// percentile (`[NN%]`) so the player can see how high in the
-    /// range the drop landed.
-    pub fn tooltip(&self, ilvl: u32) -> String {
-        let value_str = match self.def.effect {
-            AffixEffect::Stat(stat) => {
-                if stat.is_percent() {
-                    format!("{:+.1}%", self.value * 100.0)
-                } else {
-                    format!("{:+.0}", self.value)
-                }
-            }
-            AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_) => {
-                format!("{:+.0}%", self.value * 100.0)
-            }
-            AffixEffect::ExtraProjectiles(_) => format!("+{}", self.value.round() as i32),
-            AffixEffect::Proc(_, _) => format!("{:.0}%", self.value * 100.0),
-            AffixEffect::TransformAbility(_, _) => String::new(),
-        };
-        let line = if self.def.name_template.contains("{}") {
-            self.def.name_template.replace("{}", &value_str)
-        } else {
-            self.def.name_template.to_string()
-        };
-        // Append a roll-quality percentile when the affix has a
-        // non-degenerate range. ExtraProjectiles / Proc / Stat all
-        // qualify; Transform doesn't.
-        if let Some(p) = roll_percentile(self.def, ilvl, self.value) {
-            format!("{}  [{:.0}%]", line, p * 100.0)
-        } else {
-            line
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,8 +37,8 @@ pub struct Item {
     /// Anchored items survive the wipe-on-death floor reset
     /// (see `Sim::wipe_dead_loot`) so the player keeps them
     /// across runs. Legendaries only, gated behind
-    /// [`ANCHORED_CHANCE`] inside [`Item::roll`]. Purely
-    /// additive — no stat impact, just persistence.
+    /// [`super::roll::ANCHORED_CHANCE`] inside [`Item::roll`].
+    /// Purely additive — no stat impact, just persistence.
     pub anchored: bool,
     /// `true` while this item is "unstable rift loot" — picked
     /// up inside an active rift instance and not yet stabilised
@@ -140,6 +74,44 @@ pub struct Item {
     /// server boundary. Wire / persistence formats default to
     /// `None` so old payloads decode cleanly.
     pub provenance: Option<LootProvenance>,
+    /// When the legendary roll matched a [`super::uniques::UniqueDef`]
+    /// the unique's stable string id is stamped here. `None` for
+    /// every non-Legendary item and for Legendaries whose
+    /// `(slot, base)` matched no authored row (procedural-only
+    /// fallback). See `loot/uniques.rs`.
+    pub unique_id: Option<&'static str>,
+    /// Per-instance pool index for uniques whose
+    /// [`super::uniques::UniqueRoll::Pool`] sampled an ability at
+    /// roll time (today: Mirrorglass). Persists across save / load
+    /// so the same drop reproduces the same proc target. `None`
+    /// for `Fixed` uniques and for non-unique drops.
+    pub unique_pick: Option<u8>,
+    /// Rift-touched bonus line (ITEMS.md §2.6).
+    /// `Some` only on drops that came from a kill inside a rift
+    /// at or beyond
+    /// [`super::affixes::RIFT_TOUCHED_MIN_FLOOR`]. Survives
+    /// extraction — the line is a permanent record of how deep
+    /// the item came from. Magnitude scales with the
+    /// `depth` field at drop time, not item-level. `None` is
+    /// the default for hub drops, legacy items, and rift drops
+    /// that didn't pass the per-drop chance gate
+    /// ([`super::affixes::RIFT_TOUCHED_CHANCE`]).
+    pub rift_touched: Option<RolledRiftTouched>,
+}
+
+/// One realised rift-touched bonus line. Carries the floor
+/// depth it was rolled at so a deeper drop can carry a
+/// stronger version of the same line — see
+/// [`super::roll::roll_rift_touched`].
+#[derive(Clone, Debug)]
+pub struct RolledRiftTouched {
+    pub def: &'static AffixDef,
+    pub value: f32,
+    /// Floor index at the moment of the kill. Stored so the
+    /// tooltip can display the provenance ("Earned in Floor N")
+    /// and so save-load round-trips preserve the depth identity
+    /// even if the scaling formula changes between builds.
+    pub depth: u16,
 }
 
 /// 16-byte little-endian UUID payload identifying a character.
@@ -192,11 +164,6 @@ impl LootProvenance {
     }
 }
 
-/// Per-roll chance that a Legendary drop is also Anchored.
-/// 1 in 5 000 — the chase trait is meant to be a long-term
-/// goal, not something every farming session produces.
-pub const ANCHORED_CHANCE: f32 = 1.0 / 5_000.0;
-
 impl Item {
     /// Bag-grid footprint `(width_cells, height_cells)`. The
     /// item anchors at its inventory storage index and
@@ -204,374 +171,6 @@ impl Item {
     /// cells must remain empty in the storage `Vec`.
     pub fn footprint(&self) -> (u8, u8) {
         self.base.equip_slot.inventory_size()
-    }
-
-    /// Roll a fresh drop of `base` at the given rarity / item-level.
-    ///
-    /// **Phase 2 pipeline** (see `ITEMS.md` §2.1 and §3 Phase 2):
-    ///
-    /// 1. **Signature injection** — deterministic Vitality + slim
-    ///    per-`EquipSlot` defensive line (helm CDR, boots move
-    ///    speed, gloves crit pair, etc.). Damage-axis lines no
-    ///    longer live here; the trio owns those.
-    ///
-    /// 2. **Source × Element × Archetype trio** — family-locked
-    ///    axis lines, gated by rarity:
-    ///
-    ///    | Rarity    | Source | Element | Archetype |
-    ///    | --------- | :----: | :-----: | :-------: |
-    ///    | Common    | ✓      |         |           |
-    ///    | Magic     | ✓      | one of {Element, Archetype}      ||
-    ///    | Rare      | ✓      | ✓       | ✓         |
-    ///    | Legendary | ✓      | ✓       | ✓         |
-    ///
-    ///    Each line is sampled uniformly from the corresponding
-    ///    axis sub-pool filtered by [`super::BaseFamily`]. Wildcard
-    ///    axes (e.g. accessories) permit the full pool; locked
-    ///    axes (e.g. Staff → `{Fire, Ice, Lightning}`) permit only
-    ///    the declared subset. Cross-family rolls are impossible
-    ///    by construction.
-    ///
-    /// 3. **Bonus rolls** — `rarity.affix_count_range()` extra
-    ///    lines from the *bonus* sub-pool only (legendary effects
-    ///    excluded; damage-axis affixes excluded — those live in
-    ///    the trio). Excludes any `Stat` already touched by the
-    ///    signature or trio, so e.g. a Chest can't double up on
-    ///    `+Health`.
-    ///
-    /// 4. **Legendary effect** — Legendary rarity additionally
-    ///    rolls one effect from the legendary pool (Transform /
-    ///    Proc / ExtraProjectiles). Phase 4 of the refactor
-    ///    replaces this with named uniques; for now the
-    ///    procedural roll persists.
-    ///
-    /// 5. **Anchored roll** — Legendary 1/5000, independent.
-    pub fn roll(base: &'static BaseItem, rarity: Rarity, ilvl: u32, rng: &mut LootRng) -> Self {
-        use super::affixes::{
-            affix_archetype, affix_attribute, affix_element, category, AffixCategory,
-        };
-        use crate::stats::Stat;
-
-        let mut rolled: Vec<RolledAffix> = Vec::new();
-        let mut used_stats: std::collections::HashSet<Stat> = Default::default();
-        // Seed `used_stats` with the base item's implicit stats so
-        // signature / trio / bonus rolls can't double-up on a
-        // stat the implicit already carries. Without this a chest
-        // with implicit `+18 Health` could still roll
-        // `flat_health` as a signature and ship two Health lines.
-        for &(stat, _) in base.implicit {
-            used_stats.insert(stat);
-        }
-
-        // Track a rolled affix; updates `used_stats` so later
-        // phases never duplicate the same `Stat`.
-        let push = |def: &'static AffixDef,
-                    value: f32,
-                    rolled: &mut Vec<RolledAffix>,
-                    used: &mut std::collections::HashSet<Stat>| {
-            if let AffixEffect::Stat(s) = def.effect {
-                used.insert(s);
-            }
-            rolled.push(RolledAffix { def, value });
-        };
-
-        // ── Phase 1: signature injection ────────────────────────
-        let sig_ids = super::affixes::signature_for(base.equip_slot, rng);
-        for id in &sig_ids {
-            if let Some(def) = super::affixes::lookup(id) {
-                // Skip signature lines whose `Stat` already
-                // appears in the implicit set — e.g. a Chest
-                // with `+18 Health` implicit no longer also
-                // ships a `flat_health` signature line. Without
-                // this guard the tooltip would show two
-                // separate Health rows that sum at equip time.
-                if let AffixEffect::Stat(s) = def.effect {
-                    if used_stats.contains(&s) {
-                        continue;
-                    }
-                }
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            }
-        }
-
-        // ── Phase 2: Attribute × Element × Archetype trio ──────
-        //
-        // Decide which axes this rarity activates.
-        //   Common    — Attribute only (one identity line).
-        //   Magic     — Attribute + one of {Element, Archetype}
-        //               (xor; if family rejects one, fall back).
-        //   Rare/Leg  — full trio.
-        let (do_attribute, do_element, do_archetype) = match rarity {
-            Rarity::Common => (true, false, false),
-            Rarity::Magic => {
-                let want_arch = rng.range(0, 2) == 0;
-                (true, !want_arch, want_arch)
-            }
-            Rarity::Rare | Rarity::Legendary => (true, true, true),
-        };
-
-        // Uniform pick from a family-locked axis sub-pool. Returns
-        // `None` when no candidate clears the family + ilvl
-        // filters (uncommon but possible at very low ilvl).
-        fn pick_axis(
-            base: &BaseItem,
-            ilvl: u32,
-            rng: &mut LootRng,
-            cat: AffixCategory,
-        ) -> Option<&'static AffixDef> {
-            let candidates: Vec<&'static AffixDef> = AFFIX_POOL
-                .iter()
-                .filter(|d| {
-                    if d.min_ilvl > ilvl {
-                        return false;
-                    }
-                    if category(d) != cat {
-                        return false;
-                    }
-                    match cat {
-                        AffixCategory::Element => affix_element(d)
-                            .map(|e| base.family.allows_element(e))
-                            .unwrap_or(false),
-                        AffixCategory::Archetype => affix_archetype(d)
-                            .map(|a| base.family.allows_archetype(a))
-                            .unwrap_or(false),
-                        AffixCategory::Attribute => affix_attribute(d)
-                            .map(|a| base.family.allows_attribute(a))
-                            .unwrap_or(false),
-                        AffixCategory::Bonus => false,
-                        AffixCategory::Resonance => false,
-                    }
-                })
-                .collect();
-            if candidates.is_empty() {
-                return None;
-            }
-            let idx = rng.range(0, candidates.len() as u32) as usize;
-            Some(candidates[idx])
-        }
-
-        // Magic's xor: try the chosen axis; if it produces nothing
-        // (family rejected every candidate), try the other before
-        // giving up — better to silently produce the trio's third
-        // option than to ship a stat-thin Magic drop.
-        if do_attribute {
-            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Attribute) {
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            }
-        }
-        let mut tried = (false, false);
-        if do_element {
-            tried.0 = true;
-            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            } else if rarity == Rarity::Magic {
-                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
-                    let value = roll_value(def, ilvl, rng);
-                    push(def, value, &mut rolled, &mut used_stats);
-                    tried.1 = true;
-                }
-            }
-        }
-        if do_archetype && !tried.1 {
-            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            } else if rarity == Rarity::Magic && !tried.0 {
-                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
-                    let value = roll_value(def, ilvl, rng);
-                    push(def, value, &mut rolled, &mut used_stats);
-                }
-            }
-        }
-
-        // ── Phase 3: bonus rolls ────────────────────────────────
-        let (lo, hi) = rarity.affix_count_range();
-        let bonus_count = rng.range(lo, hi + 1) as usize;
-
-        // Bonus pool: only the `Bonus` category, weight > 0,
-        // legendary effects filtered out, and excluding any Stat
-        // already touched by signature or trio. Legacy
-        // `allowed_tags` / `favored_tags` masks still drive the
-        // bonus-flavour bias until Phase 7 retires them.
-        let bonus_pool_filter =
-            |a: &&'static AffixDef,
-             rolled: &[RolledAffix],
-             used: &std::collections::HashSet<Stat>| {
-                if category(a) != AffixCategory::Bonus {
-                    return false;
-                }
-                if super::affixes::is_legendary_effect(&a.effect) {
-                    return false;
-                }
-                if a.weight == 0 {
-                    return false;
-                }
-                if a.min_ilvl > ilvl {
-                    return false;
-                }
-                if !rarity.at_least(a.rarity_min) {
-                    return false;
-                }
-                if (a.tags & base.allowed_tags) == 0 {
-                    return false;
-                }
-                // Dedupe — by affix id (for non-stat lines) and by
-                // Stat (for the no-duplicate-stat invariant).
-                if rolled.iter().any(|r| r.def.id == a.id) {
-                    return false;
-                }
-                if let AffixEffect::Stat(s) = a.effect {
-                    if used.contains(&s) {
-                        return false;
-                    }
-                }
-                true
-            };
-
-        for _ in 0..bonus_count {
-            let candidates: Vec<&'static AffixDef> = AFFIX_POOL
-                .iter()
-                .filter(|a| bonus_pool_filter(a, &rolled, &used_stats))
-                .collect();
-            if candidates.is_empty() {
-                break;
-            }
-            let weights: Vec<u32> = candidates
-                .iter()
-                .map(|a| {
-                    let base_w = a.weight;
-                    if (a.tags & base.favored_tags) != 0 {
-                        base_w * 2
-                    } else {
-                        base_w
-                    }
-                })
-                .collect();
-            let Some(pick) = rng.weighted_index(&weights) else {
-                break;
-            };
-            let def = candidates[pick];
-            let value = roll_value(def, ilvl, rng);
-            push(def, value, &mut rolled, &mut used_stats);
-        }
-
-        // ── Phase 4: legendary effect ───────────────────────────
-        // Procedural roll preserved during Phase 2; Phase 4
-        // (named uniques) replaces this with the `UniqueDef`
-        // table. The candidate filter is still tag-based and is
-        // therefore *not* family-locked — a known incoherence
-        // (a sword can still roll Fireball ExtraProjectiles
-        // today). Phase 4 closes that gap by replacing the whole
-        // path.
-        if rarity == Rarity::Legendary {
-            let mut effect_candidates: Vec<(&'static AffixDef, u32)> = AFFIX_POOL
-                .iter()
-                .filter(|a| {
-                    super::affixes::is_legendary_effect(&a.effect)
-                        && (a.tags & base.allowed_tags) != 0
-                        && a.min_ilvl <= ilvl
-                        && a.weight > 0
-                })
-                .map(|a| (a, a.weight))
-                .collect();
-            effect_candidates.retain(|(a, _)| !rolled.iter().any(|r| r.def.id == a.id));
-            if !effect_candidates.is_empty() {
-                let weights: Vec<u32> = effect_candidates.iter().map(|(_, w)| *w).collect();
-                if let Some(pick) = rng.weighted_index(&weights) {
-                    let def = effect_candidates[pick].0;
-                    let value = roll_value(def, ilvl, rng);
-                    push(def, value, &mut rolled, &mut used_stats);
-                }
-            }
-        }
-
-        // ── Phase 4½: Resonance ─────────────────────────────────
-        // ITEMS.md §2.5: with `{Rare: 5 %, Legendary: 25 %}` the
-        // item gets an extra cross-family axis line drawn from
-        // `RESONANCE_POOL`. Filter to axes the base's
-        // `BaseFamily` would normally *reject* — the whole point
-        // of resonance is that it's "off-archetype". Also skip
-        // stats already on the item to keep the no-duplicate-
-        // stat invariant intact.
-        let res_chance = super::affixes::resonance_chance(rarity);
-        if res_chance > 0.0 && rng.next_f32() < res_chance {
-            let candidates: Vec<&'static AffixDef> = super::affixes::RESONANCE_POOL
-                .iter()
-                .filter(|a| {
-                    if a.min_ilvl > ilvl {
-                        return false;
-                    }
-                    if !rarity.at_least(a.rarity_min) {
-                        return false;
-                    }
-                    // No-duplicate-stat: skip if the stat is
-                    // already present (from signature or trio).
-                    if let AffixEffect::Stat(s) = a.effect {
-                        if used_stats.contains(&s) {
-                            return false;
-                        }
-                    }
-                    // Cross-family rule: keep only axes the family
-                    // *rejects*. A wildcard family rejects nothing
-                    // and therefore cannot resonate — accessories
-                    // pull from the normal trio for their flavour
-                    // (see §2.3). Element / Archetype checked
-                    // independently; one match suffices.
-                    if let Some(e) = super::affixes::resonance_element(a) {
-                        if !base.family.allows_element(e) {
-                            return true;
-                        }
-                    }
-                    if let Some(ar) = super::affixes::resonance_archetype(a) {
-                        if !base.family.allows_archetype(ar) {
-                            return true;
-                        }
-                    }
-                    if let Some(at) = super::affixes::resonance_attribute(a) {
-                        if !base.family.allows_attribute(at) {
-                            return true;
-                        }
-                    }
-                    false
-                })
-                .collect();
-            if !candidates.is_empty() {
-                let pick = rng.range(0, candidates.len() as u32) as usize;
-                let def = candidates[pick];
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            }
-        }
-
-        // ── Phase 5: anchored roll ──────────────────────────────
-        // Legendary-only and *very* rare. Decided after the
-        // affix block so the stat roll is independent.
-        let anchored = rarity == Rarity::Legendary && rng.next_f32() < ANCHORED_CHANCE;
-
-        Self {
-            base,
-            rarity,
-            ilvl,
-            affixes: rolled,
-            anchored,
-            // Freshly-rolled items are stable by default. The
-            // server flips `unstable = true` at pickup time iff
-            // the picker is in a rift (see
-            // `Sim::try_pickup_loot`). Roll-time tests, debug
-            // seeding, and any future hub-spawn drops therefore
-            // come out stable for free.
-            unstable: false,
-            // Caller (server `drop_for_enemy`) is responsible for
-            // attaching provenance after the roll — it owns the
-            // current Sim's character roster, which `rift-game`
-            // doesn't know about. Items rolled via tests / debug
-            // seeding leave it `None` and self-bind on first
-            // interaction.
-            provenance: None,
-        }
     }
 
     /// Stat-only contribution of this item (implicits + Stat affixes).
@@ -611,443 +210,6 @@ impl Item {
             .unwrap_or(0);
         from_ilvl.max(from_affixes).max(1)
     }
-
-    pub fn display_name(&self) -> String {
-        // Prefix order: Unstable > Anchored > plain. Unstable
-        // is the most action-relevant tag ("will shatter on
-        // death") so it leads.
-        let prefix = match (self.unstable, self.anchored) {
-            (true, _) => "Unstable ",
-            (false, true) => "Anchored ",
-            (false, false) => "",
-        };
-        format!("{}{} {}", prefix, self.rarity.name(), self.base.name)
-    }
-
-    /// Multi-line tooltip ready for UI rendering.
-    ///
-    /// Structured top-down for readability:
-    /// 1. Name (rarity-coloured by the renderer)
-    /// 2. `Item Level N`
-    /// 3. `Requires Level N` — the minimum character level to equip
-    ///    this item (see [`Item::required_level`]). The renderer
-    ///    can colour this red when the viewing player can't meet it.
-    /// 4. Implicits (base-item lines, e.g. "+24 Armor")
-    /// 5. **Signature block** — the slot-defining lines (helm
-    ///    CDR, boots move speed, gloves crit pair, etc.). Rendered
-    ///    in authored order; Phase 2 retired the Vitality anchor.
-    /// 6. **Bonus block** — separator (`───`) then any
-    ///    rarity-rolled stat affixes.
-    /// 7. Amplify / cooldown affixes.
-    /// 8. Legendary effect (when present) \u2014 prefixed `\u2605 ` so the
-    ///    UI / player can pick it out at a glance.
-    /// 9. Synergy footer (when `loadout.is_some()`) \u2014 a one-line
-    ///    `\u2192 Boosts <ability> (slot N)` for each slotted ability
-    ///    this item benefits.
-    pub fn tooltip(&self, loadout: Option<&crate::loadout::Loadout>) -> Vec<String> {
-        let mut out = Vec::with_capacity(8 + self.affixes.len());
-        out.push(self.display_name());
-        out.push(format!("Item Level {}", self.ilvl));
-        out.push(format!("Requires Level {}", self.required_level()));
-        if self.unstable {
-            // Highest-priority warning line — players need to
-            // see this before they decide to dive deeper or
-            // extract.
-            out.push("⚠ Unstable — extract to stabilise".to_string());
-        }
-        if self.anchored {
-            // Tagged so the renderer can colour this line
-            // distinctly from regular flavour text.
-            out.push("⚓ Anchored — survives death".to_string());
-        }
-
-        // Implicits.
-        if !self.base.implicit.is_empty() {
-            out.push(String::new());
-            for &(stat, value) in self.base.implicit {
-                out.push(stat.format(value));
-            }
-        }
-
-        // Partition stat affixes into [signatures | bonus]. The
-        // first N entries are always signatures (see
-        // `signature_count`); we render them with a deliberate
-        // primary \u2192 Vitality \u2192 secondary order so every item's
-        // headline stat is the topmost line of the stat block.
-        let sig_n = super::affixes::signature_count(self.base.equip_slot).min(self.affixes.len());
-        let (raw_signatures, rest) = self.affixes.split_at(sig_n);
-        // Defensive filter: skip any legendary effect that
-        // somehow lands in the first N positions (older
-        // persisted items + future hand-built test items can
-        // both end up that way). The dedicated legendary block
-        // at the bottom owns rendering for those — letting one
-        // slip into the signature slice would print the same
-        // line twice (white in signatures, gold in legendary).
-        let signatures: Vec<&RolledAffix> = raw_signatures
-            .iter()
-            .filter(|a| !super::affixes::is_legendary_effect(&a.def.effect))
-            .collect();
-
-        // Trio block (Attribute → Element → Archetype). These
-        // are the item's damage / identity axis lines and lead
-        // the stat list. Rendered as a single contiguous group
-        // — no inner dividers — so the trio reads as one block.
-        // Common usually has only Attribute; Magic adds one of
-        // {Element, Archetype}; Rare / Legendary fill all three.
-        use super::affixes::{category, AffixCategory};
-        let by_cat = |cat: AffixCategory| -> Option<&RolledAffix> {
-            rest.iter().find(|a| category(a.def) == cat)
-        };
-        let trio: Vec<&RolledAffix> = [
-            AffixCategory::Attribute,
-            AffixCategory::Element,
-            AffixCategory::Archetype,
-        ]
-        .into_iter()
-        .filter_map(by_cat)
-        .collect();
-        if !trio.is_empty() {
-            out.push(String::new());
-            for a in &trio {
-                out.push(a.tooltip(self.ilvl));
-            }
-        }
-
-        // Resonance line — a cross-family damage axis that
-        // intentionally breaks the trio's family lock. Prefixed
-        // with `◆ ` so the classifier can tag it with a distinct
-        // colour (see `TooltipLineKind::Resonance`); shares the
-        // damage-axes block above so no divider is inserted.
-        let resonance_lines: Vec<&RolledAffix> = rest
-            .iter()
-            .filter(|a| category(a.def) == AffixCategory::Resonance)
-            .collect();
-        if !resonance_lines.is_empty() {
-            if trio.is_empty() {
-                out.push(String::new());
-            }
-            for a in &resonance_lines {
-                out.push(format!("◆ {}", a.tooltip(self.ilvl)));
-            }
-        }
-
-        // Defensives / utility block — signature (slot identity:
-        // CDR on helm, move speed on boots, crit pair on gloves,
-        // …) followed by remaining bonus stat rolls. Separated
-        // from the damage axes above by a single divider so the
-        // tooltip has at most one inline divider in the common
-        // case; no inner dividers within the block.
-        let bonus_stats: Vec<&RolledAffix> = rest
-            .iter()
-            .filter(|a| {
-                matches!(a.def.effect, AffixEffect::Stat(_))
-                    && !matches!(
-                        category(a.def),
-                        AffixCategory::Attribute
-                            | AffixCategory::Element
-                            | AffixCategory::Archetype
-                            | AffixCategory::Resonance
-                    )
-            })
-            .collect();
-        let has_defutil = !signatures.is_empty() || !bonus_stats.is_empty();
-        if has_defutil {
-            // Only emit the divider when there's a damage-axes
-            // block above to separate from. Otherwise just a
-            // blank lead-in.
-            if !trio.is_empty() || !resonance_lines.is_empty() {
-                out.push("───".to_string());
-            } else {
-                out.push(String::new());
-            }
-            for a in &signatures {
-                out.push(a.tooltip(self.ilvl));
-            }
-            for a in bonus_stats {
-                out.push(a.tooltip(self.ilvl));
-            }
-        }
-
-        // Non-Stat, non-legendary effect lines (Amplify / CDR).
-        // These read as "amplifies my Frost Ray by +12%" \u2014 useful
-        // signal so they live above the legendary effect.
-        let amp_affixes: Vec<&RolledAffix> = self
-            .affixes
-            .iter()
-            .filter(|a| {
-                matches!(
-                    a.def.effect,
-                    AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_)
-                )
-            })
-            .collect();
-        if !amp_affixes.is_empty() {
-            out.push(String::new());
-            for a in amp_affixes {
-                out.push(a.tooltip(self.ilvl));
-            }
-        }
-
-        // Legendary effect \u2014 exactly one (or zero) per item.
-        for a in &self.affixes {
-            if super::affixes::is_legendary_effect(&a.def.effect) {
-                out.push(String::new());
-                out.push(format!("★ {}", a.tooltip(self.ilvl)));
-            }
-        }
-
-        // Synergy footer: list slotted abilities this item helps.
-        if let Some(lo) = loadout {
-            let mut hits = self.synergy_against(lo);
-            hits.sort();
-            hits.dedup();
-            if !hits.is_empty() {
-                out.push(String::new());
-                for line in hits {
-                    out.push(line);
-                }
-            }
-        }
-
-        out
-    }
-
-    /// Build the synergy-footer lines for `loadout`. One line per
-    /// slotted ability this item helps. Pure read-only — no
-    /// allocation beyond the returned `Vec`.
-    ///
-    /// Match rules:
-    /// - `Stat::PhysicalDamage` / `FireDamage` / `IceDamage` /
-    ///   `LightningDamage` → matches abilities whose `Element`
-    ///   equals it.
-    /// - `Stat::ProjectileDamage` / `BeamDamage` / `AoeDamage` /
-    ///   `MeleeDamage` → matches abilities whose `Archetype`
-    ///   equals it.
-    /// - `AmplifyAbilityDamage(id)` / `ReduceAbilityCooldown(id)` /
-    ///   `ExtraProjectiles(id)` / `TransformAbility(id, _)` →
-    ///   match if that exact ability is slotted.
-    fn synergy_against(&self, loadout: &crate::loadout::Loadout) -> Vec<String> {
-        use crate::abilities::{Archetype, Element};
-        use crate::stats::Stat;
-        let mut out: Vec<String> = Vec::new();
-        // Gather slotted abilities once so each affix scan is O(6).
-        let slotted: Vec<(usize, &'static crate::abilities::Ability)> = loadout
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &id)| crate::abilities::lookup(id).map(|a| (i, a)))
-            .collect();
-
-        // Helper closure-free predicate-driven match. We can't use
-        // a `&mut Vec` capturing closure here because each affix
-        // arm needs its own predicate, and chaining mutable
-        // captures runs into borrow-checker overlap.
-        let push_match =
-            |out: &mut Vec<String>, label: &str, pred: fn(&crate::abilities::Ability) -> bool| {
-                for (i, ab) in &slotted {
-                    if pred(ab) {
-                        out.push(format!("→ Boosts {} (slot {}) [{}]", ab.name, i + 1, label));
-                    }
-                }
-            };
-
-        for a in &self.affixes {
-            match a.def.effect {
-                AffixEffect::Stat(Stat::PhysicalDamage) => push_match(&mut out, "Physical", |x| {
-                    matches!(x.element, Element::Physical)
-                }),
-                AffixEffect::Stat(Stat::FireDamage) => {
-                    push_match(&mut out, "Fire", |x| matches!(x.element, Element::Fire))
-                }
-                AffixEffect::Stat(Stat::IceDamage) => {
-                    push_match(&mut out, "Ice", |x| matches!(x.element, Element::Ice))
-                }
-                AffixEffect::Stat(Stat::LightningDamage) => {
-                    push_match(&mut out, "Lightning", |x| {
-                        matches!(x.element, Element::Lightning)
-                    })
-                }
-                AffixEffect::Stat(Stat::ProjectileDamage) => {
-                    push_match(&mut out, "Projectile", |x| {
-                        matches!(x.archetype, Archetype::Projectile)
-                    })
-                }
-                AffixEffect::Stat(Stat::BeamDamage) => {
-                    push_match(&mut out, "Beam", |x| matches!(x.archetype, Archetype::Beam))
-                }
-                AffixEffect::Stat(Stat::AoeDamage) => {
-                    push_match(&mut out, "AoE", |x| matches!(x.archetype, Archetype::Aoe))
-                }
-                AffixEffect::Stat(Stat::MeleeDamage) => push_match(&mut out, "Melee", |x| {
-                    matches!(x.archetype, Archetype::Melee)
-                }),
-                AffixEffect::AmplifyAbilityDamage(id)
-                | AffixEffect::ReduceAbilityCooldown(id)
-                | AffixEffect::ExtraProjectiles(id)
-                | AffixEffect::TransformAbility(id, _) => {
-                    for (i, ab) in &slotted {
-                        if ab.id == id {
-                            out.push(format!("→ Affects {} (slot {})", ab.name, i + 1));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        out
-    }
-
-    /// Pack the rolled item into a wire-friendly tuple of static-pool
-    /// indices: `(base_id, rarity_byte, ilvl, [(affix_id, value)])`.
-    /// `rift-game` is dependency-free of the wire crate by design,
-    /// so the network layer wraps this tuple in its own struct.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self.base` doesn't live inside [`super::BASE_ITEMS`]
-    /// or one of the rolled affix defs doesn't live inside
-    /// [`AFFIX_POOL`]. Both invariants are guaranteed for items
-    /// produced by [`Item::roll`].
-    pub fn to_wire(&self) -> (u16, u8, u16, Vec<(u16, f32)>, bool) {
-        // Match by `id` rather than pointer identity — `BASE_ITEMS`
-        // and `AFFIX_POOL` are `pub const` slices, so each access
-        // can produce a fresh copy with different addresses.
-        let base_id = super::items::BASE_ITEMS
-            .iter()
-            .position(|b| b.id == self.base.id)
-            .expect("base item id not in BASE_ITEMS") as u16;
-        let affixes = self
-            .affixes
-            .iter()
-            .map(|a| {
-                let id = AFFIX_POOL
-                    .iter()
-                    .position(|d| d.id == a.def.id)
-                    .expect("affix id not in AFFIX_POOL") as u16;
-                (id, a.value)
-            })
-            .collect();
-        (
-            base_id,
-            self.rarity as u8,
-            self.ilvl as u16,
-            affixes,
-            self.anchored,
-        )
-    }
-
-    /// Inverse of [`Item::to_wire`]. Returns `None` if any index is
-    /// out of bounds (mismatched build / corrupted save).
-    ///
-    /// `unstable` is **not** part of `to_wire`'s tuple because
-    /// the field was added later and we want the existing
-    /// (base, rarity, ilvl, affixes, anchored) signature to keep
-    /// working unchanged for every call-site. Wire / blob-level
-    /// transports thread `unstable` separately (see
-    /// `ItemBlob::unstable`); the constructed item starts
-    /// stable and the caller flips the flag if the carrier
-    /// payload says so.
-    pub fn from_wire(
-        base_id: u16,
-        rarity_byte: u8,
-        ilvl: u16,
-        affixes: &[(u16, f32)],
-        anchored: bool,
-        provenance: Option<LootProvenance>,
-    ) -> Option<Self> {
-        let base = super::items::BASE_ITEMS.get(base_id as usize)?;
-        let rarity = match rarity_byte {
-            0 => Rarity::Common,
-            1 => Rarity::Magic,
-            2 => Rarity::Rare,
-            3 => Rarity::Legendary,
-            _ => return None,
-        };
-        let mut rolled = Vec::with_capacity(affixes.len());
-        for &(id, value) in affixes {
-            let def = AFFIX_POOL.get(id as usize)?;
-            rolled.push(RolledAffix { def, value });
-        }
-        Some(Self {
-            base,
-            rarity,
-            ilvl: ilvl as u32,
-            affixes: rolled,
-            anchored,
-            // `unstable` is not encoded in `to_wire`'s tuple to
-            // keep the existing 5-arity contract; the carrier
-            // (`ItemBlob`) sets it post-construction. Default
-            // here is `false` so blob-less reconstructions
-            // (tests, debug paths) come out stable.
-            unstable: false,
-            provenance,
-        })
-    }
-
-    /// Pack the rolled item into a tuple keyed by *stable* string
-    /// ids (`BaseItem.id`, `AffixDef.id`) suitable for long-term
-    /// storage. Unlike [`Item::to_wire`] this does not depend on
-    /// the in-process pool ordering, so saved rows survive a
-    /// rebuild that reorders `BASE_ITEMS` / `AFFIX_POOL`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self.base` or any affix def doesn't carry an id
-    /// — both invariants hold for items produced by [`Item::roll`].
-    pub fn to_persisted(&self) -> (String, u8, u16, Vec<(String, f32)>, bool) {
-        let affixes = self
-            .affixes
-            .iter()
-            .map(|a| (a.def.id.to_string(), a.value))
-            .collect();
-        (
-            self.base.id.to_string(),
-            self.rarity as u8,
-            self.ilvl as u16,
-            affixes,
-            self.anchored,
-        )
-    }
-
-    /// Inverse of [`Item::to_persisted`]. Returns `None` if any
-    /// id is unknown (item dropped from a pool that has since
-    /// been pruned, or a corrupt row).
-    pub fn from_persisted(
-        base_id: &str,
-        rarity_byte: u8,
-        ilvl: u16,
-        affixes: &[(String, f32)],
-        anchored: bool,
-        provenance: Option<LootProvenance>,
-    ) -> Option<Self> {
-        let base = super::items::BASE_ITEMS.iter().find(|b| b.id == base_id)?;
-        let rarity = match rarity_byte {
-            0 => Rarity::Common,
-            1 => Rarity::Magic,
-            2 => Rarity::Rare,
-            3 => Rarity::Legendary,
-            _ => return None,
-        };
-        let mut rolled = Vec::with_capacity(affixes.len());
-        for (id, value) in affixes {
-            let def = AFFIX_POOL.iter().find(|d| d.id == id.as_str())?;
-            rolled.push(RolledAffix { def, value: *value });
-        }
-        Some(Self {
-            base,
-            rarity,
-            ilvl: ilvl as u32,
-            affixes: rolled,
-            anchored,
-            // Persisted items are by definition stable — the
-            // unstable lifecycle ends at extraction, which is
-            // the gate that allows persistence in the first
-            // place. Any row in the DB therefore reads back as
-            // stable, full stop.
-            unstable: false,
-            provenance,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1080,6 +242,9 @@ mod tests {
             anchored: false,
             provenance: None,
             unstable: false,
+            unique_id: None,
+            unique_pick: None,
+            rift_touched: None,
         };
         assert_eq!(item.required_level(), 1);
     }
@@ -1097,6 +262,9 @@ mod tests {
             anchored: false,
             provenance: None,
             unstable: false,
+            unique_id: None,
+            unique_pick: None,
+            rift_touched: None,
         };
         assert_eq!(item.required_level(), 30);
     }
@@ -1133,6 +301,9 @@ mod tests {
             anchored: false,
             provenance: None,
             unstable: false,
+            unique_id: None,
+            unique_pick: None,
+            rift_touched: None,
         };
         assert_eq!(item.required_level(), a_high.min_ilvl.max(1));
     }
@@ -1159,6 +330,9 @@ mod tests {
             anchored: false,
             provenance: None,
             unstable: false,
+            unique_id: None,
+            unique_pick: None,
+            rift_touched: None,
         };
         assert_eq!(item_a.required_level(), 20);
 
@@ -1175,6 +349,9 @@ mod tests {
                 anchored: false,
                 provenance: None,
                 unstable: false,
+                unique_id: None,
+                unique_pick: None,
+                rift_touched: None,
             };
             assert_eq!(item_b.required_level(), high.min_ilvl);
         }
@@ -1206,7 +383,7 @@ mod tests {
         let req = item.required_level();
         let expected = format!("Requires Level {}", req);
         assert!(
-            lines.iter().any(|l| l == &expected),
+            lines.iter().any(|l| l.text == expected),
             "tooltip missing `{expected}`; got {lines:?}",
         );
     }
@@ -1215,7 +392,7 @@ mod tests {
     /// at least the per-slot signature lines. Catches the class of
     /// regressions where a base's tag mask filters every bonus
     /// candidate out, or a slot's signature ids drift out of the
-    /// pool — see ITEMS.md §3 Phase 0.
+    /// pool.
     #[test]
     fn every_base_rolls_at_every_rarity() {
         use super::super::affixes::signature_count;
@@ -1263,10 +440,10 @@ mod tests {
         }
     }
 
-    // ── Phase 2 invariants (see ITEMS.md §3 Phase 2) ─────────────
+    // Trio-pipeline invariants (ITEMS.md §3 Phase 2).
 
     /// Helper: iterate `Item::roll` over every base × rarity × N
-    /// seeds and hand each rolled `Item` to `check`. Phase 2
+    /// seeds and hand each rolled `Item` to `check`. Trio
     /// invariants are statistical — we exercise enough seeds that
     /// rare branches (Magic's element-vs-archetype flip,
     /// family-empty-element fallbacks) get covered.
@@ -1298,8 +475,8 @@ mod tests {
     /// never roll a Spell-source line; a staff (Element ∈ {Fire,
     /// Ice, Lightning}) must never roll Physical; a bow
     /// (Archetype::Projectile) must never roll Beam / AoE / Melee.
-    /// This is *the* invariant Phase 2 buys us — it's why the
-    /// trio pipeline exists.
+    /// This is *the* invariant the trio pipeline buys us — it's
+    /// why the pipeline exists.
     ///
     /// Resonance lines ([`super::super::affixes::is_resonance`])
     /// are excluded from this assertion — they break the family
@@ -1451,7 +628,7 @@ mod tests {
         });
     }
 
-    // ── Phase 3 invariants (resonance) ──────────────────────────
+    // Resonance invariants.
 
     /// Every rolled resonance line must target an axis the base's
     /// `BaseFamily` **rejects**. This is the design contract for

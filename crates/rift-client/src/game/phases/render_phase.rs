@@ -38,6 +38,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         state.floor_mgr.dungeon.as_ref(),
     );
 
+    // Rigid weapon-prop follow: write `host_xform * hand_joint`
+    // into each weapon attachment's renderer slot now that
+    // `joint_worlds` is fresh for this frame.
+    crate::game::weapon_visuals::update_weapon_transforms(&mut state.world, renderer, input);
+
     // Local-avatar ghost tint.
     crate::game::ghost_system::apply_tint(&state.world, renderer, state.net.local_ghost_cached);
 
@@ -254,6 +259,20 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // entire point-light vec while in the hub (no torches).
     if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
         storm.tick(renderer, dt);
+    }
+    // Rift-floor void embers: re-anchor every frame ~10 m
+    // below the player so the field of glowing motes
+    // continuously spawns under whatever room the player is
+    // standing in, then rises past the floor's outer edges.
+    // `None` on the hub / char-select. The 10 m depth puts
+    // the spawn plane well below the floor mesh so the floor
+    // depth-test naturally hides every ember that's still
+    // under it — only motes that drift past the silhouette
+    // become visible, giving the dungeon a hot rim.
+    if let Some(id) = state.floor_mgr.void_embers {
+        renderer
+            .vfx_system
+            .set_anchor(id, player_pos - Vec3::new(0.0, 10.0, 0.0));
     }
     // Hub sandstorm haze: keep the haze emitter centred on
     // the player so the field of dust travels with the

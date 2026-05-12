@@ -128,6 +128,17 @@ impl Equipment {
             for affix in &item.affixes {
                 mods.apply(affix);
             }
+            // Phase 4: hand-authored unique effect. Resolves the
+            // stable id through the static `UNIQUES` table and
+            // folds the resulting [`LegendaryEffect`] through
+            // the same dispatch paths the affix variants use.
+            // Unknown ids degrade silently (catalogue drift) —
+            // the item's stats / affixes still apply.
+            if let Some(def) = item.unique_id.and_then(super::uniques::find) {
+                if let Some(eff) = def.build(item.unique_pick) {
+                    mods.apply_legendary_effect(&eff);
+                }
+            }
         }
         mods
     }

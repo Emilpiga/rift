@@ -15,6 +15,8 @@ pub enum ImKey {
     ShiftRight,
     ControlLeft,
     ControlRight,
+    AltLeft,
+    AltRight,
 
     // Navigation / editing
     ArrowLeft,

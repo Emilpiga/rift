@@ -219,7 +219,7 @@ impl SpellCast {
     /// `Shooting`. The local visual fire is suppressed (`fired = true`)
     /// because the server owns projectile spawn under multiplayer
     /// authority — the client just needs the Shoot clip to play for
-    /// upper-body feedback. This makes LMB / Multishot feel snappy:
+    /// upper-body feedback. This makes LMB / Fireball Volley feel snappy:
     /// the cast pose appears the same frame the click lands instead
     /// of after the wind-up clip's full duration.
     pub fn begin(

@@ -27,12 +27,12 @@
 //! over symmetry here.
 
 use hecs::Entity;
+use rift_game::abilities::AbilityWireId;
 use rift_net::{messages::WorldEvent, NetTick};
 
 /// One context per `Sim::step` damage pass — see module docs.
 pub struct CombatCtx<'a> {
     // ---- Shared (hit-time + kill-time) --------------------
-
     /// Wire-event sink. Damage / Hit / Death / LootDropped all
     /// land here in arrival order so the per-tick snapshot
     /// builder can drain them into reliable client messages.
@@ -43,7 +43,6 @@ pub struct CombatCtx<'a> {
     pub tick: NetTick,
 
     // ---- Hit-time -----------------------------------------
-
     /// Damage rows queued *back at the attacker* by elite
     /// `THORNS` mod when an enemy is hit (any hit, killing or
     /// not). Drained by the caller into the same player-damage
@@ -59,7 +58,6 @@ pub struct CombatCtx<'a> {
     pub meter_events: &'a mut Vec<MeterEvent>,
 
     // ---- Kill-time ----------------------------------------
-
     /// Loot net-id allocator. Bumped once per dropped item.
     pub next_loot_net_id: &'a mut u32,
     /// Floor depth — pollutes the loot RNG seed so re-entering
@@ -77,6 +75,16 @@ pub struct CombatCtx<'a> {
     /// Net-id allocator for `death_aoe_zones`. Same allocator
     /// the projectile pipeline uses so wire ids are unique.
     pub next_projectile_net_id: &'a mut u32,
+    /// Free-cast requests emitted by `ProcAction::CastAbility`
+    /// procs that fire inside the projectile-hit loop
+    /// (Mirrorglass Amulet's OnHit / OnCrit pool). Each row is
+    /// `(caster_entity, request)`; the caster is the player
+    /// whose hit produced the proc. Drained by [`super::Sim::step`]
+    /// after the per-tick `CombatCtx` scope ends and routed
+    /// through [`super::ability::dispatch_proc_cast`] so the
+    /// resulting cast goes through the same pipeline as a
+    /// manual cast (full replication + meter attribution).
+    pub proc_casts: &'a mut Vec<(hecs::Entity, super::procs::ProcCastRequest)>,
     /// How many ticks `Item::provenance` is enforced for after
     /// a kill. Threaded through `drop_for_enemy` so the
     /// per-`ServerLoot` [`super::loot::ShareWindow`] is built
@@ -98,7 +106,7 @@ pub enum MeterEvent {
     /// when the source can't be attributed (DoT ticks today).
     DamageDealt {
         attacker: Entity,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         amount: f32,
     },
     /// Player → player healing (effective HP restored, post
@@ -108,7 +116,7 @@ pub enum MeterEvent {
     /// frames removed from the cast that produced them.
     HealingDone {
         caster: Entity,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         amount: f32,
     },
 }
@@ -143,6 +151,6 @@ pub struct KillInfo {
 pub struct PlayerHit {
     pub target: Entity,
     pub attacker_kind: u8,
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub amount: f32,
 }

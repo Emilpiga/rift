@@ -28,6 +28,7 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::{Floor, FloorConfig};
+use rift_game::abilities::AbilityWireId;
 use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::monsters::MonsterRole;
 use rift_net::NetId;
@@ -106,8 +107,10 @@ pub const LEASH_RANGE: f32 = 28.0;
 /// shorter than [`AGGRO_RANGE`] so it complements rather than
 /// replaces line-of-sight pickup; pulling roughly one-room
 /// radius of neighbours into the fight without alerting a
-/// whole wing of the dungeon. Wall-blind on purpose: shouting
-/// reaches through doorways the way visual aggro does not.
+/// whole wing of the dungeon. Wall-gated: the line from victim
+/// to packmate must clear the floor's tile grid, so enemies in
+/// adjacent rooms / behind walls do not get pulled into the
+/// fight by a fight they cannot see.
 pub const AGGRO_SPREAD_RADIUS: f32 = 7.0;
 /// Maximum delay (s) before a packmate fully responds to an
 /// aggro spread. Distance-scaled: an enemy right next to the
@@ -373,7 +376,7 @@ pub enum EnemyCast {
     /// (e.g. slam radius + wind-up duration).
     Start {
         owner: NetId,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         origin: Vec3,
         target: Vec3,
         dir_x: f32,
@@ -388,7 +391,7 @@ pub enum EnemyCast {
         /// zones / channels carry the kind for the receiving
         /// player's TAKEN-tab attribution.
         attacker_kind: u8,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         origin: Vec3,
         aim: Vec3,
         damage_mult: f32,
@@ -754,10 +757,18 @@ fn nearest_visible_player(
 /// skipped so we don't yank a pack off the player they're
 /// chasing.
 ///
-/// Wall-blind by design: spread models hearing a pack-mate's
-/// pain shout, not vision. Visual `AGGRO_RANGE` aggro still
-/// respects LOS via [`nearest_visible_player`].
-pub fn notify_attacked(world: &mut hecs::World, victim: Entity, attacker: Entity) {
+/// Wall-gated: spread is dropped for any packmate whose
+/// straight-line path from the victim is broken by a wall, so
+/// enemies in adjacent rooms or behind closed corridors do not
+/// get pulled into a fight they cannot see. Visual
+/// `AGGRO_RANGE` aggro also respects LOS via
+/// [`nearest_visible_player`].
+pub fn notify_attacked(
+    world: &mut hecs::World,
+    floor: &Floor,
+    victim: Entity,
+    attacker: Entity,
+) {
     // 1. Force-aggro the victim onto the attacker. Bypasses the
     //    `pending_aggro` queue — the victim *knows* who hit it.
     let victim_pos = match world.get::<&mut ServerEnemy>(victim) {
@@ -789,11 +800,20 @@ pub fn notify_attacked(world: &mut hecs::World, victim: Entity, attacker: Entity
         let dx = en.k.position.x - victim_pos.x;
         let dz = en.k.position.z - victim_pos.z;
         let d2 = dx * dx + dz * dz;
-        if d2 <= r2 {
-            let frac = (d2 / r2).sqrt(); // 0 at victim, 1 at edge
-            let delay = AGGRO_SPREAD_MAX_DELAY * frac;
-            en.pending_aggro = Some((attacker, delay));
+        if d2 > r2 {
+            continue;
         }
+        // Wall LOS gate: a victim's shout doesn't reach a
+        // packmate that's on the far side of a wall, even if
+        // they're inside the radius. Keeps adjacent-room
+        // enemies asleep until the player crosses their
+        // sight line.
+        if !floor.line_of_sight(victim_pos, en.k.position) {
+            continue;
+        }
+        let frac = (d2 / r2).sqrt(); // 0 at victim, 1 at edge
+        let delay = AGGRO_SPREAD_MAX_DELAY * frac;
+        en.pending_aggro = Some((attacker, delay));
     }
 }
 

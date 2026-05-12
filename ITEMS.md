@@ -9,6 +9,13 @@
 
 ## 1. Where we are today
 
+> **Status note (May 2026).** Section 1 has been rewritten to reflect
+> the post-Phase-5 codebase. Phases 1–5 of the migration plan in §3
+> have landed; Phase 6 (named roll bands & tooltip polish) and Phase 7
+> (the long tail) are in progress. The Attribute × Element × Archetype
+> trio, family-locked bases, hand-authored uniques, the Resonance
+> cross-family bonus slot, and the Rift-touched line are all live.
+
 ### 1.1 Crate layout
 
 All loot rules live in the `rift-game` crate (engine-agnostic, no I/O), and
@@ -19,20 +26,24 @@ string ids.
 | Concern                              | Where                                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------- |
 | Stat vocabulary                      | [crates/rift-game/src/stats.rs](crates/rift-game/src/stats.rs)                         |
+| Family vocabulary (Attr/Elem/Arch)   | [crates/rift-game/src/loot/families.rs](crates/rift-game/src/loot/families.rs)         |
 | Module index                         | [crates/rift-game/src/loot/mod.rs](crates/rift-game/src/loot/mod.rs)                   |
-| Base items + slots + tags            | [crates/rift-game/src/loot/items.rs](crates/rift-game/src/loot/items.rs)               |
-| Affix defs + the `AFFIX_POOL`        | [crates/rift-game/src/loot/affixes.rs](crates/rift-game/src/loot/affixes.rs)           |
+| Base items + slots + `BaseFamily`    | [crates/rift-game/src/loot/items.rs](crates/rift-game/src/loot/items.rs)               |
+| Affix defs + the four pools          | [crates/rift-game/src/loot/affixes.rs](crates/rift-game/src/loot/affixes.rs)           |
+| Hand-authored unique catalogue       | [crates/rift-game/src/loot/uniques.rs](crates/rift-game/src/loot/uniques.rs)           |
 | Rarity tier rules                    | [crates/rift-game/src/loot/rarity.rs](crates/rift-game/src/loot/rarity.rs)             |
-| Rolled item + tooltip                | [crates/rift-game/src/loot/item.rs](crates/rift-game/src/loot/item.rs)                 |
+| Rolled item + roll pipeline          | [crates/rift-game/src/loot/item.rs](crates/rift-game/src/loot/item.rs)                 |
 | Per-monster drop tables              | [crates/rift-game/src/loot/drops.rs](crates/rift-game/src/loot/drops.rs)               |
+| Tooltip rendering                    | [crates/rift-game/src/loot/tooltip.rs](crates/rift-game/src/loot/tooltip.rs)           |
 | Equipment slots → stat/mod aggregate | [crates/rift-game/src/loot/equipment.rs](crates/rift-game/src/loot/equipment.rs)       |
 | Aggregated ability mods              | [crates/rift-game/src/loot/ability_mods.rs](crates/rift-game/src/loot/ability_mods.rs) |
+| Wire codec                           | [crates/rift-game/src/loot/wire.rs](crates/rift-game/src/loot/wire.rs)                 |
 | Seeded RNG                           | [crates/rift-game/src/loot/rng.rs](crates/rift-game/src/loot/rng.rs)                   |
-| Server roll-on-kill                  | [crates/rift-server/src/sim/loot.rs](crates/rift-server/src/sim/loot.rs#L157)          |
+| Server roll-on-kill                  | [crates/rift-server/src/sim/loot.rs](crates/rift-server/src/sim/loot.rs)               |
 | Server transform consumer            | [crates/rift-server/src/sim/transforms.rs](crates/rift-server/src/sim/transforms.rs)   |
 | Server proc consumer                 | [crates/rift-server/src/sim/procs.rs](crates/rift-server/src/sim/procs.rs)             |
-| Persistence (Postgres JSONB)         | [crates/rift-persistence/src/lib.rs](crates/rift-persistence/src/lib.rs#L60)           |
-| Wire shape                           | [crates/rift-net/src/messages.rs](crates/rift-net/src/messages.rs#L1237)               |
+| Persistence (Postgres JSONB)         | [crates/rift-persistence/src/lib.rs](crates/rift-persistence/src/lib.rs)               |
+| Wire shape                           | [crates/rift-net/src/messages.rs](crates/rift-net/src/messages.rs)                     |
 
 ### 1.2 Equip slots
 
@@ -49,45 +60,66 @@ Rings are interchangeable in `Ring1`/`Ring2`; everything else strict.
 
 A `BaseItem` row carries: stable `id`, display `name`, `ItemSlot` taxonomy
 (`Weapon(WeaponKind) | Armor(ArmorKind) | Accessory(AccessoryKind)`),
-target `equip_slot`, `allowed_tags` / `favored_tags` bitmasks, `implicit:
-&[(Stat, f32)]`, `min_ilvl`, an `icon` registry key, and an optional
-`GenderedModel` for paperdoll art.
+target `equip_slot`, an authoritative `family: BaseFamily` (the
+**Attribute / Element / Archetype** lock — see §1.5), legacy
+`allowed_tags` / `favored_tags` bitmasks (preserved during the
+migration but no longer drive rolling), `implicit: &[(Stat, f32)]`,
+`min_ilvl`, an `icon` registry key, and an optional `GenderedModel`
+for paperdoll art.
 
-Currently authored bases (15):
+Currently authored bases (**14**):
 
-| id              | Name              | EquipSlot | Allowed tags                          | Favored          | Implicit                           |
-| --------------- | ----------------- | --------- | ------------------------------------- | ---------------- | ---------------------------------- |
-| staff_basic     | Apprentice Staff  | Weapon    | ANY_ELEMENT \| CASTER \| UTIL \| CRIT | ANY_ELEM\|CASTER | +8% Spell Damage                   |
-| sword_basic     | Iron Sword        | Weapon    | MELEE\|CRIT\|SPEED\|DEF\|UTIL         | MELEE\|CRIT      | +10% Weapon Damage                 |
-| dagger_basic    | Hunter's Dagger   | Weapon    | MELEE\|CRIT\|SPEED\|UTIL              | CRIT\|SPEED      | +6% Weapon Damage, +5% Crit Chance |
-| wand_basic      | Carved Wand       | Weapon    | ANY_ELEM\|CASTER\|UTIL\|SPEED         | CASTER\|UTIL     | +6% Spell Damage, +4% CDR          |
-| light_helm      | Leather Helm      | Helm      | DEF\|MELEE\|CRIT\|UTIL                | DEF\|MELEE       | +12 Armor, +15 Health              |
-| light_shoulders | Leather Spaulders | Shoulders | SPEED\|CRIT\|DEF\|UTIL                | SPEED\|CRIT      | +2% Evasion, +12 Health            |
-| heavy_chest     | Plated Cuirass    | Chest     | DEF\|MELEE\|UTIL                      | DEF\|MELEE       | +24 Armor, +30 Health              |
-| light_chest     | Studded Vest      | Chest     | DEF\|SPEED\|CRIT\|UTIL                | SPEED\|CRIT      | +5% Evasion, +18 Health            |
-| robe_chest      | Mage Robe         | Chest     | ANY_ELEM\|CASTER\|UTIL\|DEF           | CASTER\|UTIL     | +14 Health, +8% Essence Regen      |
-| light_boots     | Leather Boots     | Boots     | SPEED\|CRIT\|DEF\|UTIL                | SPEED            | +5% Move Speed, +3% Evasion        |
-| light_gloves    | Leather Gloves    | Hands     | ANY_ELEM\|CASTER\|UTIL                | CASTER\|ANY_ELEM | +3% CDR                            |
-| light_legs      | Leather Leggings  | Legs      | DEF\|MELEE\|UTIL                      | DEF              | +16 Armor, +20 Health              |
-| ring_basic      | Plain Ring        | Ring1     | ALL                                   | (none)           | (none)                             |
-| amulet_basic    | Plain Amulet      | Amulet    | ALL                                   | (none)           | +10 Health                         |
+| id              | Name              | EquipSlot | Family (Attr / Elements / Archetypes)           | Implicit                             |
+| --------------- | ----------------- | --------- | ----------------------------------------------- | ------------------------------------ |
+| staff_basic     | Apprentice Staff  | Weapon    | Intellect / [Fire, Ice, Lightning] / any        | +8 % Spell Damage                    |
+| sword_basic     | Iron Sword        | Weapon    | Strength / [Physical] / [Melee]                 | +10 % Weapon Damage                  |
+| dagger_basic    | Hunter's Dagger   | Weapon    | Strength / [Physical] / [Melee]                 | +6 % Weapon Damage, +5 % Crit Chance |
+| wand_basic      | Carved Wand       | Weapon    | Agility / [Fire, Ice, Lightning] / [Projectile] | +6 % Spell Damage, +4 % CDR          |
+| light_helm      | Leather Helm      | Helm      | wildcard / [Physical] / any                     | +12 Armor, +15 Health                |
+| light_shoulders | Leather Spaulders | Shoulders | wildcard (all axes)                             | +2 % Evasion, +12 Health             |
+| heavy_chest     | Plated Cuirass    | Chest     | Strength / [Physical] / [Melee]                 | +24 Armor, +30 Health                |
+| light_chest     | Studded Vest      | Chest     | wildcard (all axes)                             | +5 % Evasion, +18 Health             |
+| robe_chest      | Mage Robe         | Chest     | Intellect / any element / any archetype         | +14 Health, +8 % Essence Regen       |
+| light_boots     | Leather Boots     | Boots     | wildcard (all axes)                             | +5 % Move Speed, +3 % Evasion        |
+| light_gloves    | Leather Gloves    | Hands     | Intellect / any element / any archetype         | +3 % CDR                             |
+| light_legs      | Leather Leggings  | Legs      | Strength / [Physical] / [Melee]                 | +16 Armor, +20 Health                |
+| ring_basic      | Plain Ring        | Ring1     | wildcard (all axes)                             | (none)                               |
+| amulet_basic    | Plain Amulet      | Amulet    | wildcard (all axes)                             | +10 Health                           |
 
-Bias works through bitmask intersection on a fixed tag set:
+`BaseFamily` is declared in
+[loot/families.rs](crates/rift-game/src/loot/families.rs):
 
+```rust
+struct BaseFamily {
+    attribute: Option<Attribute>,         // None = wildcard
+    element:   Option<&'static [Element]>,
+    archetype: Option<&'static [Archetype]>,
+}
+impl BaseFamily { const WILDCARD: Self = Self { attribute: None, element: None, archetype: None }; }
+enum Attribute { Strength, Agility, Intellect }
+enum Element   { Physical, Fire, Ice, Lightning }
+enum Archetype { Projectile, Melee }   // Beam / AoE damage stats apply at runtime but never roll
 ```
-FIRE | ICE | LIGHTNING | CRIT | SPEED | DEFENSE | CASTER | MELEE | UTILITY
-```
 
-Affixes whose `tags & base.allowed_tags == 0` cannot roll;
-affixes hitting `favored_tags` get **2× weight**. No per-affix
-special-casing.
+`BaseFamily::accepts_*` gate each trio-axis affix at roll time. An
+affix on an axis the base **rejects** can still appear — but only via
+the dedicated **Resonance** slot (§1.13), which exists explicitly to
+break the family lock once per item.
+
+The `allowed_tags` / `favored_tags` bitmasks remain on every row for
+backwards compatibility (legacy items rehydrating from persistence
+still resolve through the same struct), but the live roll pipeline
+reads only `family`. Tags will be removed in Phase 7 once a DB
+migration sweep confirms no persisted item depends on them.
 
 ### 1.4 Stats
 
-`Stat` (enum in [stats.rs](crates/rift-game/src/stats.rs#L40)) is the single
+`Stat` (enum in [stats.rs](crates/rift-game/src/stats.rs)) is the single
 vocabulary used by affixes, implicits, tooltips, and the resolved
 `CharacterStats` sheet:
 
+- **Attributes** (the third trio axis — flat point totals, mirrored by
+  the manual point-spend screen): `Strength`, `Agility`, `Intellect`.
 - **Offensive:** `CritChance`, `CritDamage`, `AttackSpeed`
 - **Damage buckets** (multiply abilities of the matching shape/element):
   `WeaponDamage`, `SpellDamage`, `PhysicalDamage`, `FireDamage`, `IceDamage`,
@@ -99,7 +131,7 @@ vocabulary used by affixes, implicits, tooltips, and the resolved
   mitigation channel for physical damage (soft-capped flat
   reduction); `ElementalResist` covers Fire / Ice / Lightning.
 - **Utility:** `MaxResource`, `CooldownReduction`, `ResourceRegen`,
-  `MoveSpeed`
+  `MoveSpeed`, `Range`
 
 `Stat::is_percent()` decides display + math; percent stats are always
 0..1 internally (`+0.05` = `+5 %`).
@@ -110,17 +142,17 @@ vocabulary used by affixes, implicits, tooltips, and the resolved
 enum Rarity { Common = 0, Magic = 1, Rare = 2, Legendary = 3 }
 ```
 
-| Rarity    | Bonus affix count | Color (sRGB)       | Salvage base | What it unlocks                       |
-| --------- | ----------------- | ------------------ | ------------ | ------------------------------------- |
-| Common    | 0                 | (0.85, 0.85, 0.85) | 1            | Pure stats only                       |
-| Magic     | 1                 | (0.40, 0.65, 1.00) | 3            | Synergistic stat clusters             |
-| Rare      | 2                 | (1.00, 0.85, 0.30) | 8            | Ability **amplifiers** (dmg / CDR)    |
-| Legendary | 3                 | (1.00, 0.45, 0.10) | 25           | + 1 effect: Modify / Transform / Proc |
+| Rarity    | Bonus affix range | Trio shape (Attr × Element × Archetype) | Color (sRGB)       | Salvage base | What it unlocks                          |
+| --------- | ----------------- | --------------------------------------- | ------------------ | ------------ | ---------------------------------------- |
+| Common    | 1 – 2             | Attribute only                          | (0.85, 0.85, 0.85) | 1            | Pure stats; occasionally a Perfect roll  |
+| Magic     | 2 – 3             | Attribute + (Element xor Archetype)     | (0.40, 0.65, 1.00) | 3            | First synergy line                       |
+| Rare      | 3 – 4             | Full trio                               | (1.00, 0.85, 0.30) | 8            | Ability **amplifiers** (dmg / CDR)       |
+| Legendary | 3 – 4             | Full trio + hand-authored unique        | (1.00, 0.45, 0.10) | 25           | Named unique effect (Transform/Proc/...) |
 
 Salvage scales with ilvl: `base * (1 + ilvl/20)`.
 
 Design intent (verbatim from
-[rarity.rs](crates/rift-game/src/loot/rarity.rs#L7)): rarity unlocks
+[rarity.rs](crates/rift-game/src/loot/rarity.rs)): rarity unlocks
 **patterns**, not just bigger numbers.
 
 ### 1.6 Affix anatomy
@@ -132,15 +164,16 @@ struct AffixDef {
     effect: AffixEffect,
     roll: (f32, f32),            // range at ilvl = 1
     ilvl_scale: f32,             // linear growth per ilvl above 1
-    tags: u32,                   // synergy mask
+    tags: u32,                   // legacy bitmask (not read by roll pipeline)
     min_ilvl: u32,               // doesn't drop below this ilvl
     rarity_min: Rarity,          // and not below this tier
     weight: u32,                 // base selection weight
 }
 ```
 
-`AffixEffect` is the taxonomy of how an affix **interacts with the combat
-layer** — see [affixes.rs](crates/rift-game/src/loot/affixes.rs#L48):
+`AffixEffect` is the taxonomy of how an affix **interacts with the
+combat layer** — see
+[affixes.rs](crates/rift-game/src/loot/affixes.rs):
 
 | Variant                                       | Pattern   | Carries                         | Where applied                                                                               |
 | --------------------------------------------- | --------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -151,19 +184,20 @@ layer** — see [affixes.rs](crates/rift-game/src/loot/affixes.rs#L48):
 | `TransformAbility(AbilityId, AbilityVariant)` | Transform | discrete variant token          | `AbilityMods::transform_for(id)` → server hooks in `sim/transforms.rs` and `sim/channel.rs` |
 | `Proc(ProcEvent, ProcAction)`                 | Trigger   | proc chance is the rolled value | `AbilityMods::procs` → `sim/procs.rs::dispatch`                                             |
 
-`is_legendary_effect(effect)` is the gate function used by the roll
-pipeline; today it returns `true` for `Transform`, `Proc`, and
-`ExtraProjectiles`.
+`AffixCategory` (in `affixes.rs`) classifies each def into one of
+`Attribute | Element | Archetype | Resonance | RiftTouched | Bonus`.
+`category()` reads it from the effect + pool membership; the roll
+pipeline (§1.8) walks one phase per category.
 
-#### `AbilityVariant` (transforms — declared)
+#### `AbilityVariant` (transforms — fully wired)
 
-| Variant           | Concept                                    | Wired in server?                                                     |
-| ----------------- | ------------------------------------------ | -------------------------------------------------------------------- |
-| `FireballToBeam`  | Fireball morphs into a piercing beam       | **No** (declared only)                                               |
-| `FrostRayShatter` | Frost Ray detonates into shards on release | **Yes** — `sim/transforms.rs::on_channel_end`, ICD 6s, min hold 0.4s |
-| `WhirlwindVortex` | Whirlwind pulls enemies inward each tick   | **No** (declared only)                                               |
+| Variant           | Concept                                    | Wired in server?                                                              |
+| ----------------- | ------------------------------------------ | ----------------------------------------------------------------------------- |
+| `FireballToBeam`  | Fireball morphs into a piercing beam       | **Yes** — `sim/ability.rs` Projectile arm → synthetic `FIREBALL_BEAM` channel |
+| `FrostRayShatter` | Frost Ray detonates into shards on release | **Yes** — `sim/transforms.rs::on_channel_end`, ICD 6s, min hold 0.4s          |
+| `WhirlwindVortex` | Whirlwind pulls enemies inward each tick   | **Yes** — `sim/channel.rs` AuraAroundCaster path                              |
 
-#### `ProcEvent` (declared, partially wired)
+#### `ProcEvent`
 
 `OnCrit`, `OnHit`, `OnKill`, `OnDodge`, `OnLowHealth`.
 `OnHit` / `OnCrit` fire from `projectile::apply_hits_to_enemies`;
@@ -171,46 +205,77 @@ pipeline; today it returns `true` for `Transform`, `Proc`, and
 `OnKill` is **not yet wired** (needs killer attribution through
 `loot::finalise_kills`). Low-HP threshold is 30 % with re-arm latch.
 
-#### `ProcAction` (declared, partially wired)
+#### `ProcAction` (current shape)
 
-| Action                                   | Wired?                                         |
-| ---------------------------------------- | ---------------------------------------------- |
-| `Explosion { radius, damage }`           | **Yes** — pushes a single-tick `ServerAoeZone` |
-| `CastAbility(AbilityId)`                 | **No** (declared, dispatcher arm is a no-op)   |
-| `ChainLightning { max_targets, damage }` | **No** (declared, dispatcher arm is a no-op)   |
+The original three-variant declaration was simplified during Phase 4
+— `ChainLightning` was retired in favour of just routing those procs
+through `CastAbility(CHAIN_LIGHTNING_ABILITY_ID)` once a chain-lightning
+ability exists.
+
+| Action                         | Wired?                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| `Explosion { radius, damage }` | **Yes** — pushes a single-tick `ServerAoeZone`                                        |
+| `CastAbility(AbilityId)`       | **Yes** — queues a free cast through `ability::dispatch_proc_cast`; cooldown-bypassed |
+
+Proc-cast safety: when `CastAbility` targets a Channel ability (e.g.
+Frost Ray, Mirrorglass + Embercrown stack), the dispatch arm
+**skips** if the caster is already mid-channel (so the focused cast
+isn't stomped, which would orphan its client VFX) and **clamps**
+infinite-duration channels to a `PROC_CHANNEL_BURST_SECS = 0.6` burst
+with `cancel_on_move = false`. See
+[ability.rs](crates/rift-server/src/sim/ability.rs).
 
 Proc rolls are deterministic from `(tick, salt, action_marker)`, so
 identical hit identities produce identical outcomes.
 
-### 1.7 The current `AFFIX_POOL`
+### 1.7 The affix pools
 
-Total: **26 entries**, partitioned by intent:
+The pool is now sharded into **three named constants** rather than a
+single `AFFIX_POOL`, so the roll pipeline can address each phase
+independently. All three live in
+[affixes.rs](crates/rift-game/src/loot/affixes.rs); helper
+`affix_iter()` chains them for lookup.
 
-**Common-tier — pure stats (`weight > 0`, available at Common+):**
+#### Main pool — `AFFIX_POOL` (~21 entries)
 
-| id                   | Stat              | Roll @ ilvl 1 | ilvl_scale | Tags                 |
-| -------------------- | ----------------- | ------------- | ---------- | -------------------- |
-| `flat_health`        | Health            | 10 .. 25      | 4.0        | DEFENSE\|UTILITY     |
-| `flat_armor`         | Armor             | 4 .. 9        | 2.0        | DEFENSE\|MELEE       |
-| `pct_attack_speed`   | AttackSpeed (%)   | 4 .. 8 %      | 0.3 %/lvl  | SPEED\|MELEE\|CASTER |
-| `pct_move_speed`     | MoveSpeed (%)     | 3 .. 7 %      | 0.1 %/lvl  | SPEED\|UTILITY       |
-| `pct_evasion`        | Evasion (%)       | 3 .. 7 %      | 0.2 %/lvl  | SPEED\|DEFENSE       |
-| `pct_resource_regen` | ResourceRegen (%) | 5 .. 12 %     | 0.4 %/lvl  | UTILITY\|CASTER      |
-| `flat_health_regen`  | HealthRegen       | 1 .. 3        | 0.4        | DEFENSE\|UTILITY     |
+Carries everything the roll pipeline samples for **trio axes**
+(Attribute / Element / Archetype) and **bonus** rolls.
 
-| `pct_elemental_resist` | ElementalResist (%) | 3 .. 6 % | 0.2 %/lvl | DEFENSE\|CASTER |
-| `pct_healing_received` | HealingReceived (%) | 5 .. 12 % | 0.3 %/lvl | DEFENSE\|UTILITY |
+**Attribute axis** (signature: 1 line on most items, derived from
+`base.family.attribute`):
 
-**Magic-tier — clusters (`rarity_min = Magic`):**
+| id               | Stat      | Roll @ ilvl 1 | Notes                                |
+| ---------------- | --------- | ------------- | ------------------------------------ |
+| `flat_strength`  | Strength  | 2 .. 5        | rolls only on Strength-family bases  |
+| `flat_agility`   | Agility   | 2 .. 5        | rolls only on Agility-family bases   |
+| `flat_intellect` | Intellect | 2 .. 5        | rolls only on Intellect-family bases |
 
-| id                     | Stat                  | Roll @ ilvl 1 | Tags              |
-| ---------------------- | --------------------- | ------------- | ----------------- |
-| `pct_crit_chance`      | CritChance (%)        | 2 .. 5 %      | CRIT              |
-| `pct_crit_damage`      | CritDamage (%)        | 10 .. 25 %    | CRIT              |
-| `pct_cooldown`         | CooldownReduction (%) | 3 .. 6 %      | UTILITY\|CASTER   |
-| `pct_fire_damage`      | FireDamage (%)        | 6 .. 14 %     | FIRE\|CASTER      |
-| `pct_ice_damage`       | IceDamage (%)         | 6 .. 14 %     | ICE\|CASTER       |
-| `pct_lightning_damage` | LightningDamage (%)   | 6 .. 14 %     | LIGHTNING\|CASTER |
+(Wildcard bases skip the attribute signature; the bonus pass can still
+pull one of these if the base accepts it.)
+
+**Element axis** (signature: 1 line gated by `base.family.element`):
+
+| id                     | Effect              | Roll @ ilvl 1 |
+| ---------------------- | ------------------- | ------------- |
+| `pct_physical_damage`  | PhysicalDamage (%)  | 8 .. 16 %     |
+| `pct_fire_damage`      | FireDamage (%)      | 6 .. 14 %     |
+| `pct_ice_damage`       | IceDamage (%)       | 6 .. 14 %     |
+| `pct_lightning_damage` | LightningDamage (%) | 6 .. 14 %     |
+
+**Archetype axis** (signature: 1 line gated by `base.family.archetype`):
+
+| id                      | Effect               | Roll @ ilvl 1 | Notes          |
+| ----------------------- | -------------------- | ------------- | -------------- |
+| `pct_projectile_damage` | ProjectileDamage (%) | 8 .. 16 %     | signature-only |
+| `pct_melee_damage`      | MeleeDamage (%)      | 8 .. 16 %     | signature-only |
+
+**Defensive / utility (bonus pool — `weight > 0`, all rarities):**
+
+`flat_health`, `flat_armor`, `flat_health_regen`,
+`pct_attack_speed`, `pct_move_speed`, `pct_evasion`,
+`pct_resource_regen`, `pct_elemental_resist`,
+`pct_healing_received`, `pct_crit_chance`, `pct_crit_damage`,
+`pct_cooldown` (rarity_min = Magic).
 
 **Rare-tier — ability amplifiers (`rarity_min = Rare`):**
 
@@ -221,75 +286,136 @@ Total: **26 entries**, partitioned by intent:
 | `cdr_frost_ray`     | `ReduceAbilityCooldown(FROST_RAY)`    | -5..12 %  |
 | `cdr_evasive_roll`  | `ReduceAbilityCooldown(EVASIVE_ROLL)` | -5..12 %  |
 
-**Legendary-tier — gameplay-changing (`rarity_min = Legendary`):**
-
-| id                            | Effect                                         | Notes                  |
-| ----------------------------- | ---------------------------------------------- | ---------------------- |
-| `mod_fire_ball_extra_proj`    | `ExtraProjectiles(FIRE_BALL)` — fixed +1       | min_ilvl 15, weight 10 |
-| `transform_frost_ray_shatter` | `TransformAbility(FROST_RAY, FrostRayShatter)` | min_ilvl 15, weight 8  |
-
 **Slot-signature affixes (weight 0, never bonus-rolled):**
 
 `flat_vitality`, `pct_weapon_damage`, `pct_spell_damage`,
-`pct_physical_damage`, `pct_projectile_damage`, `pct_beam_damage`,
-`pct_aoe_damage`, `pct_melee_damage` — these only enter items via the
-deterministic per-slot signature pass (see § 1.9).
+`pct_physical_damage`, `pct_projectile_damage`, `pct_melee_damage` —
+these only enter items via the per-slot signature pass.
 
-> **Today's truth:** only **2 legendary-effect lines are authored**
-> (one `Modify`, one `Transform`). No `Proc` affix exists in the pool
-> yet, even though the dispatcher in `sim/procs.rs` is wired for
-> `Explosion`. The other two transforms (`FireballToBeam`,
-> `WhirlwindVortex`) are declared variants with no `AffixDef` row and
-> no server hook.
+**Legacy legendary-effect lines (still in the main pool — being
+migrated to `UNIQUES`):**
+
+| id                            | Effect                                         |
+| ----------------------------- | ---------------------------------------------- |
+| `mod_fire_ball_extra_proj`    | `ExtraProjectiles(FIRE_BALL)` — fixed +1       |
+| `transform_frost_ray_shatter` | `TransformAbility(FROST_RAY, FrostRayShatter)` |
+
+Phase 7 will retire these once the equivalent uniques (Embercrown,
+"Frost Ray legendary") are confirmed authored.
+
+#### Resonance pool — `RESONANCE_POOL` (9 entries)
+
+A **separate** pool sampled in its own phase that **breaks the family
+lock** — the resonance line specifically grants a trio axis the base
+would otherwise reject. Resonance affixes carry `AffixCategory::Resonance`
+and use the `res_*` id prefix.
+
+| id                      | Grants                   |
+| ----------------------- | ------------------------ |
+| `res_physical_damage`   | Physical element synergy |
+| `res_fire_damage`       | Fire element             |
+| `res_ice_damage`        | Ice element              |
+| `res_lightning_damage`  | Lightning element        |
+| `res_projectile_damage` | Projectile archetype     |
+| `res_melee_damage`      | Melee archetype          |
+| `res_strength`          | Strength attribute       |
+| `res_agility`           | Agility attribute        |
+| `res_intellect`         | Intellect attribute      |
+
+Drop chance per rarity (from `resonance_chance(rarity)`):
+Common 0, Magic 0, Rare 5 %, Legendary 25 %.
+
+#### Rift-touched pool — `RIFT_TOUCHED_POOL` (6 entries)
+
+The endgame slot: only rolls on items dropped from monsters killed
+inside an active rift, gated by `RIFT_TOUCHED_MIN_FLOOR` (currently
+**1** — a debug-friendly value; Section 2's design north star is
+20 and will be raised once endgame pacing settles). Chance per
+eligible drop is `RIFT_TOUCHED_CHANCE = 0.20`, and the magnitude
+scales by `RIFT_TOUCHED_DEPTH_SCALE = +10 %` per floor above the
+floor minimum.
+
+| id                      | Stat                  |
+| ----------------------- | --------------------- |
+| `rt_crit_chance`        | CritChance (%)        |
+| `rt_elemental_resist`   | ElementalResist (%)   |
+| `rt_cooldown_reduction` | CooldownReduction (%) |
+| `rt_move_speed`         | MoveSpeed (%)         |
+| `rt_resource_regen`     | ResourceRegen (%)     |
+| `rt_range`              | Range (%)             |
+
+#### Unique catalogue — `UNIQUES`
+
+Hand-authored items with `LegendaryEffect` are no longer pool entries;
+they live in [uniques.rs](crates/rift-game/src/loot/uniques.rs) and
+get sampled in their own phase once a base has rolled to Legendary.
+See §1.12 for the live roster.
 
 ### 1.8 The roll pipeline (`Item::roll`)
 
-[item.rs L207-281](crates/rift-game/src/loot/item.rs#L207). Four phases:
+Now **seven phases**, each consulting one pool. See
+[item.rs](crates/rift-game/src/loot/item.rs).
 
 1. **Signature injection.** Deterministic per-`EquipSlot` lines via
    `signature_for(slot, rng)`. Every item gets these regardless of
-   rarity. Composition:
+   rarity. (Slot table below — the `pct_armor` bug noted in earlier
+   revisions is **fixed**: Shoulders now returns `flat_armor`.)
 
-   | Slot          | Signature                                                 |
-   | ------------- | --------------------------------------------------------- |
-   | Weapon        | Vitality + WeaponDamage + SpellDamage                     |
-   | Hands         | Vitality + CritChance + CritDamage                        |
-   | Helm          | Vitality + CooldownReduction                              |
-   | Shoulders     | Vitality + (`pct_armor` — **note: id missing from pool**) |
-   | Chest         | Vitality + Health (`flat_health`)                         |
-   | Legs          | Vitality + Armor (`flat_armor`)                           |
-   | Boots         | Vitality + MoveSpeed                                      |
-   | Ring1 / Ring2 | Vitality + one of `{fire, ice, lightning, physical}` dmg  |
-   | Amulet        | Vitality + one of `{projectile, beam, aoe, melee}` dmg    |
+   | Slot          | Signature                                                |
+   | ------------- | -------------------------------------------------------- |
+   | Weapon        | Vitality + WeaponDamage + SpellDamage                    |
+   | Hands         | Vitality + CritChance + CritDamage                       |
+   | Helm          | Vitality + CooldownReduction                             |
+   | Shoulders     | flat_armor                                               |
+   | Chest         | Vitality + Health (`flat_health`)                        |
+   | Legs          | Vitality + Armor (`flat_armor`)                          |
+   | Boots         | Vitality + MoveSpeed                                     |
+   | Ring1 / Ring2 | Vitality + one of `{fire, ice, lightning, physical}` dmg |
+   | Amulet        | Vitality + one of `{projectile, melee}` dmg              |
 
-   ⚠ **Live bug:** `Shoulders` requests id `"pct_armor"` which does
-   not exist in the pool — `lookup` returns `None` and the line is
-   silently dropped. (Tracked in § 3.)
+2. **Trio rolls (Attribute × Element × Archetype).** One pick per axis
+   the base permits, gated by `BaseFamily::accepts_*`. Magic items get
+   Attribute + one of Element/Archetype; Rare/Legendary get all three.
+   `pick_affix_in_category(AFFIX_POOL, category, ...)` does the
+   weighted draw, skipping ids already on the item.
 
-2. **Bonus rolls.** Pull `rarity.affix_count_range()` lines from the pool
-   (Common: 0, Magic: 1, Rare: 2, Legendary: 3). The candidate filter is:
+3. **Bonus rolls.** Fill remaining slots from
+   `rarity.affix_count_range()` (Common 1–2 / Magic 2–3 / Rare 3–4 /
+   Legendary 3–4). Candidate filter:
 
    ```text
-   not in signature ids
-   AND not is_legendary_effect
-   AND tags & base.allowed_tags != 0
+   not in item's affix ids
+   AND category == Bonus  (i.e. not Attribute/Element/Archetype/Resonance/RiftTouched)
    AND min_ilvl <= ilvl
    AND rarity >= rarity_min
    AND weight > 0
+   AND base.family.accepts_affix(def)   // family lock
    ```
 
-   Selection is weighted, with `weight ×= 2` when
-   `tags & base.favored_tags != 0`. No duplicate ids per item.
+4. **Legendary unique.** Iff `rarity == Legendary`, sample
+   `UNIQUES.iter().filter(|u| u.matches(equip_slot, base_id))`
+   weighted by `weight`. Stamps `Item::unique_id = Some(u.id)` and
+   appends the unique's `legendary_effect` line. At most one per
+   item.
 
-3. **Legendary effect.** Iff `rarity == Legendary`, pick one weighted
-   pick from the legendary-effect pool (`is_legendary_effect && tags &
-base.allowed_tags != 0 && min_ilvl <= ilvl`). At most one per item.
+5. **Resonance.** Roll `next_f32() < resonance_chance(rarity)`; on
+   success draw one entry from `RESONANCE_POOL`. The chosen axis is
+   recorded on the affix's `AffixCategory` and **bypasses** the family
+   lock — this is the only legitimate way to attach an off-family
+   trio line.
 
-4. **Anchored roll.** Iff Legendary, `next_f32() < ANCHORED_CHANCE`
+6. **Rift-touched.** When `loot::finalise_kills` rolls the drop and
+   the kill happened inside a rift at `floor >= RIFT_TOUCHED_MIN_FLOOR`,
+   it calls `Item::apply_rift_touched(floor, rng)` which draws from
+   `RIFT_TOUCHED_POOL` with `RIFT_TOUCHED_CHANCE`. Magnitudes are
+   scaled by `1.0 + (floor - MIN_FLOOR) * RIFT_TOUCHED_DEPTH_SCALE`.
+   The line is stamped on `Item::rift_touched: Option<RolledRiftTouched>`.
+
+7. **Anchored.** Iff Legendary, `next_f32() < ANCHORED_CHANCE`
    (1 / 5 000) sets `Item::anchored = true`. Purely persistence-side
    trait — no stat impact.
 
-`roll_value` is shared across all three roll phases:
+`roll_value` is shared across all phases:
 `rng.frange(roll.0 + (ilvl-1)*ilvl_scale, roll.1 + (ilvl-1)*ilvl_scale)`,
 or the fixed `roll.0` when the range is degenerate (Transform / fixed
 Modify lines).
@@ -301,7 +427,9 @@ struct Item {
     base: &'static BaseItem,
     rarity: Rarity,
     ilvl: u32,
-    affixes: Vec<RolledAffix>,   // [signatures.. , bonus.. , legendary?]
+    affixes: Vec<RolledAffix>,   // [signatures.. , trio.. , bonus.. , unique?, resonance?]
+    unique_id: Option<&'static str>,         // points into UNIQUES catalogue
+    rift_touched: Option<RolledRiftTouched>, // depth-scaled endgame line
     anchored: bool,              // survives wipe-on-death (Legendary 1/5000)
     unstable: bool,              // picked up inside an active rift
     provenance: Option<LootProvenance>,
@@ -317,6 +445,10 @@ struct LootProvenance { eligible: Vec<[u8;16]> }  // character UUIDs
 - **`anchored`** wins over wipe paths _unless_ the item is also
   `unstable` (loot picked up in a rift but not extracted is destroyed
   even if it rolled the anchored trait).
+- **`unique_id`** and **`rift_touched`** survive persistence and the
+  wire codec; the tooltip pulls them through the
+  `TooltipLineKind::{Resonance, RiftTouched}` channels for distinct
+  styling.
 - **`provenance`** snapshots the party's character UUIDs at
   drop-time; `ShareWindow` time-gates outside-of-party pickups.
   Legacy items with `None` self-bind to the first picker.
@@ -364,10 +496,11 @@ Common rather than emitting an empty Legendary.
 
 ### 1.12 Tooltip rendering
 
-[item.rs L313-446](crates/rift-game/src/loot/item.rs#L313). Top-down
+[loot/tooltip.rs](crates/rift-game/src/loot/tooltip.rs). Top-down
 order:
 
-1. Display name (rarity-coloured by the renderer)
+1. Display name (rarity-coloured by the renderer; unique items also
+   surface their unique name through `unique_id`).
 2. `Item Level N`
 3. `Requires Level N`
 4. `⚠ Unstable — extract to stabilise` (if set)
@@ -375,27 +508,35 @@ order:
 6. Implicits (base lines)
 7. **Signature block**, ordered `[primary, Vitality, secondary?]`
 8. `───` separator + bonus stat affixes
-9. Amplify / CDR affixes
-10. `★ <legendary line>` (gold by renderer)
-11. Synergy footer `→ Boosts <ability> (slot N) [<bucket>]` for each
-    slotted ability the item helps (when a `Loadout` is supplied)
+9. Trio affixes (Attribute / Element / Archetype) — each tagged with
+   its `AffixCategory` so the renderer can colour-stripe them.
+10. `TooltipLineKind::Resonance` line (cyan stripe) — if the item
+    rolled a resonance.
+11. `TooltipLineKind::RiftTouched` line (violet stripe) — if rolled.
+12. `★ <legendary unique line>` (gold by renderer) — if `unique_id`
+    is set.
+13. Synergy footer `→ Boosts <ability> (slot N) [<bucket>]` for each
+    slotted ability the item helps (when a `Loadout` is supplied).
 
-Each line shows a roll-quality percentile `[NN%]` when the affix has a
-non-degenerate range.
+Each line shows a **named roll band** (`RollBand`: Crude / Fair / Fine
+/ Pristine / Perfect) computed by `RollBand::from_percentile`, rendered
+in the band's signature colour. The raw `[NN%]` percentile is no
+longer displayed.
 
 ### 1.13 Persistence & wire
 
 - `Item::to_persisted()` / `from_persisted()` round-trip through
   **stable string ids** — surviving pool reorders. Used by
   `rift-persistence` (Postgres JSONB column `affixes` of
-  `[{id, v}, …]`).
+  `[{id, v}, …]`). `unique_id`, `rift_touched`, `anchored`, and
+  `provenance` ride alongside in their own JSONB fields.
 - `Item::to_wire()` / `from_wire()` use **pool indices** (compact, but
   build-coupled — both peers must agree on `BASE_ITEMS` /
   `AFFIX_POOL` ordering). Used by `ItemBlob` in `rift-net::messages`.
-- `unstable` is **not** in `to_wire`'s 5-tuple: the carrier
+- `unstable` is **not** in `to_wire`'s tuple: the carrier
   `ItemBlob` ships it separately and the constructor defaults
   `unstable = false`.
-- `provenance` is wire-optional; legacy decode = `None`.
+- `provenance` and `rift_touched` are wire-optional; legacy decode = `None`.
 
 ---
 
@@ -517,14 +658,14 @@ unique has:
 **Catalog scale for v1:** stub 4–6 hero items to validate the system,
 then expand catalogue-style (one row per unique). Suggested seed set:
 
-| Name (working title)    | Base   | Family                         | Effect                                                                    |
-| ----------------------- | ------ | ------------------------------ | ------------------------------------------------------------------------- |
-| **Embercrown**          | Helm   | Spell / Fire / AoE             | `TransformAbility(FIRE_BALL, FireballToBeam)` — wires the dormant variant |
-| **Stormcaller's Reach** | Staff  | Spell / Lightning / Projectile | `Proc(OnCrit, ChainLightning { 3, 35 })` — wires the dormant action       |
-| **Splinterstep**        | Boots  | Weapon / Physical / Melee      | `Proc(OnDodge, Explosion { 3.0, 50 })` — already-wired action             |
-| **Tidebound Cuirass**   | Chest  | Spell / Ice                    | `TransformAbility(WHIRLWIND, WhirlwindVortex)` — wires dormant variant    |
-| **Cleavebreaker**       | Sword  | Weapon / Physical / Melee      | `ExtraProjectiles(MULTI_SHOT)` with a rolled 1–2 range, scaling with ilvl |
-| **Mirrorglass Amulet**  | Amulet | wildcard                       | `Proc(OnLowHealth, CastAbility(EVASIVE_ROLL))` — wires dormant action     |
+| Name (working title)    | Base   | Family                         | Effect                                                                         |
+| ----------------------- | ------ | ------------------------------ | ------------------------------------------------------------------------------ |
+| **Embercrown**          | Helm   | Spell / Fire / AoE             | `TransformAbility(FIRE_BALL, FireballToBeam)` — wires the dormant variant      |
+| **Stormcaller's Reach** | Staff  | Spell / Lightning / Projectile | `Proc(OnCrit, ChainLightning { 3, 35 })` — wires the dormant action            |
+| **Splinterstep**        | Boots  | Weapon / Physical / Melee      | `Proc(OnDodge, Explosion { 3.0, 50 })` — already-wired action                  |
+| **Tidebound Cuirass**   | Chest  | Spell / Ice                    | `TransformAbility(WHIRLWIND, WhirlwindVortex)` — wires dormant variant         |
+| **Cleavebreaker**       | Sword  | Weapon / Physical / Melee      | `ExtraProjectiles(FIREBALL_VOLLEY)` with a rolled 1–2 range, scaling with ilvl |
+| **Mirrorglass Amulet**  | Amulet | wildcard                       | `Proc(OnLowHealth, CastAbility(EVASIVE_ROLL))` — wires dormant action          |
 
 The seed set is intentionally chosen so building it **also wires
 every dormant `AbilityVariant` and `ProcAction`** listed in §3 — one
@@ -675,77 +816,40 @@ behind a feature flag (or as a single PR) without breaking persistence
 or the wire protocol — the existing `to_persisted` / `from_persisted`
 contract keeps old items readable while the pool churns underneath.
 
-### Phase 0 — Triage bug fixes that block design work
+### Phase 0 — Triage bug fixes that block design work — **done**
 
-These are landings the new design can't sit on top of cleanly. None
-of them require schema/wire changes.
+> **Landed.** `signature_for(Shoulders)` now returns `["flat_armor"]`
+> and the resolve-every-signature-id test in
+> [affixes.rs](crates/rift-game/src/loot/affixes.rs)
+> guards the contract. The `roll-quality` smoke test exists under
+> [item.rs](crates/rift-game/src/loot/item.rs)
+> as the `every_base_rolls_non_empty_at_each_rarity` test. The
+> `is_legendary_effect` predicate is retained for filtering legacy
+> bonus-pool legendary lines while Phase 7 retires them in favour of
+> `UNIQUES`.
 
-- **Fix the `pct_armor` signature bug.** Today
-  `signature_for(Shoulders)` returns `"pct_armor"`, which is not in
-  `AFFIX_POOL` — `lookup` returns `None` and the line is silently
-  dropped. Change Shoulders' signature to `flat_armor` (matching
-  `Legs`) and assert in a test that every id returned by
-  `signature_for` resolves.
-  [`affixes.rs` L488](crates/rift-game/src/loot/affixes.rs#L488)
-- **Add a `roll-quality test`** that every base in `BASE_ITEMS` can
-  produce a non-empty `Item::roll` at each rarity tier (catches
-  base-vs-pool drift early — e.g. a tag mask that filters every
-  affix out).
-- **Decide the deprecation path** for the existing
-  `is_legendary_effect` predicate. In the new model effects only
-  attach via named uniques, so the predicate stays useful for
-  filtering bonus rolls but is no longer the only entry point.
-
-### Phase 1 — Family-locked bases (the structural change)
+### Phase 1 — Family-locked bases (the structural change) — **done**
 
 This is the change that fixes the original incoherence ("sword with
 spell affixes"). Everything else builds on top.
 
-1. **Introduce `Family` types** in `rift-game::loot`:
+> **Landed.** `loot/families.rs` declares `Attribute`, `Element`, and
+> `Archetype` enums plus `BaseFamily { attribute, element, archetype
+}` with a `WILDCARD` constant. (The original design's `Source` axis
+> was folded into `Attribute` once classes settled — the role
+> Strength/Agility/Intellect play _is_ the Weapon/Spell distinction
+> the old Source axis encoded.) Every row in `BASE_ITEMS` carries a
+> `family` field; the legacy `allowed_tags` / `favored_tags` masks
+> are preserved for backwards-compat but ignored by the roll
+> pipeline (slated for removal in Phase 7 after a DB sweep).
+> `BaseFamily::accepts_*` is the family-lock predicate consulted by
+> every trio/bonus pick.
 
-   ```rust
-   enum Source     { Weapon, Spell }
-   enum Element    { Physical, Fire, Ice, Lightning }
-   enum Archetype  { Projectile, Beam, AoE, Melee }
-   ```
-
-   These already exist on `Ability` (see `abilities.rs`'s `Scaling`,
-   `Element`, `Archetype` — same vocabulary). Either re-use them, or
-   move them to a shared `families` module and re-export.
-
-2. **Replace `BaseItem::allowed_tags` / `favored_tags`** with:
-
-   ```rust
-   pub struct BaseFamily {
-       pub source:    Option<Source>,    // None = wildcard (accessories)
-       pub element:   Option<&'static [Element]>, // staff = [Fire,Ice,Lightning]
-       pub archetype: Option<&'static [Archetype]>,
-   }
-   ```
-
-   `None` slots are the wildcard / accessory case. A single-element
-   weapon (e.g. a future "Embercoal Wand") just authors `Some(&[Fire])`.
-
-3. **Update every base item row.** Source-of-truth migration:
-
-   | Base                      | Source                                | Element                        | Archetype             |
-   | ------------------------- | ------------------------------------- | ------------------------------ | --------------------- |
-   | staff_basic               | Spell                                 | any (`[Fire, Ice, Lightning]`) | any (`[AoE, Beam]`)   |
-   | wand_basic                | Spell                                 | any                            | `[Projectile]`        |
-   | sword_basic               | Weapon                                | `[Physical]`                   | `[Melee]`             |
-   | dagger_basic              | Weapon                                | `[Physical]`                   | `[Melee]`             |
-   | heavy_chest / legs / helm | Weapon                                | `[Physical]`                   | (none — defence only) |
-   | light\_\*                 | (either, flexible — author per piece) |                                |
-   | robe_chest                | Spell                                 | (none — element-flex)          | (none)                |
-   | ring_basic, amulet_basic  | wildcard (`None`/`None`/`None`)       |                                |
-
-4. **Delete the `tag::*` bitmask module** once nothing reads it.
-   Keep it during the migration so the legacy path keeps compiling.
-
-> Forward compatibility: items already in the DB still rehydrate via
-> `from_persisted` using affix string ids; the family lock only
-> influences _new_ rolls. Old items with off-family affixes simply
-> exist as legacy outliers and will be salvaged out by players.
+> **Deferred from this phase:** the original plan listed an
+> `Archetype::{Beam, AoE}` pair that never materialised. Beam and
+> AoE damage are runtime stats but **don't roll** — abilities consume
+> them through `BeamDamage` / `AoeDamage` stat buckets, not
+> archetype affixes. The shipped enum is just `{Projectile, Melee}`.
 
 ### Phase 2 — The trio rolling pipeline — **done**
 
@@ -844,10 +948,28 @@ design** and rolls in its own extra slot.
 > cyan tint yet). That UX polish lands with the wider tooltip
 > overhaul.
 
-### Phase 4 — Named Legendary uniques
+### Phase 4 — Named Legendary uniques — **mostly landed**
 
 §2.4. The most user-visible phase. Replace the current procedural
 legendary-effect roll with a hand-authored unique pool.
+
+> **Landed.** [loot/uniques.rs](crates/rift-game/src/loot/uniques.rs)
+> declares `UniqueDef` + `LegendaryEffect` and exports `UNIQUES`
+> with five entries: **Embercrown** (`FireballToBeam`),
+> **Splinterstep** (`OnDodge` → `Explosion`), **Cleavebreaker**
+> (`ExtraProjectiles(FIREBALL_VOLLEY, +2)`), **Mirrorglass Amulet**
+> (`OnCrit` → `CastAbility(random)`), and **Shardspire**
+> (`FrostRayShatter`). `Item::roll` consults `UNIQUES.filter(|u|
+u.matches(equip_slot, base_id))` in its Legendary phase and
+> stamps `Item::unique_id`. The wire codec carries `unique_id`
+> separately so a unique survives a pool reorder.
+>
+> **Still pending:** **Stormcaller's Reach** (Wand —
+> `CastAbility(ChainLightning)`) and **Tidebound Cuirass** (Heavy
+> Chest — `Bespoke` water-shield) from the §2.4 seed set. The
+> Mirrorglass freeroll multi-effect entry is currently commented out
+> in `UNIQUES` pending a roll site that can stamp multiple
+> `LegendaryEffect`s on one item.
 
 1. **New module: `loot/uniques.rs`.** Declarative table:
    ```rust
@@ -877,21 +999,34 @@ legendary-effect roll with a hand-authored unique pool.
    deliberately wires every dormant `AbilityVariant` and
    `ProcAction`:
    - `Embercrown` wires `FireballToBeam` (server hook).
-   - `Stormcaller's Reach` wires `ProcAction::ChainLightning` (dispatcher arm).
+   - `Stormcaller's Reach` wires `ProcAction::CastAbility<ChainLightning>` (dispatcher arm).
    - `Splinterstep` uses already-wired `OnDodge` + `Explosion`.
-   - `Tidebound Cuirass` wires `WhirlwindVortex` (server hook).
-   - `Cleavebreaker` exercises ranged `ExtraProjectiles(MULTI_SHOT)` (verify multishot consumer).
+   - `Cleavebreaker` exercises ranged `ExtraProjectiles(FIREBALL_VOLLEY)` (verify the volley consumer respects the additive count).
    - `Mirrorglass Amulet` wires `ProcAction::CastAbility` (dispatcher arm) + a free `EVASIVE_ROLL` path that bypasses cooldown.
-5. **Persistence.** Store unique id as a separate column
+   - `Shardspire (Staff, Ice)` — `FrostRayShatter` (already wired — gets the existing transform a named home)
+5. **Persistence.** Store unique id as a separate columnO
    (`unique_id: Option<String>`) so a unique survives a pool reorder
    and so the renderer can pick the authored name without inferring.
    Wire shape gets a `unique_id: Option<u16>` field on `ItemBlob`.
 6. **Tooltip:** authored name as the headline, base name as subtitle.
 
-### Phase 5 — Rift-touched line
+### Phase 5 — Rift-touched line — **landed**
 
 §2.6. One extra slot, only past a floor threshold, only on
 rift-origin items.
+
+> **Landed.** `RIFT_TOUCHED_POOL` (6 entries) +
+> `AffixCategory::RiftTouched` + `TooltipLineKind::RiftTouched` are
+> live. `Item::rift_touched: Option<RolledRiftTouched>` carries the
+> stamp through persistence and wire. The roll site in
+> [server/sim/loot.rs](crates/rift-server/src/sim/loot.rs) checks
+> `floor_index >= RIFT_TOUCHED_MIN_FLOOR` and rift-origin kills, then
+> calls `Item::apply_rift_touched(floor, rng)`.
+>
+> **One value to revisit:** `RIFT_TOUCHED_MIN_FLOOR` is currently
+> set to **1** (debug/bring-up convenience); the §2 design north star
+> is **20**. Bumping it is a one-line change once endgame floor pacing
+> stabilises.
 
 1. **New affix category** `RiftTouched`, new
    `ItemLineKind::RiftTouched` for the renderer.
@@ -911,9 +1046,21 @@ cooldowns`, `+X % movement speed`, `+X resource regen`,
    `+X % to all on-X procs`. Magnitudes scale with floor depth, not
    ilvl.
 
-### Phase 6 — Named roll bands & tooltip polish
+### Phase 6 — Named roll bands & tooltip polish — **partially landed**
 
 §2.8. Pure UX. No gameplay change.
+
+> **Landed.** `rift-ui-types::RollBand` exists with the
+> `{Crude, Fair, Fine, Pristine, Perfect}` variants,
+> `RollBand::from_percentile` and per-band colours. The tooltip
+> renderer surfaces the band name instead of the raw `[NN%]`.
+>
+> **Still pending:** the inventory **compare-tooltip** path still
+> doesn't always thread `Loadout`, so the synergy footer is
+> intermittent on the comparison panel. Cyan tint for resonance lines
+> and violet for rift-touched lines is now wired through
+> `TooltipLineKind` but the inventory-grid mini-tooltip uses the
+> default colour pass. Both are queued for the next UI pass.
 
 1. **`rift-ui-types`:** new `RollBand { Crude, Fair, Fine, Pristine, Perfect }`.
    Constructed from the existing `roll_percentile`.

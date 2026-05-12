@@ -346,14 +346,14 @@ pub fn hunter_tree() -> TalentTree {
         // Tier 2
         TalentNode {
             id: TalentId(6),
-            name: "Multi-Shot Mastery",
-            description: "Multi-Shot fires +1 arrow per rank.",
+            name: "Volley Mastery",
+            description: "Fireball Volley hurls +1 fireball per rank.",
             max_rank: 2,
             current_rank: 0,
             tier: 2,
             prerequisites: vec![TalentId(4)],
             effect: TalentEffect::AbilityMod {
-                ability: abilities::MULTI_SHOT,
+                ability: abilities::FIREBALL_VOLLEY,
                 modifier: AbilityModifier::ExtraProjectiles(1),
             },
         },

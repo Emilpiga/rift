@@ -157,6 +157,19 @@ impl Stat {
         )
     }
 
+    /// `true` if this stat is part of the offensive bonus group.
+    /// Used by tooltip rendering (to partition the bonus block
+    /// into "offence vs sustain") and by the bonus-roll filter
+    /// in `Item::roll` (weapons only ever roll offensive bonus
+    /// stats). Single source of truth so the two pipelines
+    /// can't drift.
+    pub fn is_offensive_bonus(self) -> bool {
+        matches!(
+            self,
+            Stat::CritChance | Stat::CritDamage | Stat::AttackSpeed
+        )
+    }
+
     /// Format `value` for tooltip display (with sign prefix and unit).
     pub fn format(self, value: f32) -> String {
         if self.is_percent() {

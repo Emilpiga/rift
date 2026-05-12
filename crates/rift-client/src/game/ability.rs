@@ -238,6 +238,7 @@ pub fn on_channel_tick(
     position: Vec3,
     aim: Vec3,
 ) {
+    let ability_id = rift_game::abilities::AbilityWireId::new(ability_id);
     if let Some(entry) = state
         .channel
         .visuals
@@ -258,7 +259,60 @@ pub fn on_channel_tick(
         obj_idx: None,
         vfx_id: None,
         ending: false,
+        saw_local_active: false,
         impact_acc: 0.0,
+        pulse_travel_time: 0.0,
+        pulse_t: 0.0,
+        pulse_emit_acc: 0.0,
+    });
+}
+
+/// Handle a `WorldEvent::ChannelPulse` from the server.
+///
+/// Starts (or restarts) the traveling-bead animation on the
+/// matching channel visual. The bead lerps from caster origin
+/// to beam terminus over `travel_time` seconds, with
+/// per-frame spark emissions for trail readability. When
+/// `pulse_t` reaches `pulse_travel_time` the server's
+/// dispatched on-arrival effect (Frost Ray's shatter shards)
+/// arrives in the same tick.
+///
+/// Pre-creates a `ChannelVisual` if one doesn't exist yet —
+/// the pulse event can fire on the same tick as the very
+/// first `ChannelTick` and ordering between the two isn't
+/// guaranteed once events are interleaved across snapshots.
+pub fn on_channel_pulse(
+    state: &mut GameState,
+    caster: rift_net::NetId,
+    ability_id: u8,
+    travel_time: f32,
+) {
+    let ability_id = rift_game::abilities::AbilityWireId::new(ability_id);
+    if let Some(entry) = state
+        .channel
+        .visuals
+        .iter_mut()
+        .find(|v| v.caster == caster && v.ability_id == ability_id)
+    {
+        entry.pulse_travel_time = travel_time;
+        entry.pulse_t = 0.0;
+        entry.pulse_emit_acc = 0.0;
+        return;
+    }
+    state.channel.visuals.push(ChannelVisual {
+        caster,
+        ability_id,
+        position: Vec3::ZERO,
+        aim: Vec3::Z,
+        idle: 0.0,
+        obj_idx: None,
+        vfx_id: None,
+        ending: false,
+        saw_local_active: false,
+        impact_acc: 0.0,
+        pulse_travel_time: travel_time,
+        pulse_t: 0.0,
+        pulse_emit_acc: 0.0,
     });
 }
 
@@ -282,6 +336,7 @@ pub fn on_channel_end(
     is_local_caster: bool,
 ) {
     use rift_engine::ecs::components::SpellCast;
+    let ability_id = rift_game::abilities::AbilityWireId::new(ability_id);
 
     if is_local_caster {
         state.channel.active = None;
@@ -315,6 +370,17 @@ pub fn on_channel_end(
 pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: f32) {
     use rift_engine::physics::{self, Ray};
     use rift_game::abilities::{ShapeVisuals, VfxKind};
+
+    /// Pick the per-tick impact burst preset that matches a
+    /// beam's `VfxKind` so Embercrown's fire beam scorches
+    /// in warm orange instead of cyan frost shards.
+    fn beam_impact_preset(kind: VfxKind) -> rift_engine::renderer::vfx::spec::EffectBundle {
+        use rift_engine::renderer::vfx::presets;
+        match kind {
+            VfxKind::FireBeam => presets::fire_beam_impact(),
+            _ => presets::frost_impact(),
+        }
+    }
 
     // Common channel-render constants. Per-ability data
     // (beam VFX choice, hand offset) is pulled from each
@@ -415,6 +481,7 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         // ours but our local channel has already stopped"
         // collapses that flicker into a clean immediate fade.
         let local_release_pending = our_net_id.map(|id| id == vis.caster).unwrap_or(false)
+            && vis.saw_local_active
             && local_active_ability != Some(vis.ability_id);
         if local_release_pending {
             vis.ending = true;
@@ -459,6 +526,12 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             }
             hand_override = hand;
         } else if is_local {
+            // Latch — we've now seen this visual run under the
+            // local-channel branch, so a subsequent frame where
+            // `local_active_ability` no longer matches really
+            // does mean "the player released the hold" and
+            // `local_release_pending` may fire.
+            vis.saw_local_active = true;
             if let Some((pos, aim, hand)) = local_live {
                 vis.position = pos;
                 if aim.length_squared() > 1e-6 {
@@ -467,6 +540,22 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
                 hand_override = hand;
                 // Heartbeat the idle timer so we don't fade out
                 // between server ticks.
+                vis.idle = 0.0;
+            }
+        } else if our_net_id.map(|id| id == vis.caster).unwrap_or(false) {
+            // We're the caster but `state.channel.active` was
+            // never set for this ability (finite-duration
+            // transform-driven channel — Embercrown's Fireball
+            // Beam being today's only such case). Anchor to our
+            // live transform anyway so the beam tracks the
+            // body / aim instead of freezing at the chest-height
+            // ChannelTick payload.
+            if let Some((pos, aim, hand)) = local_live {
+                vis.position = pos;
+                if aim.length_squared() > 1e-6 {
+                    vis.aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or_zero();
+                }
+                hand_override = hand;
                 vis.idle = 0.0;
             }
         }
@@ -569,10 +658,9 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             for (_along, pos) in &hits {
                 // Centre on the enemy's torso, not their feet.
                 let burst_pos = *pos + Vec3::Y * 0.9;
-                renderer.vfx_system.spawn_bundle(
-                    rift_engine::renderer::vfx::presets::frost_impact(),
-                    burst_pos,
-                );
+                renderer
+                    .vfx_system
+                    .spawn_bundle(beam_impact_preset(beam_vfx), burst_pos);
             }
 
             // Terminal-point burst: when the beam clipped a wall
@@ -582,7 +670,40 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
             if clipped || hits.len() < cap {
                 renderer
                     .vfx_system
-                    .spawn_bundle(rift_engine::renderer::vfx::presets::frost_impact(), tip);
+                    .spawn_bundle(beam_impact_preset(beam_vfx), tip);
+            }
+        }
+
+        // ---- Pulse bead. Generic per-channel mechanic — any
+        // transform that returns a non-zero
+        // `transform_pulse_period` server-side gets a bead
+        // riding the beam from origin to tip over the pulse's
+        // travel time, with cadence-gated spark emissions for
+        // trail readability. The on-arrival effect (e.g. Frost
+        // Ray's shatter shards) is dispatched server-side and
+        // arrives via its own events on the tick the pulse
+        // completes — the bead just telegraphs *when*.
+        if vis.pulse_travel_time > 0.0 {
+            const BEAD_EMIT_INTERVAL: f32 = 0.04;
+            vis.pulse_t += dt;
+            let frac = (vis.pulse_t / vis.pulse_travel_time).clamp(0.0, 1.0);
+            let bead_pos = origin + (tip - origin) * frac;
+            vis.pulse_emit_acc += dt;
+            if vis.pulse_emit_acc >= BEAD_EMIT_INTERVAL {
+                vis.pulse_emit_acc = 0.0;
+                renderer
+                    .vfx_system
+                    .spawn_bundle(beam_impact_preset(beam_vfx), bead_pos);
+            }
+            // Cycle complete — clear so we don't keep emitting
+            // at the terminus until the next `ChannelPulse`
+            // event arrives. The on-arrival burst is already
+            // covered by the server-pushed shatter `ChannelTick`
+            // at the terminus.
+            if vis.pulse_t >= vis.pulse_travel_time {
+                vis.pulse_travel_time = 0.0;
+                vis.pulse_t = 0.0;
+                vis.pulse_emit_acc = 0.0;
             }
         }
     }

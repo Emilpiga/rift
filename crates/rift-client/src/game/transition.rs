@@ -116,6 +116,14 @@ pub fn update_character_select(
                 entity,
                 &desired,
             );
+            super::weapon_visuals::apply_weapon_visual_for_base_ids(
+                &mut state.world,
+                renderer,
+                &mut state.weapon_visual_cache,
+                entity,
+                base_ids,
+                gender,
+            );
         }
     }
     rift_engine::ecs::systems::skinning_system(
@@ -124,6 +132,10 @@ pub fn update_character_select(
         dt,
         state.floor_mgr.dungeon.as_ref(),
     );
+    // Mirror the in-game render-phase order: weapon props ride
+    // the casting-hand joint, so they update right after the
+    // skinning pass refreshes `joint_worlds`.
+    super::weapon_visuals::update_weapon_transforms(&mut state.world, renderer, input);
 
     // Fused input + render through the immediate-mode UI stack.
     let (sw, sh) = renderer.screen_size();

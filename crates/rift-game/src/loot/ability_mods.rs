@@ -9,12 +9,13 @@
 //! All maps key by [`crate::abilities::AbilityId`]; combat code that
 //! already has the id can do constant-time lookups.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::abilities::AbilityId;
 
 use super::affixes::{AbilityVariant, AffixEffect, ProcAction, ProcEvent};
 use super::item::RolledAffix;
+use super::uniques::{BespokeId, LegendaryEffect};
 
 /// One proc registered on the character.
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +45,10 @@ pub struct AbilityMods {
     /// Registered procs (no aggregation — multiple identical procs
     /// each get their own roll).
     pub procs: Vec<Proc>,
+    /// Active bespoke (one-off) unique flags. Each
+    /// [`BespokeId`] is a single boolean — equipped or not.
+    /// The combat layer reads via [`Self::has_bespoke`].
+    pub bespoke: HashSet<BespokeId>,
 }
 
 impl AbilityMods {
@@ -76,6 +81,14 @@ impl AbilityMods {
         self.procs.iter().filter(move |p| p.event == event)
     }
 
+    /// `true` when at least one equipped unique stamped
+    /// `flag` onto this aggregate (via
+    /// [`Self::apply_legendary_effect`]). Combat sites that
+    /// gate on a bespoke effect read this single boolean.
+    pub fn has_bespoke(&self, flag: BespokeId) -> bool {
+        self.bespoke.contains(&flag)
+    }
+
     /// Fold one rolled affix into the running aggregate.
     pub(super) fn apply(&mut self, affix: &RolledAffix) {
         match affix.def.effect {
@@ -101,6 +114,38 @@ impl AbilityMods {
                     action,
                     chance: affix.value.clamp(0.0, 1.0),
                 });
+            }
+        }
+    }
+
+    /// Fold one authored [`LegendaryEffect`] (Phase 4 named
+    /// uniques) into the running aggregate. Mirrors [`Self::apply`]
+    /// arm-for-arm for the three pattern variants, plus a
+    /// [`BespokeId`] arm that records the flag on
+    /// [`Self::bespoke`]. The combat layer reads the aggregated
+    /// result through the same `damage_for` / `transform_for` /
+    /// `extra_projectiles_for` / `procs_for` / `has_bespoke` API.
+    pub(super) fn apply_legendary_effect(&mut self, eff: &LegendaryEffect) {
+        match *eff {
+            LegendaryEffect::Transform { ability, variant } => {
+                self.transforms.insert(ability, variant);
+            }
+            LegendaryEffect::Proc {
+                event,
+                action,
+                chance,
+            } => {
+                self.procs.push(Proc {
+                    event,
+                    action,
+                    chance: chance.clamp(0.0, 1.0),
+                });
+            }
+            LegendaryEffect::ExtraProjectiles { ability, count } => {
+                *self.extra_projectiles.entry(ability).or_insert(0) += count;
+            }
+            LegendaryEffect::Bespoke(flag) => {
+                self.bespoke.insert(flag);
             }
         }
     }

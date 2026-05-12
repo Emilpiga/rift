@@ -83,9 +83,9 @@ pub(crate) fn gender_from_i16(g: i16) -> Gender {
 /// sentinel (`u8::MAX`) so a malformed row leaves the slot
 /// blank instead of accidentally re-binding Steady Shot.
 pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
-    let mut out = [rift_game::loadout::EMPTY_SLOT; 6];
+    let mut out = [rift_game::loadout::EMPTY_SLOT.raw(); 6];
     for (i, &slot) in loadout.iter().enumerate() {
-        out[i] = u8::try_from(slot).unwrap_or(rift_game::loadout::EMPTY_SLOT);
+        out[i] = u8::try_from(slot).unwrap_or(rift_game::loadout::EMPTY_SLOT.raw());
     }
     out
 }
@@ -96,7 +96,7 @@ pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
 /// field layout — bumping `Item::to_wire` only needs to be
 /// reflected here.
 pub(crate) fn item_to_blob(item: &rift_game::loot::Item) -> rift_net::messages::ItemBlob {
-    let (base_id, rarity, ilvl, affixes, anchored) = item.to_wire();
+    let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) = item.to_wire();
     rift_net::messages::ItemBlob {
         base_id,
         rarity,
@@ -108,6 +108,9 @@ pub(crate) fn item_to_blob(item: &rift_game::loot::Item) -> rift_net::messages::
         // cleared when the run extracts.
         unstable: item.unstable,
         provenance: provenance_to_wire(item),
+        unique_id: unique_id.map(|s| s.to_string()),
+        unique_pick,
+        rift_touched: item.rift_touched_to_wire(),
     }
 }
 

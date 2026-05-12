@@ -8,6 +8,7 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::{Floor, Tile};
+use rift_game::abilities::AbilityWireId;
 use rift_net::{messages::WorldEvent, NetId};
 
 use super::enemies::ServerEnemy;
@@ -29,7 +30,7 @@ pub enum Team {
 #[derive(Clone, Debug)]
 pub struct ServerProjectile {
     pub net_id: NetId,
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub owner: NetId,
     pub team: Team,
     /// Attacker kind for the TAKEN-tab breakdown. For
@@ -63,12 +64,12 @@ pub struct ServerProjectile {
 #[derive(Clone, Debug)]
 pub struct ServerAoeZone {
     pub owner: NetId,
-    /// Wire-stable u8 id of the ability that spawned this
+    /// Wire-stable id of the ability that spawned this
     /// zone, from `rift_game::abilities::id::*`. Used to
     /// attribute hits to the right meter bucket. Set to
     /// `255` ("Other") for zones spawned by enemy deaths
     /// (EXPLODER), since enemies don't carry an ability id.
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Attacker kind for the TAKEN-tab breakdown. Mirrors
     /// [`ServerProjectile::attacker_kind`] — set from the
     /// owning enemy's `MonsterRole` for `Team::Enemy` zones,
@@ -109,11 +110,11 @@ pub(super) struct Hit {
     /// the ECS at apply time so we don't have to thread the
     /// entity through every hit construction site.
     pub attacker: NetId,
-    /// Wire-stable u8 id of the source ability, from
+    /// Wire-stable id of the source ability, from
     /// `rift_game::abilities::id::*`. `255` ("Other") for
     /// hits we can't attribute (today: nothing — every hit
     /// path threads its source ability through).
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub damage: f32,
     /// Crit roll inputs from the source caster's stats.
     /// `crit_chance` 0..1; `crit_damage` is the multiplier added
@@ -201,7 +202,7 @@ pub fn tick(
 ) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, u8, u8)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, AbilityWireId, u8)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
     for (pe, proj) in world.query_mut::<&mut ServerProjectile>() {
         proj.position += proj.velocity * dt;
@@ -313,7 +314,7 @@ pub fn tick(
     for e in to_despawn {
         let _ = world.despawn(e);
     }
-    apply_hits_to_enemies(world, hits, ctx);
+    apply_hits_to_enemies(world, floor, hits, ctx);
     // Player debuff applications run after the projectile
     // borrow ends so we can mutably grab each player's
     // `EffectStack` row without aliasing the projectile query.
@@ -347,7 +348,7 @@ pub fn tick_aoe(
 ) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
-    let mut player_debuffs: Vec<(Entity, u8, u8, u8)> = Vec::new();
+    let mut player_debuffs: Vec<(Entity, u8, AbilityWireId, u8)> = Vec::new();
     let mut idx = 0;
     while idx < zones.len() {
         let zone = &mut zones[idx];
@@ -465,7 +466,7 @@ pub fn tick_aoe(
             idx += 1;
         }
     }
-    apply_hits_to_enemies(world, hits, ctx);
+    apply_hits_to_enemies(world, floor, hits, ctx);
     for (player_entity, debuff_id, ability_id, attacker_kind) in player_debuffs {
         if let Ok(mut stack) = world.get::<&mut super::effect::EffectStack>(player_entity) {
             // Enemy AoE: caster Entity isn't tracked through
@@ -501,6 +502,7 @@ pub fn tick_aoe(
 /// * **Aggro spread** — see [`super::enemies::notify_attacked`].
 pub(super) fn apply_hits_to_enemies(
     world: &mut hecs::World,
+    floor: &Floor,
     hits: Vec<Hit>,
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
 ) {
@@ -655,10 +657,13 @@ pub(super) fn apply_hits_to_enemies(
                 .map(|p| p.ability_mods.procs.iter().copied().collect())
                 .unwrap_or_default();
             if !procs_clone.is_empty() {
+                let mut proc_casts: Vec<super::procs::ProcCastRequest> = Vec::new();
                 let mut sink = super::procs::ProcSink {
                     aoe_zones: ctx.death_aoe_zones,
                     next_projectile_net_id: ctx.next_projectile_net_id,
                     tick: ctx.tick,
+                    proc_casts: &mut proc_casts,
+                    events: ctx.events,
                 };
                 let origin = super::procs::ProcOrigin {
                     position: hit.enemy_pos,
@@ -681,6 +686,17 @@ pub(super) fn apply_hits_to_enemies(
                         &mut sink,
                     );
                 }
+                // OnHit / OnCrit `CastAbility` procs (Mirrorglass
+                // pool) are routed back to the player via
+                // `ctx.proc_casts`. `Sim::step` drains the queue
+                // after the projectile loop drops its borrows
+                // and dispatches each request through
+                // `ability::dispatch_proc_cast` so the resulting
+                // cast hits the same wire / damage paths as a
+                // manual cast.
+                for req in proc_casts.drain(..) {
+                    ctx.proc_casts.push((ae, req));
+                }
             }
         }
     }
@@ -691,7 +707,7 @@ pub(super) fn apply_hits_to_enemies(
     aggro_alerts.sort_by_key(|(v, _)| v.id());
     aggro_alerts.dedup_by_key(|(v, _)| v.id());
     for (victim, attacker) in aggro_alerts {
-        super::enemies::notify_attacked(world, victim, attacker);
+        super::enemies::notify_attacked(world, floor, victim, attacker);
     }
     super::loot::finalise_kills(world, ctx, dead);
 }

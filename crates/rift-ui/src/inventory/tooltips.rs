@@ -1,6 +1,6 @@
 //! Item tooltips and the side-by-side compare/delta panel.
 
-use rift_ui_im::{Color, Pos2, Rect, Tooltip, TooltipLine, Ui};
+use rift_ui_im::{Color, Pos2, Rect, Tooltip, TooltipLine, TooltipLineDecor, Ui};
 use rift_ui_types::inventory::{CompareDeltaRow, ItemView, TooltipLineKind};
 
 pub fn render_item_tooltip(
@@ -99,15 +99,58 @@ fn render_item_tooltip_inner(
                     Color::rgba(0.96, 0.40, 0.40, 1.0)
                 }
                 TooltipLineKind::Legendary => Color::rgba(1.00, 0.70, 0.20, 1.0),
+                TooltipLineKind::LegendaryBannerEdge => Color::rgba(0.0, 0.0, 0.0, 0.0),
+                TooltipLineKind::LegendaryFlavor => Color::rgba(0.85, 0.70, 0.45, 0.85),
                 TooltipLineKind::Resonance => Color::rgba(0.78, 0.55, 1.00, 1.0),
+                TooltipLineKind::RiftTouched => Color::rgba(1.00, 0.45, 0.95, 1.0),
                 TooltipLineKind::Anchored => Color::rgba(1.00, 0.82, 0.25, 1.0),
                 TooltipLineKind::Synergy => theme.colors.accent,
                 TooltipLineKind::Stat | TooltipLineKind::Blank => theme.colors.text,
+            };
+            // Phase 6 polish: the band identity is carried by a
+            // trailing rounded "pill" rendered by the widget,
+            // not by tinting the whole stat line. The head text
+            // therefore stays at the theme text colour; only the
+            // badge fill picks up the band tint.
+            //
+            // Resonance lines also opt into the badge — the
+            // distinctive "violet head + band pill" pairing is
+            // what marks a roll as resonated, instead of relying
+            // solely on the `◆` glyph + colour wash (which read
+            // as "just another purple stat" without the pill).
+            let badge = match (l.kind, l.band) {
+                (TooltipLineKind::Stat | TooltipLineKind::Resonance, Some(band)) => {
+                    let [r, g, b] = band.color_rgb();
+                    Some(Color::rgba(r, g, b, 1.0))
+                }
+                _ => None,
+            };
+            // Map host kind → primitive decor so the widget can
+            // paint banner chrome without re-sniffing the text.
+            let decor = match l.kind {
+                TooltipLineKind::LegendaryBannerEdge => {
+                    // Top vs bottom is disambiguated by content:
+                    // top sentinel is `╔…`, bottom is `╚…`. Keeps
+                    // a single host kind while letting the widget
+                    // open/close the inset backdrop in order.
+                    if l.text.trim_start().starts_with('\u{2554}') {
+                        TooltipLineDecor::BannerEdgeTop
+                    } else {
+                        TooltipLineDecor::BannerEdgeBottom
+                    }
+                }
+                TooltipLineKind::Legendary | TooltipLineKind::LegendaryFlavor => {
+                    TooltipLineDecor::BannerBody
+                }
+                TooltipLineKind::Divider => TooltipLineDecor::Divider,
+                _ => TooltipLineDecor::Text,
             };
             TooltipLine {
                 text: l.text,
                 size,
                 color,
+                decor,
+                badge,
             }
         })
         .collect();
@@ -163,6 +206,8 @@ fn render_compare_delta_inner(
             text: "No stat changes",
             size: theme.fonts.size_md,
             color: theme.colors.text_dim,
+            decor: TooltipLineDecor::Text,
+            badge: None,
         }];
     } else {
         lines = rows
@@ -175,6 +220,8 @@ fn render_compare_delta_inner(
                 } else {
                     Color::rgba(0.96, 0.40, 0.40, 1.0)
                 },
+                decor: TooltipLineDecor::Text,
+                badge: None,
             })
             .collect();
     }

@@ -38,6 +38,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     // cursor is on the panel we want clicks to drive tab
     // switches / row expand-toggle, not basic attacks.
     let pointer_in_meters = state.meters.consumes_mouse(mp.0, mp.1);
+    // HUD widgets (ability bar plaque, alt-hold loot labels)
+    // publish their click-targets via `frame.hud_consume_rects`
+    // each frame. A click landing on any of them is a UI
+    // interaction (swap-slot, pickup) and must not also fire a
+    // basic-attack cast.
+    let pointer_in_hud = {
+        let p = rift_engine::ui::im::Pos2::new(mp.0, mp.1);
+        state.frame.hud_consume_rects.iter().any(|r| r.contains(p))
+    };
 
     // Ability-based combat (sends cast requests to the server).
     // Two gates beyond the obvious "alive" check:
@@ -57,7 +66,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
             || pointer_in_inventory
             || pointer_in_party_ui
             || pointer_in_chat
-            || pointer_in_meters;
+            || pointer_in_meters
+            || pointer_in_hud;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
     } else if is_ghost

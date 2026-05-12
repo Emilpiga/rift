@@ -462,6 +462,71 @@ impl Floor {
         })
     }
 
+    /// Clip the segment from `origin` in `dir` (XZ-normalized,
+    /// `y` ignored) to the nearest blocking wall / prop tile,
+    /// up to `max_dist` metres. Returns the distance the ray
+    /// travels before being blocked, or `max_dist` if it
+    /// reaches the end unobstructed.
+    ///
+    /// Used by ranged effects whose visual / on-arrival
+    /// payload spawns at the beam terminus and must not punch
+    /// through a wall (e.g. Frost Ray's `Shatter` shard
+    /// burst). Step cadence (0.25 m) is half the LOS sampler's
+    /// because we care about *where* the ray clips, not just
+    /// whether it does — coarser steps would jitter the
+    /// terminus by tile boundaries.
+    pub fn clip_distance(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> f32 {
+        let dx = dir.x;
+        let dz = dir.z;
+        let dl = (dx * dx + dz * dz).sqrt();
+        if dl < 1.0e-4 || max_dist <= 0.0 {
+            return 0.0;
+        }
+        let ux = dx / dl;
+        let uz = dz / dl;
+        const STEP: f32 = 0.25;
+        // Pull-back applied to a clipped distance so the
+        // returned terminus sits inside the last open tile
+        // rather than on the wall's boundary. Smaller than
+        // `STEP` so the terminus lands close to the wall
+        // (not retreated back to the previous sample) but
+        // still has clearance — a full-step back-off
+        // collapses to the caster when the very first sample
+        // is blocked.
+        const PULL_BACK: f32 = 0.10;
+        // Minimum clipped distance the caller will see. If
+        // the wall is closer than this (e.g. the player is
+        // firing point-blank into geometry) the burst still
+        // spawns this far ahead of the caster instead of on
+        // top of them, so it reads as "the shatter happened
+        // at the wall" rather than "the shatter detonated
+        // in my face".
+        const MIN_CLIPPED: f32 = 1.0;
+        let steps = (max_dist / STEP).ceil() as i32;
+        for i in 1..=steps {
+            let t = (i as f32 * STEP).min(max_dist);
+            let px = origin.x + ux * t;
+            let pz = origin.z + uz * t;
+            let gx = (px + 0.5).floor() as i32;
+            let gz = (pz + 0.5).floor() as i32;
+            let blocked = if gx < 0 || gz < 0 {
+                true
+            } else {
+                let (x, z) = (gx as usize, gz as usize);
+                if x >= self.width || z >= self.depth {
+                    true
+                } else {
+                    self.tiles[z * self.width + x] == Tile::Wall
+                        || self.prop_blocked[z * self.width + x]
+                }
+            };
+            if blocked {
+                return (t - PULL_BACK).max(MIN_CLIPPED).min(max_dist);
+            }
+        }
+        max_dist
+    }
+
     /// Rebuild the [`Self::prop_blocked`] tile bitmap from the
     /// current `props` list. Cheap (`O(props * affected tiles)`,
     /// at most a few hundred props per floor each touching a

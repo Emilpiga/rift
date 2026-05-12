@@ -17,7 +17,10 @@ use crate::ecs::components::{
     AnimationSet, LocalPlayer, Player, SpellCast, SpellPhase, Transform, Velocity,
 };
 use crate::renderer::mesh::Mesh;
-use crate::renderer::vfx::{presets as vfx_presets, spec::{Effect, EffectBundle}};
+use crate::renderer::vfx::{
+    presets as vfx_presets,
+    spec::{Effect, EffectBundle},
+};
 use crate::renderer::Renderer;
 
 /// Map a declarative [`VfxKind`] to a concrete VFX [`EffectBundle`].
@@ -35,13 +38,20 @@ pub fn effect_for_vfx(kind: VfxKind) -> EffectBundle {
         VfxKind::FireballImpact => vfx_presets::fireball_explosion(),
         VfxKind::ArcaneBoltTrail => vfx_presets::arcane_bolt_trail().into(),
         VfxKind::ArcaneBoltImpact => vfx_presets::arcane_bolt_impact().into(),
+        VfxKind::FrostShardTrail => vfx_presets::frost_shard_trail().into(),
+        VfxKind::FrostShardImpact => vfx_presets::frost_shard_impact().into(),
         VfxKind::FrostRay => vfx_presets::frost_ray(),
+        VfxKind::FireBeam => vfx_presets::fire_beam(),
         VfxKind::FireWave => vfx_presets::fire_wave().into(),
         VfxKind::HealBurst => vfx_presets::heal_burst().into(),
         VfxKind::HealOverTimeAura => vfx_presets::heal_over_time_aura().into(),
         // Empty effect — caller can guard `VfxKind::None` to skip
         // the spawn call entirely.
-        VfxKind::None => Effect { duration: 0.0, layers: Vec::new() }.into(),
+        VfxKind::None => Effect {
+            duration: 0.0,
+            layers: Vec::new(),
+        }
+        .into(),
     }
 }
 
@@ -78,7 +88,9 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
             AbilityEffect::SpawnProjectiles { .. } => {
                 // Server-authoritative.
             }
-            AbilityEffect::SpawnAoeZone { visual, visual_y, .. } => {
+            AbilityEffect::SpawnAoeZone {
+                visual, visual_y, ..
+            } => {
                 if let Some(p) = visual {
                     let pos = ctx.placed_position();
                     ctx.renderer
@@ -94,7 +106,15 @@ pub fn execute_ability(ability: &Ability, ctx: &mut AbilityCtx<'_>) {
                 cancel_cast,
                 emitter,
             } => {
-                set_player_action(*action, *duration, clip, *movement, *cancel_cast, *emitter, ctx);
+                set_player_action(
+                    *action,
+                    *duration,
+                    clip,
+                    *movement,
+                    *cancel_cast,
+                    *emitter,
+                    ctx,
+                );
             }
             AbilityEffect::SpawnEmitterAtCaster { visual, height } => {
                 ctx.renderer.vfx_system.spawn_bundle(
@@ -123,8 +143,14 @@ fn set_player_action(
         .next();
     let Some(pid) = player_id else { return };
 
-    let player_t = ctx.world.get::<&Transform>(pid).ok().map(|t| (t.position, t.rotation));
-    let Some((position, rotation)) = player_t else { return };
+    let player_t = ctx
+        .world
+        .get::<&Transform>(pid)
+        .ok()
+        .map(|t| (t.position, t.rotation));
+    let Some((position, rotation)) = player_t else {
+        return;
+    };
 
     if let Some(p) = emitter {
         ctx.renderer
@@ -135,7 +161,11 @@ fn set_player_action(
     let body_dir = {
         let fwd = rotation * Vec3::Z;
         let f = Vec3::new(fwd.x, 0.0, fwd.z);
-        if f.length_squared() > 0.0001 { f.normalize() } else { Vec3::Z }
+        if f.length_squared() > 0.0001 {
+            f.normalize()
+        } else {
+            Vec3::Z
+        }
     };
     if let Ok(mut p) = ctx.world.get::<&mut Player>(pid) {
         p.action = action;

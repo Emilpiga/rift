@@ -35,6 +35,14 @@ pub struct PlayerState {
     /// up). The HUD reads this every frame instead of redoing
     /// the affix sum + multiplier math per frame.
     cached_stats: CharacterStats,
+    /// Cached per-ability gear modifiers (extra projectiles,
+    /// cooldown scalar, damage scalar, transforms, procs, …).
+    /// Recomputed alongside [`cached_stats`] from the current
+    /// `Equipment` so the HUD ability tooltip can reflect
+    /// legendary effects (e.g. Cleavebreaker's `+2 projectiles
+    /// to Fireball Volley`) without rebuilding the aggregate
+    /// every frame.
+    cached_ability_mods: rift_game::loot::ability_mods::AbilityMods,
     /// Last server-reported essence pool fraction (0..=1) for
     /// the local player. Mirrored from the snapshot's
     /// `resource_pct` each frame in `world_sync`. The HUD reads
@@ -61,12 +69,14 @@ impl PlayerState {
         let talents = talents::hunter_tree();
 
         let experience = Experience::new();
+        let default_equipment = rift_game::loot::Equipment::default();
         let cached_stats = CharacterStats::compute(
             &attributes,
             experience.level,
-            &rift_game::loot::Equipment::default().active_affix_sum(),
+            &default_equipment.active_affix_sum(),
             &talents.stat_modifiers(),
         );
+        let cached_ability_mods = default_equipment.ability_mods();
 
         Self {
             gender,
@@ -78,6 +88,7 @@ impl PlayerState {
             abilities,
             talents,
             cached_stats,
+            cached_ability_mods,
             resource_pct: 1.0,
             shards: 0,
         }
@@ -87,7 +98,7 @@ impl PlayerState {
     /// Re-materializes the runtime `AbilitySlot` so cooldowns
     /// reset for the swapped slot. No-op when `slot_index` is
     /// out of range.
-    pub fn set_loadout_slot(&mut self, slot_index: usize, wire_id: u8) {
+    pub fn set_loadout_slot(&mut self, slot_index: usize, wire_id: rift_game::abilities::AbilityWireId) {
         self.loadout.set_slot(slot_index, wire_id);
         self.abilities = self.loadout.materialize();
     }
@@ -102,6 +113,7 @@ impl PlayerState {
             &equipment.active_affix_sum(),
             &self.talents.stat_modifiers(),
         );
+        self.cached_ability_mods = equipment.ability_mods();
     }
 
     /// Borrow the cached resolved stats. O(1) — no recomputation.
@@ -109,6 +121,14 @@ impl PlayerState {
     /// change.
     pub fn stats(&self) -> &CharacterStats {
         &self.cached_stats
+    }
+
+    /// Borrow the cached per-ability gear modifiers. O(1).
+    /// HUD ability tooltips read this so legendary effects
+    /// (extra projectiles, cooldown reductions, transforms…)
+    /// show through on the displayed numbers.
+    pub fn ability_mods(&self) -> &rift_game::loot::ability_mods::AbilityMods {
+        &self.cached_ability_mods
     }
 
     /// Convenience for spawn paths that only want max HP.

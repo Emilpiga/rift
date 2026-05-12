@@ -76,8 +76,7 @@ pub fn finalise_kills(
             // handles it without special casing.
             if (elite_mods & super::enemies::elite_mod::EXPLODER) != 0 {
                 let zone_net_id = rift_net::NetId(*ctx.next_projectile_net_id);
-                *ctx.next_projectile_net_id =
-                    ctx.next_projectile_net_id.wrapping_add(1).max(1);
+                *ctx.next_projectile_net_id = ctx.next_projectile_net_id.wrapping_add(1).max(1);
                 ctx.death_aoe_zones.push(super::projectile::ServerAoeZone {
                     owner: zone_net_id,
                     ability_id: super::meters::ABILITY_ID_OTHER,
@@ -196,7 +195,15 @@ pub fn drop_for_enemy(
 
         item.provenance = provenance.clone();
 
-        let (base_id, rarity, ilvl_w, affixes, anchored) = item.to_wire();
+        // Phase 5: rift-touched bonus line. Gated by floor index
+        // + an independent per-drop chance gate (both live in
+        // `rift_game::loot::affixes`). Hub kills are filtered
+        // out by `RIFT_TOUCHED_MIN_FLOOR`; the constant is the
+        // single configurable knob if we ever want to push
+        // rift-touched deeper into the run.
+        item.rift_touched = rift_game::loot::roll_rift_touched(&mut rng, floor_index);
+
+        let (base_id, rarity, ilvl_w, affixes, anchored, unique_id, unique_pick) = item.to_wire();
         let provenance_wire = item.provenance.as_ref().map(|p| p.eligible.clone());
         let blob = ItemBlob {
             base_id,
@@ -209,6 +216,9 @@ pub fn drop_for_enemy(
             // the unstable flag is only set at pickup-in-rift.
             unstable: item.unstable,
             provenance: provenance_wire,
+            unique_id: unique_id.map(|s| s.to_string()),
+            unique_pick,
+            rift_touched: item.rift_touched_to_wire(),
         };
 
         let loot = ServerLoot {

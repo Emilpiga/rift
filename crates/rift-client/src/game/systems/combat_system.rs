@@ -39,8 +39,23 @@ pub struct PlacedTargeting {
     pub ability: Ability,
     /// Radius of the AoE indicator circle.
     pub radius: f32,
-    /// Render object index for the ground indicator mesh.
+    /// Render object index for the "valid placement" (blue)
+    /// indicator. Driven each frame: shown at the cursor when
+    /// line-of-sight to the caster is clear, collapsed to
+    /// `Mat4::ZERO` otherwise.
     pub indicator_obj: Option<usize>,
+    /// Render object index for the "invalid placement" (red)
+    /// indicator. Mutually exclusive with [`Self::indicator_obj`]
+    /// each frame — only one of the two is visible at a time.
+    /// Shown when an XZ raycast from the caster's chest to the
+    /// cursor is blocked by a wall, or the cursor lies inside
+    /// a wall AABB.
+    pub invalid_indicator_obj: Option<usize>,
+    /// Cached LoS result from the most recent indicator update
+    /// frame. The LMB-confirm path reads this to decide
+    /// whether to send the cast or just play a soft rejection
+    /// (refund slot, leave targeting active).
+    pub los_blocked: bool,
 }
 
 /// Active entity-target picking state for friendly
@@ -114,13 +129,80 @@ fn tick_placed_targeting(
     }
 
     if let Some(cursor_pos) = crate::game::cursor::world_pos(input, renderer, 0.0) {
-        let targeting = state.frame.targeting.as_ref().unwrap();
-        let radius = targeting.radius;
-        if let Some(obj_idx) = targeting.indicator_obj {
-            if obj_idx < renderer.objects.len() {
-                renderer.objects[obj_idx].model_matrix =
-                    Mat4::from_translation(cursor_pos)
-                        * Mat4::from_scale(Vec3::splat(radius));
+        // LoS check: trace from the caster's chest height
+        // toward the cursor. If a wall sits between them, or
+        // the cursor itself is inside a wall AABB, the
+        // placement is invalid. We use the same XZ wall
+        // colliders the projectile / beam paths consult so
+        // the visual matches the server's eventual targeting
+        // rules.
+        let from = player_pos + Vec3::Y * 1.2;
+        let to = cursor_pos + Vec3::Y * 1.2;
+        let delta = to - from;
+        let dist = delta.length();
+        let blocked = if dist > 1e-3 {
+            let dir = delta / dist;
+            // Strict: any wall between the caster and the
+            // cursor blocks placement, full stop. No
+            // "near-cursor grace" — if you can't see it,
+            // you can't drop a Rain of Fire on it.
+            let ray = rift_engine::physics::Ray {
+                origin: from,
+                direction: dir,
+            };
+            rift_engine::physics::raycast_any(&ray, dist, &state.floor.wall_aabbs)
+        } else {
+            false
+        };
+
+        let radius = state.frame.targeting.as_ref().unwrap().radius;
+        // Pick which colour ring to display this frame.
+        let (show_idx, hide_idx, show_color) = {
+            let targeting = state.frame.targeting.as_mut().unwrap();
+            targeting.los_blocked = blocked;
+            if blocked {
+                (
+                    targeting.invalid_indicator_obj,
+                    targeting.indicator_obj,
+                    [1.0, 0.2, 0.15],
+                )
+            } else {
+                (
+                    targeting.indicator_obj,
+                    targeting.invalid_indicator_obj,
+                    [0.2, 0.5, 1.0],
+                )
+            }
+        };
+        // Rebuild the visible ring's vertices in world space
+        // with per-vertex Y sampled from the dungeon's
+        // height-field, so the ring bends across raised
+        // daises, sunken pits, and stair ramps instead of
+        // floating through them. Falls back to a flat ring
+        // at y=0 when no dungeon is loaded (hub, transitions).
+        if let Some(idx) = show_idx {
+            if idx < renderer.objects.len() {
+                let conformed = match state.floor_mgr.dungeon.as_ref() {
+                    Some(floor) => rift_engine::Mesh::targeting_circle_conformed(
+                        show_color,
+                        cursor_pos,
+                        radius,
+                        |x, z| floor.tile_floor_y_at(x, z),
+                    ),
+                    None => rift_engine::Mesh::targeting_circle_conformed(
+                        show_color,
+                        cursor_pos,
+                        radius,
+                        |_, _| 0.0,
+                    ),
+                };
+                renderer.update_dynamic_vertices(idx, &conformed.vertices);
+                renderer.objects[idx].model_matrix = Mat4::IDENTITY;
+            }
+        }
+        if let Some(idx) = hide_idx {
+            if idx < renderer.objects.len() {
+                renderer.objects[idx].model_matrix = Mat4::ZERO;
             }
         }
     }
@@ -128,8 +210,28 @@ fn tick_placed_targeting(
     // Left-click: confirm placement → forward to server.
     if input.left_clicked() {
         if let Some(cursor_pos) = crate::game::cursor::world_pos(input, renderer, 0.0) {
+            // LoS gate — refuse to send the cast through
+            // walls. The cooldown was consumed up-front by
+            // `try_use`; keep the indicator up so the player
+            // can drag to a valid spot without re-pressing
+            // the keybind. (Right-click / Esc still
+            // cancels and refunds normally.)
+            if state
+                .frame
+                .targeting
+                .as_ref()
+                .map(|t| t.los_blocked)
+                .unwrap_or(false)
+            {
+                return true;
+            }
             let targeting = state.frame.targeting.take().unwrap();
             if let Some(obj_idx) = targeting.indicator_obj {
+                if obj_idx < renderer.objects.len() {
+                    renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
+                }
+            }
+            if let Some(obj_idx) = targeting.invalid_indicator_obj {
                 if obj_idx < renderer.objects.len() {
                     renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
                 }
@@ -150,6 +252,11 @@ fn tick_placed_targeting(
     if input.right_clicked() || input.key_just_pressed(KeyCode::Escape) {
         let targeting = state.frame.targeting.take().unwrap();
         if let Some(obj_idx) = targeting.indicator_obj {
+            if obj_idx < renderer.objects.len() {
+                renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
+            }
+        }
+        if let Some(obj_idx) = targeting.invalid_indicator_obj {
             if obj_idx < renderer.objects.len() {
                 renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
             }
@@ -273,9 +380,7 @@ fn tick_entity_targeting(
                 renderer.objects[obj_idx].model_matrix = Mat4::ZERO;
             }
         }
-        if let Some(slot) =
-            state.player_state.abilities.slots[targeting.slot_index].as_mut()
-        {
+        if let Some(slot) = state.player_state.abilities.slots[targeting.slot_index].as_mut() {
             slot.cooldown_remaining = targeting.ability.cooldown;
         }
         state.net.casts.push(NetCastRequest {
@@ -297,8 +402,7 @@ fn tick_entity_targeting(
         .map(|t| t.ability.range)
         .unwrap_or(15.0);
     let cursor_pos = crate::game::cursor::world_pos(input, renderer, 0.0);
-    let pick = cursor_pos
-        .and_then(|c| pick_friendly_target(state, c, player_pos, range, 1.2));
+    let pick = cursor_pos.and_then(|c| pick_friendly_target(state, c, player_pos, range, 1.2));
 
     // Update indicator visual + cached hovered net id.
     {
@@ -307,8 +411,9 @@ fn tick_entity_targeting(
         if let Some(obj_idx) = targeting.indicator_obj {
             if obj_idx < renderer.objects.len() {
                 renderer.objects[obj_idx].model_matrix = match pick {
-                    Some((_, pos)) => Mat4::from_translation(pos)
-                        * Mat4::from_scale(Vec3::splat(0.9)),
+                    Some((_, pos)) => {
+                        Mat4::from_translation(pos) * Mat4::from_scale(Vec3::splat(0.9))
+                    }
                     None => Mat4::ZERO,
                 };
             }
@@ -331,9 +436,7 @@ fn tick_entity_targeting(
             // server's CD which begins only when the cast
             // arrives. (`tick_ability_keybinds` refunded the
             // CD when entering targeting mode.)
-            if let Some(slot) =
-                state.player_state.abilities.slots[targeting.slot_index].as_mut()
-            {
+            if let Some(slot) = state.player_state.abilities.slots[targeting.slot_index].as_mut() {
                 slot.cooldown_remaining = targeting.ability.cooldown;
             }
             state.net.casts.push(NetCastRequest {
@@ -359,9 +462,7 @@ fn tick_entity_targeting(
         // refactor that consumes it eagerly would still want
         // this — keep the explicit zero so the invariant
         // (cancelled cast = 0 CD) is local to this branch.
-        if let Some(slot) =
-            state.player_state.abilities.slots[targeting.slot_index].as_mut()
-        {
+        if let Some(slot) = state.player_state.abilities.slots[targeting.slot_index].as_mut() {
             slot.cooldown_remaining = 0.0;
         }
         return true;
@@ -398,7 +499,7 @@ fn tick_active_channel(state: &mut GameState, input: &Input, dt: f32) -> bool {
         || input.right_clicked()
         || input.key_just_pressed(KeyCode::Escape);
     if cancelled {
-        state.channel.pending_ends.push(active.ability_id);
+        state.channel.pending_ends.push(active.ability_id.raw());
         state.channel.active = None;
         // Tear our local cast pose down. Server will emit
         // ChannelEnd which the binary handles as well, but
@@ -458,13 +559,11 @@ fn tick_ability_keybinds(
         // input that will be rejected. Channel costs (per-sec
         // drain) are not gated here — they're enforced by
         // the channel tick on the server.
-        if let Some(Some(slot_state)) =
-            state.player_state.abilities.slots.get(i)
-        {
+        if let Some(Some(slot_state)) = state.player_state.abilities.slots.get(i) {
             let cost = slot_state.ability.resource_cost;
             if cost > 0.0 {
-                let current_essence = state.player_state.resource_pct
-                    * state.player_state.stats().max_resource;
+                let current_essence =
+                    state.player_state.resource_pct * state.player_state.stats().max_resource;
                 if cost > current_essence + 1e-3 {
                     continue;
                 }
@@ -477,15 +576,45 @@ fn tick_ability_keybinds(
 
         // Placed ability → enter targeting mode locally.
         if let TargetingMode::Placed { radius } = ability_clone.targeting {
-            let indicator_mesh = rift_engine::Mesh::targeting_circle([0.2, 0.5, 1.0]);
-            let initial_pos = crate::game::cursor::world_pos(input, renderer, 0.0)
-                .unwrap_or(player_pos);
-            let initial_mat = Mat4::from_translation(initial_pos)
-                * Mat4::from_scale(Vec3::splat(radius));
-            let indicator_obj = if let Ok(()) = renderer.add_mesh(&indicator_mesh, initial_mat) {
-                Some(renderer.objects.len() - 1)
-            } else {
-                None
+            // Two stacked indicators: a blue "valid" ring and
+            // a red "invalid" ring. Each frame we run an XZ
+            // line-of-sight raycast from the caster to the
+            // cursor and show exactly one of the two. Both
+            // get allocated upfront so we can swap visibility
+            // by editing the model matrix rather than
+            // pushing/popping render objects.
+            //
+            // Registered as *dynamic* meshes so
+            // `tick_placed_targeting` can re-bake their
+            // vertices each frame against the dungeon's
+            // height-field — the ring bends across raised
+            // daises and sunken pits instead of clipping
+            // through them.
+            let initial_pos =
+                crate::game::cursor::world_pos(input, renderer, 0.0).unwrap_or(player_pos);
+            let height_fn = |x: f32, z: f32| match state.floor_mgr.dungeon.as_ref() {
+                Some(floor) => floor.tile_floor_y_at(x, z),
+                None => 0.0,
+            };
+            let valid_mesh = rift_engine::Mesh::targeting_circle_conformed(
+                [0.2, 0.5, 1.0],
+                initial_pos,
+                radius,
+                height_fn,
+            );
+            let invalid_mesh = rift_engine::Mesh::targeting_circle_conformed(
+                [1.0, 0.2, 0.15],
+                initial_pos,
+                radius,
+                height_fn,
+            );
+            let indicator_obj = match renderer.add_dynamic_mesh(&valid_mesh, Mat4::IDENTITY) {
+                Ok(idx) => Some(idx),
+                Err(_) => None,
+            };
+            let invalid_indicator_obj = match renderer.add_dynamic_mesh(&invalid_mesh, Mat4::ZERO) {
+                Ok(idx) => Some(idx),
+                Err(_) => None,
             };
 
             state.frame.targeting = Some(PlacedTargeting {
@@ -493,6 +622,8 @@ fn tick_ability_keybinds(
                 ability: ability_clone,
                 radius,
                 indicator_obj,
+                invalid_indicator_obj,
+                los_blocked: false,
             });
             break;
         }
@@ -501,8 +632,8 @@ fn tick_ability_keybinds(
         // self-cast, otherwise enter pick-mode and let the
         // player click an ally (or themselves).
         if matches!(ability_clone.targeting, TargetingMode::TargetEntity) {
-            let shift_held = input.is_key_held(KeyCode::ShiftLeft)
-                || input.is_key_held(KeyCode::ShiftRight);
+            let shift_held =
+                input.is_key_held(KeyCode::ShiftLeft) || input.is_key_held(KeyCode::ShiftRight);
             if shift_held {
                 if let Some(self_id) = state.net.our_net_id_cached {
                     state.net.casts.push(NetCastRequest {
@@ -524,9 +655,7 @@ fn tick_ability_keybinds(
                     // Welcome hasn't landed yet — refund the
                     // cooldown the slot just consumed so the
                     // press doesn't disappear into the void.
-                    if let Some(slot) =
-                        state.player_state.abilities.slots[i].as_mut()
-                    {
+                    if let Some(slot) = state.player_state.abilities.slots[i].as_mut() {
                         slot.cooldown_remaining = 0.0;
                     }
                 }
@@ -542,17 +671,12 @@ fn tick_ability_keybinds(
                 // CD-elapsed would be silently rejected by
                 // the still-cooling server. Re-consumed on
                 // LMB-confirm in `tick_entity_targeting`.
-                if let Some(slot) =
-                    state.player_state.abilities.slots[i].as_mut()
-                {
+                if let Some(slot) = state.player_state.abilities.slots[i].as_mut() {
                     slot.cooldown_remaining = 0.0;
                 }
                 // Soft green hover ring under the candidate ally.
-                let indicator_mesh =
-                    rift_engine::Mesh::targeting_circle([0.30, 1.00, 0.50]);
-                let indicator_obj = if let Ok(()) =
-                    renderer.add_mesh(&indicator_mesh, Mat4::ZERO)
-                {
+                let indicator_mesh = rift_engine::Mesh::targeting_circle([0.30, 1.00, 0.50]);
+                let indicator_obj = if let Ok(()) = renderer.add_mesh(&indicator_mesh, Mat4::ZERO) {
                     Some(renderer.objects.len() - 1)
                 } else {
                     None
@@ -625,7 +749,7 @@ fn tick_ability_keybinds(
 /// latency instead of `wind_up_clip_duration + RTT` (the
 /// earlier "defer until apex" path made remote poses lag the
 /// local one by the full wind-up animation, which felt heavy
-/// on rapid LMB attacks and Multishot but not on Frost Ray
+/// on rapid LMB attacks and Fireball Volley but not on Frost Ray
 /// because channels were always sent immediately). The
 /// trade-off: the server projectile now spawns at chest height
 /// when the click lands, rather than from the casting hand at

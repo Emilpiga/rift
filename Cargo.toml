@@ -13,7 +13,7 @@ env_logger = "0.11"
 anyhow = "1"
 gpu-allocator = "0.28"
 image = "0.25"
-gltf = { version = "1", default-features = false, features = ["utils", "import", "names"] }
+gltf = { version = "1", default-features = false, features = ["utils", "import", "names", "KHR_materials_emissive_strength"] }
 hecs = "0.10"
 shaderc = "0.10.1"
 notify = "8.2.0"

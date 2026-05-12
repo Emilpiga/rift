@@ -576,19 +576,21 @@ impl Mesh {
     }
 
     /// Vertical "skirt" geometry along elevation discontinuities
-    /// between adjacent flat floor tiles. Without these, a
+    /// between adjacent walkable tiles. Without these, a
     /// raised dais or sunken pit shows a thin gap right through
     /// the world wherever its lip meets a floor at a different
     /// elevation — the upper tile's quad sits at one Y and the
     /// neighbouring lower tile's quad sits at another, with
     /// nothing connecting them.
     ///
-    /// Stair tiles are deliberately **excluded** from skirt
-    /// generation: their slanted quad already bridges the
-    /// elevation difference along the slope axis, and emitting
-    /// a skirt at the stair's leading edge would z-fight with
-    /// the ramp surface. Walls also don't get skirts because
-    /// the wall mesh itself extends from y=0 upward.
+    /// Stair tiles **are** included on their slope-perpendicular
+    /// sides: a ramp going up between two flat floors has a
+    /// triangular wedge of empty space on each lateral side
+    /// (the side you'd brush past walking up the ramp), and
+    /// without a trapezoidal skirt the player can see right
+    /// through the world there. Stair sides along the slope
+    /// axis (the leading low / high edges) normally meet a
+    /// floor at matching elevation and emit nothing.
     ///
     /// Each emitted quad is double-sided (two opposed
     /// triangles) so it reads correctly whether the player
@@ -614,7 +616,7 @@ impl Mesh {
         floor_num: u32,
         accept: impl Fn((usize, usize), (usize, usize)) -> bool,
     ) -> Self {
-        use rift_dungeon::{Tile, ELEVATION_STEP};
+        use rift_dungeon::{StairDir, Tile, ELEVATION_STEP};
 
         // Same palette as `dungeon_floor` but slightly darker
         // so the vertical face reads as receding into shadow,
@@ -633,111 +635,187 @@ impl Mesh {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let height_at = |i: usize| -> Option<f32> {
+        // Top-surface world Y at a tile-local corner. `local`
+        // is in `[-0.5, 0.5]^2` (tile centre at (0,0)). For
+        // [`Tile::Floor`] this is constant; for
+        // [`Tile::Stair`] it varies linearly along the slope
+        // axis from `elevation*STEP` at the low edge to
+        // `(elevation+1)*STEP` at the high edge. Walls return
+        // `None` — they don't need skirts because the wall
+        // mesh itself extends from y=0 upward.
+        let corner_y = |i: usize, local: (f32, f32)| -> Option<f32> {
             match floor.tiles[i] {
                 Tile::Floor => Some(floor.elevation[i] as f32 * ELEVATION_STEP),
-                _ => None, // walls and stairs handled elsewhere
+                Tile::Stair { dir } => {
+                    let base = floor.elevation[i] as f32 * ELEVATION_STEP;
+                    // `t` ramps from 0 at the low edge to 1 at
+                    // the high edge along the slope axis.
+                    let t = match dir {
+                        StairDir::PosX => local.0 + 0.5,
+                        StairDir::NegX => 0.5 - local.0,
+                        StairDir::PosZ => local.1 + 0.5,
+                        StairDir::NegZ => 0.5 - local.1,
+                    };
+                    Some(base + t.clamp(0.0, 1.0) * ELEVATION_STEP)
+                }
+                Tile::Wall => None,
             }
         };
 
-        let mut emit_quad = |a: Vec3, b: Vec3, low_y: f32, high_y: f32, normal: Vec3| {
-            // Quad spans (a..b) horizontally at low_y to high_y
-            // vertically. Two triangles, double-sided so the
-            // skirt is visible from both faces.
-            let base = vertices.len() as u32;
-            // World-space UVs along the strip — keep the
-            // shipped ground-tile texture wrapping naturally.
-            let u0 = a.x + a.z;
-            let u1 = b.x + b.z;
-            let v0 = low_y;
-            let v1 = high_y;
-            let p_al = Vec3::new(a.x, low_y, a.z);
-            let p_bl = Vec3::new(b.x, low_y, b.z);
-            let p_bh = Vec3::new(b.x, high_y, b.z);
-            let p_ah = Vec3::new(a.x, high_y, a.z);
-            let push = |v: &mut Vec<Vertex>, p: Vec3, n: Vec3, uv: Vec2| {
-                v.push(Vertex {
-                    position: p,
-                    normal: n,
-                    color: base_color,
-                    uv,
-                });
+        // Emit a (potentially trapezoidal) skirt quad whose
+        // shared edge runs from `a` to `b` in the XZ plane.
+        // `a_low..a_high` is the vertical span at endpoint
+        // `a`; same for `b`. `normal` faces the side that's
+        // visible to a player standing on the *lower* tile.
+        // Degenerate (both endpoints have zero span) inputs
+        // are filtered by the caller.
+        let mut emit_quad =
+            |a: Vec3, b: Vec3, a_low: f32, a_high: f32, b_low: f32, b_high: f32, normal: Vec3| {
+                let base = vertices.len() as u32;
+                // World-space UVs along the strip — keep the
+                // shipped ground-tile texture wrapping naturally.
+                let u0 = a.x + a.z;
+                let u1 = b.x + b.z;
+                let p_al = Vec3::new(a.x, a_low, a.z);
+                let p_bl = Vec3::new(b.x, b_low, b.z);
+                let p_bh = Vec3::new(b.x, b_high, b.z);
+                let p_ah = Vec3::new(a.x, a_high, a.z);
+                let push = |v: &mut Vec<Vertex>, p: Vec3, n: Vec3, uv: Vec2| {
+                    v.push(Vertex {
+                        position: p,
+                        normal: n,
+                        color: base_color,
+                        uv,
+                    });
+                };
+                // Front face (normal pointing toward the lower
+                // tile — the side a player on the lower floor
+                // sees).
+                push(&mut vertices, p_al, normal, Vec2::new(u0, a_low));
+                push(&mut vertices, p_bl, normal, Vec2::new(u1, b_low));
+                push(&mut vertices, p_bh, normal, Vec2::new(u1, b_high));
+                push(&mut vertices, p_ah, normal, Vec2::new(u0, a_high));
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                // Back face (opposite normal). Same vertex
+                // positions, opposite winding + flipped normal.
+                let back = vertices.len() as u32;
+                push(&mut vertices, p_al, -normal, Vec2::new(u0, a_low));
+                push(&mut vertices, p_bl, -normal, Vec2::new(u1, b_low));
+                push(&mut vertices, p_bh, -normal, Vec2::new(u1, b_high));
+                push(&mut vertices, p_ah, -normal, Vec2::new(u0, a_high));
+                indices.extend_from_slice(&[back, back + 2, back + 1, back, back + 3, back + 2]);
             };
-            // Front face (normal pointing toward the lower
-            // tile — the side a player on the lower floor
-            // sees).
-            push(&mut vertices, p_al, normal, Vec2::new(u0, v0));
-            push(&mut vertices, p_bl, normal, Vec2::new(u1, v0));
-            push(&mut vertices, p_bh, normal, Vec2::new(u1, v1));
-            push(&mut vertices, p_ah, normal, Vec2::new(u0, v1));
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            // Back face (opposite normal). Same vertex
-            // positions, opposite winding + flipped normal.
-            let back = vertices.len() as u32;
-            push(&mut vertices, p_al, -normal, Vec2::new(u0, v0));
-            push(&mut vertices, p_bl, -normal, Vec2::new(u1, v0));
-            push(&mut vertices, p_bh, -normal, Vec2::new(u1, v1));
-            push(&mut vertices, p_ah, -normal, Vec2::new(u0, v1));
-            indices.extend_from_slice(&[back, back + 2, back + 1, back, back + 3, back + 2]);
+
+        // Helper: process one shared edge between tiles `i_a`
+        // and `i_b`. `a_corners` / `b_corners` give the
+        // tile-local positions of the edge's two endpoints
+        // from each tile's frame (a tile sees the shared
+        // edge through its own +/- 0.5 corners). `world_*`
+        // are the corresponding world-space XZ positions.
+        // `normal_from_a_to_b` is the unit vector from a's
+        // centre toward b's centre.
+        let mut process_edge = |i_a: usize,
+                                i_b: usize,
+                                a_corners: [(f32, f32); 2],
+                                b_corners: [(f32, f32); 2],
+                                world_c0: Vec3,
+                                world_c1: Vec3,
+                                normal_from_a_to_b: Vec3,
+                                a_tile: (usize, usize),
+                                b_tile: (usize, usize)| {
+            // Both tiles must be walkable (have a top
+            // surface). Wall vs anything is bridged by
+            // the wall mesh.
+            let ya0 = corner_y(i_a, a_corners[0]);
+            let yb0 = corner_y(i_b, b_corners[0]);
+            let ya1 = corner_y(i_a, a_corners[1]);
+            let yb1 = corner_y(i_b, b_corners[1]);
+            let (ya0, yb0, ya1, yb1) = match (ya0, yb0, ya1, yb1) {
+                (Some(a0), Some(b0), Some(a1), Some(b1)) => (a0, b0, a1, b1),
+                _ => return,
+            };
+            // No gap anywhere along the edge → nothing
+            // to bridge. Strict equality is fine because
+            // both sides compute Y from the same integer
+            // elevation × step constant.
+            let diff0 = (ya0 - yb0).abs();
+            let diff1 = (ya1 - yb1).abs();
+            if diff0 < 1.0e-4 && diff1 < 1.0e-4 {
+                return;
+            }
+            if !accept(a_tile, b_tile) {
+                return;
+            }
+            // Per-endpoint low/high so the quad is a
+            // trapezoid when one side is sloped (stair).
+            let a_low = ya0.min(yb0);
+            let a_high = ya0.max(yb0);
+            let b_low = ya1.min(yb1);
+            let b_high = ya1.max(yb1);
+            // Front-facing normal points from the higher
+            // tile toward the lower one. Use the average
+            // of the two endpoints to pick a side — for
+            // a stair-vs-floor side the higher one is
+            // unambiguous along most of the edge anyway.
+            let avg_a = 0.5 * (ya0 + ya1);
+            let avg_b = 0.5 * (yb0 + yb1);
+            let n = if avg_a > avg_b {
+                normal_from_a_to_b
+            } else {
+                -normal_from_a_to_b
+            };
+            emit_quad(world_c0, world_c1, a_low, a_high, b_low, b_high, n);
         };
 
         // East-west adjacencies (compare tile (x, z) with (x+1, z)).
+        // Shared edge runs along Z at the meeting X. From
+        // tile a's frame the two endpoints are at local
+        // (+0.5, -0.5) and (+0.5, +0.5); from tile b's frame
+        // (-0.5, -0.5) and (-0.5, +0.5).
         for z in 0..floor.depth {
             for x in 0..floor.width.saturating_sub(1) {
                 let i_a = z * floor.width + x;
                 let i_b = z * floor.width + (x + 1);
-                if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
-                    if (ya - yb).abs() > 1.0e-4 {
-                        if !accept((x, z), (x + 1, z)) {
-                            continue;
-                        }
-                        let edge_x = (x as f32) + 0.5; // shared edge X
-                        let z_lo = (z as f32) - 0.5;
-                        let z_hi = (z as f32) + 0.5;
-                        let low = ya.min(yb);
-                        let high = ya.max(yb);
-                        // Normal points from the higher tile
-                        // toward the lower one (so the front
-                        // face is what a player standing on
-                        // the lower side sees).
-                        let nx = if ya > yb { 1.0 } else { -1.0 };
-                        emit_quad(
-                            Vec3::new(edge_x, 0.0, z_lo),
-                            Vec3::new(edge_x, 0.0, z_hi),
-                            low,
-                            high,
-                            Vec3::new(nx, 0.0, 0.0),
-                        );
-                    }
-                }
+                let edge_x = (x as f32) + 0.5;
+                let c0 = Vec3::new(edge_x, 0.0, (z as f32) - 0.5);
+                let c1 = Vec3::new(edge_x, 0.0, (z as f32) + 0.5);
+                process_edge(
+                    i_a,
+                    i_b,
+                    [(0.5, -0.5), (0.5, 0.5)],
+                    [(-0.5, -0.5), (-0.5, 0.5)],
+                    c0,
+                    c1,
+                    Vec3::new(1.0, 0.0, 0.0),
+                    (x, z),
+                    (x + 1, z),
+                );
             }
         }
 
         // North-south adjacencies (compare tile (x, z) with (x, z+1)).
+        // Shared edge runs along X at the meeting Z. From
+        // tile a's frame the two endpoints are at local
+        // (-0.5, +0.5) and (+0.5, +0.5); from tile b's frame
+        // (-0.5, -0.5) and (+0.5, -0.5).
         for z in 0..floor.depth.saturating_sub(1) {
             for x in 0..floor.width {
                 let i_a = z * floor.width + x;
                 let i_b = (z + 1) * floor.width + x;
-                if let (Some(ya), Some(yb)) = (height_at(i_a), height_at(i_b)) {
-                    if (ya - yb).abs() > 1.0e-4 {
-                        if !accept((x, z), (x, z + 1)) {
-                            continue;
-                        }
-                        let edge_z = (z as f32) + 0.5;
-                        let x_lo = (x as f32) - 0.5;
-                        let x_hi = (x as f32) + 0.5;
-                        let low = ya.min(yb);
-                        let high = ya.max(yb);
-                        let nz = if ya > yb { 1.0 } else { -1.0 };
-                        emit_quad(
-                            Vec3::new(x_lo, 0.0, edge_z),
-                            Vec3::new(x_hi, 0.0, edge_z),
-                            low,
-                            high,
-                            Vec3::new(0.0, 0.0, nz),
-                        );
-                    }
-                }
+                let edge_z = (z as f32) + 0.5;
+                let c0 = Vec3::new((x as f32) - 0.5, 0.0, edge_z);
+                let c1 = Vec3::new((x as f32) + 0.5, 0.0, edge_z);
+                process_edge(
+                    i_a,
+                    i_b,
+                    [(-0.5, 0.5), (0.5, 0.5)],
+                    [(-0.5, -0.5), (0.5, -0.5)],
+                    c0,
+                    c1,
+                    Vec3::new(0.0, 0.0, 1.0),
+                    (x, z),
+                    (x, z + 1),
+                );
             }
         }
 
@@ -1183,6 +1261,100 @@ impl Mesh {
                 base_idx + 1,
             ]);
             // Back faces (normal down): 0,1,2 and 0,2,3
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 3,
+            ]);
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Terrain-conforming variant of [`Self::targeting_circle`].
+    /// Same hollow-ring topology and shading, but the
+    /// vertices are baked into world space with each one's
+    /// Y sampled from `height_at(world_x, world_z)` plus a
+    /// small lift so the ring sits just above the surface
+    /// without z-fighting. The mesh is intended to be
+    /// uploaded as a *dynamic* mesh and re-baked every frame
+    /// (or whenever the cursor moves) — the vertex count and
+    /// winding match across rebuilds because both paths run
+    /// through this same constructor.
+    ///
+    /// `center` provides the world XZ centre; its Y is
+    /// ignored (the ring follows the floor, not the cursor's
+    /// projection plane). Caller's `model_matrix` should be
+    /// `Mat4::IDENTITY` since positions are already world-
+    /// space; collapse the ring by writing `Mat4::ZERO`
+    /// rather than zeroing the vertex buffer.
+    pub fn targeting_circle_conformed(
+        color: [f32; 3],
+        center: Vec3,
+        radius: f32,
+        height_at: impl Fn(f32, f32) -> f32,
+    ) -> Self {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // Must match `targeting_circle` so callers can switch
+        // between the flat and conformed variants without
+        // re-allocating the renderer slot.
+        let segments = 64u32;
+        // Constant lift above the sampled floor height. Same
+        // value as the flat variant's `y = 0.08` — chosen so
+        // the ring clears both the dungeon floor mesh and any
+        // skirt/stair geometry the renderer might rasterise
+        // at the same Y. Independent of `radius` so the ring
+        // doesn't "float" higher for larger AoEs.
+        let lift = 0.08_f32;
+        let bright = Vec3::new(color[0] * 8.0, color[1] * 8.0, color[2] * 8.0);
+        let dim = Vec3::new(color[0] * 4.0, color[1] * 4.0, color[2] * 4.0);
+
+        let inner_r = radius * 0.75;
+        let outer_r = radius;
+        let uv = Vec2::new(0.5, 0.5);
+
+        // Closure: world XZ → world position with Y locked
+        // to the sampled floor + lift. Inlined twice (inner
+        // and outer rim) to avoid a per-vertex branch.
+        let push = |angle: f32, r: f32, tint: Vec3, vs: &mut Vec<Vertex>| {
+            let wx = center.x + angle.cos() * r;
+            let wz = center.z + angle.sin() * r;
+            let wy = height_at(wx, wz) + lift;
+            vs.push(Vertex {
+                position: Vec3::new(wx, wy, wz),
+                normal: Vec3::Y,
+                color: tint,
+                uv,
+            });
+        };
+
+        for i in 0..segments {
+            let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            let base_idx = vertices.len() as u32;
+
+            // 0 = inner_a0, 1 = outer_a0, 2 = outer_a1, 3 = inner_a1
+            push(a0, inner_r, dim, &mut vertices);
+            push(a0, outer_r, bright, &mut vertices);
+            push(a1, outer_r, bright, &mut vertices);
+            push(a1, inner_r, dim, &mut vertices);
+
+            // Front-facing triangles (normal up).
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 3,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 1,
+            ]);
+            // Back-facing triangles (so the ring is visible
+            // from below too, matching the flat variant).
             indices.extend_from_slice(&[
                 base_idx,
                 base_idx + 1,
@@ -1899,6 +2071,38 @@ impl Mesh {
     }
 }
 
+/// Resolve a glTF image source to a decoded [`ImageData`], handling
+/// both external file URIs and images embedded in the binary chunk
+/// of a `.glb`. External URIs are routed through [`AssetServer`]
+/// (cached, deduped); embedded images are decoded fresh each time
+/// — there's no path to key them on, and meshes themselves are
+/// already cached one level up.
+fn load_gltf_image(
+    image: gltf::Image,
+    buffers: &[gltf::buffer::Data],
+    base_dir: &std::path::Path,
+    assets: &crate::assets::AssetServer,
+) -> Option<std::sync::Arc<crate::assets::ImageData>> {
+    match image.source() {
+        gltf::image::Source::Uri { uri, .. } => assets.load_image(base_dir, uri),
+        gltf::image::Source::View { view, .. } => {
+            let buf = &buffers[view.buffer().index()];
+            let start = view.offset();
+            let end = start + view.length();
+            let bytes = buf.0.get(start..end)?;
+            let img = image::load_from_memory(bytes)
+                .map_err(|e| log::warn!("gltf embedded image decode failed: {}", e))
+                .ok()?
+                .to_rgba8();
+            Some(std::sync::Arc::new(crate::assets::ImageData {
+                width: img.width(),
+                height: img.height(),
+                pixels: img.into_raw(),
+            }))
+        }
+    }
+}
+
 fn visit_node_inner(
     node: &gltf::Node,
     parent: glam::Mat4,
@@ -1934,15 +2138,40 @@ fn visit_node_inner(
             // a cheap stand-in for binding per-primitive material sets
             // and is what makes the nature-prop pack actually look
             // like trees / leaves / mushrooms instead of pure white.
-            let pbr = prim.material().pbr_metallic_roughness();
+            let material = prim.material();
+            let pbr = material.pbr_metallic_roughness();
             let base_color = pbr.base_color_factor();
             let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
-            let base_tex =
-                pbr.base_color_texture()
-                    .and_then(|info| match info.texture().source().source() {
-                        gltf::image::Source::Uri { uri, .. } => assets.load_image(base_dir, uri),
-                        _ => None,
-                    });
+            let base_tex = pbr.base_color_texture().and_then(|info| {
+                load_gltf_image(info.texture().source(), buffers, base_dir, assets)
+            });
+            log::info!(
+                "  primitive material={:?} base_color_factor=[{:.2},{:.2},{:.2},{:.2}] base_tex={} emissive=[{:.2},{:.2},{:.2}] emissive_strength={:.2} emissive_tex={}",
+                material.name(),
+                base_color[0], base_color[1], base_color[2], base_color[3],
+                if base_tex.is_some() { "yes" } else { "no" },
+                material.emissive_factor()[0], material.emissive_factor()[1], material.emissive_factor()[2],
+                material.emissive_strength().unwrap_or(1.0),
+                if material.emissive_texture().is_some() { "yes" } else { "no" },
+            );
+
+            // Emissive contribution from the Principled BSDF's
+            // Emission socket (Blender) → glTF `emissiveFactor`,
+            // optionally amplified by `KHR_materials_emissive_strength`
+            // when the Emission Strength in Blender is > 1. We add
+            // this on top of the base colour so emissive primitives
+            // (e.g. a wand's crystal tip) push past linear 1.0 and
+            // get picked up by the bloom bright-pass downstream.
+            // Areas without emission contribute zero, so a base-only
+            // primitive is unchanged.
+            let emissive_factor = material.emissive_factor();
+            let emissive_strength = material.emissive_strength().unwrap_or(1.0);
+            let emissive =
+                glam::Vec3::new(emissive_factor[0], emissive_factor[1], emissive_factor[2])
+                    * emissive_strength;
+            let emissive_tex = material.emissive_texture().and_then(|info| {
+                load_gltf_image(info.texture().source(), buffers, base_dir, assets)
+            });
 
             let base_idx = out.vertices.len() as u32;
             for i in 0..positions.len() {
@@ -1957,6 +2186,11 @@ fn visit_node_inner(
                 if let Some(img) = &base_tex {
                     color *= img.sample(uvs[i]);
                 }
+                let mut em = emissive;
+                if let Some(img) = &emissive_tex {
+                    em *= img.sample(uvs[i]);
+                }
+                color += em;
                 out.vertices.push(Vertex {
                     position: p_world,
                     normal: if n_world == glam::Vec3::ZERO {

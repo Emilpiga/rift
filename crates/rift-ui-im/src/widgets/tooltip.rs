@@ -16,26 +16,94 @@
 use super::super::{color::Color, layer::Layer, theme::Theme, ui::Ui};
 use crate::rect::{Pos2, Rect};
 
+/// Per-line decoration. Most lines are plain `Text`; the rest
+/// instruct [`Tooltip::show`] to paint a specific chrome
+/// element (divider rule, legendary banner edge, …).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum TooltipLineDecor {
+    /// Ordinary text line.
+    #[default]
+    Text,
+    /// Gold horizontal rule. Text is ignored.
+    Divider,
+    /// Top edge of a legendary banner — gold gradient
+    /// (transparent → opaque → transparent) rule and marks the
+    /// start of a darker inset backdrop drawn behind every
+    /// `BannerBody` line that follows until [`BannerEdgeBottom`].
+    BannerEdgeTop,
+    /// Bottom edge of a legendary banner. Same gradient rule;
+    /// closes the inset backdrop.
+    BannerEdgeBottom,
+    /// Text line that lives between [`BannerEdgeTop`] and
+    /// [`BannerEdgeBottom`]. The renderer paints a darker
+    /// translucent fill behind these (with a horizontal
+    /// 0 → full → 0 alpha mask so the plate fades into the
+    /// surrounding stone background).
+    BannerBody,
+}
+
 /// One row of a tooltip. Width measurement is automatic.
 pub struct TooltipLine<'a> {
     pub text: &'a str,
     pub size: f32,
     pub color: Color,
+    pub decor: TooltipLineDecor,
+    /// When `Some`, the renderer splits the line text at the
+    /// last `"  "` (two spaces) and draws the tail as a filled
+    /// rounded pill ("badge") with this colour as the fill —
+    /// used by item tooltips to surface roll-quality tiers
+    /// (`▴ Fine`, `▴▴▴ Perfect`, …) as a visual chip rather
+    /// than trailing text.
+    pub badge: Option<Color>,
 }
 
 impl<'a> TooltipLine<'a> {
     pub fn new(text: &'a str, size: f32, color: Color) -> Self {
-        Self { text, size, color }
+        Self {
+            text,
+            size,
+            color,
+            decor: TooltipLineDecor::Text,
+            badge: None,
+        }
+    }
+
+    /// Builder: set the per-line decoration. See
+    /// [`TooltipLineDecor`].
+    pub fn decor(mut self, d: TooltipLineDecor) -> Self {
+        self.decor = d;
+        self
+    }
+
+    /// Builder: tag this line with a trailing badge. See
+    /// [`Self::badge`].
+    pub fn badge(mut self, fill: Color) -> Self {
+        self.badge = Some(fill);
+        self
     }
 
     /// `true` if this line should render as a gold horizontal
-    /// rule rather than text. Detected by leading `─` (the box-
-    /// drawing char the item-tooltip builder uses as a section
-    /// separator). Keeps the API surface flat — callers just
-    /// push divider lines like any other.
+    /// rule rather than text. Honours both the explicit
+    /// [`TooltipLineDecor::Divider`] tag and the legacy `─`
+    /// character-detection so callers that pre-date the decor
+    /// field keep working.
     fn is_divider(&self) -> bool {
+        if matches!(self.decor, TooltipLineDecor::Divider) {
+            return true;
+        }
         let t = self.text.trim();
         !t.is_empty() && t.chars().all(|c| c == '\u{2500}')
+    }
+
+    fn is_banner_edge_top(&self) -> bool {
+        matches!(self.decor, TooltipLineDecor::BannerEdgeTop)
+    }
+    fn is_banner_edge_bottom(&self) -> bool {
+        matches!(self.decor, TooltipLineDecor::BannerEdgeBottom)
+    }
+    #[allow(dead_code)]
+    fn is_banner_body(&self) -> bool {
+        matches!(self.decor, TooltipLineDecor::BannerBody)
     }
 }
 
@@ -147,6 +215,21 @@ impl<'a> Tooltip<'a> {
         // Extra vertical breathing room around each divider
         // so affix groups read as distinct sections.
         let divider_margin = 4.0 * theme.scale;
+        // Gradient gold rule slot used for legendary banner
+        // edges — a touch taller than a regular divider so the
+        // gradient reads, and with a bit more margin so the
+        // banner reads as its own framed box.
+        let banner_edge_h = 4.0 * theme.scale;
+        let banner_edge_margin = 5.0 * theme.scale;
+        // Inner horizontal padding inside a legendary banner so
+        // the dark inset backdrop hugs the text instead of
+        // running edge to edge — sells the "inset plate" look.
+        let banner_inset = 4.0 * theme.scale;
+        // Single uniform gap appended after every text row so
+        // the whole tooltip has a consistent vertical rhythm.
+        // Kept small (1px @ scale 1.0) — anything larger and
+        // affix groups stop reading as a single block.
+        let line_gap = 1.0 * theme.scale;
 
         // Per-line measurement so we don't have to assume a
         // fixed glyph width. Dividers contribute no width but
@@ -159,9 +242,39 @@ impl<'a> Tooltip<'a> {
         for ln in lines {
             if ln.is_divider() {
                 body_h += divider_h + divider_margin * 2.0;
+            } else if ln.is_banner_edge_top() || ln.is_banner_edge_bottom() {
+                body_h += banner_edge_h + banner_edge_margin * 2.0;
             } else {
-                max_w = max_w.max(ui.measure_text(ln.text, ln.size));
-                body_h += ln.size + 2.0 * theme.scale;
+                // Width budget: head text + (optional) trailing
+                // badge pill side-by-side. The renderer right-
+                // aligns the badge against the tooltip edge, so
+                // we measure both and reserve enough room for
+                // them to coexist without overlapping the head.
+                let (head, badge_text) = match (ln.badge, ln.text.rsplit_once("  ")) {
+                    (Some(_), Some((h, t))) => {
+                        let t = strip_band_glyph(t);
+                        if t.is_empty() {
+                            (ln.text, None)
+                        } else {
+                            (h.trim_end(), Some(t))
+                        }
+                    }
+                    _ => (ln.text, None),
+                };
+                let head_w = ui.measure_text(head, ln.size);
+                let badge_w = badge_text
+                    .map(|t| {
+                        let bf = ln.size * 0.82;
+                        ui.measure_text(t, bf) + 4.0 * theme.scale * 2.0
+                    })
+                    .unwrap_or(0.0);
+                let gap = if badge_w > 0.0 {
+                    8.0 * theme.scale
+                } else {
+                    0.0
+                };
+                max_w = max_w.max(head_w + gap + badge_w);
+                body_h += ln.size + line_gap;
             }
         }
         let header_h = if self.header.is_some() {
@@ -244,56 +357,164 @@ impl<'a> Tooltip<'a> {
                 );
                 cursor_y += theme.fonts.size_sm + 4.0 * theme.scale;
             }
+
+            // Pre-scan to locate any legendary banner spans so
+            // we can paint the dark inset backdrop **before**
+            // the line texts go down on top of it. Tracks
+            // matched (top_y, bot_y) pairs; unmatched edges are
+            // tolerated (renderer never panics on malformed
+            // input — worst case the backdrop is skipped).
+            let mut banner_spans: Vec<(f32, f32)> = Vec::new();
+            {
+                let mut probe_y = cursor_y;
+                let mut open_top: Option<f32> = None;
+                for ln in lines {
+                    if ln.is_divider() {
+                        probe_y += divider_margin + divider_h + divider_margin;
+                    } else if ln.is_banner_edge_top() {
+                        let slot_top = probe_y;
+                        probe_y += banner_edge_margin + banner_edge_h + banner_edge_margin;
+                        // Banner body starts just inside the
+                        // bottom of the edge slot.
+                        open_top = Some(slot_top + banner_edge_margin + banner_edge_h * 0.5);
+                    } else if ln.is_banner_edge_bottom() {
+                        let slot_top = probe_y;
+                        if let Some(t) = open_top.take() {
+                            banner_spans
+                                .push((t, slot_top + banner_edge_margin + banner_edge_h * 0.5));
+                        }
+                        probe_y += banner_edge_margin + banner_edge_h + banner_edge_margin;
+                    } else {
+                        probe_y += ln.size + line_gap;
+                    }
+                }
+                // Drop any unclosed edge silently.
+                let _ = open_top;
+            }
+
+            // Paint banner backdrops first so all subsequent
+            // text and edge gradients draw on top. The plate is
+            // a horizontal 0 → full → 0 alpha mask of a dark
+            // translucent fill so it fades into the surrounding
+            // stone background instead of reading as a hard
+            // rectangle. Mirrors the gold edge rule's gradient
+            // so the banner reads as one coherent ornament.
+            for &(top_y, bot_y) in &banner_spans {
+                let plate_l = rect.x() + pad - banner_inset;
+                let plate_r = rect.max.x - pad + banner_inset;
+                let plate_h = (bot_y - top_y).max(0.0);
+                let mid_x = (plate_l + plate_r) * 0.5;
+                let dark = Color::rgba(0.0, 0.0, 0.0, 0.55);
+                let clear = Color::rgba(0.0, 0.0, 0.0, 0.0);
+                let half_l = Rect::from_xywh(plate_l, top_y, mid_x - plate_l, plate_h);
+                let half_r = Rect::from_xywh(mid_x, top_y, plate_r - mid_x, plate_h);
+                // grad4 corners: top-left, top-right, bot-left, bot-right.
+                ui.draw_grad4_rect(half_l, clear, dark, clear, dark);
+                ui.draw_grad4_rect(half_r, dark, clear, dark, clear);
+            }
+
             for ln in lines {
                 if ln.is_divider() {
-                    // Gold separator — same honey tint used by
-                    // the inventory's cell outlines so the two
-                    // surfaces feel like one set. Two stacked
-                    // hairlines (gold + soft highlight) read
-                    // as etched metal.
+                    // Gold separator with the same horizontal
+                    // 0 → full → 0 alpha mask as the legendary
+                    // banner edges so every divider in the
+                    // tooltip reads as one consistent ornament,
+                    // just at different sizes.
                     cursor_y += divider_margin;
                     let mid_y = cursor_y + divider_h * 0.5 - 1.0;
-                    let line_l = rect.x() + pad;
-                    let line_r = rect.max.x - pad;
+                    let span_l = rect.x() + pad;
+                    let span_r = rect.max.x - pad;
+                    let mid_x = (span_l + span_r) * 0.5;
                     let gold = Color::rgba(0.78, 0.62, 0.30, 0.85);
-                    let hi = Color::rgba(1.0, 0.95, 0.82, 0.18);
-                    ui.draw_rect(Rect::from_xywh(line_l, mid_y, line_r - line_l, 1.0), gold);
-                    ui.draw_rect(
-                        Rect::from_xywh(line_l, mid_y + 1.0, line_r - line_l, 1.0),
-                        hi,
-                    );
+                    let clear = Color::rgba(0.78, 0.62, 0.30, 0.0);
+                    let row_l = Rect::from_xywh(span_l, mid_y, mid_x - span_l, 1.0);
+                    let row_r = Rect::from_xywh(mid_x, mid_y, span_r - mid_x, 1.0);
+                    ui.draw_grad4_rect(row_l, clear, gold, clear, gold);
+                    ui.draw_grad4_rect(row_r, gold, clear, gold, clear);
                     cursor_y += divider_h + divider_margin;
+                } else if ln.is_banner_edge_top() || ln.is_banner_edge_bottom() {
+                    // Horizontal gold-gradient rule: transparent
+                    // → opaque → transparent across the tooltip
+                    // width. Drawn as two side-by-side gradient
+                    // rects (left half transparent→opaque, right
+                    // half opaque→transparent) using
+                    // `draw_grad4_rect` since the primitive
+                    // exposes 4-corner colours.
+                    cursor_y += banner_edge_margin;
+                    let mid_y = cursor_y + banner_edge_h * 0.5 - 1.0;
+                    let span_l = rect.x() + pad - banner_inset;
+                    let span_r = rect.max.x - pad + banner_inset;
+                    let mid_x = (span_l + span_r) * 0.5;
+                    let gold = Color::rgba(1.0, 0.82, 0.36, 0.95);
+                    let clear = Color::rgba(1.0, 0.82, 0.36, 0.0);
+                    let row_l = Rect::from_xywh(span_l, mid_y, mid_x - span_l, 2.0);
+                    let row_r = Rect::from_xywh(mid_x, mid_y, span_r - mid_x, 2.0);
+                    ui.draw_grad4_rect(row_l, clear, gold, clear, gold);
+                    ui.draw_grad4_rect(row_r, gold, clear, gold, clear);
+                    cursor_y += banner_edge_h + banner_edge_margin;
                 } else {
-                    // Detect a trailing roll-quality token like
-                    // `… +5 Intellect  [42%]`. The item-tooltip
-                    // builder appends it with two leading spaces;
-                    // when present we split the line so the
-                    // `[NN%]` chunk renders at a dimmed alpha —
-                    // information, not a primary stat read.
-                    let (head, tail) = match ln.text.rsplit_once("  [") {
-                        Some((h, t)) if t.ends_with("%]") => (h, format!("  [{}", t)),
-                        _ => (ln.text, String::new()),
+                    // Optional trailing badge: split off the
+                    // tail after the last `"  "` (two spaces)
+                    // and render it inside a small filled
+                    // rounded pill so roll-quality tiers
+                    // (`▴ Fine`, `▴▴▴ Perfect`, …) read as a
+                    // visual chip rather than trailing text.
+                    // Both head and tail are `trim_end`/
+                    // `trim_start`-ed so a stat formatter that
+                    // emits an extra space around the
+                    // delimiter doesn't push the badge text off
+                    // its left padding edge.
+                    let (head, badge_text) = match (ln.badge, ln.text.rsplit_once("  ")) {
+                        (Some(_), Some((h, t))) => {
+                            let t = strip_band_glyph(t);
+                            if t.is_empty() {
+                                (ln.text, None)
+                            } else {
+                                (h.trim_end(), Some(t))
+                            }
+                        }
+                        _ => (ln.text, None),
                     };
                     ui.draw_text(Pos2::new(rect.x() + pad, cursor_y), head, ln.size, ln.color);
-                    if !tail.is_empty() {
-                        let head_w = ui.measure_text(head, ln.size);
-                        let [r, g, b, _] = ln.color.0;
-                        // Mute saturation toward neutral and drop
-                        // alpha so the bracketed roll-quality
-                        // reads as secondary metadata next to
-                        // the main stat text.
-                        let dim_r = r * 0.55 + 0.18;
-                        let dim_g = g * 0.55 + 0.18;
-                        let dim_b = b * 0.55 + 0.18;
-                        let dim = Color::rgba(dim_r, dim_g, dim_b, 0.55);
+                    if let (Some(tail), Some(fill)) = (badge_text, ln.badge) {
+                        // Badge sits aligned to the right edge of
+                        // the tooltip body. Slightly smaller than
+                        // the line size so the pill chrome reads
+                        // as ornament instead of fighting the
+                        // stat text for weight. Padding +
+                        // rounded corners are scale-aware so the
+                        // shape stays proportional across themes.
+                        let badge_font = ln.size * 0.82;
+                        let pad_x = 4.0 * theme.scale;
+                        let pad_y = 1.0 * theme.scale;
+                        let tail_w = ui.measure_text(tail, badge_font);
+                        let badge_w = tail_w + pad_x * 2.0;
+                        let badge_h = badge_font + pad_y * 2.0;
+                        let badge_x = rect.max.x - pad - badge_w;
+                        // Centre the pill vertically against the
+                        // line baseline so it sits on the same
+                        // optical row as the head text.
+                        let badge_y = cursor_y + (ln.size - badge_h) * 0.5;
+                        let badge_rect = Rect::from_xywh(badge_x, badge_y, badge_w, badge_h);
+                        let radius = badge_h * 0.5;
+                        // Soft-tinted fill so the pill reads as
+                        // a chip without yelling. The text on
+                        // top stays at the band's full saturated
+                        // colour so the tier identity comes from
+                        // the lettering, not the background.
+                        let [r, g, b, _] = fill.0;
+                        let chip_fill = Color::rgba(r, g, b, 0.18);
+                        let chip_border = Color::rgba(r, g, b, 0.85);
+                        ui.draw_rounded_rect(badge_rect, radius, chip_fill);
+                        ui.draw_rounded_outline(badge_rect, radius, 1.0, chip_border);
                         ui.draw_text(
-                            Pos2::new(rect.x() + pad + head_w, cursor_y),
-                            &tail,
-                            ln.size,
-                            dim,
+                            Pos2::new(badge_x + pad_x, badge_y + pad_y),
+                            tail,
+                            badge_font,
+                            Color::rgba(r, g, b, 1.0),
                         );
                     }
-                    cursor_y += ln.size + 2.0 * theme.scale;
+                    cursor_y += ln.size + line_gap;
                 }
             }
         });
@@ -311,6 +532,20 @@ pub fn tooltip_at_mouse(ui: &mut Ui<'_>, header: Option<&str>, lines: &[TooltipL
         t = t.header(h);
     }
     t.show(ui, Pos2::new(mp.x + 18.0 * ui.theme().scale, mp.y), lines)
+}
+
+/// Strip the leading roll-band glyph(s) (`▾ ▸ ▴ ▴▴ ▴▴▴`) from a
+/// badge tail like `"▴ Fine"`, returning just the band name
+/// (`"Fine"`). The triangle glyphs carry large left side-bearing
+/// in most fonts, which makes them sit visibly off-centre inside
+/// the pill — and they're redundant anyway because the pill's
+/// fill colour already encodes the band identity. Whitespace on
+/// both ends is trimmed so `measure_text` matches the painted
+/// glyph run exactly.
+fn strip_band_glyph(tail: &str) -> &str {
+    let trimmed = tail.trim();
+    let rest = trimmed.trim_start_matches(|c| matches!(c, '\u{25B4}' | '\u{25B8}' | '\u{25BE}'));
+    rest.trim_start()
 }
 
 /// Convenience used by the inventory: build a list of lines
@@ -333,6 +568,8 @@ pub fn item_tooltip_lines<'a>(
                 theme.fonts.size_sm
             },
             color: if i == 0 { rarity } else { theme.colors.text },
+            decor: TooltipLineDecor::Text,
+            badge: None,
         })
         .collect()
 }

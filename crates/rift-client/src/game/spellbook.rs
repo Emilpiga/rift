@@ -26,8 +26,8 @@ use rift_engine::ui::im::{
 };
 use rift_game::abilities::{Ability, Category};
 use rift_game::loadout::{
-    is_ability_unlocked, is_slot_unlocked, player_abilities, Loadout,
-    SLOT_COUNT, SLOT_UNLOCK_LEVELS,
+    is_ability_unlocked, is_slot_unlocked, player_abilities, Loadout, SLOT_COUNT,
+    SLOT_UNLOCK_LEVELS,
 };
 
 /// User intent emitted by [`SpellbookUi::frame`]. The binary
@@ -37,7 +37,7 @@ use rift_game::loadout::{
 pub enum SpellbookAction {
     /// Player asked to put `ability_id` into action-bar slot
     /// `slot_index`. `ability_id == EMPTY_SLOT` clears the slot.
-    AssignSlot { slot_index: u8, ability_id: u8 },
+    AssignSlot { slot_index: u8, ability_id: rift_game::abilities::AbilityWireId },
 }
 
 #[derive(Default)]
@@ -46,7 +46,7 @@ pub struct SpellbookUi {
     /// Wire id of the ability the user has selected from the
     /// pool. `None` means "no ability picked yet — clicking a
     /// slot is a no-op".
-    selected_ability: Option<u8>,
+    selected_ability: Option<rift_game::abilities::AbilityWireId>,
     /// Bar slot the user pre-targeted by clicking the HUD.
     /// `Some(i)` means the next pool click assigns directly to
     /// slot `i`. Cleared on assign / close.
@@ -102,7 +102,10 @@ impl SpellbookUi {
         if !self.open {
             return None;
         }
-        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
+        if ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
+        {
             self.close();
             return None;
         }
@@ -126,7 +129,9 @@ impl SpellbookUi {
         // multiplied by — captures both the global theme scale
         // and any further shrink from the screen clamp so a
         // small viewport still gets a usable layout.
-        let fit = (panel_w / PANEL_W_BASE).min(panel_h / PANEL_H_BASE).max(0.4);
+        let fit = (panel_w / PANEL_W_BASE)
+            .min(panel_h / PANEL_H_BASE)
+            .max(0.4);
 
         // Modal dim.
         ui.with_layer(rift_engine::ui::im::Layer::Modal, |ui| {
@@ -167,7 +172,10 @@ impl SpellbookUi {
         let lvl_text = format!("Lv {player_level}");
         let lvl_w = ui.measure_text(&lvl_text, theme.fonts.size_md);
         ui.draw_text(
-            Pos2::new(panel.max.x - lvl_w - inner_pad, panel.min.y + inner_pad + 4.0),
+            Pos2::new(
+                panel.max.x - lvl_w - inner_pad,
+                panel.min.y + inner_pad + 4.0,
+            ),
             lvl_text.as_str(),
             theme.fonts.size_md,
             theme.colors.accent,
@@ -175,7 +183,8 @@ impl SpellbookUi {
 
         // ── Layout regions ────────────────────────────────────
         // Header: title + hint + breathing room.
-        let header_h = inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
+        let header_h =
+            inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
         let rail_w = 140.0 * fit;
         let bar_strip_h = 110.0 * fit; // ACTION BAR row + label + breathing room
         let detail_h = 132.0 * fit;
@@ -235,11 +244,7 @@ impl SpellbookUi {
             } else {
                 Button::new(label.as_str())
             };
-            let resp = btn.show_with_id(
-                ui,
-                Id::root("spellbook_cat").child(i),
-                r,
-            );
+            let resp = btn.show_with_id(ui, Id::root("spellbook_cat").child(i), r);
             if resp.clicked {
                 self.selected_category = Some(*cat);
             }
@@ -286,7 +291,7 @@ impl SpellbookUi {
                 grid_rect.x() + col as f32 * (tile + tile_gap),
                 grid_rect.y() + row as f32 * (tile + tile_gap),
             );
-            let id = Id::root("spellbook_pool").child(ab.wire_id as usize);
+            let id = Id::root("spellbook_pool").child(ab.wire_id.raw() as usize);
             let unlocked = is_ability_unlocked(ab.wire_id, player_level);
             let mut t = ItemSlot::new(tile)
                 .selected(self.selected_ability == Some(ab.wire_id))
@@ -320,10 +325,8 @@ impl SpellbookUi {
         }
 
         // ── Detail panel ──────────────────────────────────────
-        let focus: Option<&Ability> = hovered_ability.or_else(|| {
-            self.selected_ability
-                .and_then(rift_game::abilities::lookup)
-        });
+        let focus: Option<&Ability> = hovered_ability
+            .or_else(|| self.selected_ability.and_then(rift_game::abilities::lookup));
         Frame::inset(&theme).show_only(ui, detail_rect);
         draw_ability_detail(ui, detail_rect, focus, player_level, &theme);
 
@@ -339,10 +342,7 @@ impl SpellbookUi {
         let bar_total_w = SLOT_COUNT as f32 * tile + (SLOT_COUNT - 1) as f32 * tile_gap;
         let bar_x = panel.min.x + (panel_w - bar_total_w) * 0.5;
         for slot_index in 0..SLOT_COUNT {
-            let pos = Pos2::new(
-                bar_x + slot_index as f32 * (tile + tile_gap),
-                bar_y,
-            );
+            let pos = Pos2::new(bar_x + slot_index as f32 * (tile + tile_gap), bar_y);
             let id = Id::root("spellbook_bar").child(slot_index);
             let wire_id = loadout.slots[slot_index];
             let ab = rift_game::abilities::lookup(wire_id);
@@ -384,10 +384,8 @@ impl SpellbookUi {
         }
 
         // Re-resolve focus now that bar hover may have updated it.
-        let focus = hovered_ability.or_else(|| {
-            self.selected_ability
-                .and_then(rift_game::abilities::lookup)
-        });
+        let focus = hovered_ability
+            .or_else(|| self.selected_ability.and_then(rift_game::abilities::lookup));
         draw_ability_detail(ui, detail_rect, focus, player_level, &theme);
 
         // Close hint (bottom-right). Measured-anchored so the
@@ -463,7 +461,11 @@ fn draw_ability_detail(
         Pos2::new(rect.min.x + pad, rect.min.y + pad),
         ab.name,
         theme.fonts.size_lg,
-        if unlocked { theme.colors.text } else { theme.colors.text_muted },
+        if unlocked {
+            theme.colors.text
+        } else {
+            theme.colors.text_muted
+        },
     );
     // Lv pill on the right.
     let lvl_text = format!("Lv {}", ab.unlock_level);
@@ -485,8 +487,8 @@ fn draw_ability_detail(
             "Cooldown {:.1}s   |   Damage {:.0}%{}",
             ab.cooldown,
             ab.damage_mult * 100.0,
-            if ab.projectile_count > 1 {
-                format!("   |   Projectiles {}", ab.projectile_count)
+            if ab.projectile_count() > 1 {
+                format!("   |   Projectiles {}", ab.projectile_count())
             } else {
                 String::new()
             },
@@ -495,8 +497,8 @@ fn draw_ability_detail(
         format!(
             "Damage {:.0}%{}",
             ab.damage_mult * 100.0,
-            if ab.projectile_count > 1 {
-                format!("   |   Projectiles {}", ab.projectile_count)
+            if ab.projectile_count() > 1 {
+                format!("   |   Projectiles {}", ab.projectile_count())
             } else {
                 String::new()
             },

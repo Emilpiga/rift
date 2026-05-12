@@ -1272,6 +1272,30 @@ pub struct ItemBlob {
     /// decoding cleanly.
     #[serde(default)]
     pub provenance: Option<Vec<[u8; 16]>>,
+    /// Stable string id of the matched
+    /// `rift_game::loot::uniques::UniqueDef`. `None` for
+    /// procedural legendaries and non-legendaries. Old payloads
+    /// default to `None` (renders as a procedural legendary).
+    #[serde(default)]
+    pub unique_id: Option<String>,
+    /// Per-instance pool index for pool-roll uniques (today only
+    /// Mirrorglass). `None` for `Fixed` uniques and non-uniques.
+    /// Defaults to `None` for forward-compat with pre-Phase-4
+    /// senders.
+    #[serde(default)]
+    pub unique_pick: Option<u8>,
+    /// Rift-touched bonus line (ITEMS.md §2.6, §3 Phase 5).
+    /// `Some((affix_pool_index, value, depth_floor))` for drops
+    /// that came from inside a rift past the configured floor
+    /// gate; `None` for hub drops and rift drops that didn't
+    /// pass the per-kill chance gate. The pool index points
+    /// into `rift_game::loot::RIFT_TOUCHED_POOL`; `depth_floor`
+    /// is the floor index at the moment of the kill, persisted
+    /// so the tooltip can display "Floor N" even after the
+    /// scaling formula changes between builds. Defaults to
+    /// `None` so pre-Phase-5 senders decode cleanly.
+    #[serde(default)]
+    pub rift_touched: Option<(u16, f32, u16)>,
 }
 
 /// Wire shape of a single stash tab. The stash is now a
@@ -1380,6 +1404,26 @@ pub enum WorldEvent {
     /// any per-channel looping visual / audio.
     ChannelEnd { caster: NetId, ability: u16 },
 
+    /// A "pulse" cycle started on a channeled ability that has
+    /// the pulse mechanic enabled (currently: Frost Ray with
+    /// the `FrostRayShatter` legendary). The server emits this
+    /// every `travel_time` seconds while the channel is live —
+    /// once at insertion, then once each time the previous
+    /// pulse completed and triggered its on-arrival effect
+    /// (e.g. the shatter shard burst at the beam terminus).
+    /// Clients use it to render the in-flight bead travelling
+    /// along the beam from caster → terminus over `travel_time`
+    /// so the player can see exactly when the next proc lands.
+    /// Generic by design: any future channel transform that
+    /// wants the same "telegraphed periodic finisher" UX just
+    /// returns a non-zero `transform_pulse_period(...)` on the
+    /// server and reuses this event verbatim.
+    ChannelPulse {
+        caster: NetId,
+        ability: u16,
+        travel_time: f32,
+    },
+
     /// A dead player has finished their down-pose timer and risen
     /// as a ghost. Server stops including their row in remote
     /// snapshots after this fires, so the client uses the event
@@ -1441,6 +1485,24 @@ pub enum WorldEvent {
         kind: u8,
         position: [f32; 3],
     },
+
+    /// One-shot visual effect at a world position, untied to a
+    /// specific caster. Used today by legendary `ProcAction::
+    /// Explosion` fires (Splinterstep, Mirrorglass) which spawn
+    /// AoE damage zones but don't flow through the normal
+    /// `AbilityCast` path. `kind` discriminates the preset — see
+    /// [`vfx_event_kind`].
+    Vfx { kind: u8, position: [f32; 3] },
+}
+
+/// Stable wire ids for [`WorldEvent::Vfx::kind`].
+/// Append-only — never reorder or repurpose existing values.
+pub mod vfx_event_kind {
+    /// Legendary `ProcAction::Explosion` pop — a short
+    /// fire-orange shockwave at the proc origin. Used by
+    /// Splinterstep's OnDodge explode and Mirrorglass'
+    /// OnLowHealth panic burst.
+    pub const PROC_EXPLOSION: u8 = 0;
 }
 
 /// Stable wire ids for [`WorldEvent::EnemyTelegraph::kind`].

@@ -221,9 +221,7 @@ fn pick_rarity(weights: &[u32; 4], rng: &mut LootRng) -> Rarity {
 
 fn any_affix_available(base: &BaseItem, rarity: Rarity, ilvl: u32) -> bool {
     AFFIX_POOL.iter().any(|a| {
-        (a.tags & base.allowed_tags) != 0
-            && a.min_ilvl <= ilvl
-            && rarity.at_least(a.rarity_min)
+        (a.tags & base.allowed_tags) != 0 && a.min_ilvl <= ilvl && rarity.at_least(a.rarity_min)
     })
 }
 

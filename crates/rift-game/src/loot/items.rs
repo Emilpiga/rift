@@ -325,14 +325,24 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         ],
         min_ilvl: 1,
         // Wand = caster, any element, projectile shape (Fireball,
-        // Multi-Shot-style spell projectiles).
+        // Multi-fireball-style spell projectiles).
         family: BaseFamily {
             attribute: Some(Attribute::Agility),
             element: Some(ELEMENTS_CASTER),
             archetype: Some(ARCHETYPES_PROJECTILE),
         },
         icon: "loot/Weapons/15",
-        models: None,
+        // Weapons are external props rather than skinned outfit
+        // pieces — the same authored mesh is used regardless of
+        // the wielder's gender, attached to the casting-hand
+        // joint each frame. The renderer-side path lives in
+        // `rift-client::game::weapon_visuals`; both gender slots
+        // point at the same source file because nothing in the
+        // mesh is gendered.
+        models: Some(GenderedModel {
+            female: Some("assets/models/loot/weapons/wands/wand_01.glb"),
+            male: Some("assets/models/loot/weapons/wands/wand_01.glb"),
+        }),
     },
     // ---- Armor — Helm, Chest, Legs, Hands, Boots ---------------------
     // Each base picks one EquipSlot. New bases (different art / name /
@@ -602,6 +612,36 @@ mod family_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Every `BaseItem::id` must be unique across the catalogue.
+    /// Persistence keys items by the stable string id, so a
+    /// duplicate would alias two different bases onto the same
+    /// row on save / load and silently overwrite a player's gear.
+    #[test]
+    fn every_base_id_is_unique() {
+        let mut seen: std::collections::HashSet<&'static str> = Default::default();
+        for b in BASE_ITEMS {
+            assert!(
+                seen.insert(b.id),
+                "base item id `{}` appears more than once in BASE_ITEMS",
+                b.id
+            );
+        }
+    }
+
+    /// Every `BaseItem::icon` must be non-empty. An empty icon
+    /// key forces the renderer down the fallback-glyph path every
+    /// frame for that base; usually a content-authoring slip.
+    #[test]
+    fn every_base_declares_an_icon() {
+        for b in BASE_ITEMS {
+            assert!(
+                !b.icon.is_empty(),
+                "base item `{}` has an empty icon key",
+                b.id
+            );
         }
     }
 }

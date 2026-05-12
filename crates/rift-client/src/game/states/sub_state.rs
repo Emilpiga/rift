@@ -16,6 +16,7 @@
 //! super::sub_state::*` brings the whole bag in.
 
 use glam::Vec3;
+use rift_game::abilities::AbilityWireId;
 use rift_game::character;
 
 /// Where we are in the per-frame staged init.
@@ -69,7 +70,7 @@ pub struct NetState {
     /// `(slot_index, ability_id)`. The server replies with
     /// `ServerMsg::Loadout`, so we never mutate the local
     /// loadout optimistically.
-    pub pending_loadout_changes: Vec<(u8, u8)>,
+    pub pending_loadout_changes: Vec<(u8, AbilityWireId)>,
     /// `true` for one frame when the local player F-presses the
     /// rift-spawn portal, asking the binary to fire
     /// `ClientMsg::RiftExitVoteStart`. Server validates +
@@ -140,7 +141,7 @@ pub enum NetTransitionRequest {
 /// the server next frame.
 #[derive(Clone, Copy, Debug)]
 pub struct NetCastRequest {
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub origin: Vec3,
     pub aim_dir: Vec3,
     pub placed_target: Option<Vec3>,
@@ -167,7 +168,7 @@ pub struct ChannelState {
 #[derive(Clone, Copy, Debug)]
 pub struct ActiveChannel {
     /// Wire ability id of the channel ability in flight.
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Which action-bar slot the player is holding. Used to decide
     /// which input edge (left-click vs Digit1..5) ends the channel.
     pub slot_index: usize,
@@ -189,7 +190,7 @@ pub struct ChannelVisual {
     /// Channeling caster (network id).
     pub caster: rift_net::NetId,
     /// Wire id of the ability driving the visual.
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Most recently reported caster position (chest-height-ish; we
     /// bias the beam upward in `update` so it leaves the hand).
     pub position: Vec3,
@@ -212,10 +213,39 @@ pub struct ChannelVisual {
     /// `ChannelEnd`. The next `update` frame zeros the mesh's
     /// model matrix and drops the entry.
     pub ending: bool,
+    /// True once a frame has hit the `is_local` branch — i.e.
+    /// the local player owns this visual *and* had a matching
+    /// `state.channel.active` row at least once. Drives the
+    /// `local_release_pending` short-circuit in
+    /// `tick_channel_visuals`: we only collapse a visual on
+    /// "local channel just released" when we actually saw the
+    /// local channel running for it (otherwise short
+    /// transform-driven beams — Embercrown's Fireball Beam,
+    /// which never sets `state.channel.active` because it's a
+    /// finite-duration channel — would be killed on their
+    /// first frame).
+    pub saw_local_active: bool,
     /// Accumulator for the impact-burst cadence (Frost Ray spawns
     /// `frost_impact` at every pierced target every ~0.10 s rather
     /// than every frame, to keep the particle count bounded).
     pub impact_acc: f32,
+    /// Pulse travel duration (seconds) for transforms whose
+    /// finisher is telegraphed by a bead riding the beam from
+    /// caster to terminus (currently `FrostRayShatter`). `0.0`
+    /// when no pulse is active. Set on `WorldEvent::ChannelPulse`,
+    /// cleared once `pulse_t` reaches it (the server emits the
+    /// next `ChannelPulse` to start the following cycle).
+    pub pulse_travel_time: f32,
+    /// Seconds elapsed in the current pulse cycle. Frame-stepped
+    /// in `tick_channel_visuals`. Drives the bead's lerp
+    /// fraction `pulse_t / pulse_travel_time`.
+    pub pulse_t: f32,
+    /// Cadence accumulator for the bead's per-frame spark
+    /// emission. Same pattern as `impact_acc` — the bead
+    /// re-emits a small frost burst every ~0.04 s along its
+    /// path so the trail reads as continuous without
+    /// spawning a particle every frame.
+    pub pulse_emit_acc: f32,
 }
 
 /// Server-mirrored loot state — visual pillars, pickup queue,

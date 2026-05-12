@@ -103,7 +103,7 @@ impl Sim {
                     self.pending_events
                         .push(rift_net::messages::WorldEvent::AbilityCast {
                             caster: owner,
-                            ability: ability_id as u16,
+                            ability: ability_id.raw() as u16,
                             origin: origin.to_array(),
                             dir: [dir_x, dir_y],
                             target: Some(target.to_array()),
@@ -189,6 +189,15 @@ impl Sim {
         //    `(client_id, net_id)` entry for the main loop. The
         //    first death on a non-hub floor also arms the
         //    auto-respawn timer.
+        //
+        //    `proc_cast_queue` collects free-cast requests from
+        //    OnDodge / OnLowHealth / OnHit `ProcAction::CastAbility`
+        //    procs (Mirrorglass Amulet pool). It's appended to
+        //    by `apply_player_damage` and by the projectile-hit
+        //    loop (via `CombatCtx::proc_casts`); drained at the
+        //    end of the step so the cast pipeline runs against
+        //    a clean world borrow.
+        let mut proc_cast_queue: Vec<(Entity, super::procs::ProcCastRequest)> = Vec::new();
         damage::apply_player_damage(
             &mut self.world,
             &mut self.pending_events,
@@ -198,6 +207,7 @@ impl Sim {
             &mut self.next_projectile_net_id,
             tick,
             melee_damage,
+            &mut proc_cast_queue,
         );
         self.check_party_wipe();
 
@@ -241,6 +251,7 @@ impl Sim {
             meter_events: &mut meter_events,
             death_aoe_zones: &mut death_aoe_zones,
             next_projectile_net_id: &mut self.next_projectile_net_id,
+            proc_casts: &mut proc_cast_queue,
             share_window_ticks: SHARE_WINDOW_TICKS,
         };
         // Unified projectile tick — handles both player→enemy
@@ -311,8 +322,70 @@ impl Sim {
                 &mut self.next_projectile_net_id,
                 tick,
                 enemy_player_damage,
+                &mut proc_cast_queue,
             );
             self.check_party_wipe();
+        }
+
+        // Drain proc-driven free casts (Mirrorglass Amulet pool +
+        // future OnHit / OnDodge / OnLowHealth `CastAbility`
+        // procs). Each request was queued earlier in the step
+        // with a borrow context that didn't own a cast
+        // dispatcher; dispatching here means the world borrow is
+        // clean and the resulting effects (projectiles / zones /
+        // channels) are added to the same pools the manual cast
+        // path writes to, replicated to clients through the same
+        // `WorldEvent` traffic, and credited to the proc owner's
+        // meter row.
+        if !proc_cast_queue.is_empty() {
+            let mut proc_summons: Vec<(Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
+            let mut proc_player_damage: Vec<combat_ctx::PlayerHit> = Vec::new();
+            let mut proc_player_heals: Vec<(Entity, f32)> = Vec::new();
+            for (caster, request) in proc_cast_queue.drain(..) {
+                let mut sinks = ability::DispatchSinks {
+                    aoe_zones: &mut self.aoe_zones,
+                    events: &mut self.pending_events,
+                    next_projectile_net_id: &mut self.next_projectile_net_id,
+                    player_damage: &mut proc_player_damage,
+                    player_heals: &mut proc_player_heals,
+                    summons: &mut proc_summons,
+                    player_targets: &player_targets,
+                };
+                ability::dispatch_proc_cast(&mut self.world, caster, request, &mut sinks, tick);
+            }
+            // Apply any player-damage rows produced by proc
+            // casts that landed on `AbilityKind::DelayedAoe`
+            // shapes (unlikely with today's Mirrorglass pool
+            // but cheap to thread). Skip the proc_cast feedback
+            // loop — we don't want a proc-cast's hit to spawn
+            // another proc-cast this same frame.
+            let mut _proc_proc_dummy: Vec<(Entity, super::procs::ProcCastRequest)> = Vec::new();
+            if !proc_player_damage.is_empty() {
+                damage::apply_player_damage(
+                    &mut self.world,
+                    &mut self.pending_events,
+                    &mut self.pending_player_deaths,
+                    &mut self.meters,
+                    &mut self.aoe_zones,
+                    &mut self.next_projectile_net_id,
+                    tick,
+                    proc_player_damage,
+                    &mut _proc_proc_dummy,
+                );
+            }
+            // Mirrorglass and other current proc-cast pools
+            // are damage-only; defer routing of heal /
+            // summon sinks until we add a proc that needs
+            // them. Asserting empty keeps the contract
+            // explicit instead of silently dropping rows.
+            debug_assert!(
+                proc_player_heals.is_empty(),
+                "proc cast queued player heals; healing pipeline not yet routed",
+            );
+            debug_assert!(
+                proc_summons.is_empty(),
+                "proc cast queued summons; not yet routed",
+            );
         }
 
         // Fold meter events queued during the CombatCtx scope

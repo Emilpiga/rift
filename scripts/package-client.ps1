@@ -34,6 +34,22 @@ if ($Server) {
     Remove-Item Env:RIFT_DEFAULT_SERVER -ErrorAction SilentlyContinue
 }
 
+# Bake a dev-issuer HMAC key into the binary so the packaged
+# client can authenticate against the Fly-hosted server (which
+# runs without the steam-auth feature and therefore uses the
+# Dev verifier with the matching RIFT_DEV_AUTH_KEY secret).
+# Without this, rift.exe exits at startup with
+# "Cannot connect: no auth issuer".
+if (-not $env:RIFT_DEV_AUTH_KEY) {
+    $devAuthFile = Join-Path $PSScriptRoot '..\.env.dev-auth'
+    if (Test-Path $devAuthFile) {
+        $env:RIFT_DEV_AUTH_KEY = (Get-Content -Raw $devAuthFile).Trim()
+    } else {
+        throw "RIFT_DEV_AUTH_KEY not set and .env.dev-auth missing. Run scripts\rift.ps1 once to generate one, then ensure the same value is set as a secret on the Fly server (flyctl secrets set RIFT_DEV_AUTH_KEY=...)."
+    }
+}
+Write-Host "==> baking RIFT_DEV_AUTH_KEY (length=$($env:RIFT_DEV_AUTH_KEY.Length))"
+
 Write-Host '==> cargo build --release -p rift-client'
 cargo build --release -p rift-client
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }

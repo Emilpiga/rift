@@ -12,6 +12,8 @@ mod ability_bar;
 mod minimap;
 mod vitals;
 
-pub use ability_bar::{frame_ability_bar, VITALS_BOTTOM_OFFSET_BASE};
+pub use ability_bar::{
+    frame_ability_bar, BOTTOM_GAP_BASE, PLAQUE_H_BASE, PLAQUE_W_BASE, VITALS_BOTTOM_OFFSET_BASE,
+};
 pub use minimap::frame_minimap;
 pub use vitals::frame_vitals;

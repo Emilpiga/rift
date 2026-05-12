@@ -34,14 +34,16 @@ pub fn frost_ray() -> EffectBundle {
                 lifetime: (0.25, 0.55),
                 forces: vec![
                     ForceField::Drag { coefficient: 3.0 },
-                    ForceField::Gravity { axis: Vec3::Y, strength: 1.5 },
-                    ForceField::Orbit { axis: Vec3::Y, speed: 6.0 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 1.5,
+                    },
+                    ForceField::Orbit {
+                        axis: Vec3::Y,
+                        speed: 6.0,
+                    },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.10),
-                    (0.40, 0.14),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.10), (0.40, 0.14), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [1.5, 3.0, 4.5, 1.0]),
                     (0.50, [0.6, 1.4, 2.2, 0.7]),
@@ -190,4 +192,146 @@ pub fn frost_impact() -> EffectBundle {
             }),
         ],
     })
+}
+
+/// Trailing wake for a Frost Shatter shard projectile. Cyan
+/// counterpart to `arcane_bolt_trail()` — same persistent
+/// (`duration = 0.0`) anchor-driven trail pattern, recoloured
+/// to match Frost Ray's palette so the shards visually descend
+/// from the same beam they spawned out of.
+pub fn frost_shard_trail() -> Effect {
+    Effect {
+        duration: 0.0,
+        layers: vec![
+            // Cold core — sharp cyan-white embers fizzing off
+            // the shard body.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Continuous { rate: 160.0 },
+                speed: (0.3, 1.0),
+                lifetime: (0.14, 0.26),
+                forces: vec![ForceField::Drag { coefficient: 5.0 }],
+                size: Curve::from_stops([(0.00, 0.16), (0.30, 0.12), (1.00, 0.02)]),
+                color: Gradient::from_stops([
+                    (0.00, [2.4, 4.6, 6.0, 1.0]),
+                    (0.40, [0.7, 1.8, 2.8, 0.85]),
+                    (1.00, [0.10, 0.25, 0.45, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // Frost mist wake — pale blue puffs hanging briefly
+            // along the shard's path.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Continuous { rate: 35.0 },
+                speed: (0.05, 0.4),
+                lifetime: (0.30, 0.55),
+                forces: vec![ForceField::Drag { coefficient: 2.5 }],
+                size: Curve::from_stops([(0.00, 0.12), (1.00, 0.28)]),
+                color: Gradient::from_stops([
+                    (0.00, [0.7, 1.0, 1.4, 0.5]),
+                    (0.50, [0.20, 0.35, 0.55, 0.28]),
+                    (1.00, [0.04, 0.06, 0.12, 0.0]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}
+
+/// Impact burst for a Frost Shatter shard projectile. Larger
+/// and sharper than the per-tick `frost_impact()` ping —
+/// shaped like `arcane_bolt_impact()` (flash + cloud + sparks
+/// + ground ring) but in cold blue so it reads as part of the
+/// Frost Ray family.
+pub fn frost_shard_impact() -> Effect {
+    Effect {
+        duration: 0.05,
+        layers: vec![
+            // 1. Flash — single tight cyan-white puff.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 1 },
+                speed: (0.0, 0.0),
+                lifetime: (0.09, 0.11),
+                forces: vec![],
+                size: Curve::from_stops([(0.00, 1.05), (1.00, 1.70)]),
+                color: Gradient::from_stops([
+                    (0.00, [4.0, 6.0, 8.0, 1.0]),
+                    (1.00, [0.5, 1.2, 2.0, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 2. Cold mist cloud — outward sphere of pale blue
+            //    puffs with slight upward drift.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Burst { count: 26 },
+                speed: (2.0, 5.0),
+                lifetime: (0.32, 0.55),
+                forces: vec![
+                    ForceField::Drag { coefficient: 4.0 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 1.0,
+                    },
+                ],
+                size: Curve::from_stops([(0.00, 0.30), (0.30, 0.52), (1.00, 0.20)]),
+                color: Gradient::from_stops([
+                    (0.00, [2.4, 4.0, 5.8, 1.0]),
+                    (0.40, [0.7, 1.6, 2.6, 0.8]),
+                    (1.00, [0.06, 0.14, 0.30, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 3. Crystal sparks — fast cyan motes flung outward.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Burst { count: 20 },
+                speed: (4.0, 9.0),
+                lifetime: (0.26, 0.48),
+                forces: vec![
+                    ForceField::Drag { coefficient: 1.4 },
+                    ForceField::Gravity {
+                        axis: -Vec3::Y,
+                        strength: 4.0,
+                    },
+                ],
+                size: Curve::from_stops([(0.00, 0.09), (1.00, 0.0)]),
+                color: Gradient::from_stops([
+                    (0.00, [3.5, 5.5, 7.0, 1.0]),
+                    (0.50, [1.0, 2.0, 3.0, 0.9]),
+                    (1.00, [0.10, 0.20, 0.40, 0.0]),
+                ]),
+                sprite: SpriteShape::Shard,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            // 4. Frost ring — flat cyan ring expanding along
+            //    the ground plane.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 1 },
+                speed: (0.0, 0.0),
+                lifetime: (0.32, 0.32),
+                forces: vec![],
+                size: Curve::from_stops([(0.00, 0.35), (1.00, 2.50)]),
+                color: Gradient::from_stops([
+                    (0.00, [1.6, 3.0, 4.4, 0.9]),
+                    (1.00, [0.10, 0.25, 0.55, 0.0]),
+                ]),
+                sprite: SpriteShape::Ring,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+        ],
+    }
 }

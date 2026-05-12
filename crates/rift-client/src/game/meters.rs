@@ -577,7 +577,7 @@ fn ability_value(tab: MeterTab, a: &MeterAbilityBreakdown) -> f32 {
 /// Resolve a wire ability id to a display name. Falls back to
 /// "Other" for the unattributed sentinel and unknown ids.
 fn ability_name(id: u8) -> &'static str {
-    abilities::from_wire_id(id).map(|a| a.name).unwrap_or("Other")
+    abilities::from_wire_id(abilities::AbilityWireId::new(id)).map(|a| a.name).unwrap_or("Other")
 }
 
 /// Resolve an attacker-kind wire byte to a display name.

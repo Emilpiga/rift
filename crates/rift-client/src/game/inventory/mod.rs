@@ -20,12 +20,14 @@
 use std::time::Instant;
 
 use rift_engine::ui::im::Ui;
-use rift_game::loot::{salvage_yield, EquipSlot, Equipment, Item, Rarity};
+use rift_game::loot::{
+    salvage_yield, EquipSlot, Equipment, Item, Rarity, TooltipKind, TooltipLine,
+};
 use rift_game::stats::Stat;
 use rift_ui::inventory::frame_inventory;
 use rift_ui_types::inventory::{
     next_stash_tab_color, BulkSalvageView, CompareDeltaRow, InventoryAction, InventoryUiState,
-    InventoryView, ItemView, StashTabView, StashView, StatRow, StatSection, StatsView,
+    InventoryView, ItemView, RollBand, StashTabView, StashView, StatRow, StatSection, StatsView,
     TooltipLineKind, TooltipLineView,
 };
 
@@ -69,20 +71,20 @@ pub fn frame(
     let viewer_level = player_state.experience.level;
     let loadout = Some(&player_state.loadout);
 
-    let bag_tooltip_strs: Vec<Vec<String>> = items
+    let bag_tooltip_lines: Vec<Vec<TooltipLine>> = items
         .iter()
         .map(|slot| match slot {
             Some(it) => it.tooltip(loadout),
             None => Vec::new(),
         })
         .collect();
-    let equip_tooltip_strs: Vec<Vec<String>> = (0..EquipSlot::COUNT)
+    let equip_tooltip_lines: Vec<Vec<TooltipLine>> = (0..EquipSlot::COUNT)
         .map(|i| match equipment.get(EquipSlot::ALL[i]) {
             Some(it) => it.tooltip(loadout),
             None => Vec::new(),
         })
         .collect();
-    let stash_tooltip_strs: Vec<Vec<Vec<String>>> = stash_tabs
+    let stash_tooltip_lines: Vec<Vec<Vec<TooltipLine>>> = stash_tabs
         .iter()
         .map(|t| {
             t.items
@@ -140,24 +142,21 @@ pub fn frame(
 
     let (stat_section_names, stat_rows_owned) = build_stat_rows(player_state);
 
-    // ── Phase 2 ─ build TooltipLineView slices. ───────────
-    let bag_lines: Vec<Vec<TooltipLineView<'_>>> = bag_tooltip_strs
+    // Build TooltipLineView slices borrowing from the typed
+    // line buffers above.
+    let bag_lines: Vec<Vec<TooltipLineView<'_>>> = bag_tooltip_lines
         .iter()
-        .enumerate()
-        .map(|(i, lines)| match &items[i] {
-            Some(_it) => classify_tooltip(lines, viewer_level),
-            None => Vec::new(),
-        })
+        .map(|lines| view_tooltip(lines, viewer_level))
         .collect();
-    let equip_lines: Vec<Vec<TooltipLineView<'_>>> = equip_tooltip_strs
+    let equip_lines: Vec<Vec<TooltipLineView<'_>>> = equip_tooltip_lines
         .iter()
-        .map(|lines| classify_tooltip(lines, viewer_level))
+        .map(|lines| view_tooltip(lines, viewer_level))
         .collect();
-    let stash_lines: Vec<Vec<Vec<TooltipLineView<'_>>>> = stash_tooltip_strs
+    let stash_lines: Vec<Vec<Vec<TooltipLineView<'_>>>> = stash_tooltip_lines
         .iter()
         .map(|tab| {
             tab.iter()
-                .map(|lines| classify_tooltip(lines, viewer_level))
+                .map(|lines| view_tooltip(lines, viewer_level))
                 .collect()
         })
         .collect();
@@ -527,49 +526,53 @@ fn build_item_stat_keys(it: &Item) -> Vec<&'static str> {
     keys
 }
 
-fn classify_tooltip<'a>(lines: &'a [String], viewer_level: u32) -> Vec<TooltipLineView<'a>> {
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let kind = if i == 0 {
-                TooltipLineKind::Name
-            } else if s.is_empty() {
-                TooltipLineKind::Blank
-            } else if s.starts_with("Item Level") {
-                TooltipLineKind::ItemLevel
-            } else if s.starts_with("Requires Level") {
-                let req = s
-                    .trim_start_matches("Requires Level")
-                    .trim()
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse::<u32>().ok())
-                    .unwrap_or(0);
-                TooltipLineKind::RequiresLevel {
-                    ok: viewer_level >= req,
-                }
-            } else if s.starts_with('\u{2500}') {
-                TooltipLineKind::Divider
-            } else if s.starts_with('★') {
-                TooltipLineKind::Legendary
-            } else if s.starts_with('◆') {
-                TooltipLineKind::Resonance
-            } else if s.starts_with('⚓') {
-                TooltipLineKind::Anchored
-            } else if s.starts_with('⚠') {
-                TooltipLineKind::Warning
-            } else if s.starts_with('→') {
-                TooltipLineKind::Synergy
-            } else {
-                TooltipLineKind::Stat
-            };
-            TooltipLineView {
-                text: s.as_str(),
+fn view_tooltip<'a>(lines: &'a [TooltipLine], viewer_level: u32) -> Vec<TooltipLineView<'a>> {
+    // Trivial enum-to-enum adapter — the producer in
+    // `rift-game/loot/tooltip.rs` stamps the semantic kind /
+    // percentile directly, so this is just a remap into the
+    // UI-side palette plus newline fragmenting. Continuation
+    // fragments share the lead fragment's kind so multi-line
+    // text (e.g. flavour, Shardspire's two-row legendary
+    // description) renders with a single backdrop instead of
+    // dropping back to `Stat` on the second row.
+    let mut out: Vec<TooltipLineView<'a>> = Vec::with_capacity(lines.len());
+    for ln in lines {
+        let kind = match ln.kind {
+            TooltipKind::Name => TooltipLineKind::Name,
+            TooltipKind::Stat => TooltipLineKind::Stat,
+            TooltipKind::Blank => TooltipLineKind::Blank,
+            TooltipKind::Divider => TooltipLineKind::Divider,
+            TooltipKind::ItemLevel => TooltipLineKind::ItemLevel,
+            TooltipKind::RequiresLevel { required } => TooltipLineKind::RequiresLevel {
+                ok: viewer_level >= required,
+            },
+            TooltipKind::Legendary => TooltipLineKind::Legendary,
+            TooltipKind::LegendaryBannerEdge => TooltipLineKind::LegendaryBannerEdge,
+            TooltipKind::LegendaryFlavor => TooltipLineKind::LegendaryFlavor,
+            TooltipKind::Resonance => TooltipLineKind::Resonance,
+            TooltipKind::RiftTouched => TooltipLineKind::RiftTouched,
+            TooltipKind::Anchored => TooltipLineKind::Anchored,
+            TooltipKind::Warning => TooltipLineKind::Warning,
+            TooltipKind::Synergy => TooltipLineKind::Synergy,
+        };
+        let band = ln.percentile.map(RollBand::from_percentile);
+        let mut frags = ln.text.split('\n');
+        if let Some(first) = frags.next() {
+            out.push(TooltipLineView {
+                text: first,
                 kind,
-            }
-        })
-        .collect()
+                band,
+            });
+        }
+        for cont in frags {
+            out.push(TooltipLineView {
+                text: cont,
+                kind,
+                band: None,
+            });
+        }
+    }
+    out
 }
 
 fn bulk_preview(items: &[Option<Item>]) -> BulkSalvageView {

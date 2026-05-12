@@ -259,7 +259,7 @@ impl NetClient {
     /// `aim_dir` should be the XZ-plane unit direction.
     pub fn request_cast(
         &mut self,
-        ability_id: u8,
+        ability_id: rift_game::abilities::AbilityWireId,
         origin: Vec3,
         aim_dir: Vec3,
         placed_target: Option<Vec3>,
@@ -276,7 +276,7 @@ impl NetClient {
             rift_game::kinematic::start_roll(&mut self.predicted, aim);
         }
         let msg = ClientMsg::CastAbility {
-            ability_id,
+            ability_id: ability_id.raw(),
             origin: origin.to_array(),
             aim_dir: [aim.x, aim.z],
             placed_target: placed_target.map(|v| v.to_array()),
@@ -290,8 +290,10 @@ impl NetClient {
     /// hold-to-channel ability. Server silently ignores if the
     /// caller isn't actually channeling that ability so duplicate
     /// release packets are safe.
-    pub fn request_end_channel(&mut self, ability_id: u8) {
-        let msg = ClientMsg::EndChannel { ability_id };
+    pub fn request_end_channel(&mut self, ability_id: rift_game::abilities::AbilityWireId) {
+        let msg = ClientMsg::EndChannel {
+            ability_id: ability_id.raw(),
+        };
         self.send(Channel::Event, &msg);
     }
 
@@ -300,13 +302,17 @@ impl NetClient {
     /// player-castable; on accept it mirrors the change to the
     /// persisted record and replies with a fresh
     /// [`ServerMsg::Loadout`].
-    pub fn request_set_loadout_slot(&mut self, slot_index: u8, ability_id: u8) {
+    pub fn request_set_loadout_slot(
+        &mut self,
+        slot_index: u8,
+        ability_id: rift_game::abilities::AbilityWireId,
+    ) {
         log::debug!("net: -> SetLoadoutSlot slot={slot_index} ability={ability_id}");
         self.send(
             Channel::Control,
             &ClientMsg::SetLoadoutSlot {
                 slot_index,
-                ability_id,
+                ability_id: ability_id.raw(),
             },
         );
     }

@@ -6,6 +6,7 @@
 //! its declarative `AbilityEffect` list as plain data.
 
 use crate::components::PlayerAction;
+use serde::{Deserialize, Serialize};
 
 // ─── Engine-consumed declarative ability shape ───────────────────────────
 
@@ -13,6 +14,56 @@ use crate::components::PlayerAction;
 /// concrete IDs are defined below as constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AbilityId(pub &'static str);
+
+/// Stable wire / persistence byte for an ability — the numeric
+/// counterpart of [`AbilityId`]. Carried on every cast event,
+/// projectile, channel tick, damage log and slot-bar entry; the
+/// authoritative table is the `id::*` module below. Values are
+/// **never reordered, only appended**, so this byte is a stable
+/// long-term identity for an ability across save / wire formats.
+///
+/// `#[serde(transparent)]` makes it byte-identical to a `u8` on
+/// the bincode wire, so introducing the newtype doesn't bump any
+/// protocol version. Inner byte is `pub` so static initialisers
+/// for the const id table can build values in a `const` context.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct AbilityWireId(pub u8);
+
+impl AbilityWireId {
+    /// Const constructor for use inside `pub const` initialisers
+    /// in the `id::*` table.
+    pub const fn new(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    /// Raw wire byte. Use only at protocol / persistence
+    /// boundaries — gameplay code should keep the newtype.
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+}
+
+impl From<u8> for AbilityWireId {
+    fn from(b: u8) -> Self {
+        Self(b)
+    }
+}
+
+impl From<AbilityWireId> for u8 {
+    fn from(id: AbilityWireId) -> u8 {
+        id.0
+    }
+}
+
+impl std::fmt::Display for AbilityWireId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// How the ability is targeted before firing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,9 +122,22 @@ pub enum VfxKind {
     ArcaneBoltTrail,
     /// Violet/indigo burst played at arcane-bolt detonation.
     ArcaneBoltImpact,
+    /// Cold cyan trail attached to a Frost Shatter shard
+    /// projectile (the shards emitted by Frost Ray's pulse
+    /// finisher). Sibling of `ArcaneBoltTrail`, recoloured to
+    /// match the frost palette so the shards visually descend
+    /// from the beam they spawned from.
+    FrostShardTrail,
+    /// Cold cyan burst played when a Frost Shatter shard hits.
+    /// Sibling of `ArcaneBoltImpact`.
+    FrostShardImpact,
     /// Sustained ribbon-and-glow effect rendered along the Frost
     /// Ray beam.
     FrostRay,
+    /// Warm-orange counterpart to [`Self::FrostRay`] — the
+    /// channeled beam Embercrown's `FireballToBeam` transform
+    /// fires. Same ribbon-and-light structure, fire palette.
+    FireBeam,
     /// Self-centred expanding ring of fire used by Fire Wave —
     /// a one-shot blast that grows outward from the caster.
     FireWave,
@@ -119,10 +183,7 @@ pub enum ShapeVisuals {
     },
     /// Ground-locked AoE zone (Rain of Fire). The visual sits at
     /// `visual_y` metres above the placed target.
-    AoeZone {
-        effect: VfxKind,
-        visual_y: f32,
-    },
+    AoeZone { effect: VfxKind, visual_y: f32 },
     /// Forward beam from the caster's hand (Frost Ray).
     Beam {
         effect: VfxKind,
@@ -132,9 +193,7 @@ pub enum ShapeVisuals {
     },
     /// Self-centred aura around the caster (Whirlwind). The
     /// effect is anchored to the caster every frame.
-    Aura {
-        effect: VfxKind,
-    },
+    Aura { effect: VfxKind },
     /// No bespoke shape visual — only `cast_spark` (if any) and
     /// the `effects` list run.
     None,
@@ -174,18 +233,18 @@ pub enum ActionMovement {
 /// ignores them. `SetPlayerAction` and `Custom` run on the client.
 #[derive(Clone, Copy, Debug)]
 pub enum AbilityEffect {
-    SpawnProjectiles {
-        count: u32,
-        spread: f32,
-        damage_mult: f32,
-        pierce: u32,
-        spawn_offset: SpawnOffset,
-    },
+    /// Marker: the ability spawns projectiles. The server
+    /// reads count / spread / speed / ttl / pierce from
+    /// [`AbilityKind::Projectiles`]; this variant carries
+    /// only the hand-relative spawn offset (which has no
+    /// equivalent in `AbilityKind`).
+    SpawnProjectiles { spawn_offset: SpawnOffset },
+    /// Marker: the ability drops a ground AoE zone. The
+    /// server reads radius / duration / tick-interval from
+    /// [`AbilityKind::AoeZone`]; this variant carries only
+    /// the client-side visual recipe (which has no
+    /// equivalent in `AbilityKind`).
     SpawnAoeZone {
-        radius: f32,
-        damage_mult: f32,
-        duration: f32,
-        tick_interval: f32,
         visual: Option<VfxKind>,
         visual_y: f32,
     },
@@ -308,15 +367,46 @@ pub enum Scaling {
     None,
 }
 
+/// Per-ability sound recipe. Co-located with the rest of the
+/// ability data so authoring one place sets every gameplay +
+/// presentation knob. The client's audio module wraps these
+/// `&'static str` asset paths in volume / falloff specs at
+/// playback time; the paths themselves are the only piece that
+/// varies per-ability.
+///
+/// Default is silent (`None` everywhere) -- abilities without a
+/// dedicated SFX simply ship muted instead of fanning out a
+/// `match` arm in a separate table.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AbilityAudio {
+    /// One-shot at cast time, anchored at the caster's hand
+    /// height.
+    pub cast: Option<&'static str>,
+    /// Looping emitter attached to the projectile while it
+    /// travels. Only meaningful for projectile-shaped abilities.
+    pub travel: Option<&'static str>,
+    /// One-shot at projectile impact / detonation.
+    pub impact: Option<&'static str>,
+}
+
+impl AbilityAudio {
+    /// Const-friendly silent default for use in the REGISTRY.
+    pub const SILENT: Self = Self {
+        cast: None,
+        travel: None,
+        impact: None,
+    };
+}
+
 /// Static definition of an ability.
 #[derive(Clone, Debug)]
 pub struct Ability {
     pub id: AbilityId,
-    /// Wire-stable u8 id, matching one of `id::*`. Sent to the
+    /// Wire-stable id, matching one of `id::*`. Sent to the
     /// server when the player presses the slot key. Decoupled from
     /// the slot index so the action bar can be rearranged without
     /// reshuffling cooldown / dispatch state.
-    pub wire_id: u8,
+    pub wire_id: AbilityWireId,
     pub name: &'static str,
     pub description: &'static str,
     /// Filename stem (no extension) of the icon under
@@ -344,13 +434,6 @@ pub struct Ability {
     /// damage number is `base_damage`, not `base_damage *
     /// damage_mult`.
     pub damage_mult: f32,
-    /// Display-only projectile count for HUD tooltips. The
-    /// authoritative count for projectile abilities lives in
-    /// `kind` (`AbilityKind::Projectiles { count, ... }`).
-    pub projectile_count: u32,
-    /// Display-only spread angle for HUD tooltips. Authoritative
-    /// value lives in `kind` for projectile abilities.
-    pub spread_angle: f32,
     /// Display-only range for HUD tooltips. The authoritative
     /// range is encoded in `kind` (projectile speed * ttl, beam
     /// `range`, etc.) — this field is purely cosmetic.
@@ -369,9 +452,6 @@ pub struct Ability {
     /// (`WeaponDamage` vs `SpellDamage`). `Scaling::None` for
     /// utility abilities.
     pub scaling: Scaling,
-    /// Display-only duration for HUD tooltips. Authoritative
-    /// duration lives in `kind` for AoE / Channel abilities.
-    pub duration: f32,
     /// How this ability is targeted (instant vs placed AoE preview).
     pub targeting: TargetingMode,
     /// Authoritative server-side behaviour: projectiles, AoE
@@ -390,6 +470,12 @@ pub struct Ability {
     /// puff, AoE visual). The engine's `ability_runtime` walks
     /// this list when the ability fires locally.
     pub effects: &'static [AbilityEffect],
+    /// Per-ability sound recipe. Defaults to silent
+    /// ([`AbilityAudio::SILENT`]); set the relevant fields when
+    /// authoring an ability that needs cast / travel / impact
+    /// SFX. Client looks this up through [`lookup`] -- no
+    /// separate side-table.
+    pub audio: AbilityAudio,
 }
 
 /// Runtime state for an ability on the action bar.
@@ -419,6 +505,40 @@ impl Ability {
                 _ => Category::Physical,
             },
             Element::None => Category::Utility,
+        }
+    }
+
+    /// Authoritative projectile count for HUD tooltips. Reads
+    /// from [`AbilityKind`] so there's no second source of
+    /// truth to keep in sync. Returns `0` for shapes that
+    /// don't spawn projectiles.
+    pub fn projectile_count(&self) -> u32 {
+        match self.kind {
+            AbilityKind::Projectiles { count, .. }
+            | AbilityKind::EnemyProjectiles { count, .. } => count,
+            _ => 0,
+        }
+    }
+
+    /// Authoritative spread angle (radians) for HUD tooltips.
+    /// Mirrors [`Self::projectile_count`] -- derived from
+    /// [`AbilityKind`].
+    pub fn spread_angle(&self) -> f32 {
+        match self.kind {
+            AbilityKind::Projectiles { spread, .. }
+            | AbilityKind::EnemyProjectiles { spread, .. } => spread,
+            _ => 0.0,
+        }
+    }
+
+    /// Authoritative ability duration (seconds) for HUD
+    /// tooltips. Reads from [`AbilityKind`] for AoE zones and
+    /// channels; `0.0` for instant shapes.
+    pub fn duration(&self) -> f32 {
+        match self.kind {
+            AbilityKind::AoeZone { duration, .. } => duration,
+            AbilityKind::Channel { duration, .. } => duration,
+            _ => 0.0,
         }
     }
 }
@@ -454,7 +574,9 @@ impl AbilityState {
     }
 
     pub fn cooldown_progress(&self) -> f32 {
-        if self.ability.cooldown <= 0.0 { return 1.0; }
+        if self.ability.cooldown <= 0.0 {
+            return 1.0;
+        }
         1.0 - (self.cooldown_remaining / self.ability.cooldown)
     }
 }
@@ -467,7 +589,9 @@ pub struct AbilitySlot {
 
 impl AbilitySlot {
     pub fn new() -> Self {
-        Self { slots: Default::default() }
+        Self {
+            slots: Default::default(),
+        }
     }
 
     pub fn set(&mut self, index: usize, ability: Ability) {
@@ -485,7 +609,9 @@ impl AbilitySlot {
     }
 
     pub fn try_use(&mut self, index: usize) -> Option<&Ability> {
-        if index >= 6 { return None; }
+        if index >= 6 {
+            return None;
+        }
         if let Some(state) = &mut self.slots[index] {
             if state.try_use() {
                 return Some(&state.ability);
@@ -502,17 +628,19 @@ impl AbilitySlot {
 // bar maps them onto button presses.
 
 pub mod id {
-    pub const FIRE_BALL: u8 = 0;
-    pub const MULTI_SHOT: u8 = 1;
-    pub const EVASIVE_ROLL: u8 = 2;
-    pub const RAPID_FIRE: u8 = 3;
-    pub const MARK_FOR_DEATH: u8 = 4;
-    pub const RAIN_OF_ARROWS: u8 = 5;
-    pub const FROST_RAY: u8 = 6;
-    pub const WHIRLWIND: u8 = 7;
-    pub const FIRE_WAVE: u8 = 8;
-    pub const HEAL_TARGET: u8 = 9;
-    pub const HEAL_OVER_TIME_TARGET: u8 = 10;
+    use super::AbilityWireId;
+
+    pub const FIRE_BALL: AbilityWireId = AbilityWireId::new(0);
+    pub const FIREBALL_VOLLEY: AbilityWireId = AbilityWireId::new(1);
+    pub const EVASIVE_ROLL: AbilityWireId = AbilityWireId::new(2);
+    pub const RAPID_FIRE: AbilityWireId = AbilityWireId::new(3);
+    pub const MARK_FOR_DEATH: AbilityWireId = AbilityWireId::new(4);
+    pub const RAIN_OF_ARROWS: AbilityWireId = AbilityWireId::new(5);
+    pub const FROST_RAY: AbilityWireId = AbilityWireId::new(6);
+    pub const WHIRLWIND: AbilityWireId = AbilityWireId::new(7);
+    pub const FIRE_WAVE: AbilityWireId = AbilityWireId::new(8);
+    pub const HEAL_TARGET: AbilityWireId = AbilityWireId::new(9);
+    pub const HEAL_OVER_TIME_TARGET: AbilityWireId = AbilityWireId::new(10);
     /// Synthetic ability fired by the `FrostRayShatter`
     /// legendary transform: shards spawned at the beam
     /// terminus when a player ends a Frost Ray channel.
@@ -520,7 +648,7 @@ pub mod id {
     /// directly. Has its own wire id so the client renders
     /// the shards as visible projectiles (Frost Ray itself
     /// is a `Beam` and has no projectile visuals).
-    pub const FROST_SHATTER_SHARD: u8 = 11;
+    pub const FROST_SHATTER_SHARD: AbilityWireId = AbilityWireId::new(11);
 
     /// Generic enemy basic-attack — the bare melee swing /
     /// dash hit that doesn't have its own dedicated registry
@@ -529,37 +657,45 @@ pub mod id {
     /// tab can roll those up under one row instead of
     /// dumping them all into "Other". Not on any loadout bar
     /// — the player never casts it directly.
-    pub const MELEE_ATTACK: u8 = 12;
+    pub const MELEE_ATTACK: AbilityWireId = AbilityWireId::new(12);
+
+    /// Synthetic beam ability used by the Embercrown
+    /// `FireballToBeam` transform. Not on any loadout bar —
+    /// the server re-stamps the cast event under this id so
+    /// clients render the beam visual / play the channel
+    /// pose, since [`FIRE_BALL`]'s own visuals are
+    /// projectile-shaped.
+    pub const FIREBALL_BEAM: AbilityWireId = AbilityWireId::new(13);
 
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
     // upper half is plenty. Clients dispatch projectile mesh /
     // VFX off these ids in `world_sync` — never reorder, only
     // append.
-    pub const ARCANE_BOLT: u8 = 64;
+    pub const ARCANE_BOLT: AbilityWireId = AbilityWireId::new(64);
     /// Ground-slam wind-up: a one-shot `WorldEvent::AbilityCast`
     /// emitted when a slam-style attack enters its telegraph
     /// phase. The cast event's `target` carries the slam centre
     /// and the `dir.x` field carries the radius (m); clients
     /// drive a sustained ground-ring telegraph off it. Player-
     /// castable in principle — today only the boss uses it.
-    pub const GROUND_SLAM_WINDUP: u8 = 65;
+    pub const GROUND_SLAM_WINDUP: AbilityWireId = AbilityWireId::new(65);
     /// Ground-slam impact: paired with `GROUND_SLAM_WINDUP`,
     /// emitted when the wind-up resolves. Same target/radius
     /// payload convention as the wind-up event.
-    pub const GROUND_SLAM_IMPACT: u8 = 66;
+    pub const GROUND_SLAM_IMPACT: AbilityWireId = AbilityWireId::new(66);
     /// Multi-bolt cone fan. Authored as a single
     /// [`AbilityKind::EnemyProjectiles`] entry with `count > 1`
     /// and a non-zero spread; the boss uses it in phase 2+.
-    pub const ARCANE_FAN: u8 = 67;
+    pub const ARCANE_FAN: AbilityWireId = AbilityWireId::new(67);
     /// Boss ground slam (the gameplay ability — distinct from
     /// the visual-only WINDUP/IMPACT events). Kind is
     /// [`AbilityKind::DelayedAoe`].
-    pub const GROUND_SLAM: u8 = 68;
+    pub const GROUND_SLAM: AbilityWireId = AbilityWireId::new(68);
     /// Boss summons: spawn brute reinforcements in a ring
     /// around the caster after a wind-up. Kind is
     /// [`AbilityKind::Summon`].
-    pub const SUMMON_BRUTES: u8 = 69;
+    pub const SUMMON_BRUTES: AbilityWireId = AbilityWireId::new(69);
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -638,10 +774,7 @@ pub enum AbilityKind {
     /// a `WorldEvent::AbilityCast` carrying `radius` + `windup`
     /// when the wind-up starts (see `id::GROUND_SLAM_WINDUP`),
     /// and a paired impact event on resolve.
-    DelayedAoe {
-        radius: f32,
-        windup: f32,
-    },
+    DelayedAoe { radius: f32, windup: f32 },
     /// Spawn `count` enemies in a ring around the caster after
     /// `windup` seconds. Used by boss summons. `hp_mult` scales
     /// the floor's base enemy HP — summons want to be a real
@@ -658,9 +791,7 @@ pub enum AbilityKind {
     /// nothing if the target is dead, ghosting, or out of
     /// range / line of sight — those gates live in
     /// `ability::submit`.
-    HealTarget {
-        amount: f32,
-    },
+    HealTarget { amount: f32 },
     /// Friendly single-target heal over time. Applies the
     /// [`crate::effects::id::REJUVENATION`] effect to the
     /// target; the effect tick produces healing rows in
@@ -682,10 +813,7 @@ pub enum ChannelEffect {
     /// Damage every enemy within `radius` of the caster's current
     /// position. Use for self-centred AoEs (Whirlwind, Sanctified
     /// Ground, Frost Nova).
-    AuraAroundCaster {
-        radius: f32,
-        damage_per_tick: f32,
-    },
+    AuraAroundCaster { radius: f32, damage_per_tick: f32 },
     /// Damage every enemy inside a forward beam of length `range`
     /// and half-width `width`. Use for Ray of Frost-style channels.
     /// `pierce_targets` caps how many enemies one tick can hit
@@ -710,7 +838,8 @@ pub enum ChannelEffect {
 // reference them as identity tokens.
 
 pub const FIRE_BALL: AbilityId = AbilityId("fire_ball");
-pub const MULTI_SHOT: AbilityId = AbilityId("multi_shot");
+pub const FIREBALL_VOLLEY: AbilityId = AbilityId("fireball_volley");
+pub const FIREBALL_BEAM: AbilityId = AbilityId("fireball_beam");
 pub const RAPID_FIRE: AbilityId = AbilityId("rapid_fire");
 pub const RAIN_OF_ARROWS: AbilityId = AbilityId("rain_of_arrows");
 pub const EVASIVE_ROLL: AbilityId = AbilityId("evasive_roll");
@@ -738,14 +867,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 8.0,
         damage_mult: 1.0,
-        projectile_count: 1,
-        spread_angle: 0.0,
         range: 12.0,
         unlock_level: 1,
         element: Element::Fire,
         archetype: Archetype::Projectile,
         scaling: Scaling::Spell,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Projectiles {
             count: 1,
@@ -764,33 +890,29 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles {
-            count: 1,
-            spread: 0.0,
-            damage_mult: 1.0,
-            pierce: 0,
-            spawn_offset: SpawnOffset::HAND,
-        }],
+        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        audio: AbilityAudio {
+            cast: Some("vfx/abilities/fireball/fireball_cast.mp3"),
+            travel: Some("vfx/abilities/fireball/fireball_travel.mp3"),
+            impact: Some("vfx/abilities/fireball/fireball_impact.mp3"),
+        },
     },
     Ability {
-        id: MULTI_SHOT,
-        wire_id: id::MULTI_SHOT,
-        name: "Multi-Shot",
-        description: "Fire 3 arrows in a wide spread.",
-        icon: Some("Hunter_18"),
+        id: FIREBALL_VOLLEY,
+        wire_id: id::FIREBALL_VOLLEY,
+        name: "Fireball Volley",
+        description: "Hurl 3 fireballs in a wide arc.",
+        icon: Some("FireMage_18"),
         cooldown: 4.0,
         resource_cost: 15.0,
         channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.7,
         damage_mult: 0.7,
-        projectile_count: 3,
-        spread_angle: 0.5,
         range: 10.0,
         unlock_level: 3,
-        element: Element::Physical,
+        element: Element::Fire,
         archetype: Archetype::Projectile,
-        scaling: Scaling::Weapon,
-        duration: 0.0,
+        scaling: Scaling::Spell,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Projectiles {
             count: 3,
@@ -798,7 +920,7 @@ pub static REGISTRY: &[Ability] = &[
             speed: 20.0,
             ttl: 2.0,
             pierce: 0,
-            apply_debuff: Some(crate::effects::id::SLOW),
+            apply_debuff: Some(crate::effects::id::BURN),
         },
         visuals: AbilityVisuals {
             cast_spark: None,
@@ -809,13 +931,8 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles {
-            count: 3,
-            spread: 0.5,
-            damage_mult: 0.7,
-            pierce: 0,
-            spawn_offset: SpawnOffset::HAND,
-        }],
+        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: RAPID_FIRE,
@@ -828,14 +945,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.5,
         damage_mult: 0.5,
-        projectile_count: 6,
-        spread_angle: 0.08,
         range: 12.0,
         unlock_level: 7,
         element: Element::Physical,
         archetype: Archetype::Projectile,
         scaling: Scaling::Weapon,
-        duration: 1.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Projectiles {
             count: 6,
@@ -854,13 +968,8 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles {
-            count: 6,
-            spread: 0.08,
-            damage_mult: 0.5,
-            pierce: 0,
-            spawn_offset: SpawnOffset::HAND,
-        }],
+        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: RAIN_OF_ARROWS,
@@ -873,14 +982,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 8.0 * 0.4,
         damage_mult: 0.4,
-        projectile_count: 12,
-        spread_angle: 0.0,
         range: 15.0,
         unlock_level: 12,
         element: Element::Fire,
         archetype: Archetype::Aoe,
         scaling: Scaling::Spell,
-        duration: 2.0,
         targeting: TargetingMode::Placed { radius: 3.0 },
         kind: AbilityKind::AoeZone {
             radius: 3.0,
@@ -895,14 +1001,8 @@ pub static REGISTRY: &[Ability] = &[
                 visual_y: 5.0,
             },
         },
-        effects: &[AbilityEffect::SpawnAoeZone {
-            radius: 3.0,
-            damage_mult: 0.4,
-            duration: 2.0,
-            tick_interval: 0.5,
-            visual: Some(VfxKind::RainOfFire),
-            visual_y: 5.0,
-        }],
+        effects: &[AbilityEffect::SpawnAoeZone { visual: Some(VfxKind::RainOfFire), visual_y: 5.0 }],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: EVASIVE_ROLL,
@@ -915,14 +1015,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 0.0,
         unlock_level: 5,
         element: Element::None,
         archetype: Archetype::Movement,
         scaling: Scaling::None,
-        duration: 0.3,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals::NONE,
@@ -934,6 +1031,7 @@ pub static REGISTRY: &[Ability] = &[
             cancel_cast: true,
             emitter: Some(VfxKind::DodgePuff),
         }],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: MARK_FOR_DEATH,
@@ -946,18 +1044,16 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 20.0,
         unlock_level: 10,
         element: Element::None,
         archetype: Archetype::Utility,
         scaling: Scaling::None,
-        duration: 6.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals::NONE,
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: FROST_RAY,
@@ -970,8 +1066,6 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 18.0,
         base_damage: 1.6,
         damage_mult: 0.2,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 9.0,
         unlock_level: 1,
         element: Element::Ice,
@@ -979,7 +1073,6 @@ pub static REGISTRY: &[Ability] = &[
         scaling: Scaling::Spell,
         // Effectively infinite — channel ends only on key release,
         // movement cancel, or (future) resource depletion.
-        duration: f32::INFINITY,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Channel {
             duration: f32::INFINITY,
@@ -1001,15 +1094,16 @@ pub static REGISTRY: &[Ability] = &[
             },
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Synthetic ability — never on the player's loadout bar.
     // Fired by the `FrostRayShatter` legendary transform when
     // a Frost Ray channel ends; carries its own projectile
     // visuals so the shards are visible (Frost Ray itself
     // declares `ShapeVisuals::Beam`, which the client
-    // projectile-spawn path skips). Reuses the ArcaneBolt
-    // mesh / VFX as a stand-in until a frost-tinted preset
-    // ships — the gameplay hook stays valid either way.
+    // projectile-spawn path skips). Cold cyan trail + impact
+    // presets keep the shards visually keyed to the parent
+    // beam they spawned from.
     Ability {
         id: FROST_SHATTER_SHARD,
         wire_id: id::FROST_SHATTER_SHARD,
@@ -1021,14 +1115,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 1.0,
-        projectile_count: 1,
-        spread_angle: 0.0,
         range: 0.0,
         unlock_level: 1,
         element: Element::Ice,
         archetype: Archetype::Projectile,
         scaling: Scaling::Spell,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         // Server constructs the projectile rows directly in
         // `transforms::on_channel_end`; the registry shape
@@ -1046,12 +1137,13 @@ pub static REGISTRY: &[Ability] = &[
             cast_spark: None,
             shape: ShapeVisuals::Projectile {
                 mesh: MeshKind::ArcaneBolt,
-                trail: VfxKind::ArcaneBoltTrail,
-                impact: VfxKind::ArcaneBoltImpact,
+                trail: VfxKind::FrostShardTrail,
+                impact: VfxKind::FrostShardImpact,
                 scale: 0.5,
             },
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Synthetic ability — never on a player loadout, never
     // cast through the dispatch pipeline. Exists purely as an
@@ -1072,18 +1164,64 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 1.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 0.0,
         unlock_level: 1,
         element: Element::Physical,
         archetype: Archetype::Melee,
         scaling: Scaling::Weapon,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals::NONE,
         effects: &[],
+        audio: AbilityAudio::SILENT,
+    },
+    // Synthetic ability — never on a player's loadout bar.
+    // Stamped by the Embercrown `FireballToBeam` transform
+    // so clients render the beam visual + channel pose when
+    // a Fireball cast morphs into a beam. The server builds
+    // the actual `ChannelEffect::Beam` inline in
+    // `sim::ability` (the parameters are derived from the
+    // caster's gear there); the registry-level `kind` here
+    // mirrors those numbers so HUD tooltip / meter
+    // attribution have plausible values to read.
+    Ability {
+        id: FIREBALL_BEAM,
+        wire_id: id::FIREBALL_BEAM,
+        name: "Fireball Beam",
+        description: "Fireball channels into a short piercing fire beam.",
+        icon: Some("FireMage_12"),
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 8.0,
+        damage_mult: 1.0,
+        range: 12.0,
+        unlock_level: 1,
+        element: Element::Fire,
+        archetype: Archetype::Beam,
+        scaling: Scaling::Spell,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::Channel {
+            duration: 0.55,
+            tick_interval: 0.11,
+            effect: ChannelEffect::Beam {
+                range: 12.0,
+                width: 1.0,
+                damage_per_tick: 8.0 / 5.0,
+                pierce_targets: 32,
+            },
+            apply_debuff: Some(crate::effects::id::BURN),
+            cancel_on_move: false,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::Beam {
+                effect: VfxKind::FireBeam,
+                hand_offset: 1.25,
+            },
+        },
+        effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: WHIRLWIND,
@@ -1096,14 +1234,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 2.2,
         damage_mult: 0.275,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 2.5,
         unlock_level: 8,
         element: Element::Physical,
         archetype: Archetype::Melee,
         scaling: Scaling::Weapon,
-        duration: 2.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Channel {
             duration: 2.0,
@@ -1122,6 +1257,7 @@ pub static REGISTRY: &[Ability] = &[
             },
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: FIRE_WAVE,
@@ -1136,8 +1272,6 @@ pub static REGISTRY: &[Ability] = &[
         // `ChannelEffect::AuraAroundCaster::damage_per_tick`.
         base_damage: 7.0,
         damage_mult: 1.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 7.5,
         unlock_level: 4,
         element: Element::Fire,
@@ -1145,7 +1279,6 @@ pub static REGISTRY: &[Ability] = &[
         scaling: Scaling::Spell,
         // Total channel length is short — the wave reads as a
         // single quick blast, not a sustained aura.
-        duration: 0.5,
         targeting: TargetingMode::Instant,
         // Channel + AuraAroundCaster centres damage on the
         // caster (no `placed_target` math), which is exactly
@@ -1178,6 +1311,7 @@ pub static REGISTRY: &[Ability] = &[
             visual: VfxKind::FireWave,
             height: 0.15,
         }],
+        audio: AbilityAudio::SILENT,
     },
     // ── Friendly support abilities ─────────────────────────────────────
     //
@@ -1198,14 +1332,11 @@ pub static REGISTRY: &[Ability] = &[
         // tooltips. Authoritative value lives on the kind.
         base_damage: 40.0,
         damage_mult: 1.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 15.0,
         unlock_level: 1,
         element: Element::None,
         archetype: Archetype::Aoe,
         scaling: Scaling::Spell,
-        duration: 0.0,
         targeting: TargetingMode::TargetEntity,
         kind: AbilityKind::HealTarget { amount: 40.0 },
         visuals: AbilityVisuals {
@@ -1215,6 +1346,7 @@ pub static REGISTRY: &[Ability] = &[
         // Heal cast emits a one-shot HealBurst on the target;
         // the engine consumes the matching wire event.
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: HEAL_OVER_TIME_TARGET,
@@ -1227,14 +1359,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 60.0,
         damage_mult: 1.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 15.0,
         unlock_level: 1,
         element: Element::None,
         archetype: Archetype::Aoe,
         scaling: Scaling::Spell,
-        duration: 10.0,
         targeting: TargetingMode::TargetEntity,
         kind: AbilityKind::HealOverTimeTarget {
             apply_buff: crate::effects::id::REJUVENATION,
@@ -1244,6 +1373,7 @@ pub static REGISTRY: &[Ability] = &[
             shape: ShapeVisuals::None,
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // ── Enemy abilities (wire ids 64..) ───────────────────────────────
     //
@@ -1267,14 +1397,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 9.0,
         damage_mult: 1.0,
-        projectile_count: 1,
-        spread_angle: 0.0,
         range: 14.0 * 1.5,
         unlock_level: 0,
         element: Element::None,
         archetype: Archetype::Projectile,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::EnemyProjectiles {
             count: 1,
@@ -1298,6 +1425,7 @@ pub static REGISTRY: &[Ability] = &[
             },
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Boss multi-bolt fan — same projectile path as the
     // single-bolt caster attack but with `count > 1` and a
@@ -1313,14 +1441,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 9.0,
         damage_mult: 1.0,
-        projectile_count: 5,
-        spread_angle: 0.7,
         range: 14.0 * 1.5,
         unlock_level: 0,
         element: Element::None,
         archetype: Archetype::Projectile,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::EnemyProjectiles {
             count: 5,
@@ -1341,6 +1466,7 @@ pub static REGISTRY: &[Ability] = &[
             },
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Boss ground slam — single-resolve self-centred AoE.
     // The wire id 68 is the gameplay ability; the per-cast
@@ -1358,14 +1484,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 28.0,
         damage_mult: 1.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 4.0,
         unlock_level: 0,
         element: Element::Physical,
         archetype: Archetype::Aoe,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::DelayedAoe {
             radius: 4.0,
@@ -1376,6 +1499,7 @@ pub static REGISTRY: &[Ability] = &[
             shape: ShapeVisuals::None,
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Boss summons — ring of brutes around the caster after
     // a wind-up.
@@ -1390,14 +1514,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 3.0,
         unlock_level: 0,
         element: Element::None,
         archetype: Archetype::Utility,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Summon {
             count: 3,
@@ -1411,6 +1532,7 @@ pub static REGISTRY: &[Ability] = &[
             shape: ShapeVisuals::None,
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     // Visual-only ability events — no kind/data, just the wire
     // id so the client renderer can dispatch off it.
@@ -1431,14 +1553,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 0.0,
         unlock_level: 0,
         element: Element::Physical,
         archetype: Archetype::Aoe,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals {
@@ -1446,6 +1565,7 @@ pub static REGISTRY: &[Ability] = &[
             shape: ShapeVisuals::None,
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
     Ability {
         id: AbilityId("ground_slam_impact"),
@@ -1458,14 +1578,11 @@ pub static REGISTRY: &[Ability] = &[
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
         damage_mult: 0.0,
-        projectile_count: 0,
-        spread_angle: 0.0,
         range: 0.0,
         unlock_level: 0,
         element: Element::Physical,
         archetype: Archetype::Aoe,
         scaling: Scaling::None,
-        duration: 0.0,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::ClientOnly,
         visuals: AbilityVisuals {
@@ -1473,17 +1590,25 @@ pub static REGISTRY: &[Ability] = &[
             shape: ShapeVisuals::None,
         },
         effects: &[],
+        audio: AbilityAudio::SILENT,
     },
 ];
 
 /// Look up an ability by its wire id. Linear scan over `REGISTRY`
 /// — at 8 entries this is faster than hashing.
-pub fn lookup(ability_id: u8) -> Option<&'static Ability> {
+pub fn lookup(ability_id: AbilityWireId) -> Option<&'static Ability> {
     REGISTRY.iter().find(|a| a.wire_id == ability_id)
+}
+
+/// Look up an ability by its [`AbilityId`] (string newtype).
+/// Used by proc / talent dispatch where the source carries the
+/// identity token rather than the wire id.
+pub fn lookup_by_id(id: AbilityId) -> Option<&'static Ability> {
+    REGISTRY.iter().find(|a| a.id == id)
 }
 
 /// Owned-clone variant of [`lookup`]. Kept for callers that need
 /// to stash an `Ability` in a component / message struct.
-pub fn from_wire_id(ability_id: u8) -> Option<Ability> {
+pub fn from_wire_id(ability_id: AbilityWireId) -> Option<Ability> {
     lookup(ability_id).cloned()
 }

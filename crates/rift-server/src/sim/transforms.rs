@@ -26,7 +26,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
-use rift_game::abilities::{id as ability_id, ChannelEffect};
+use rift_game::abilities::{id as ability_id, AbilityWireId, ChannelEffect};
 use rift_game::loot::AbilityVariant;
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
@@ -75,10 +75,11 @@ impl TransformCds {
 /// transforms attached to spammable abilities like Frost Ray.
 fn transform_internal_cooldown(v: AbilityVariant) -> f32 {
     match v {
-        // Frost Ray has cooldown 0 and infinite duration; the
-        // ICD is the only thing keeping shatter from being
-        // a per-tick burst.
-        AbilityVariant::FrostRayShatter => 6.0,
+        // Frost Ray's finisher is now telegraphed via the
+        // pulse mechanic (see `transform_pulse_period`); the
+        // pulse cycle itself paces the proc, so no separate
+        // ICD is needed.
+        AbilityVariant::FrostRayShatter => 0.0,
         AbilityVariant::FireballToBeam => 0.0,
         AbilityVariant::WhirlwindVortex => 0.0,
     }
@@ -89,8 +90,33 @@ fn transform_internal_cooldown(v: AbilityVariant) -> f32 {
 /// require both "commit to the channel" and "can't spam".
 fn transform_min_channel_time(v: AbilityVariant) -> f32 {
     match v {
-        AbilityVariant::FrostRayShatter => 0.4,
+        // FrostRayShatter no longer fires on release; the
+        // pulse cycle is the only proc path.
         _ => 0.0,
+    }
+}
+
+/// Pulse period (seconds) for transforms whose finisher is
+/// telegraphed via a traveling beam pulse instead of firing
+/// at channel end. Returning a non-zero value enables the
+/// generic pulse machinery in [`super::channel`]: a pulse
+/// is emitted at insertion + every time the previous one
+/// completed, and [`on_channel_pulse`] dispatches the
+/// per-variant effect (e.g. Frost Ray's shatter shards) at
+/// the beam terminus when the pulse arrives.
+///
+/// Returning `0.0` opts the transform out of the pulse
+/// mechanic entirely (its finisher fires through some other
+/// path — `on_channel_end`, projectile-hit hook, etc.).
+pub fn transform_pulse_period(v: AbilityVariant) -> f32 {
+    match v {
+        // 1.2 s feels snappy enough that a player perceives
+        // the bead as the proc telegraph (not a slow wind-up)
+        // while still leaving a clear "channel-and-wait"
+        // beat between shatters.
+        AbilityVariant::FrostRayShatter => 1.2,
+        AbilityVariant::FireballToBeam => 0.0,
+        AbilityVariant::WhirlwindVortex => 0.0,
     }
 }
 
@@ -100,7 +126,7 @@ fn transform_min_channel_time(v: AbilityVariant) -> f32 {
 /// passed by reference into [`on_channel_end`].
 #[derive(Clone, Debug)]
 pub struct ChannelEndSnapshot {
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     pub team: Team,
     pub effect: ChannelEffect,
     pub crit_chance: f32,
@@ -157,8 +183,8 @@ impl ChannelEndSnapshot {
 /// constructing a step-scoped context.
 pub fn on_channel_end(
     world: &mut hecs::World,
-    events: &mut Vec<WorldEvent>,
-    next_projectile_net_id: &mut u32,
+    _events: &mut Vec<WorldEvent>,
+    _next_projectile_net_id: &mut u32,
     snap: &ChannelEndSnapshot,
 ) {
     // Only player-team transforms make gameplay sense today.
@@ -168,7 +194,9 @@ pub fn on_channel_end(
     if snap.team != Team::Player {
         return;
     }
-    let Some(variant) = snap.transform else { return };
+    let Some(variant) = snap.transform else {
+        return;
+    };
 
     // Gate 1 — minimum hold time. Releasing an ability
     // immediately after starting it shouldn't trigger a
@@ -198,16 +226,55 @@ pub fn on_channel_end(
 
     match variant {
         AbilityVariant::FrostRayShatter => {
-            fire_frost_shatter(world, events, next_projectile_net_id, snap)
+            // Fired by the pulse cycle (see [`on_channel_pulse`]),
+            // not on release — channel end is a no-op for this
+            // variant. Kept as an explicit arm so the dispatch
+            // table remains exhaustive over `AbilityVariant`.
         }
         AbilityVariant::FireballToBeam => {
-            // Stub: Fireball-to-beam should intercept *cast*
-            // dispatch, not channel end. Left here as a marker
-            // so a reader scanning the file sees the variant
-            // is known but not yet wired.
+            // Wired at cast dispatch, not channel end — the
+            // base Fireball is `AbilityKind::Projectiles`, so
+            // the transform hook lives at the top of the
+            // `Projectiles` arm in `ability::dispatch` where it
+            // short-circuits the projectile spawn and inserts
+            // a short beam channel instead.
         }
         AbilityVariant::WhirlwindVortex => {
             // Stub: vortex-on-end behavior TBD.
+        }
+    }
+}
+
+/// Pulse-cycle transform dispatch. Called from
+/// [`super::channel::tick`] every time a channel's `pulse_acc`
+/// completes a cycle (see [`transform_pulse_period`]). Emits
+/// the per-variant on-arrival effect — currently the
+/// `FrostRayShatter` shard burst at the beam terminus.
+///
+/// The snapshot type is shared with [`on_channel_end`] for
+/// convenience; only the channel-end-specific gates
+/// (`elapsed`, `transform_cds`) are skipped here, since the
+/// pulse cycle is itself the rate limiter.
+pub fn on_channel_pulse(
+    world: &mut hecs::World,
+    floor: &rift_dungeon::Floor,
+    events: &mut Vec<WorldEvent>,
+    next_projectile_net_id: &mut u32,
+    snap: &ChannelEndSnapshot,
+) {
+    if snap.team != Team::Player {
+        return;
+    }
+    let Some(variant) = snap.transform else {
+        return;
+    };
+    match variant {
+        AbilityVariant::FrostRayShatter => {
+            fire_frost_shatter(world, floor, events, next_projectile_net_id, snap);
+        }
+        AbilityVariant::FireballToBeam | AbilityVariant::WhirlwindVortex => {
+            // No pulse-cycle effect (their `transform_pulse_period`
+            // returns 0 so this dispatch never fires for them).
         }
     }
 }
@@ -231,12 +298,18 @@ const FROST_SHATTER_DAMAGE_MULT: f32 = 2.0;
 
 fn fire_frost_shatter(
     world: &mut hecs::World,
+    floor: &rift_dungeon::Floor,
     events: &mut Vec<WorldEvent>,
     next_projectile_net_id: &mut u32,
     snap: &ChannelEndSnapshot,
 ) {
     use std::f32::consts::TAU;
-    let ChannelEffect::Beam { range, damage_per_tick, .. } = snap.effect else {
+    let ChannelEffect::Beam {
+        range,
+        damage_per_tick,
+        ..
+    } = snap.effect
+    else {
         // FrostRayShatter only meaningful on Beam channels.
         return;
     };
@@ -245,7 +318,15 @@ fn fire_frost_shatter(
     } else {
         Vec3::Z
     };
-    let terminus = snap.caster_pos + aim * range + Vec3::Y * 1.0;
+    // Clip the terminus to the nearest blocking wall / prop
+    // so the shard burst can't spawn inside (or behind)
+    // geometry the beam would visibly have clipped against.
+    // The floor walker backs off by one sample step so the
+    // terminus sits inside the last open tile — shards then
+    // arc outward from a point that's actually in the
+    // playable room rather than embedded in the wall.
+    let clipped = floor.clip_distance(snap.caster_pos, aim, range);
+    let terminus = snap.caster_pos + aim * clipped + Vec3::Y * 1.0;
     let damage = damage_per_tick * FROST_SHATTER_DAMAGE_MULT;
     for i in 0..FROST_SHATTER_SHARDS {
         let theta = (i as f32 / FROST_SHATTER_SHARDS as f32) * TAU;
@@ -257,9 +338,7 @@ fn fire_frost_shatter(
             continue;
         }
         let net_id = NetId(*next_projectile_net_id);
-        *next_projectile_net_id = next_projectile_net_id
-            .wrapping_add(1)
-            .max(0x4000_0000);
+        *next_projectile_net_id = next_projectile_net_id.wrapping_add(1).max(0x4000_0000);
         // Use `FROST_SHATTER_SHARD` as the wire ability id so
         // the client projectile-spawn pipeline picks up the
         // dedicated `ShapeVisuals::Projectile` recipe (Frost
@@ -291,7 +370,7 @@ fn fire_frost_shatter(
     // cue).
     events.push(WorldEvent::ChannelTick {
         caster: snap.caster_net_id,
-        ability: snap.ability_id as u16,
+        ability: snap.ability_id.raw() as u16,
         position: terminus.to_array(),
         dir: [aim.x, aim.z],
         tick: NetTick(0),

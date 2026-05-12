@@ -22,6 +22,7 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::Floor;
+use rift_game::abilities::AbilityWireId;
 use rift_game::kinematic::loco;
 
 use super::{enter_windup, tick_windup, AiOutcome, AiPhase, EnemyCast, ServerEnemy, WindupKind};
@@ -36,7 +37,7 @@ pub struct Spec {
     /// speed, lifetime, cooldown, and wind-up are all read
     /// from the shared registry — only the *which ability* is
     /// per-spec.
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Below this distance the caster backs off.
     pub min_range: f32,
     /// Above this distance the caster advances. Bolts won't

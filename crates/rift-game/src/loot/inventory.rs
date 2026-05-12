@@ -97,6 +97,11 @@ impl Loadout {
             for affix in &item.affixes {
                 mods.apply(affix);
             }
+            if let Some(def) = item.unique_id.and_then(super::uniques::find) {
+                if let Some(eff) = def.build(item.unique_pick) {
+                    mods.apply_legendary_effect(&eff);
+                }
+            }
         }
         mods
     }

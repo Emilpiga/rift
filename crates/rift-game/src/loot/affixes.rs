@@ -96,11 +96,12 @@ pub enum ProcEvent {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProcAction {
     /// Cast `ability` for free, ignoring cooldown & resource cost.
+    /// This is the generic "proc casts a spell" payload — pick any
+    /// player-castable ability id and the dispatcher will route it
+    /// through the standard cast pipeline.
     CastAbility(AbilityId),
     /// Spawn a one-shot AoE explosion of `radius` doing `damage`.
     Explosion { radius: f32, damage: f32 },
-    /// Chain a small bolt to up to `max_targets` nearby enemies.
-    ChainLightning { max_targets: u32, damage: f32 },
 }
 
 /// One affix the loot system can roll. `'static` so the pool can
@@ -597,6 +598,122 @@ pub fn resonance_chance(rarity: Rarity) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------
+// Rift-touched pool — ITEMS.md §2.6 / §3 Phase 5
+// ---------------------------------------------------------------------
+//
+// A single extra slot awarded only on drops that come from inside
+// a rift instance, gated by [`RIFT_TOUCHED_MIN_FLOOR`]. The defs
+// here roll with `ilvl_scale = 0.0` — magnitude scaling is done
+// at the drop site by multiplying the rolled value by a
+// floor-depth factor, so a deeper rift produces a stronger line
+// without touching the ilvl axis (which is gated by drop ilvl).
+//
+// All six entries use existing `Stat` axes so no new compute
+// path is required — the "rift-touched" identity comes from the
+// dedicated slot, glyph, colour and depth-scaling, not from a
+// parallel stat hierarchy.
+//
+// `min_ilvl: 1` because the floor gate is the effective limiter;
+// `rarity_min: Common` because rift-touched stacks **on top of**
+// whatever rarity the item rolled. The roll pipeline never picks
+// from this pool — it's sampled exclusively by
+// `drop_for_enemy` via [`roll_rift_touched`].
+pub const RIFT_TOUCHED_POOL: &[AffixDef] = &[
+    AffixDef {
+        id: "rt_crit_chance",
+        name_template: "{} Crit Chance",
+        effect: AffixEffect::Stat(Stat::CritChance),
+        roll: (0.03, 0.06),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "rt_elemental_resist",
+        name_template: "{} Elemental Resist",
+        effect: AffixEffect::Stat(Stat::ElementalResist),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "rt_cooldown_reduction",
+        name_template: "{} Cooldown Reduction",
+        effect: AffixEffect::Stat(Stat::CooldownReduction),
+        roll: (0.03, 0.06),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "rt_move_speed",
+        name_template: "{} Move Speed",
+        effect: AffixEffect::Stat(Stat::MoveSpeed),
+        roll: (0.03, 0.06),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "rt_resource_regen",
+        name_template: "{} Essence Regen",
+        effect: AffixEffect::Stat(Stat::ResourceRegen),
+        roll: (0.05, 0.10),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+    AffixDef {
+        id: "rt_range",
+        name_template: "{} Range",
+        effect: AffixEffect::Stat(Stat::Range),
+        roll: (0.04, 0.08),
+        ilvl_scale: 0.0,
+        tags: ALL,
+        min_ilvl: 1,
+        rarity_min: Rarity::Common,
+        weight: 1,
+    },
+];
+
+/// Minimum rift floor at which a kill is eligible for a
+/// rift-touched line. ITEMS.md §3 Phase 5 originally specified
+/// floor 20 but the design contract is "easily configurable" —
+/// for the first ship we set it to `1` (every rift kill is
+/// eligible) so the feature gets exercised in playtests, with
+/// the single named constant here as the obvious knob to push it
+/// later. Hub kills (`floor_index == 0`) never qualify because
+/// they're below this threshold by construction.
+pub const RIFT_TOUCHED_MIN_FLOOR: u32 = 1;
+
+/// Independent per-drop probability that a rift-floor kill
+/// awards a rift-touched line. Kept low so the slot stays
+/// special — most rift drops still come back with the usual
+/// trio + bonus shape and the extra slot is the visible
+/// "this came from deep" cue.
+pub const RIFT_TOUCHED_CHANCE: f32 = 0.20;
+
+/// Per-floor magnitude multiplier on top of the rift-touched
+/// def's base roll range. A drop from floor
+/// `RIFT_TOUCHED_MIN_FLOOR` gets `1.0×`, each additional floor
+/// stacks `RIFT_TOUCHED_DEPTH_SCALE` on top — so a kill at floor
+/// `MIN + 10` rolls with `1.0 + 10 * SCALE` applied to the rolled
+/// value. Independent of ilvl scaling so deep rifts feel
+/// meaningfully different from a level-matched hub drop.
+pub const RIFT_TOUCHED_DEPTH_SCALE: f32 = 0.10;
+
 /// Element targeted by a resonance affix; `None` if not in the
 /// resonance pool or not an element axis.
 pub fn resonance_element(def: &AffixDef) -> Option<families::Element> {
@@ -630,6 +747,7 @@ pub fn lookup(id: &str) -> Option<&'static AffixDef> {
     AFFIX_POOL
         .iter()
         .chain(RESONANCE_POOL.iter())
+        .chain(RIFT_TOUCHED_POOL.iter())
         .find(|a| a.id == id)
 }
 
@@ -641,6 +759,15 @@ pub fn lookup(id: &str) -> Option<&'static AffixDef> {
 /// rehydrated items.
 pub fn is_resonance(def: &AffixDef) -> bool {
     def.id.as_bytes().starts_with(b"res_")
+}
+
+/// `true` if `def` lives in [`RIFT_TOUCHED_POOL`]. Identified by
+/// the `rt_` id prefix — same convention as resonance, no data
+/// flag needed on `AffixDef`. Works post-rehydration because the
+/// `&'static AffixDef` pointer always points back into one of
+/// the static pools and the id is preserved.
+pub fn is_rift_touched(def: &AffixDef) -> bool {
+    def.id.as_bytes().starts_with(b"rt_")
 }
 
 /// `true` if `effect` is a "legendary" effect — i.e. one of the
@@ -697,6 +824,11 @@ pub enum AffixCategory {
     /// **breaks the family lock by design**. Rolled in its own
     /// dedicated slot with `{Rare: 5 %, Legendary: 25 %}` chance.
     Resonance,
+    /// Anything in [`RIFT_TOUCHED_POOL`] — a single extra slot
+    /// awarded only on drops from inside a rift instance,
+    /// gated by [`RIFT_TOUCHED_MIN_FLOOR`]. Magnitudes scale
+    /// with floor depth, not ilvl. Survives extraction.
+    RiftTouched,
     /// Everything else — defensives, crit, utility, ability mods,
     /// legendary effects. The bonus pool draws from here.
     Bonus,
@@ -712,6 +844,9 @@ pub fn category(def: &AffixDef) -> AffixCategory {
     use crate::stats::Stat::*;
     if is_resonance(def) {
         return AffixCategory::Resonance;
+    }
+    if is_rift_touched(def) {
+        return AffixCategory::RiftTouched;
     }
     match def.effect {
         AffixEffect::Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage) => {
@@ -850,6 +985,103 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Every id in every pool must be unique within its pool and
+    /// across pools — the `lookup` chain assumes id-uniqueness so
+    /// a duplicate would silently shadow.
+    #[test]
+    fn every_affix_id_is_globally_unique() {
+        let mut seen: std::collections::HashSet<&'static str> = Default::default();
+        for d in AFFIX_POOL
+            .iter()
+            .chain(RESONANCE_POOL.iter())
+            .chain(RIFT_TOUCHED_POOL.iter())
+        {
+            assert!(
+                seen.insert(d.id),
+                "affix id `{}` appears more than once across AFFIX_POOL / RESONANCE_POOL / RIFT_TOUCHED_POOL",
+                d.id
+            );
+        }
+    }
+
+    /// Resonance pool authoring contract: every id must use the
+    /// `res_` prefix that [`is_resonance`] keys off, and must
+    /// resolve via [`lookup`] so persistence round-trips work.
+    #[test]
+    fn resonance_pool_prefix_and_lookup() {
+        for d in RESONANCE_POOL {
+            assert!(
+                d.id.starts_with("res_"),
+                "resonance affix id `{}` is missing the `res_` prefix that \
+                 `is_resonance` matches against — it would classify as `Bonus` \
+                 and roll through the wrong slot",
+                d.id
+            );
+            assert!(
+                lookup(d.id).is_some(),
+                "resonance affix id `{}` doesn't resolve via `lookup` — \
+                 persisted resonance lines would fail to rehydrate",
+                d.id
+            );
+        }
+    }
+
+    /// Rift-touched pool authoring contract: every id must use the
+    /// `rt_` prefix that [`is_rift_touched`] keys off, must resolve
+    /// via [`lookup`], and must keep `ilvl_scale = 0.0` so depth
+    /// scaling at the drop site is the only magnitude knob.
+    #[test]
+    fn rift_touched_pool_contract() {
+        assert!(
+            !RIFT_TOUCHED_POOL.is_empty(),
+            "RIFT_TOUCHED_POOL must contain at least one entry — \
+             `roll_rift_touched` would return `None` for every kill"
+        );
+        for d in RIFT_TOUCHED_POOL {
+            assert!(
+                d.id.starts_with("rt_"),
+                "rift-touched affix id `{}` is missing the `rt_` prefix",
+                d.id
+            );
+            assert!(
+                lookup(d.id).is_some(),
+                "rift-touched affix id `{}` doesn't resolve via `lookup`",
+                d.id
+            );
+            assert_eq!(
+                d.ilvl_scale, 0.0,
+                "rift-touched affix `{}` declares ilvl_scale={}; only \
+                 floor-depth scaling at the drop site should drive magnitude",
+                d.id, d.ilvl_scale
+            );
+        }
+    }
+
+    /// Every `AffixDef::name_template` must either contain exactly
+    /// one `{}` placeholder (numeric effects) or none at all
+    /// (`TransformAbility`). Anything else would mis-render at
+    /// tooltip time.
+    #[test]
+    fn every_name_template_has_correct_placeholder_count() {
+        for d in AFFIX_POOL
+            .iter()
+            .chain(RESONANCE_POOL.iter())
+            .chain(RIFT_TOUCHED_POOL.iter())
+        {
+            let count = d.name_template.matches("{}").count();
+            let expected = match d.effect {
+                AffixEffect::TransformAbility(_, _) => 0,
+                _ => 1,
+            };
+            assert_eq!(
+                count, expected,
+                "affix `{}` has {count} `{{}}` placeholder(s) in `name_template` \
+                 but its effect wants {expected}",
+                d.id
+            );
         }
     }
 }

@@ -18,12 +18,14 @@
 //! and 4K.
 
 pub mod exploration;
+pub mod loot_labels;
 pub mod voting;
 pub mod world_overlays;
 
 // Re-export submodule fns so callers continue to write
 // `hud::render_minimap(...)`, `hud::render_exit_vote(...)`, etc.
 pub use exploration::{render_descend_tooltip, render_hud_prompt, render_minimap};
+pub use loot_labels::render_loot_labels;
 pub use voting::{render_exit_vote, render_shrine_progress};
 pub use world_overlays::{
     render_boss_arrow, render_enemy_health_bars, render_remote_player_health_bars,
@@ -265,6 +267,19 @@ pub fn render_ability_bar(
     // current gear / attribute state so the tooltip damage
     // number matches what the player will actually deal.
     stats: &rift_game::stats::CharacterStats,
+    // Per-ability gear modifiers (extra projectiles, cooldown
+    // scalar, damage scalar, transforms). Folded into the
+    // tooltip numbers so legendary effects (e.g.
+    // Cleavebreaker's `+2 projectiles to Fireball Volley`)
+    // show up on the displayed damage / projectile / cooldown
+    // lines instead of being invisible until the player
+    // notices the cast difference.
+    ability_mods: &rift_game::loot::ability_mods::AbilityMods,
+    // Sink for the plaque rect so the next frame's combat tick
+    // can recognise a click that landed on the bar as a UI
+    // interaction (e.g. swap-slot opens the spellbook) rather
+    // than a basic-attack cast.
+    hud_consume_rects: &mut Vec<Rect>,
     targeting_slot: Option<usize>,
 ) -> Option<usize> {
     const AB_KEYS: [&str; 6] = ["LMB", "1", "2", "3", "4", "5"];
@@ -294,27 +309,44 @@ pub fn render_ability_bar(
         let unlock_level = rift_game::loadout::SLOT_UNLOCK_LEVELS[i];
         let (icon, fallback_glyph, cooldown_remaining, affordable, tooltip) = match slot {
             Some(state) if unlocked => {
+                // Per-ability gear modifiers — folded into the
+                // tooltip numbers so legendary effects (extra
+                // projectiles, cooldown reductions, damage
+                // amplifies, behaviour transforms) are
+                // visible at a glance.
+                let aid = state.ability.id;
+                let dmg_mult = ability_mods.damage_for(aid);
+                let cd_mult = ability_mods.cooldown_for(aid);
+                let extra_projectiles = ability_mods.extra_projectiles_for(aid);
+                let transform = ability_mods.transform_for(aid);
+
+                let effective_cd = state.ability.cooldown * cd_mult;
+                let total_projectiles = state
+                    .ability
+                    .projectile_count()
+                    .saturating_add(extra_projectiles);
+
                 let cd = (1.0 - state.cooldown_progress()).clamp(0.0, 1.0);
                 let affordable = state.ability.resource_cost <= current_essence + 1e-3;
 
-                let per_hit = stats.ability_effective_damage(&state.ability);
-                let avg = stats.ability_avg_damage(&state.ability);
+                let per_hit = stats.ability_effective_damage(&state.ability) * dmg_mult;
+                let avg = stats.ability_avg_damage(&state.ability) * dmg_mult;
                 let damage_line = if per_hit > 0.01 {
                     use rift_game::abilities::AbilityKind;
                     let unit = match state.ability.kind {
                         AbilityKind::Channel { .. } | AbilityKind::AoeZone { .. } => " / tick",
                         _ => "",
                     };
-                    if state.ability.cooldown > 0.0 {
+                    if effective_cd > 0.0 {
                         Some(format!(
                             "CD: {:.1}s  |  {:.0}{} damage",
-                            state.ability.cooldown, per_hit, unit
+                            effective_cd, per_hit, unit
                         ))
                     } else {
                         Some(format!("{:.0}{} damage", per_hit, unit))
                     }
-                } else if state.ability.cooldown > 0.0 {
-                    Some(format!("CD: {:.1}s", state.ability.cooldown))
+                } else if effective_cd > 0.0 {
+                    Some(format!("CD: {:.1}s", effective_cd))
                 } else {
                     None
                 };
@@ -338,10 +370,48 @@ pub fn render_ability_bar(
                 } else {
                     None
                 };
-                let projectiles_line = if state.ability.projectile_count > 1 {
-                    Some(format!("Projectiles: {}", state.ability.projectile_count))
+                let projectiles_line = if total_projectiles > 1 {
+                    if extra_projectiles > 0 {
+                        Some(format!(
+                            "Projectiles: {} (+{} from gear)",
+                            total_projectiles, extra_projectiles
+                        ))
+                    } else {
+                        Some(format!("Projectiles: {}", total_projectiles))
+                    }
                 } else {
                     None
+                };
+
+                let transform_line = transform.map(|v| {
+                    use rift_game::loot::AbilityVariant;
+                    let desc = match v {
+                        AbilityVariant::FireballToBeam => "Fireball channels into a piercing beam",
+                        AbilityVariant::FrostRayShatter => {
+                            "Frost Ray shatters into icy shards on release"
+                        }
+                        AbilityVariant::WhirlwindVortex => "Whirlwind pulls enemies into a vortex",
+                    };
+                    format!("★ {}", desc)
+                });
+
+                // Bonus summary — only show the parts that
+                // actually contributed (deltas != neutral).
+                let bonus_line = {
+                    let mut parts: Vec<String> = Vec::new();
+                    if (dmg_mult - 1.0).abs() > 1.0e-3 {
+                        parts.push(format!("{:+.0}% damage", (dmg_mult - 1.0) * 100.0));
+                    }
+                    if (cd_mult - 1.0).abs() > 1.0e-3 {
+                        // Negative cd_mult delta means *faster*
+                        // cooldown — phrase it that way.
+                        parts.push(format!("{:+.0}% cooldown", (cd_mult - 1.0) * 100.0));
+                    }
+                    if parts.is_empty() {
+                        None
+                    } else {
+                        Some(format!("★ {}", parts.join(", ")))
+                    }
                 };
 
                 let tip = rift_ui_types::hud::AbilityTooltip {
@@ -352,6 +422,8 @@ pub fn render_ability_bar(
                     cost_line,
                     cost_affordable: affordable,
                     projectiles_line,
+                    transform_line,
+                    bonus_line,
                 };
                 (
                     state.ability.icon,
@@ -383,9 +455,27 @@ pub fn render_ability_bar(
     let _ = &mut slots;
     let view = rift_ui_types::hud::AbilityBarView { slots };
 
-    rift_ui::hud::frame_ability_bar(ui, &view).map(|action| match action {
+    let result = rift_ui::hud::frame_ability_bar(ui, &view).map(|action| match action {
         rift_ui_types::hud::HudAction::AbilitySlotClicked(idx) => idx,
-    })
+    });
+
+    // Stash the plaque rect so the next frame's combat tick
+    // can recognise a click on the bar as a UI interaction and
+    // skip the basic-attack cast. Computed from the same
+    // baseline constants the widget uses internally so the
+    // rect tracks the live layout one-to-one.
+    {
+        let theme = *ui.theme();
+        let s = theme.scale;
+        let screen = ui.screen_size();
+        let plaque_w = rift_ui::hud::PLAQUE_W_BASE * s;
+        let plaque_h = rift_ui::hud::PLAQUE_H_BASE * s;
+        let plaque_x = (screen.x - plaque_w) * 0.5;
+        let plaque_y = screen.y - plaque_h - rift_ui::hud::BOTTOM_GAP_BASE * s;
+        hud_consume_rects.push(Rect::from_xywh(plaque_x, plaque_y, plaque_w, plaque_h));
+    }
+
+    result
 }
 
 /// Screen-space buff / debuff pip strip. Anchors the strip's
@@ -551,11 +641,7 @@ fn draw_effect_tooltip(
     }
     let lines: Vec<TooltipLine<'_>> = texts
         .iter()
-        .map(|(s, sz, c)| TooltipLine {
-            text: s.as_str(),
-            size: *sz,
-            color: *c,
-        })
+        .map(|(s, sz, c)| TooltipLine::new(s.as_str(), *sz, *c))
         .collect();
     Tooltip::new()
         .header(def.name)

@@ -64,6 +64,17 @@ pub struct AbilityTooltip<'a> {
     /// `"Projectiles: 3"` — only set when the ability fires
     /// more than one.
     pub projectiles_line: Option<String>,
+    /// Legendary transform indicator, e.g. `"★ Transformed:
+    /// Fireball channels into a beam"`. Set by the host when
+    /// the player has an equipped affix that overrides the
+    /// ability's behaviour (Embercrown, Shardspire, …).
+    pub transform_line: Option<String>,
+    /// Per-ability gear bonus summary, e.g. `"★ +25%
+    /// damage, -10% cooldown"`. Set by the host when the
+    /// player has legendary affixes that scale this ability's
+    /// damage / cooldown / projectile count beyond the base
+    /// numbers shown on the other lines.
+    pub bonus_line: Option<String>,
 }
 
 /// One slot on the bottom-center action bar.

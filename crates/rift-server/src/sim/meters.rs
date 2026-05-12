@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use hecs::Entity;
+use rift_game::abilities::AbilityWireId;
 use rift_net::messages::{
     MeterAbilityBreakdown, MeterEntry, MeterTakenAbility, MeterTakenAttackerBreakdown,
     ServerMsg,
@@ -25,7 +26,7 @@ use super::player::ServerPlayer;
 /// concrete ability — DoTs from unknown casters, environmental
 /// damage, basic-attack auto-hits. Pairs with the same constant
 /// understood by the client UI.
-pub const ABILITY_ID_OTHER: u8 = 255;
+pub const ABILITY_ID_OTHER: AbilityWireId = AbilityWireId::new(255);
 
 /// Reserved attacker-kind id for the TAKEN-tab breakdown when
 /// we can't (or don't care to) attribute the source to a
@@ -50,7 +51,7 @@ pub struct AbilityAccum {
 #[derive(Default, Clone, Debug)]
 pub struct AttackerAccum {
     pub damage_taken: f32,
-    pub by_ability: HashMap<u8, f32>,
+    pub by_ability: HashMap<AbilityWireId, f32>,
 }
 
 /// Per-client cumulative counters. Numbers are HP units.
@@ -60,9 +61,9 @@ pub struct MeterAccum {
     pub damage_taken: f32,
     pub healing_done: f32,
     /// Per-ability slice for damage dealt + healing done.
-    /// Keyed by wire-stable u8 id from
+    /// Keyed by wire-stable id from
     /// `rift_game::abilities::id::*`, or [`ABILITY_ID_OTHER`].
-    pub by_ability: HashMap<u8, AbilityAccum>,
+    pub by_ability: HashMap<AbilityWireId, AbilityAccum>,
     /// Two-level breakdown for damage *taken*: outer key is
     /// the attacker kind (`MonsterRole::to_wire_byte()` or
     /// [`ATTACKER_KIND_OTHER`]), inner is per-ability damage.
@@ -73,13 +74,13 @@ pub struct MeterAccum {
 impl MeterAccum {
     /// Credit `amount` damage to a specific ability. Updates
     /// both the top-line total and the ability slice.
-    pub fn add_damage(&mut self, ability_id: u8, amount: f32) {
+    pub fn add_damage(&mut self, ability_id: AbilityWireId, amount: f32) {
         self.damage_dealt += amount;
         self.by_ability.entry(ability_id).or_default().damage_dealt += amount;
     }
 
     /// Credit `amount` healing to a specific ability.
-    pub fn add_healing(&mut self, ability_id: u8, amount: f32) {
+    pub fn add_healing(&mut self, ability_id: AbilityWireId, amount: f32) {
         self.healing_done += amount;
         self.by_ability.entry(ability_id).or_default().healing_done += amount;
     }
@@ -88,12 +89,17 @@ impl MeterAccum {
     /// `attacker_kind` is `MonsterRole::to_wire_byte()` for
     /// known enemies or [`ATTACKER_KIND_OTHER`] for sources
     /// without an enemy origin (thorns reflect, environmental).
-    /// `ability_id` is the wire-stable u8 of the source
+    /// `ability_id` is the wire-stable id of the source
     /// ability or [`ABILITY_ID_OTHER`]. Updates the top-line
     /// `damage_taken` total *and* both axes of the
     /// `taken_by_attacker` two-level map so the TAKEN tab can
     /// drill from attacker → ability.
-    pub fn add_damage_taken(&mut self, attacker_kind: u8, ability_id: u8, amount: f32) {
+    pub fn add_damage_taken(
+        &mut self,
+        attacker_kind: u8,
+        ability_id: AbilityWireId,
+        amount: f32,
+    ) {
         self.damage_taken += amount;
         let bucket = self.taken_by_attacker.entry(attacker_kind).or_default();
         bucket.damage_taken += amount;
@@ -153,7 +159,7 @@ impl Meters {
                 .by_ability
                 .iter()
                 .map(|(id, a)| MeterAbilityBreakdown {
-                    ability_id: *id,
+                    ability_id: id.raw(),
                     damage_dealt: a.damage_dealt,
                     healing_done: a.healing_done,
                 })
@@ -175,7 +181,7 @@ impl Meters {
                         .by_ability
                         .iter()
                         .map(|(id, amt)| MeterTakenAbility {
-                            ability_id: *id,
+                            ability_id: id.raw(),
                             damage_taken: *amt,
                         })
                         .collect();
@@ -221,30 +227,30 @@ mod tests {
     #[test]
     fn add_damage_accumulates_total_and_per_ability() {
         let mut a = MeterAccum::default();
-        a.add_damage(7, 10.0);
-        a.add_damage(7, 5.0);
-        a.add_damage(9, 3.0);
+        a.add_damage(AbilityWireId::new(7), 10.0);
+        a.add_damage(AbilityWireId::new(7), 5.0);
+        a.add_damage(AbilityWireId::new(9), 3.0);
         assert_eq!(a.damage_dealt, 18.0);
-        assert_eq!(a.by_ability[&7].damage_dealt, 15.0);
-        assert_eq!(a.by_ability[&9].damage_dealt, 3.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(7)].damage_dealt, 15.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(9)].damage_dealt, 3.0);
         // Healing slice on those same abilities stays at zero
         // — the per-ability struct holds both metrics but we
         // only touched damage.
-        assert_eq!(a.by_ability[&7].healing_done, 0.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(7)].healing_done, 0.0);
     }
 
     #[test]
     fn add_healing_accumulates_separately_from_damage() {
         let mut a = MeterAccum::default();
-        a.add_damage(1, 4.0);
-        a.add_healing(1, 6.0);
-        a.add_healing(2, 2.0);
+        a.add_damage(AbilityWireId::new(1), 4.0);
+        a.add_healing(AbilityWireId::new(1), 6.0);
+        a.add_healing(AbilityWireId::new(2), 2.0);
         assert_eq!(a.damage_dealt, 4.0);
         assert_eq!(a.healing_done, 8.0);
         // Same ability id collects both axes.
-        assert_eq!(a.by_ability[&1].damage_dealt, 4.0);
-        assert_eq!(a.by_ability[&1].healing_done, 6.0);
-        assert_eq!(a.by_ability[&2].healing_done, 2.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(1)].damage_dealt, 4.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(1)].healing_done, 6.0);
+        assert_eq!(a.by_ability[&AbilityWireId::new(2)].healing_done, 2.0);
     }
 
     #[test]
@@ -253,10 +259,10 @@ mod tests {
         // sentinel; nothing in MeterAccum special-cases it.
         let mut a = MeterAccum::default();
         a.add_damage(ABILITY_ID_OTHER, 12.5);
-        a.add_damage(5, 7.5);
+        a.add_damage(AbilityWireId::new(5), 7.5);
         assert_eq!(a.damage_dealt, 20.0);
         assert_eq!(a.by_ability[&ABILITY_ID_OTHER].damage_dealt, 12.5);
-        assert_eq!(a.by_ability[&5].damage_dealt, 7.5);
+        assert_eq!(a.by_ability[&AbilityWireId::new(5)].damage_dealt, 7.5);
     }
 
     #[test]
@@ -266,19 +272,19 @@ mod tests {
         // doesn't lose its prior \"hit count\" semantics. This
         // test pins that behaviour so we notice if it changes.
         let mut a = MeterAccum::default();
-        a.add_damage(3, 0.0);
+        a.add_damage(AbilityWireId::new(3), 0.0);
         assert_eq!(a.damage_dealt, 0.0);
-        assert!(a.by_ability.contains_key(&3));
+        assert!(a.by_ability.contains_key(&AbilityWireId::new(3)));
     }
 
     #[test]
     fn meters_entry_inserts_default_on_miss() {
         let mut m = Meters::default();
         let cid = ClientId(42);
-        m.entry(cid).add_damage(1, 5.0);
+        m.entry(cid).add_damage(AbilityWireId::new(1), 5.0);
         assert_eq!(m.by_client[&cid].damage_dealt, 5.0);
         // Re-entry returns the same accum, not a fresh one.
-        m.entry(cid).add_damage(1, 5.0);
+        m.entry(cid).add_damage(AbilityWireId::new(1), 5.0);
         assert_eq!(m.by_client[&cid].damage_dealt, 10.0);
     }
 }

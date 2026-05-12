@@ -45,9 +45,19 @@ impl DevSigner {
     /// returns a short user-facing reason (the binary surfaces
     /// it verbatim before exiting).
     pub fn from_env() -> Result<Self, String> {
-        let raw = std::env::var("RIFT_DEV_AUTH_KEY").map_err(|_| {
-            "RIFT_DEV_AUTH_KEY is not set (no auth issuer is enabled in this build)".to_string()
-        })?;
+        // Runtime env wins so a developer can override a baked
+        // key locally. Falls back to whatever was baked in at
+        // compile time via `RIFT_DEV_AUTH_KEY` so playtest
+        // bundles can ship a working dev issuer without
+        // requiring each tester to set an env var. `build.rs`
+        // declares `cargo:rerun-if-env-changed=RIFT_DEV_AUTH_KEY`
+        // so flipping the bake invalidates the incremental build.
+        let raw = std::env::var("RIFT_DEV_AUTH_KEY")
+            .ok()
+            .or_else(|| option_env!("RIFT_DEV_AUTH_KEY").map(|s| s.to_string()))
+            .ok_or_else(|| {
+                "RIFT_DEV_AUTH_KEY is not set (no auth issuer is enabled in this build)".to_string()
+            })?;
         let key = decode_key(raw.trim())?;
         let identity = pick_identity();
         Ok(Self { key, identity })

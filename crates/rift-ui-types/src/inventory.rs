@@ -67,10 +67,26 @@ pub enum TooltipLineKind {
     RequiresLevel { ok: bool },
     /// `★ …` legendary effect line. Gold.
     Legendary,
+    /// `╔` / `╚` sentinel line wrapping the legendary banner.
+    /// Carries no text — the renderer paints a horizontal
+    /// gold gradient rule and uses these as the top/bottom
+    /// edges of a dark inset backdrop framing the legendary
+    /// effect + flavour.
+    LegendaryBannerEdge,
+    /// Flavour string under the legendary effect (e.g.
+    /// `"forged in the rift"`). Italic-leaning dim gold,
+    /// rendered atop the same banner backdrop.
+    LegendaryFlavor,
     /// `◆ …` resonance affix line — cross-family damage axis
     /// that intentionally breaks the trio's family lock.
     /// Distinct violet colour per ITEMS.md §2.5.
     Resonance,
+    /// `✦ …` rift-touched memento line — the extra slot awarded
+    /// to drops earned past `RIFT_TOUCHED_MIN_FLOOR`. Carries
+    /// the floor depth suffix `(Floor N)`. Magenta tint so it
+    /// reads as "this came from deep in the rift" without
+    /// fighting resonance violet or anchored gold.
+    RiftTouched,
     /// `⚓ …` anchored trait line. Saturated gold.
     Anchored,
     /// `⚠ …` warning line (e.g. unstable rift loot). Red.
@@ -79,11 +95,115 @@ pub enum TooltipLineKind {
     Synergy,
 }
 
+/// Named tier for a single affix roll quality. Constructed from
+/// the 0..1 percentile returned by
+/// `rift_game::loot::roll_percentile` and used by tooltips to
+/// replace the raw `[NN%]` suffix with a glyph + name pair the
+/// player can scan at a glance. See `ITEMS.md` §Phase 6.
+///
+/// Thresholds (chosen so `Perfect` is rare and `Crude` is common
+/// enough to feel meaningful as the "low end" tag):
+///
+/// | percentile p | band |
+/// |--------------|------|
+/// | `p < 0.20`   | `Crude` |
+/// | `p < 0.50`   | `Fair` |
+/// | `p < 0.80`   | `Fine` |
+/// | `p < 0.95`   | `Pristine` |
+/// | `p >= 0.95`  | `Perfect` |
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RollBand {
+    Crude,
+    Fair,
+    Fine,
+    Pristine,
+    Perfect,
+}
+
+impl RollBand {
+    /// Map a 0..1 roll percentile to a named tier. Values outside
+    /// `[0, 1]` are clamped by saturating into the nearest tier.
+    pub fn from_percentile(p: f32) -> Self {
+        if p < 0.20 {
+            Self::Crude
+        } else if p < 0.50 {
+            Self::Fair
+        } else if p < 0.80 {
+            Self::Fine
+        } else if p < 0.95 {
+            Self::Pristine
+        } else {
+            Self::Perfect
+        }
+    }
+
+    /// Stable display name. Also the source of truth the host
+    /// classifier matches against when parsing a tooltip line's
+    /// trailing band suffix — keep these literals stable.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Crude => "Crude",
+            Self::Fair => "Fair",
+            Self::Fine => "Fine",
+            Self::Pristine => "Pristine",
+            Self::Perfect => "Perfect",
+        }
+    }
+
+    /// Compact glyph rendered immediately before the name in the
+    /// tooltip suffix. The chevron progression (down → right →
+    /// up → double-up → triple-up) reads as quality climbing
+    /// without needing colour.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Crude => "▾",
+            Self::Fair => "▸",
+            Self::Fine => "▴",
+            Self::Pristine => "▴▴",
+            Self::Perfect => "▴▴▴",
+        }
+    }
+
+    /// Straight-alpha RGB tint used to colour stat lines that
+    /// carry this band. The tooltip renderer blends this with
+    /// the theme `text` colour for `Stat` lines.
+    pub fn color_rgb(self) -> [f32; 3] {
+        match self {
+            Self::Crude => [0.60, 0.60, 0.62],
+            Self::Fair => [0.82, 0.82, 0.84],
+            Self::Fine => [0.65, 0.92, 1.00],
+            Self::Pristine => [1.00, 0.85, 0.45],
+            Self::Perfect => [1.00, 0.72, 0.22],
+        }
+    }
+
+    /// Inverse of [`Self::name`]: parse a band literal back into
+    /// the enum. Used by the host tooltip classifier to recover
+    /// the band from the trailing word of a rendered stat line.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "Crude" => Some(Self::Crude),
+            "Fair" => Some(Self::Fair),
+            "Fine" => Some(Self::Fine),
+            "Pristine" => Some(Self::Pristine),
+            "Perfect" => Some(Self::Perfect),
+            _ => None,
+        }
+    }
+}
+
 /// One pre-classified tooltip line.
 #[derive(Clone, Debug)]
 pub struct TooltipLineView<'a> {
     pub text: &'a str,
     pub kind: TooltipLineKind,
+    /// `Some` for stat / affix lines that carry a named roll
+    /// band suffix; the renderer uses
+    /// [`RollBand::color_rgb`] to tint the line. `None` for
+    /// every non-affix line (Name, Divider, Anchored, …) and
+    /// for affix effects with degenerate ranges (Transform)
+    /// where percentile is meaningless.
+    pub band: Option<RollBand>,
 }
 
 // ─── Compare delta (per-stat) ────────────────────────────────

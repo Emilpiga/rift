@@ -108,6 +108,12 @@ pub struct GameState {
     /// keyed by glTF/GLB path. Populated lazily the first
     /// time a base item with `models` set drops on the floor.
     pub loot_model_cache: super::loot_models::LootModelCache,
+    /// Rigid-prop mesh cache for equipped weapons, keyed by
+    /// glTF/GLB path. Populated lazily the first time any
+    /// player equips a weapon whose `BaseItem::models` is set.
+    /// Drives the casting-hand-attached weapon visuals managed
+    /// by [`super::weapon_visuals`].
+    pub weapon_visual_cache: super::weapon_visuals::WeaponMeshCache,
     /// Spatial-audio runtime. `None` when the audio backend
     /// failed to initialise (no output device available, OS
     /// audio service down, etc.) — every helper short-circuits
@@ -168,6 +174,7 @@ impl GameState {
             equipment_visual_cache: super::equipment_visuals::EquipmentVisualCache::new(),
             avatar_cosmetics_cache: super::avatar_cosmetics::AvatarCosmeticsCache::new(),
             loot_model_cache: super::loot_models::LootModelCache::new(),
+            weapon_visual_cache: super::weapon_visuals::WeaponMeshCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
             chat: super::chat::ChatUi::new(),
             party: super::party::PartyUi::new(),
@@ -357,7 +364,7 @@ impl GameState {
 // [`super::ability`]. They are re-exported below for callers that
 // historically reached them through `game::state::*`.
 pub use super::ability::{
-    on_channel_end, on_channel_tick, on_remote_ability_cast, on_remote_death,
+    on_channel_end, on_channel_pulse, on_channel_tick, on_remote_ability_cast, on_remote_death,
 };
 
 // `WorldEvent::LootDropped` handler lives in [`super::loot_system`]

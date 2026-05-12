@@ -12,6 +12,7 @@
 //!  - `snapshot::build` — to emit the per-entity `effects` list.
 
 use hecs::Entity;
+use rift_game::abilities::AbilityWireId;
 use rift_game::effects::{EffectDef, EffectKind, lookup};
 use rift_net::{messages::{ActiveEffect, WorldEvent}, NetId};
 
@@ -44,7 +45,7 @@ pub struct EffectInstance {
     /// Used as the meter's per-ability bucket when DoT / HoT
     /// ticks credit the caster. `255` (`ABILITY_ID_OTHER`) when
     /// the source can't be attributed to a specific ability.
-    pub ability_id: u8,
+    pub ability_id: AbilityWireId,
     /// Attacker kind for the TAKEN-tab breakdown when this
     /// instance is sitting on a player and ticks damage.
     /// `MonsterRole::to_wire_byte()` for known enemy casters,
@@ -68,7 +69,7 @@ impl EffectStack {
         debuff_id: u8,
         duration_override: Option<f32>,
         caster: Option<Entity>,
-        ability_id: u8,
+        ability_id: AbilityWireId,
         attacker_kind: u8,
     ) {
         let Some(def) = lookup(debuff_id) else { return };
@@ -173,7 +174,7 @@ struct DotHit {
     caster: Option<Entity>,
     /// Wire ability id of the source. Bucketed in the meter's
     /// per-ability breakdown.
-    ability_id: u8,
+    ability_id: AbilityWireId,
     /// Attacker kind for the TAKEN-tab breakdown (player
     /// targets only). Carried over from
     /// [`EffectInstance::attacker_kind`].
@@ -192,7 +193,7 @@ struct HotHit {
     /// Original applier of the HoT. Used to credit the per-
     /// tick healing to the caster's meter row.
     caster: Option<Entity>,
-    ability_id: u8,
+    ability_id: AbilityWireId,
 }
 
 /// Decay every active debuff, fire any due DoT ticks, drop expired

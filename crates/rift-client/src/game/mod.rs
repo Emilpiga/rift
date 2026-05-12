@@ -31,6 +31,7 @@ pub mod states;
 pub mod systems;
 pub mod torches;
 pub mod transition;
+pub mod weapon_visuals;
 
 // Flatten the systems / phases / states hierarchies back into
 // the `game` namespace so existing `crate::game::sub_state::*`,

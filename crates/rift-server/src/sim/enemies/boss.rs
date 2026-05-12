@@ -14,6 +14,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
+use rift_game::abilities::AbilityWireId;
 use rift_game::kinematic::loco;
 
 use super::brute;
@@ -81,9 +82,9 @@ impl BossState {
         let mut cooldowns = [0.0_f32; ABILITY_COOLDOWN_SLOTS];
         // Stagger the opening so the boss doesn't dump every
         // attack on the first frame the player walks in.
-        cooldowns[rift_game::abilities::id::GROUND_SLAM as usize] = 1.5;
-        cooldowns[rift_game::abilities::id::ARCANE_FAN as usize] = 3.0;
-        cooldowns[rift_game::abilities::id::SUMMON_BRUTES as usize] = 6.0;
+        cooldowns[rift_game::abilities::id::GROUND_SLAM.raw() as usize] = 1.5;
+        cooldowns[rift_game::abilities::id::ARCANE_FAN.raw() as usize] = 3.0;
+        cooldowns[rift_game::abilities::id::SUMMON_BRUTES.raw() as usize] = 6.0;
         Self {
             floor,
             cooldowns,
@@ -101,7 +102,7 @@ impl BossState {
 pub enum BossAttack {
     Idle,
     Windup {
-        ability_id: u8,
+        ability_id: AbilityWireId,
         remaining: f32,
         /// Aim direction snapshotted at wind-up start (so the
         /// player can side-step a fan after the telegraph).
@@ -201,7 +202,7 @@ pub fn tick(
             // Re-arm the per-ability cooldown from the
             // registry, scaled by phase modifier.
             let base_cd = lookup(ability_id).map(|a| a.cooldown).unwrap_or(0.0);
-            boss.cooldowns[ability_id as usize] = base_cd * cd_mult;
+            boss.cooldowns[ability_id.raw() as usize] = base_cd * cd_mult;
             boss.attack = BossAttack::Idle;
         } else {
             boss.attack = BossAttack::Windup {
@@ -237,7 +238,7 @@ pub fn tick(
     // radius, projectile count) all comes from the shared
     // [`rift_game::abilities::REGISTRY`]; this body only owns
     // the *selection* logic.
-    if enraged && boss.cooldowns[ab_id::SUMMON_BRUTES as usize] <= 0.0 {
+    if enraged && boss.cooldowns[ab_id::SUMMON_BRUTES.raw() as usize] <= 0.0 {
         let summon = lookup(ab_id::SUMMON_BRUTES)
             .expect("REGISTRY missing SUMMON_BRUTES");
         let windup = match summon.kind {
@@ -253,7 +254,7 @@ pub fn tick(
         en.attack_anim_remaining = windup;
         return;
     }
-    if boss.cooldowns[ab_id::GROUND_SLAM as usize] <= 0.0 {
+    if boss.cooldowns[ab_id::GROUND_SLAM.raw() as usize] <= 0.0 {
         let slam = lookup(ab_id::GROUND_SLAM).expect("REGISTRY missing GROUND_SLAM");
         let (slam_radius, slam_windup_base) = match slam.kind {
             AbilityKind::DelayedAoe { radius, windup } => (radius, windup),
@@ -294,7 +295,7 @@ pub fn tick(
             return;
         }
     }
-    if phase >= 2 && boss.cooldowns[ab_id::ARCANE_FAN as usize] <= 0.0 {
+    if phase >= 2 && boss.cooldowns[ab_id::ARCANE_FAN.raw() as usize] <= 0.0 {
         let fan = lookup(ab_id::ARCANE_FAN).expect("REGISTRY missing ARCANE_FAN");
         let fan_windup = match fan.kind {
             AbilityKind::EnemyProjectiles { windup, .. } => windup,
