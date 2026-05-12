@@ -19,9 +19,8 @@
 //! enum stays flat to keep matching cheap):
 //!
 //! - **Offensive** — `CritChance`, `CritDamage`, `AttackSpeed`, plus the
-//!   typed damage buckets (`WeaponDamage`, `SpellDamage`,
-//!   `PhysicalDamage`, `FireDamage`, `IceDamage`, `LightningDamage`,
-//!   `ProjectileDamage`, `BeamDamage`, `AoeDamage`, `MeleeDamage`).
+//!   typed damage buckets (`PhysicalDamage`, `FireDamage`,
+//!   `IceDamage`, `LightningDamage`).
 //! - **Defensive** — `Health`, `Armor`, `Evasion`.
 //! - **Utility** — `CooldownReduction`, `ResourceRegen`, `MoveSpeed`.
 //! - **Elemental** — `FireDamage`, `IceDamage`, `LightningDamage`.
@@ -90,12 +89,6 @@ pub enum Stat {
     FireDamage,
     IceDamage,
     LightningDamage,
-    // Archetype scaling — multiplies abilities whose
-    // `Archetype` matches.
-    ProjectileDamage,
-    BeamDamage,
-    AoeDamage,
-    MeleeDamage,
 }
 
 impl Stat {
@@ -123,10 +116,6 @@ impl Stat {
             Stat::FireDamage => "Fire Damage",
             Stat::IceDamage => "Ice Damage",
             Stat::LightningDamage => "Lightning Damage",
-            Stat::ProjectileDamage => "Projectile Damage",
-            Stat::BeamDamage => "Beam Damage",
-            Stat::AoeDamage => "AoE Damage",
-            Stat::MeleeDamage => "Melee Damage",
         }
     }
 
@@ -150,10 +139,6 @@ impl Stat {
                 | Stat::FireDamage
                 | Stat::IceDamage
                 | Stat::LightningDamage
-                | Stat::ProjectileDamage
-                | Stat::BeamDamage
-                | Stat::AoeDamage
-                | Stat::MeleeDamage
         )
     }
 
@@ -353,12 +338,6 @@ pub struct CharacterStats {
     pub ice_damage: f32,
     pub lightning_damage: f32,
     pub physical_damage: f32,
-
-    // --- Archetype scaling -----------------------------------------
-    pub projectile_damage: f32,
-    pub beam_damage: f32,
-    pub aoe_damage: f32,
-    pub melee_damage: f32,
 }
 
 impl CharacterStats {
@@ -447,11 +426,6 @@ impl CharacterStats {
             ice_damage: flat(Stat::IceDamage),
             lightning_damage: flat(Stat::LightningDamage),
             physical_damage: flat(Stat::PhysicalDamage),
-
-            projectile_damage: flat(Stat::ProjectileDamage),
-            beam_damage: flat(Stat::BeamDamage),
-            aoe_damage: flat(Stat::AoeDamage),
-            melee_damage: flat(Stat::MeleeDamage),
         }
     }
 
@@ -465,18 +439,17 @@ impl CharacterStats {
     }
 
     /// Compose the full ability-aware damage multiplier for one
-    /// cast. Reads the ability's scaling-bucket / element /
-    /// archetype tags and stacks the matching gear bonuses
-    /// multiplicatively. Pure read-only — call site multiplies
-    /// the result onto base damage in the server cast pipe.
+    /// cast. Reads the ability's element tag and stacks the
+    /// matching gear bonus multiplicatively. Pure read-only —
+    /// call site multiplies the result onto base damage in the
+    /// server cast pipe.
     ///
     /// Order matches the design doc:
-    /// `(1 + scaling_bucket) × (1 + element) × (1 + archetype)`.
-    /// Each unmatched tag (`Scaling::None`, `Element::None`,
-    /// `Archetype::Movement`/`Utility`) contributes `× 1`, so
+    /// `(1 + scaling_bucket) × (1 + element)`.
+    /// Each unmatched tag (`Element::None`) contributes `× 1`, so
     /// utility abilities pass through untouched.
     pub fn ability_damage_mult(&self, ability: &crate::abilities::Ability) -> f32 {
-        use crate::abilities::{Archetype, Element};
+        use crate::abilities::Element;
         let element = match ability.element {
             Element::Physical => 1.0 + self.physical_damage,
             Element::Fire => 1.0 + self.fire_damage,
@@ -484,14 +457,7 @@ impl CharacterStats {
             Element::Lightning => 1.0 + self.lightning_damage,
             Element::None => 1.0,
         };
-        let archetype = match ability.archetype {
-            Archetype::Projectile => 1.0 + self.projectile_damage,
-            Archetype::Beam => 1.0 + self.beam_damage,
-            Archetype::Aoe => 1.0 + self.aoe_damage,
-            Archetype::Melee => 1.0 + self.melee_damage,
-            Archetype::Movement | Archetype::Utility => 1.0,
-        };
-        element * archetype
+        element
     }
 
     /// Fraction of incoming damage absorbed by armor, 0..0.75.

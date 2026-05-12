@@ -91,6 +91,12 @@ struct Server {
     /// HUD damage-meter panel updates without spamming the
     /// control channel every tick.
     meter_accumulator: Duration,
+    /// Drives periodic `ServerMsg::PartyState` rebroadcasts so
+    /// party-frame HUD (top-left) reflects live hp / level /
+    /// floor changes. Without this the client only sees a fresh
+    /// roster on join / leave / kick / promote events, which is
+    /// why party-mates appear frozen at their join-time hp.
+    party_state_accumulator: Duration,
     /// Persistence worker handle. `None` when the server is started
     /// without `--database-url`, in which case all characters are
     /// purely in-memory — useful for offline iteration / tests.
@@ -133,6 +139,7 @@ impl Server {
             tick_accumulator: Duration::ZERO,
             snapshot_accumulator: Duration::ZERO,
             meter_accumulator: Duration::ZERO,
+            party_state_accumulator: Duration::ZERO,
             persistence,
             auto_save_accumulator: Duration::ZERO,
             chat: ChatHistory::default(),
@@ -242,6 +249,19 @@ impl Server {
         if self.meter_accumulator >= METER_PERIOD {
             self.meter_accumulator -= METER_PERIOD;
             self.broadcast_meters();
+        }
+
+        // Party HUD refresh at 1 Hz. The party frames show hp /
+        // level / floor which change continuously, but join /
+        // leave / kick / promote are the only events that
+        // originally broadcast PartyState. Without a periodic
+        // rebroadcast a watching client sees frozen hp bars for
+        // their party-mates.
+        const PARTY_STATE_PERIOD: Duration = Duration::from_secs(1);
+        self.party_state_accumulator += frame_dt;
+        if self.party_state_accumulator >= PARTY_STATE_PERIOD {
+            self.party_state_accumulator -= PARTY_STATE_PERIOD;
+            self.broadcast_party_states();
         }
 
         // Periodic auto-save. Fire-and-forget per session — the
@@ -472,6 +492,12 @@ impl Server {
                 }
                 self.handle_drop_inventory_item(from, inventory_index as usize);
             }
+            ClientMsg::DropEquippedItem { slot } => {
+                if self.sim_for_client(from).is_ghost(from) {
+                    return;
+                }
+                self.handle_drop_equipped_item(from, slot);
+            }
             ClientMsg::SalvageInventoryItem { inventory_index } => {
                 if self.sim_for_client(from).is_ghost(from) {
                     return;
@@ -489,6 +515,9 @@ impl Server {
                 inventory_index,
             } => {
                 self.handle_unequip_to_bag_slot(from, slot, inventory_index as usize);
+            }
+            ClientMsg::SwapEquipSlots { a, b } => {
+                self.handle_swap_equip_slots(from, a, b);
             }
             ClientMsg::SetLoadoutSlot {
                 slot_index,

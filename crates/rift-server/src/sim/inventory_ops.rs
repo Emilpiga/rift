@@ -272,6 +272,22 @@ impl Sim {
         Some((item, p.k.position))
     }
 
+    /// Remove the equipped item at `slot` and return it
+    /// alongside the player's current position. Used by the
+    /// "drag equip outside" → drop-to-world path. Recomputes
+    /// the player's stats since equipment changed.
+    pub fn pop_equipment_item(
+        &mut self,
+        client_id: ClientId,
+        slot: rift_game::loot::EquipSlot,
+    ) -> Option<(rift_game::loot::Item, glam::Vec3)> {
+        let &entity = self.sessions.get(&client_id)?;
+        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let item = p.equipment.take(slot)?;
+        p.recompute_stats();
+        Some((item, p.k.position))
+    }
+
     /// Move whatever's currently in `slot` into the bag at
     /// `inventory_index`, swapping with whatever is already
     /// there. Validates that footprints fit at the swapped
@@ -328,6 +344,56 @@ impl Sim {
                 return false;
             }
         }
+        p.recompute_stats();
+        true
+    }
+
+    /// Swap the items between two equipment slots in place.
+    /// Validates `Equipment::accepts` for each item against
+    /// the destination slot; rejects the entire op if either
+    /// direction would be illegal. An empty source slot is
+    /// trivially "accepted" by the destination. Returns
+    /// `true` if any swap actually occurred.
+    pub fn swap_equip_slots(
+        &mut self,
+        client_id: ClientId,
+        a: rift_game::loot::EquipSlot,
+        b: rift_game::loot::EquipSlot,
+    ) -> bool {
+        if a == b {
+            return false;
+        }
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return false;
+        };
+        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            return false;
+        };
+        let item_a = p.equipment.take(a);
+        let item_b = p.equipment.take(b);
+        // Reject if either item would land in a slot that
+        // doesn't accept it.
+        let a_ok = item_a
+            .as_ref()
+            .map(|it| rift_game::loot::Equipment::accepts(b, it))
+            .unwrap_or(true);
+        let b_ok = item_b
+            .as_ref()
+            .map(|it| rift_game::loot::Equipment::accepts(a, it))
+            .unwrap_or(true);
+        if !a_ok || !b_ok {
+            // Restore originals — no partial mutation.
+            p.equipment.set(a, item_a);
+            p.equipment.set(b, item_b);
+            return false;
+        }
+        // At least one side must change for "true" to mean
+        // something. Two empty slots is a no-op.
+        if item_a.is_none() && item_b.is_none() {
+            return false;
+        }
+        p.equipment.set(a, item_b);
+        p.equipment.set(b, item_a);
         p.recompute_stats();
         true
     }

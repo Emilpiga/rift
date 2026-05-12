@@ -73,6 +73,13 @@ pub fn route_slot(
 /// into `in_transit` so the renderer can hide that slot until
 /// the server's mutation reply arrives. Eliminates the
 /// "pop back to source then jump to target" flash.
+///
+/// Only records the source when the drop actually produced an
+/// [`InventoryAction`] — otherwise the source slot would
+/// "ghost" indefinitely (no server reply ever clears it). A
+/// drop that resolves to no action (illegal target, same-slot
+/// drop, stash-closed sidecast, etc.) leaves the icon in
+/// place.
 pub fn route_slot_capture(
     r: SlotInteraction<DragSource>,
     target: DropTarget,
@@ -82,13 +89,16 @@ pub fn route_slot_capture(
     out: &mut Vec<InventoryAction>,
     in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
 ) {
-    if let Some(dp) = r.dropped.as_ref() {
-        *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(
-            dp.payload,
-            active_tab,
-        ));
-    }
+    let dropped_payload = r.dropped.as_ref().map(|dp| dp.payload);
+    let actions_before = out.len();
     route_slot(r, target, stash_open, ctrl, active_tab, out);
+    if let Some(payload) = dropped_payload {
+        if out.len() > actions_before {
+            *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(
+                payload, active_tab,
+            ));
+        }
+    }
 }
 
 /// Right-click is the "fast transfer" verb: send the item
@@ -191,6 +201,18 @@ pub fn handle_drop(
                 slot: slot.0,
                 inventory_index: idx,
             });
+        }
+        (DragSource::Equip(a), DropTarget::Equip(b)) if a != b => {
+            // Only ring1 ↔ ring2 is a legal equip-to-equip
+            // swap; every other pair would either be a no-op
+            // (same slot) or violate `Equipment::accepts`.
+            // Ring slot bytes are 6 (Ring1) and 7 (Ring2) per
+            // `EquipSlot::ALL`.
+            const RING1: u8 = 6;
+            const RING2: u8 = 7;
+            if matches!((a.0, b.0), (RING1, RING2) | (RING2, RING1)) {
+                out.push(InventoryAction::SwapEquip { a: a.0, b: b.0 });
+            }
         }
         (DragSource::Equip(slot), DropTarget::Stash(idx)) if stash_open => {
             out.push(InventoryAction::UnequipToStashSlot {

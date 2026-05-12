@@ -64,7 +64,7 @@ pub fn base_model_paths(gender: Gender) -> (&'static str, &'static str) {
     match gender {
         Gender::Female => (
             "assets/models/base-characters/Base Characters/Godot - UE/Superhero_Female_FullBody.gltf",
-            "assets/models/modular-character-outfits/Textures/Base/T_Regular_Female_Dark_BaseColor.png",
+            "assets/models/base-characters/Base Characters/Godot - UE/T_Superhero_Female_Dark_BaseColor.png",
         ),
         Gender::Male => (
             "assets/models/base-characters/Base Characters/Godot - UE/Superhero_Male_FullBody.gltf",

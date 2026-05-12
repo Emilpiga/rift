@@ -125,8 +125,8 @@ pub fn tick(
             // bee-lining into the geometry. Also gate the
             // dash commit on LOS — dashing into a wall is
             // useless and looks broken.
-            let los_clear = floor.line_of_sight(en.k.position, target_pos);
-            if los_clear && dist <= spec.trigger_range {
+            let los_blocked = super::cached_los_blocked(en, floor, target_pos);
+            if !los_blocked && dist <= spec.trigger_range {
                 // Lock in the approach by entering the wind-up.
                 // Pad attack_anim_remaining post-windup so the
                 // attack clip carries through the whole
@@ -137,7 +137,7 @@ pub fn tick(
                 en.attack_anim_remaining = spec.windup_dur + spec.dash_dur;
                 return;
             }
-            let dir = if !los_clear {
+            let dir = if los_blocked {
                 // Wall in the way — consume / rebuild a cached
                 // A* path toward the target tile and steer
                 // toward the next waypoint. Same shape as

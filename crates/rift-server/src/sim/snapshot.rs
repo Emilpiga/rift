@@ -58,7 +58,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 aim_yaw: p.k.aim_yaw,
                 locomotion: p.k.locomotion,
                 action: p.k.action,
-                action_start: NetTick(0),
+                action_start: p.action_start,
             },
             position: p.k.position.to_array(),
             yaw: p.k.yaw,

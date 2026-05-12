@@ -16,6 +16,7 @@ publish = false
 rift-net = { path = "../rift-net" }
 rift-dungeon = { path = "../rift-dungeon" }
 rift-game = { path = "../rift-game" }
+rift-math = { path = "../rift-math" }
 rift-persistence = { path = "../rift-persistence" }
 hecs = { workspace = true }
 glam = { workspace = true }

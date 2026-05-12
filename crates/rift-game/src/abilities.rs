@@ -581,16 +581,32 @@ impl AbilityState {
     }
 }
 
-/// The player's action bar — 6 ability slots (like Diablo 3).
+/// The player's action bar — 6 ability slots (like Diablo 3),
+/// plus a fixed passive **Roll** slot that's always available
+/// on the Space key regardless of what the player has slotted.
+/// Roll is intentionally not part of the spellbook pool: it's
+/// the universal dodge, like Diablo 4's Evade. It still ticks
+/// its own cooldown via the normal [`AbilityState`] path so the
+/// HUD and the server share the same vocabulary.
 #[derive(Clone, Debug)]
 pub struct AbilitySlot {
     pub slots: [Option<AbilityState>; 6],
+    /// Passive dodge bound to Space. Always populated with
+    /// [`id::EVASIVE_ROLL`] when the registry contains it; only
+    /// `None` in degenerate test builds where the ability was
+    /// stripped.
+    pub roll: Option<AbilityState>,
 }
 
 impl AbilitySlot {
     pub fn new() -> Self {
+        // Auto-populate the passive Roll slot from the registry
+        // so every materialised loadout includes the dodge —
+        // callers never need to remember to wire it up.
+        let roll = lookup(id::EVASIVE_ROLL).map(|ab| AbilityState::new(ab.clone()));
         Self {
             slots: Default::default(),
+            roll,
         }
     }
 
@@ -606,6 +622,9 @@ impl AbilitySlot {
                 state.tick(dt);
             }
         }
+        if let Some(state) = &mut self.roll {
+            state.tick(dt);
+        }
     }
 
     pub fn try_use(&mut self, index: usize) -> Option<&Ability> {
@@ -618,6 +637,18 @@ impl AbilitySlot {
             }
         }
         None
+    }
+
+    /// Try to consume the passive Roll slot. Returns the
+    /// ability definition on success so the caller can spawn
+    /// the same local VFX / cast request as a normal slot.
+    pub fn try_use_roll(&mut self) -> Option<&Ability> {
+        let state = self.roll.as_mut()?;
+        if state.try_use() {
+            Some(&state.ability)
+        } else {
+            None
+        }
     }
 }
 
@@ -786,6 +817,15 @@ pub enum AbilityKind {
         ring_radius: f32,
         windup: f32,
     },
+    /// Player melee swing — a short forward arc resolved server-side
+    /// on the cast tick. Every enemy whose XZ position lies within
+    /// `radius` of the caster AND whose bearing from the caster is
+    /// inside the half-`arc_radians` cone around the aim direction
+    /// takes the ability's scaled damage exactly once. There is no
+    /// projectile or persistent zone; the caster is locked into the
+    /// `Attack` action for the registry-authored duration so the
+    /// swing animation can play. Authored on Sword / Dagger LMB.
+    MeleeArc { radius: f32, arc_radians: f32 },
     /// Friendly single-target instant heal. Restores `amount`
     /// HP to the targeted player (clamped at `hp_max`). Does
     /// nothing if the target is dead, ghosting, or out of
@@ -1016,7 +1056,7 @@ pub static REGISTRY: &[Ability] = &[
         base_damage: 0.0,
         damage_mult: 0.0,
         range: 0.0,
-        unlock_level: 5,
+        unlock_level: 1,
         element: Element::None,
         archetype: Archetype::Movement,
         scaling: Scaling::None,
@@ -1145,33 +1185,51 @@ pub static REGISTRY: &[Ability] = &[
         effects: &[],
         audio: AbilityAudio::SILENT,
     },
-    // Synthetic ability — never on a player loadout, never
-    // cast through the dispatch pipeline. Exists purely as an
-    // attribution row so brute / boss melee swings and
-    // stalker dash hits credit the meter to a single
-    // "Melee Attack" bucket on the receiving player's TAKEN
-    // tab. All numeric fields are zero / no-op; the kind is
-    // `ClientOnly` so submit / dispatch reject it if anything
-    // ever does try to cast it.
+    // Player Sword / Dagger LMB. Resolved server-side as a
+    // forward arc on the cast tick (`AbilityKind::MeleeArc`).
+    // Enemy callers (brute / stalker / boss) reuse this id
+    // for attribution on their swing-style damage rows — they
+    // never go through `submit` / `dispatch` for it, they
+    // just stamp `ability_id: MELEE_ATTACK` on the
+    // `combat_ctx::EnemyHit` row, so the registry kind /
+    // damage numbers below are irrelevant to those code
+    // paths. The `effects` list drives the local cast pose
+    // for the player only.
     Ability {
         id: MELEE_ATTACK,
         wire_id: id::MELEE_ATTACK,
         name: "Melee",
-        description: "Generic enemy melee attack.",
+        description: "Swing your weapon in a short forward arc.",
         icon: None,
-        cooldown: 0.0,
+        cooldown: 0.4,
         resource_cost: 0.0,
         channel_cost_per_sec: 0.0,
-        base_damage: 0.0,
+        base_damage: 12.0,
         damage_mult: 1.0,
-        range: 0.0,
+        range: 2.5,
         unlock_level: 1,
         element: Element::Physical,
         archetype: Archetype::Melee,
         scaling: Scaling::Weapon,
         targeting: TargetingMode::Instant,
-        kind: AbilityKind::ClientOnly,
+        kind: AbilityKind::MeleeArc {
+            radius: 2.5,
+            // ~120° cone — wide enough to feel forgiving on
+            // off-axis enemies, tight enough that you can't
+            // tag mobs behind you.
+            arc_radians: 2.094,
+        },
         visuals: AbilityVisuals::NONE,
+        // Swing visuals are driven outside the declarative
+        // effects list: the local cast site plays the combo-
+        // stepped clip on the upper-body `SpellCast` layer
+        // directly (so legs keep doing locomotion through
+        // the swing), and remote observers mirror the same
+        // clip by reading the snapshot's `ATTACK_*` action
+        // byte. Picking the clip table is a function of the
+        // combo step, which doesn't fit `SetPlayerAction`'s
+        // single-clip-list shape — see
+        // [`rift_game::kinematic::MELEE_COMBO_CLIPS`].
         effects: &[],
         audio: AbilityAudio::SILENT,
     },

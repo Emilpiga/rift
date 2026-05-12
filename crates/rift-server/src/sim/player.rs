@@ -17,7 +17,7 @@ use rift_game::loadout::Loadout;
 use rift_game::stats::CharacterStats;
 use rift_net::{
     messages::{button_bits, InputCmd},
-    ClientId, NetId,
+    ClientId, NetId, NetTick,
 };
 
 /// Default per-player level until the persisted level field is
@@ -83,6 +83,30 @@ pub struct ServerPlayer {
     /// Last input `seq` we successfully applied. Echoed back in
     /// snapshots so the client can prune its prediction buffer.
     pub last_input_seq: u32,
+    /// Tick on which the currently-active full-body
+    /// [`Kinematic::action`] began. Shipped in
+    /// `EntityKind::Player.action_start` so clients can
+    /// reconstruct `roll_remaining` from the server's clock
+    /// during reconcile — without it the local roll timer
+    /// drifts ~RTT/2 ahead of the server's and snapshots
+    /// snap the predicted position back into the still-
+    /// rolling server pose every few frames.
+    pub action_start: NetTick,
+    /// Tick on which the most recent melee swing fired. Combined
+    /// with [`Self::melee_combo_step`] to drive the
+    /// A→B→C→D swing-chain: a fresh `MeleeArc` cast within
+    /// [`rift_game::kinematic::ATTACK_COMBO_WINDOW`] of this
+    /// tick advances the step, otherwise it resets to 0. `0`
+    /// (the default) is fine as a sentinel — the very first
+    /// swing will always be far enough past tick 0 that the
+    /// window check naturally restarts the combo at step 0.
+    pub last_melee_tick: NetTick,
+    /// 0..=3 combo step of the next-or-current melee swing.
+    /// Mirrors `kinematic::action::ATTACK_A..=ATTACK_D` on the
+    /// wire so clients can pick the matching swing clip.
+    /// Advanced by `MeleeArc` dispatch using
+    /// [`Self::last_melee_tick`] as the timing reference.
+    pub melee_combo_step: u8,
     /// In-memory inventory of items the player has picked up this
     /// session. Authoritative on the server. Persisted via the
     /// `inventory_items` table; rows live across sessions and
@@ -219,6 +243,9 @@ impl ServerPlayer {
             resource_regen_pause: 0.0,
             low_hp_proc_armed: true,
             last_input_seq: 0,
+            action_start: NetTick(0),
+            last_melee_tick: NetTick(0),
+            melee_combo_step: 0,
             inventory: Vec::new(),
             equipment,
             stash: vec![StashTab::fresh(0)],

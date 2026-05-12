@@ -248,9 +248,7 @@ impl GenderedModel {
 
 use tag::*;
 
-use super::families::{
-    Attribute, ARCHETYPES_MELEE, ARCHETYPES_PROJECTILE, ELEMENTS_CASTER, ELEMENTS_PHYSICAL,
-};
+use super::families::{Attribute, ELEMENTS_CASTER, ELEMENTS_PHYSICAL};
 
 pub const BASE_ITEMS: &[BaseItem] = &[
     // ---- Weapons ------------------------------------------------------
@@ -271,7 +269,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Intellect),
             element: Some(ELEMENTS_CASTER),
-            archetype: None,
         },
         icon: "loot/Weapons/43",
         models: None,
@@ -289,7 +286,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Strength),
             element: Some(ELEMENTS_PHYSICAL),
-            archetype: Some(ARCHETYPES_MELEE),
         },
         icon: "loot/Weapons/25",
         models: None,
@@ -301,13 +297,12 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: MELEE | CRIT | SPEED | UTILITY,
         favored_tags: CRIT | SPEED,
-        implicit: &[(Stat::MeleeDamage, 0.06), (Stat::CritChance, 0.05)],
+        implicit: &[(Stat::Strength, 3.0), (Stat::CritChance, 0.05)],
         min_ilvl: 1,
         // Dagger = physical melee weapon, crit-flavoured.
         family: BaseFamily {
             attribute: Some(Attribute::Strength),
             element: Some(ELEMENTS_PHYSICAL),
-            archetype: Some(ARCHETYPES_MELEE),
         },
         icon: "loot/Weapons/1",
         models: None,
@@ -319,17 +314,13 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         equip_slot: EquipSlot::Weapon,
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SPEED,
         favored_tags: CASTER | UTILITY,
-        implicit: &[
-            (Stat::ProjectileDamage, 0.06),
-            (Stat::CooldownReduction, 0.04),
-        ],
+        implicit: &[(Stat::Agility, 3.0), (Stat::CooldownReduction, 0.04)],
         min_ilvl: 1,
         // Wand = caster, any element, projectile shape (Fireball,
         // Multi-fireball-style spell projectiles).
         family: BaseFamily {
             attribute: Some(Attribute::Agility),
             element: Some(ELEMENTS_CASTER),
-            archetype: Some(ARCHETYPES_PROJECTILE),
         },
         icon: "loot/Weapons/15",
         // Weapons are external props rather than skinned outfit
@@ -361,7 +352,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: None,
             element: Some(ELEMENTS_PHYSICAL),
-            archetype: None,
         },
         icon: "loot/Helmets/Helmet_1",
         models: Some(GenderedModel {
@@ -402,7 +392,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Strength),
             element: Some(ELEMENTS_PHYSICAL),
-            archetype: Some(ARCHETYPES_MELEE),
         },
         icon: "loot/BodyArmor/BodyArmor_1",
         models: None,
@@ -458,7 +447,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Intellect),
             element: None,
-            archetype: None,
         },
         icon: "loot/BodyArmor/BodyArmor_3",
         models: None,
@@ -476,7 +464,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Intellect),
             element: None,
-            archetype: None,
         },
         icon: "loot/Gloves/Gloves_1",
         models: Some(GenderedModel {
@@ -497,7 +484,6 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         family: BaseFamily {
             attribute: Some(Attribute::Strength),
             element: Some(ELEMENTS_PHYSICAL),
-            archetype: Some(ARCHETYPES_MELEE),
         },
         icon: "loot/Pants/Pants_1",
         models: Some(GenderedModel {
@@ -538,14 +524,14 @@ pub const BASE_ITEMS: &[BaseItem] = &[
 
 #[cfg(test)]
 mod family_tests {
-    use super::super::families::{Archetype, Element};
+    use super::super::families::Element;
     use super::*;
 
     /// Every `BaseItem` row declares a `family`. Source-less
     /// (wildcard) and source-locked entries are both legal; what
-    /// we enforce is that a non-empty element / archetype slice is
-    /// just that — non-empty — so the Phase 2 roll path can pick
-    /// at least one option per axis when the lock is set.
+    /// we enforce is that a non-empty element slice is just that
+    /// — non-empty — so the Phase 2 roll path can pick at least
+    /// one option per axis when the lock is set.
     #[test]
     fn every_base_declares_a_coherent_family() {
         for b in BASE_ITEMS {
@@ -553,13 +539,6 @@ mod family_tests {
                 assert!(
                     !list.is_empty(),
                     "base `{}` has an empty element slice",
-                    b.id,
-                );
-            }
-            if let Some(list) = b.family.archetype {
-                assert!(
-                    !list.is_empty(),
-                    "base `{}` has an empty archetype slice",
                     b.id,
                 );
             }
@@ -601,14 +580,6 @@ mod family_tests {
                         "accessory `{}` rejects element {:?}",
                         b.id,
                         e,
-                    );
-                }
-                for a in [Archetype::Projectile, Archetype::Melee] {
-                    assert!(
-                        b.family.allows_archetype(a),
-                        "accessory `{}` rejects archetype {:?}",
-                        b.id,
-                        a,
                     );
                 }
             }

@@ -13,19 +13,19 @@ use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
 pub struct UniformData {
     pub view: Mat4,
     pub proj: Mat4,
-    pub camera_pos: Vec4,    // xyz = position, w unused
-    pub light_dir: Vec4,     // xyz = direction (toward light), w unused
-    pub light_color: Vec4,   // xyz = color, w = ambient intensity
-    pub fog_color: Vec4,     // xyz = fog color, w unused
-    pub fog_params: Vec4,    // x = start dist, y = end dist, z = density, w unused
-    pub fog_origin: Vec4,    // xyz = world-space anchor for fog distance, w unused
+    pub camera_pos: Vec4,  // xyz = position, w unused
+    pub light_dir: Vec4,   // xyz = direction (toward light), w unused
+    pub light_color: Vec4, // xyz = color, w = ambient intensity
+    pub fog_color: Vec4,   // xyz = fog color, w unused
+    pub fog_params: Vec4,  // x = start dist, y = end dist, z = density, w unused
+    pub fog_origin: Vec4,  // xyz = world-space anchor for fog distance, w unused
     /// Point lights: [pos.xyz, radius] packed into vec4s, then [color.rgb, intensity].
     /// Capacity is `MAX_POINT_LIGHTS = 16`, sized to comfortably fit
     /// every torch within the fog radius (typical dungeon torch
     /// spacing × ~24 m visibility ≈ 8–12 torches at once).
-    pub point_light_pos: [Vec4; 16],   // xyz = position, w = radius
+    pub point_light_pos: [Vec4; 16], // xyz = position, w = radius
     pub point_light_color: [Vec4; 16], // xyz = color, w = intensity
-    pub point_light_count: Vec4,       // x = count (as float), yzw unused
+    pub point_light_count: Vec4, // x = count (as float), yzw unused
     /// Directional-light view-projection matrix. Used by both the shadow
     /// pass (to project geometry) and the main pass (to sample the shadow
     /// map at each fragment's projected position).
@@ -49,6 +49,12 @@ pub struct UniformData {
     /// the field. All-zero when no blood field is active (the default
     /// 1×1 placeholder texture is bound and produces no contribution).
     pub blood_field_xform: Vec4,
+    /// XZ AABB of the room the player is currently in:
+    /// `(min_x, min_z, max_x, max_z)`. Read by the cel shader
+    /// to gate the see-through-wall porthole so it only opens
+    /// against walls of the player's current room. All-zero
+    /// disables the porthole entirely.
+    pub player_room_aabb: Vec4,
 }
 
 pub struct UniformBuffers {
@@ -59,10 +65,7 @@ pub struct UniformBuffers {
 }
 
 impl UniformBuffers {
-    pub fn new(
-        device: &ash::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-    ) -> Result<Self> {
+    pub fn new(device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) -> Result<Self> {
         let buffer_size = std::mem::size_of::<UniformData>() as vk::DeviceSize;
 
         // Create one uniform buffer per frame in flight
@@ -113,8 +116,7 @@ impl UniformBuffers {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
         let descriptor_set_layout =
             unsafe { device.create_descriptor_set_layout(&layout_info, None)? };

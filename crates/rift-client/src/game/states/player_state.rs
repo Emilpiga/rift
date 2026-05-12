@@ -48,6 +48,17 @@ pub struct PlayerState {
     /// `resource_pct` each frame in `world_sync`. The HUD reads
     /// this directly; the canonical scalar is server-side.
     pub resource_pct: f32,
+    /// Seconds elapsed since the most recent local melee swing.
+    /// Ticked up each frame in `combat_system::tick`; reset to
+    /// `0.0` whenever a fresh swing fires. Paired with
+    /// [`melee_combo_step`] to decide whether the next swing
+    /// chains the combo (within
+    /// `rift_game::kinematic::ATTACK_COMBO_WINDOW`) or
+    /// restarts it. Starts at `f32::MAX` so the very first
+    /// swing always begins the chain at step 0.
+    pub melee_time_since_last: f32,
+    /// 0..=3 combo index for the next melee swing.
+    pub melee_combo_step: u8,
     /// Last server-reported salvage currency balance. Mirrored
     /// from [`rift_net::ServerMsg::ShardsSync`] in `main.rs`.
     /// The HUD reads this for the shard counter; the canonical
@@ -90,6 +101,8 @@ impl PlayerState {
             cached_stats,
             cached_ability_mods,
             resource_pct: 1.0,
+            melee_time_since_last: f32::MAX,
+            melee_combo_step: 0,
             shards: 0,
         }
     }

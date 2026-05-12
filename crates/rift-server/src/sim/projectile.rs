@@ -13,6 +13,26 @@ use rift_net::{messages::WorldEvent, NetId};
 
 use super::enemies::ServerEnemy;
 
+/// Cell size (m) for the per-tick enemy spatial grid built by
+/// [`tick`] and [`tick_aoe`]. Picked at roughly twice the
+/// `ENEMY_HIT_RADIUS` (0.45 m) so a typical projectile
+/// `query_radius` of `proj.size/2 + enemy_radius` covers a 3×3
+/// cell window and an AoE radius of 6 m still only touches a
+/// 7×7 window. Larger cells mean fewer hashmap probes per
+/// query; smaller cells mean fewer candidate enemies per
+/// probe. 1.0 m was experimentally a hair faster than 2.0 m
+/// for the floor-40 mob density we care about.
+const ENEMY_GRID_CELL: f32 = 1.0;
+
+/// Maximum hit radius any enemy advertises — every row in the
+/// `enemies` slice is built with [`super::enemies::ENEMY_HIT_RADIUS`],
+/// so this is a compile-time bound on how far an enemy's hit
+/// disc can reach beyond its centre. The projectile query uses
+/// it to inflate the grid lookup radius so we don't miss an
+/// enemy whose centre is just outside the projectile's own disc
+/// but whose hit-radius still overlaps.
+const MAX_ENEMY_HIT_RADIUS: f32 = super::enemies::ENEMY_HIT_RADIUS;
+
 /// Which side a projectile belongs to. Drives target-list
 /// filtering in [`tick`]: `Player`-team bolts collide with
 /// enemies, `Enemy`-team bolts collide with players. Both
@@ -160,7 +180,7 @@ pub(super) fn mix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-fn hit_seed(tick: rift_net::NetTick, enemy: NetId, owner: NetId, salt: u64) -> u64 {
+pub(super) fn hit_seed(tick: rift_net::NetTick, enemy: NetId, owner: NetId, salt: u64) -> u64 {
     mix64(
         (tick.0 as u64) ^ ((enemy.0 as u64) << 8) ^ ((owner.0 as u64) << 24) ^ salt.rotate_left(7),
     )
@@ -204,6 +224,13 @@ pub fn tick(
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
     let mut player_debuffs: Vec<(Entity, u8, AbilityWireId, u8)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
+    // Bucket enemies once per tick so each `Player`-team
+    // projectile only scans the cells its disc overlaps instead
+    // of the full enemy list. Cell size ~2 m matches the typical
+    // projectile + enemy radius sum, so most queries touch a
+    // 3×3 neighbourhood. At ~200 enemies + ~50 projectiles this
+    // collapses the inner loop from O(P·E) to O(P + hits).
+    let enemy_grid = rift_math::spatial::SpatialGrid::build(enemies, ENEMY_GRID_CELL, |e| e.1);
     for (pe, proj) in world.query_mut::<&mut ServerProjectile>() {
         proj.position += proj.velocity * dt;
         proj.ttl -= dt;
@@ -225,7 +252,13 @@ pub fn tick(
             Team::Player => {
                 // Player bolts hit enemies. Pierce drains per
                 // hit; first frame past zero stops the bolt.
-                for (en_entity, en_pos, en_net_id, en_radius) in enemies {
+                // The spatial grid keeps the candidate set tight
+                // — projectile collisions used to be O(E) per
+                // bolt; this is now O(hits in the cell
+                // neighbourhood).
+                let query_radius = proj.size * 0.5 + MAX_ENEMY_HIT_RADIUS;
+                for idx in enemy_grid.query_radius(proj.position, query_radius) {
+                    let (en_entity, en_pos, en_net_id, en_radius) = &enemies[idx as usize];
                     let dx = proj.position.x - en_pos.x;
                     let dz = proj.position.z - en_pos.z;
                     let dist_xz = (dx * dx + dz * dz).sqrt();
@@ -349,6 +382,11 @@ pub fn tick_aoe(
     let mut hits: Vec<Hit> = Vec::new();
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
     let mut player_debuffs: Vec<(Entity, u8, AbilityWireId, u8)> = Vec::new();
+    // Same trick as `tick`: hash enemies into a coarse grid so
+    // each zone only scans the cells its radius overlaps. AoE
+    // radii are typically 2–6 m, so the per-zone cell window
+    // stays small (3×3 to 7×7) regardless of swarm size.
+    let enemy_grid = rift_math::spatial::SpatialGrid::build(enemies, ENEMY_GRID_CELL, |e| e.1);
     let mut idx = 0;
     while idx < zones.len() {
         let zone = &mut zones[idx];
@@ -370,7 +408,8 @@ pub fn tick_aoe(
         if tick {
             match zone_team {
                 Team::Player => {
-                    for (en_entity, en_pos, en_net_id, _r) in enemies {
+                    for grid_idx in enemy_grid.query_radius(zone_pos, zone_radius) {
+                        let (en_entity, en_pos, en_net_id, _r) = &enemies[grid_idx as usize];
                         let dx = en_pos.x - zone_pos.x;
                         let dz = en_pos.z - zone_pos.z;
                         if dx * dx + dz * dz >= zone_radius * zone_radius {

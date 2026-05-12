@@ -119,18 +119,35 @@ impl NetClient {
         // both the authoritative state and the new ack seq in hand.
         let our_id = self.our_net_id;
         let our_auth = our_id.and_then(|nid| {
-            snap.entities
-                .iter()
-                .find(|e| e.net_id == nid)
-                .map(|e| (Vec3::from_array(e.position), Vec3::from_array(e.velocity), e.yaw))
+            snap.entities.iter().find(|e| e.net_id == nid).map(|e| {
+                // Pull action + action_start from the Player
+                // payload so the reconcile path below can
+                // re-derive `roll_remaining` from the server's
+                // clock instead of letting the local timer
+                // drift by ~RTT/2 every dodge.
+                let (action, action_start) = match &e.kind {
+                    EntityKind::Player {
+                        action,
+                        action_start,
+                        ..
+                    } => (*action, *action_start),
+                    _ => (0u8, NetTick::default()),
+                };
+                (
+                    Vec3::from_array(e.position),
+                    Vec3::from_array(e.velocity),
+                    e.yaw,
+                    action,
+                    action_start,
+                )
+            })
         });
         // Track our own DEAD flag so input + prediction can stop
         // running on a corpse. The flag flips back to false once
         // the server respawns us via `LoadFloor` (handled there).
         if let Some(nid) = our_id {
             if let Some(e) = snap.entities.iter().find(|e| e.net_id == nid) {
-                let now_dead =
-                    e.flags & rift_net::messages::entity_flags::DEAD != 0;
+                let now_dead = e.flags & rift_net::messages::entity_flags::DEAD != 0;
                 if now_dead && !self.local_dead {
                     // First snapshot of death: drop any unacked
                     // pre-death movement inputs so the reconcile
@@ -143,8 +160,7 @@ impl NetClient {
                     self.correction_error = Vec3::ZERO;
                 }
                 self.local_dead = now_dead;
-                self.local_ghost =
-                    e.flags & rift_net::messages::entity_flags::GHOST != 0;
+                self.local_ghost = e.flags & rift_net::messages::entity_flags::GHOST != 0;
             }
         }
 
@@ -185,7 +201,8 @@ impl NetClient {
             // the reliable Death packet arrives. Used by the
             // layered blood decal system to orient the corpse
             // pool / spray fan / wall arc along the kill axis.
-            self.last_velocities.insert(net_id, Vec3::from_array(e.velocity));
+            self.last_velocities
+                .insert(net_id, Vec3::from_array(e.velocity));
             // Skip our own row — we own the local player's transform
             // through prediction, not through the interp buffer.
             if Some(net_id) == our_id_for_interp {
@@ -210,13 +227,9 @@ impl NetClient {
                     // the currently-displayed sample forward as the
                     // new `prev` so the next interp window starts
                     // exactly where this frame's render ends.
-                    let snapshot_period =
-                        1.0 / rift_net::SNAPSHOT_HZ as f32;
-                    let elapsed = now
-                        .saturating_duration_since(b.curr_arrival)
-                        .as_secs_f32();
-                    let alpha =
-                        (elapsed / snapshot_period.max(1e-4)).clamp(0.0, 1.0);
+                    let snapshot_period = 1.0 / rift_net::SNAPSHOT_HZ as f32;
+                    let elapsed = now.saturating_duration_since(b.curr_arrival).as_secs_f32();
+                    let alpha = (elapsed / snapshot_period.max(1e-4)).clamp(0.0, 1.0);
                     let mut display_pos = hermite_position(
                         b.prev.position,
                         b.curr.position,
@@ -226,20 +239,17 @@ impl NetClient {
                         snapshot_period,
                     );
                     if elapsed > snapshot_period {
-                        let extrap = (elapsed - snapshot_period)
-                            .min(snapshot_period * 4.0);
+                        let extrap = (elapsed - snapshot_period).min(snapshot_period * 4.0);
                         display_pos += b.curr.velocity * extrap;
                     }
                     let q_prev = Quat::from_rotation_y(b.prev.yaw);
                     let q_curr = Quat::from_rotation_y(b.curr.yaw);
-                    let (display_yaw, _, _) = q_prev
-                        .slerp(q_curr, alpha)
-                        .to_euler(glam::EulerRot::YXZ);
+                    let (display_yaw, _, _) =
+                        q_prev.slerp(q_curr, alpha).to_euler(glam::EulerRot::YXZ);
                     let qa_prev = Quat::from_rotation_y(b.prev.aim_yaw);
                     let qa_curr = Quat::from_rotation_y(b.curr.aim_yaw);
-                    let (display_aim_yaw, _, _) = qa_prev
-                        .slerp(qa_curr, alpha)
-                        .to_euler(glam::EulerRot::YXZ);
+                    let (display_aim_yaw, _, _) =
+                        qa_prev.slerp(qa_curr, alpha).to_euler(glam::EulerRot::YXZ);
                     b.prev = InterpSample {
                         position: display_pos,
                         yaw: display_yaw,
@@ -264,7 +274,7 @@ impl NetClient {
         // Reconcile: drop acked inputs from history, snap to the
         // server's authoritative state, then replay everything
         // still in flight to recover the predicted "now".
-        if let Some((auth_pos, auth_vel, auth_yaw)) = our_auth {
+        if let Some((auth_pos, auth_vel, auth_yaw, auth_action, auth_action_start)) = our_auth {
             self.input_history
                 .retain(|(seq, _, _)| seq.wrapping_sub(snap.ack_seq) as i32 > 0);
 
@@ -272,6 +282,67 @@ impl NetClient {
             self.predicted.position = auth_pos;
             self.predicted.velocity = auth_vel;
             self.predicted.yaw = auth_yaw;
+
+            // Reconcile dodge-roll state from the authoritative
+            // snapshot. Without this the local `roll_remaining`
+            // clock ticks independently of the server's: locally
+            // we start the roll on the input frame, the server
+            // can't start until our cast packet has flown
+            // one-way (~RTT/2 later), so the client's roll ends
+            // earlier and the next few snapshots keep snapping
+            // the predicted position back into the still-rolling
+            // server pose. Replay-on-reconcile alone can't fix
+            // this either — buffered inputs don't carry the
+            // one-shot ROLL trigger (that lives in commands.rs's
+            // `start_roll` call, not in button bits).
+            if auth_action == rift_game::kinematic::action::ROLL {
+                let elapsed_ticks = snap.tick.diff(auth_action_start).max(0) as f32;
+                let elapsed_s = elapsed_ticks / rift_net::TICK_HZ as f32;
+                let remaining = (rift_game::kinematic::ROLL_DURATION - elapsed_s).max(0.0);
+                self.predicted.roll_remaining = remaining;
+                self.predicted.action = rift_game::kinematic::action::ROLL;
+                // Reconstruct the locked roll direction from the
+                // server's reported XZ velocity (during an active
+                // roll the kinematic writes `velocity = roll_dir *
+                // speed_curve`, so normalising it recovers the
+                // direction the server chose). Fall back to the
+                // existing local `roll_dir` if the snapshot vel
+                // is degenerate (e.g. capsule pinned against a
+                // wall mid-roll).
+                let vx = auth_vel.x;
+                let vz = auth_vel.z;
+                let len_sq = vx * vx + vz * vz;
+                if len_sq > 1.0e-4 {
+                    let inv = len_sq.sqrt().recip();
+                    self.predicted.roll_dir = [vx * inv, vz * inv];
+                }
+            } else if rift_game::kinematic::action::is_attack(auth_action) {
+                // Same reconcile recipe as the roll branch
+                // above, scaled to the swing window. Swings
+                // no longer freeze locomotion (the combo
+                // pivot landed the swing on the upper-body
+                // `SpellCast` layer), so the predicted
+                // `attack_remaining` purely drives the
+                // action-byte expiry timing \u2014 the body
+                // continues to read move input during the
+                // swing. We still echo the exact `ATTACK_*`
+                // step byte the server is broadcasting so
+                // remote observers and any combo-aware
+                // local logic see a stable value.
+                let elapsed_ticks = snap.tick.diff(auth_action_start).max(0) as f32;
+                let elapsed_s = elapsed_ticks / rift_net::TICK_HZ as f32;
+                let remaining = (rift_game::kinematic::ATTACK_DURATION - elapsed_s).max(0.0);
+                self.predicted.attack_remaining = remaining;
+                self.predicted.action = auth_action;
+                self.predicted.roll_remaining = 0.0;
+            } else {
+                // Server says the roll has ended (or never
+                // started). Clear the local timer so apply_input
+                // stops overriding velocity with the roll curve.
+                self.predicted.roll_remaining = 0.0;
+                self.predicted.attack_remaining = 0.0;
+                self.predicted.action = rift_game::kinematic::action::NONE;
+            }
 
             if let Some(floor) = self.predict_floor.as_ref() {
                 let history: Vec<(u32, f32, rift_net::messages::InputCmd)> =
@@ -390,7 +461,11 @@ impl NetClient {
         let qa_curr = Quat::from_rotation_y(b.curr.aim_yaw);
         let qa = qa_prev.slerp(qa_curr, alpha);
         let (aim_yaw, _, _) = qa.to_euler(glam::EulerRot::YXZ);
-        Some(DisplaySample { position, yaw, aim_yaw })
+        Some(DisplaySample {
+            position,
+            yaw,
+            aim_yaw,
+        })
     }
 }
 
@@ -400,14 +475,7 @@ impl NetClient {
 /// tangent vectors. At `t = 0` returns `p0` with derivative `v0`,
 /// at `t = 1` returns `p1` with derivative `v1`.
 #[inline]
-fn hermite_position(
-    p0: Vec3,
-    p1: Vec3,
-    v0: Vec3,
-    v1: Vec3,
-    t: f32,
-    period: f32,
-) -> Vec3 {
+fn hermite_position(p0: Vec3, p1: Vec3, v0: Vec3, v1: Vec3, t: f32, period: f32) -> Vec3 {
     let t2 = t * t;
     let t3 = t2 * t;
     let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;

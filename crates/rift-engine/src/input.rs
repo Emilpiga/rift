@@ -298,9 +298,17 @@ impl Input {
                 self.right_clicked.set(true);
             }
             self.right_mouse_down = pressed;
-            if !pressed {
-                self.last_mouse_pos = None;
-            }
+            // Drop the last-known cursor position on *both*
+            // edges. On release this prevents the next drag
+            // from inheriting a stale anchor; on press it
+            // prevents the very first CursorMoved after the
+            // grab-toggle (window grab is released while RMB
+            // is held so the player can rotate past the window
+            // edge) from producing a huge synthetic `dx` that
+            // snaps the camera. The first move after the press
+            // just sets the anchor; the second move is what
+            // actually starts rotating.
+            self.last_mouse_pos = None;
         }
         if button == winit::event::MouseButton::Left {
             if pressed {
@@ -353,26 +361,29 @@ impl Input {
     }
 
     pub fn on_cursor_moved(&mut self, x: f64, y: f64) {
-        let current = (x, y);
+        // Just record the absolute position — UI hit-testing
+        // and click handling needs it. Camera yaw is driven
+        // off raw mouse-motion deltas (see `on_mouse_motion`)
+        // so that locking the cursor during RMB drag doesn't
+        // freeze rotation.
         self.mouse_pos = (x as f32, y as f32);
+        self.last_mouse_pos = Some((x, y));
+    }
+
+    /// Raw mouse motion delta (DeviceEvent::MouseMotion). Used
+    /// to drive camera yaw while RMB is held. Independent of
+    /// the OS cursor's screen position, which is what lets the
+    /// player keep rotating past the window edge — the cursor
+    /// is locked to the centre of the window during the drag
+    /// and the raw deltas keep flowing.
+    pub fn on_mouse_motion(&mut self, dx: f64, _dy: f64) {
         if self.right_mouse_down {
-            if let Some(last) = self.last_mouse_pos {
-                let dx = (current.0 - last.0) as f32;
-                // Pitch is locked: the camera holds the
-                // standard top-down ARPG angle (~30°). Yaw
-                // remains free so the player can rotate around
-                // their character with right-mouse drag, and
-                // the scroll wheel still controls zoom. Locking
-                // pitch removes the camera-vs-wall problem
-                // entirely (no low pitches that bury the camera
-                // inside geometry) and keeps combat readable
-                // since every fight is framed at the same
-                // overhead angle.
-                let _ = current.1 - last.1;
-                self.camera_yaw -= dx * 0.005;
-            }
+            // Pitch is locked: the camera holds the standard
+            // top-down ARPG angle (~30°). Yaw remains free so
+            // the player can rotate around their character
+            // with right-mouse drag.
+            self.camera_yaw -= (dx as f32) * 0.005;
         }
-        self.last_mouse_pos = Some(current);
     }
 
     pub fn on_scroll(&mut self, delta: f32) {

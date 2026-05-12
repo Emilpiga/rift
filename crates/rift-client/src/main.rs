@@ -55,6 +55,16 @@ impl App for RiftApp {
             self.apply_server_pushed_state(renderer);
         }
 
+        // Pause-menu request: the in-game "Exit Game" / "Exit
+        // to Character Select" buttons set this flag. Both
+        // currently terminate the process; the latter will be
+        // wired through a graceful session-leave message in a
+        // later landing.
+        if self.state.pause.request_quit {
+            log::info!("pause menu: quit requested");
+            std::process::exit(0);
+        }
+
         // Audio housekeeping: refresh the listener pose from
         // the player's camera, then tick the mixer so finished
         // one-shots are reaped and dead emitters recycle their
@@ -898,6 +908,9 @@ impl RiftApp {
                 EquipRequest::DropToWorld { inventory_index } => {
                     net.request_drop_inventory_item(inventory_index);
                 }
+                EquipRequest::DropEquipToWorld { slot } => {
+                    net.request_drop_equipped_item(slot);
+                }
                 EquipRequest::Salvage { inventory_index } => {
                     net.request_salvage_inventory_item(inventory_index);
                 }
@@ -909,6 +922,9 @@ impl RiftApp {
                     inventory_index,
                 } => {
                     net.request_unequip_to_bag_slot(slot, inventory_index);
+                }
+                EquipRequest::SwapEquip { a, b } => {
+                    net.request_swap_equip_slots(a, b);
                 }
                 EquipRequest::SortBag => {
                     net.request_sort_inventory();
@@ -1214,6 +1230,16 @@ impl RiftApp {
             log::info!("client: hydrated equipment with {} slot(s)", equip.count());
             state.loot.equipment = equip;
             state.player_state.recompute_stats(&state.loot.equipment);
+            // Re-derive the LMB slot from the freshly-equipped
+            // weapon so the action bar stays in sync with the
+            // server. `materialize_with_weapon` overrides slot
+            // 0 with the weapon-derived ability id (melee for
+            // Sword / Dagger, Fireball otherwise) on top of
+            // the persisted loadout.
+            state.player_state.abilities = state
+                .player_state
+                .loadout
+                .materialize_with_weapon(&state.loot.equipment);
 
             // Refresh the local player's modular outfit attachments
             // so anything with a `BaseItem::model_path` shows up
@@ -1309,7 +1335,10 @@ impl RiftApp {
         // re-materialize the runtime `AbilitySlot`.
         if let Some(slots) = net.drain_loadout() {
             state.player_state.loadout = rift_game::loadout::Loadout::from_slots(slots);
-            state.player_state.abilities = state.player_state.loadout.materialize();
+            state.player_state.abilities = state
+                .player_state
+                .loadout
+                .materialize_with_weapon(&state.loot.equipment);
         }
 
         // Authoritative shard balance. Pushed by the server on

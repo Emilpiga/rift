@@ -19,6 +19,7 @@
 //! the loadout editor.
 
 use crate::abilities::{lookup, Ability, AbilitySlot, AbilityState, AbilityWireId, REGISTRY};
+use crate::loot::{EquipSlot, Equipment, ItemSlot, WeaponKind};
 
 /// Number of action-bar slots. Mirrors `AbilitySlot::slots.len()`.
 pub const SLOT_COUNT: usize = 6;
@@ -150,6 +151,18 @@ impl Loadout {
         bar
     }
 
+    /// Like [`Self::materialize`] but synthesises slot 0 (the LMB
+    /// slot) from the equipped weapon via [`weapon_lmb_ability`].
+    /// The persisted slot-0 entry in [`Self::slots`] is ignored —
+    /// LMB is locked to the weapon for MVP. Other slots (1..N)
+    /// materialise from the persisted loadout exactly as before.
+    pub fn materialize_with_weapon(&self, equipment: &Equipment) -> AbilitySlot {
+        let mut bar = self.materialize();
+        let lmb_id = weapon_lmb_ability(equipment);
+        bar.slots[0] = lookup(lmb_id).map(|ab| AbilityState::new(ab.clone()));
+        bar
+    }
+
     /// Replace one slot with a new wire id (or [`EMPTY_SLOT`] to
     /// clear it). No-op when `index` is out of range.
     ///
@@ -185,6 +198,14 @@ impl Loadout {
     /// defensively repair rows that pre-date the dedup
     /// invariant.
     pub fn normalize(&mut self) {
+        // Strip any stale Evasive Roll entries — it's now a
+        // passive bound to Space, so persisted rows from
+        // pre-passive builds need to be repaired on load.
+        for s in self.slots.iter_mut() {
+            if *s == crate::abilities::id::EVASIVE_ROLL {
+                *s = EMPTY_SLOT;
+            }
+        }
         for i in 0..SLOT_COUNT {
             let id = self.slots[i];
             if id == EMPTY_SLOT {
@@ -207,9 +228,21 @@ impl Default for Loadout {
 }
 
 /// `true` if `wire_id` belongs to an ability the player is allowed
-/// to slot. Excludes enemy-only abilities and the empty sentinel.
+/// to slot. Excludes enemy-only abilities, the empty sentinel,
+/// and passive abilities (currently [`crate::abilities::id::EVASIVE_ROLL`])
+/// that live on a fixed key rather than the action bar.
 pub fn is_player_ability(wire_id: AbilityWireId) -> bool {
     if wire_id == EMPTY_SLOT || wire_id.raw() >= 64 {
+        return false;
+    }
+    if wire_id == crate::abilities::id::EVASIVE_ROLL {
+        return false;
+    }
+    // Melee attack is a weapon-locked LMB ability — not slottable
+    // from the spellbook (it lives in slot 0 only when the
+    // player has a Sword / Dagger equipped, via
+    // [`weapon_lmb_ability`]).
+    if wire_id == crate::abilities::id::MELEE_ATTACK {
         return false;
     }
     lookup(wire_id).is_some()
@@ -219,15 +252,59 @@ pub fn is_player_ability(wire_id: AbilityWireId) -> bool {
 /// `player_level`. Empty / enemy / unknown ids are never
 /// unlocked.
 pub fn is_ability_unlocked(wire_id: AbilityWireId, player_level: u32) -> bool {
-    let Some(ab) = lookup(wire_id) else { return false };
+    let Some(ab) = lookup(wire_id) else {
+        return false;
+    };
     ab.wire_id.raw() < 64 && player_level >= ab.unlock_level
 }
 
 /// Iterator over every player-castable ability in the registry,
 /// in registry order. Used by the spellbook UI to render the
-/// pickable pool.
+/// pickable pool. Skips passives that live on a fixed key
+/// (Evasive Roll on Space) — those have a dedicated HUD slot
+/// and are not part of the action-bar loadout.
 pub fn player_abilities() -> impl Iterator<Item = &'static Ability> {
-    REGISTRY.iter().filter(|a| a.wire_id.raw() < 64)
+    REGISTRY.iter().filter(|a| {
+        a.wire_id.raw() < 64
+            && a.wire_id != crate::abilities::id::EVASIVE_ROLL
+            && a.wire_id != crate::abilities::id::MELEE_ATTACK
+    })
+}
+
+/// Wire id of the ability that should occupy the LMB slot for a
+/// player wearing `equipment`. LMB is locked to the weapon for
+/// MVP: melee weapons (Sword / Dagger) get
+/// [`crate::abilities::id::MELEE_ATTACK`]; caster weapons (Staff
+/// / Wand) and an empty weapon slot both fall back to
+/// [`crate::abilities::id::FIRE_BALL`].
+pub fn weapon_lmb_ability(equipment: &Equipment) -> AbilityWireId {
+    use crate::abilities::id;
+    let weapon = equipment.get(EquipSlot::Weapon);
+    match weapon.map(|it| it.base.slot) {
+        Some(ItemSlot::Weapon(WeaponKind::Sword | WeaponKind::Dagger)) => id::MELEE_ATTACK,
+        _ => id::FIRE_BALL,
+    }
+}
+
+/// Authoritative check used by the server to gate a player cast.
+/// Accepts the always-available passive (Evasive Roll), every
+/// ability the player has slotted in their persisted loadout,
+/// and — for the MVP — the weapon-derived LMB ability even when
+/// the persisted loadout slot 0 holds a different (or empty)
+/// id. Mirrors [`Loadout::materialize_with_weapon`] so the
+/// client and server agree on which ids count as castable.
+pub fn can_player_cast(
+    loadout: &Loadout,
+    equipment: &Equipment,
+    ability_id: AbilityWireId,
+) -> bool {
+    if ability_id == crate::abilities::id::EVASIVE_ROLL {
+        return true;
+    }
+    if loadout.contains(ability_id) {
+        return true;
+    }
+    ability_id == weapon_lmb_ability(equipment)
 }
 
 #[cfg(test)]

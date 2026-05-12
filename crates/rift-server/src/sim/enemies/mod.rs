@@ -166,6 +166,15 @@ pub const SEPARATION_RADIUS: f32 = 0.9;
 /// other apart without breaking forward locomotion.
 pub const SEPARATION_STRENGTH: f32 = 1.1;
 
+/// Cadence (seconds) for refreshing the cached `ServerEnemy::
+/// los_blocked_cached` flag. The role tick reads the cache
+/// instead of calling `Floor::line_of_sight` every frame —
+/// at swarm sizes (floor 40+) the grid sampler otherwise
+/// dominates the AI budget. Short enough that a player ducking
+/// behind cover still flips the AI to A*-pathing within ~one
+/// dodge window.
+pub const LOS_RECHECK_INTERVAL: f32 = 0.15;
+
 /// Damage of the EXPLODER death AoE, as a multiplier on the
 /// floor's enemy_damage_mult (so the pop scales with floor
 /// difficulty the same way as a bolt).
@@ -345,6 +354,18 @@ pub struct ServerEnemy {
     /// Seconds until the next path recompute is allowed. Caps
     /// A* invocations to a few per second per enemy.
     pub path_recompute_in: f32,
+    /// Cached "is line-of-sight to current target blocked?"
+    /// flag. The role tick reads this to choose bee-line vs
+    /// A* approach. Updated only when [`Self::los_recheck_in`]
+    /// expires so we don't call the (relatively expensive)
+    /// `Floor::line_of_sight` grid sampler on every enemy on
+    /// every tick — at floor 40 swarm sizes that single check
+    /// otherwise dominates the AI tick budget.
+    pub los_blocked_cached: bool,
+    /// Seconds until the next LOS recheck. Jittered at spawn
+    /// (via `net_id`) so a freshly-spawned pack doesn't
+    /// LOS-check synchronously on the same tick.
+    pub los_recheck_in: f32,
 }
 
 impl ServerEnemy {
@@ -458,18 +479,20 @@ pub fn tick_ai(
     damage_mult: f32,
     dt: f32,
 ) -> AiOutcome {
-    // Snapshot every live enemy's (net_id, position) so the
-    // separation pass below can read neighbour positions while
-    // each row is borrowed mutably for steering. Net id is
-    // included in the key so we can skip self when summing
-    // repulsions. Dying enemies don't count — they're frozen and
-    // shouldn't shove their neighbours around.
+    // Snapshot every live enemy's (net_id, position) and bucket
+    // them into a coarse spatial grid keyed on `SEPARATION_RADIUS`
+    // cells. The separation pass then queries only the 3×3 cell
+    // neighbourhood around each enemy instead of the full live-
+    // enemy list — O(N) per tick instead of O(N²). At floor 40
+    // swarm sizes (hundreds of mobs) this is the difference
+    // between a CPU-bound 30 Hz tick and a smooth one.
     let neighbours: Vec<(NetId, Vec3)> = world
         .query::<&ServerEnemy>()
         .iter()
         .filter(|(_, en)| !en.is_dying())
         .map(|(_, en)| (en.net_id, en.k.position))
         .collect();
+    let grid = rift_math::spatial::SpatialGrid::build(&neighbours, SEPARATION_RADIUS, |&(_, p)| p);
 
     let mut outcome = AiOutcome::default();
     for (_e, (en, stack, boss_state)) in world.query_mut::<(
@@ -531,6 +554,9 @@ pub fn tick_ai(
         }
         if en.path_recompute_in > 0.0 {
             en.path_recompute_in = (en.path_recompute_in - dt).max(0.0);
+        }
+        if en.los_recheck_in > 0.0 {
+            en.los_recheck_in = (en.los_recheck_in - dt).max(0.0);
         }
         // Find or refresh the engaged target. Two-phase logic:
         // honour an existing lock until it leaves leash range,
@@ -609,7 +635,15 @@ pub fn tick_ai(
         // one of him and the body is huge, so neighbour pushes
         // would just jitter him off his attack mark.
         if en.role != MonsterRole::Boss {
-            let push = separation_steering(en.net_id, en.k.position, &neighbours);
+            let self_id = en.net_id;
+            let push = rift_math::spatial::separation_push(
+                &grid,
+                en.k.position,
+                SEPARATION_RADIUS,
+                &neighbours,
+                |&(_, p)| p,
+                |&(nid, _)| nid == self_id,
+            );
             if push.length_squared() > 1.0e-6 {
                 // Scale by base speed so the shove feels uniform
                 // across slow / fast roles. Applied additively so
@@ -763,12 +797,7 @@ fn nearest_visible_player(
 /// get pulled into a fight they cannot see. Visual
 /// `AGGRO_RANGE` aggro also respects LOS via
 /// [`nearest_visible_player`].
-pub fn notify_attacked(
-    world: &mut hecs::World,
-    floor: &Floor,
-    victim: Entity,
-    attacker: Entity,
-) {
+pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, attacker: Entity) {
     // 1. Force-aggro the victim onto the attacker. Bypasses the
     //    `pending_aggro` queue — the victim *knows* who hit it.
     let victim_pos = match world.get::<&mut ServerEnemy>(victim) {
@@ -821,25 +850,17 @@ pub fn notify_attacked(
 /// [`SEPARATION_RADIUS`]. Each push is scaled by `(R - d) / R` so
 /// neighbours that are touching produce the strongest shove and
 /// neighbours just inside the boundary contribute almost nothing.
-fn separation_steering(self_id: NetId, pos: Vec3, neighbours: &[(NetId, Vec3)]) -> Vec3 {
-    let mut push = Vec3::ZERO;
-    for (nid, npos) in neighbours {
-        if *nid == self_id {
-            continue;
-        }
-        let dx = pos.x - npos.x;
-        let dz = pos.z - npos.z;
-        let d2 = dx * dx + dz * dz;
-        if d2 >= SEPARATION_RADIUS * SEPARATION_RADIUS || d2 < 1.0e-6 {
-            continue;
-        }
-        let d = d2.sqrt();
-        let weight = (SEPARATION_RADIUS - d) / SEPARATION_RADIUS;
-        // Normalize the offset and scale by the weight. y is
-        // intentionally zero — separation is purely horizontal.
-        push += Vec3::new(dx / d, 0.0, dz / d) * weight;
+/// Refresh the cached LOS-blocked flag if its timer has expired,
+/// otherwise return the cached value. Centralises the
+/// `Floor::line_of_sight` rate-limit so every role tick gets the
+/// same throttling for free. See [`LOS_RECHECK_INTERVAL`] for the
+/// cadence rationale.
+pub(super) fn cached_los_blocked(en: &mut ServerEnemy, floor: &Floor, target_pos: Vec3) -> bool {
+    if en.los_recheck_in <= 0.0 {
+        en.los_blocked_cached = !floor.line_of_sight(en.k.position, target_pos);
+        en.los_recheck_in = LOS_RECHECK_INTERVAL;
     }
-    push
+    en.los_blocked_cached
 }
 
 /// Begin a wind-up attack: freeze the enemy by setting the
@@ -956,6 +977,11 @@ pub fn spawn_summon(
         path: Vec::new(),
         path_target_tile: None,
         path_recompute_in: 0.0,
+        los_blocked_cached: false,
+        // Jitter the first LOS check across enemies so a freshly-
+        // spawned pack doesn't all hit `line_of_sight` on the same
+        // tick. Spread over the recheck interval.
+        los_recheck_in: ((net_id.0 % 13) as f32) * (LOS_RECHECK_INTERVAL / 13.0),
     };
     world.spawn((enemy, super::effect::EffectStack::default()));
 }
@@ -1135,6 +1161,8 @@ pub fn spawn_for_floor(
                     path: Vec::new(),
                     path_target_tile: None,
                     path_recompute_in: 0.0,
+                    los_blocked_cached: false,
+                    los_recheck_in: ((net_id.0 % 13) as f32) * (LOS_RECHECK_INTERVAL / 13.0),
                 };
                 world.spawn((enemy, super::effect::EffectStack::default()));
                 spawned += 1;

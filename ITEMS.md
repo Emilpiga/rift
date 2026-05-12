@@ -12,9 +12,24 @@
 > **Status note (May 2026).** Section 1 has been rewritten to reflect
 > the post-Phase-5 codebase. Phases 1–5 of the migration plan in §3
 > have landed; Phase 6 (named roll bands & tooltip polish) and Phase 7
-> (the long tail) are in progress. The Attribute × Element × Archetype
-> trio, family-locked bases, hand-authored uniques, the Resonance
+> (the long tail) are in progress. The Attribute × Element duo,
+> family-locked bases, hand-authored uniques, the Resonance
 > cross-family bonus slot, and the Rift-touched line are all live.
+>
+> **Archetype axis retired (May 2026).** The original design carried a
+> third **Archetype** axis (`Projectile | Melee`) with matching
+> `ProjectileDamage` / `MeleeDamage` / `BeamDamage` / `AoeDamage`
+> stats. In practice those stats overlapped with the Element axis
+> (every weapon already commits to an element family that scales the
+> same abilities) and added a third rung that didn't carry independent
+> information. The four `*Damage` stat variants, the `Archetype` enum,
+> the `archetype` field on `BaseFamily`, and the `pct_*` / `res_*`
+> archetype affix lines have all been removed. The shipped trio is now
+> a **duo** — Attribute × Element — and the dagger / wand implicits
+> that used to push `MeleeDamage` / `ProjectileDamage` now push
+> `Strength` / `Agility` instead. §2 "where we want to be" still uses
+> the trio wording where it documents the original intent; the active
+> spec in §1 is the source of truth.
 
 ### 1.1 Crate layout
 
@@ -61,7 +76,7 @@ Rings are interchangeable in `Ring1`/`Ring2`; everything else strict.
 A `BaseItem` row carries: stable `id`, display `name`, `ItemSlot` taxonomy
 (`Weapon(WeaponKind) | Armor(ArmorKind) | Accessory(AccessoryKind)`),
 target `equip_slot`, an authoritative `family: BaseFamily` (the
-**Attribute / Element / Archetype** lock — see §1.5), legacy
+**Attribute / Element** lock — see §1.5), legacy
 `allowed_tags` / `favored_tags` bitmasks (preserved during the
 migration but no longer drive rolling), `implicit: &[(Stat, f32)]`,
 `min_ilvl`, an `icon` registry key, and an optional `GenderedModel`
@@ -69,22 +84,22 @@ for paperdoll art.
 
 Currently authored bases (**14**):
 
-| id              | Name              | EquipSlot | Family (Attr / Elements / Archetypes)           | Implicit                             |
-| --------------- | ----------------- | --------- | ----------------------------------------------- | ------------------------------------ |
-| staff_basic     | Apprentice Staff  | Weapon    | Intellect / [Fire, Ice, Lightning] / any        | +8 % Spell Damage                    |
-| sword_basic     | Iron Sword        | Weapon    | Strength / [Physical] / [Melee]                 | +10 % Weapon Damage                  |
-| dagger_basic    | Hunter's Dagger   | Weapon    | Strength / [Physical] / [Melee]                 | +6 % Weapon Damage, +5 % Crit Chance |
-| wand_basic      | Carved Wand       | Weapon    | Agility / [Fire, Ice, Lightning] / [Projectile] | +6 % Spell Damage, +4 % CDR          |
-| light_helm      | Leather Helm      | Helm      | wildcard / [Physical] / any                     | +12 Armor, +15 Health                |
-| light_shoulders | Leather Spaulders | Shoulders | wildcard (all axes)                             | +2 % Evasion, +12 Health             |
-| heavy_chest     | Plated Cuirass    | Chest     | Strength / [Physical] / [Melee]                 | +24 Armor, +30 Health                |
-| light_chest     | Studded Vest      | Chest     | wildcard (all axes)                             | +5 % Evasion, +18 Health             |
-| robe_chest      | Mage Robe         | Chest     | Intellect / any element / any archetype         | +14 Health, +8 % Essence Regen       |
-| light_boots     | Leather Boots     | Boots     | wildcard (all axes)                             | +5 % Move Speed, +3 % Evasion        |
-| light_gloves    | Leather Gloves    | Hands     | Intellect / any element / any archetype         | +3 % CDR                             |
-| light_legs      | Leather Leggings  | Legs      | Strength / [Physical] / [Melee]                 | +16 Armor, +20 Health                |
-| ring_basic      | Plain Ring        | Ring1     | wildcard (all axes)                             | (none)                               |
-| amulet_basic    | Plain Amulet      | Amulet    | wildcard (all axes)                             | +10 Health                           |
+| id              | Name              | EquipSlot | Family (Attr / Elements)           | Implicit                       |
+| --------------- | ----------------- | --------- | ---------------------------------- | ------------------------------ |
+| staff_basic     | Apprentice Staff  | Weapon    | Intellect / [Fire, Ice, Lightning] | +8 % Fire Damage               |
+| sword_basic     | Iron Sword        | Weapon    | Strength / [Physical]              | +10 % Physical Damage          |
+| dagger_basic    | Hunter's Dagger   | Weapon    | Strength / [Physical]              | +3 Strength, +5 % Crit Chance  |
+| wand_basic      | Carved Wand       | Weapon    | Agility / [Fire, Ice, Lightning]   | +3 Agility, +4 % CDR           |
+| light_helm      | Leather Helm      | Helm      | wildcard / [Physical]              | +12 Armor, +15 Health          |
+| light_shoulders | Leather Spaulders | Shoulders | wildcard (all axes)                | +2 % Evasion, +12 Health       |
+| heavy_chest     | Plated Cuirass    | Chest     | Strength / [Physical]              | +24 Armor, +30 Health          |
+| light_chest     | Studded Vest      | Chest     | wildcard (all axes)                | +5 % Evasion, +18 Health       |
+| robe_chest      | Mage Robe         | Chest     | Intellect / any element            | +14 Health, +8 % Essence Regen |
+| light_boots     | Leather Boots     | Boots     | wildcard (all axes)                | +5 % Move Speed, +3 % Evasion  |
+| light_gloves    | Leather Gloves    | Hands     | Intellect / any element            | +3 % CDR                       |
+| light_legs      | Leather Leggings  | Legs      | Strength / [Physical]              | +16 Armor, +20 Health          |
+| ring_basic      | Plain Ring        | Ring1     | wildcard (all axes)                | (none)                         |
+| amulet_basic    | Plain Amulet      | Amulet    | wildcard (all axes)                | +10 Health                     |
 
 `BaseFamily` is declared in
 [loot/families.rs](crates/rift-game/src/loot/families.rs):
@@ -93,12 +108,10 @@ Currently authored bases (**14**):
 struct BaseFamily {
     attribute: Option<Attribute>,         // None = wildcard
     element:   Option<&'static [Element]>,
-    archetype: Option<&'static [Archetype]>,
 }
-impl BaseFamily { const WILDCARD: Self = Self { attribute: None, element: None, archetype: None }; }
+impl BaseFamily { const WILDCARD: Self = Self { attribute: None, element: None }; }
 enum Attribute { Strength, Agility, Intellect }
 enum Element   { Physical, Fire, Ice, Lightning }
-enum Archetype { Projectile, Melee }   // Beam / AoE damage stats apply at runtime but never roll
 ```
 
 `BaseFamily::accepts_*` gate each trio-axis affix at roll time. An
@@ -118,15 +131,18 @@ migration sweep confirms no persisted item depends on them.
 vocabulary used by affixes, implicits, tooltips, and the resolved
 `CharacterStats` sheet:
 
-- **Attributes** (the third trio axis — flat point totals, mirrored by
+- **Attributes** (the second axis — flat point totals, mirrored by
   the manual point-spend screen): `Strength`, `Agility`, `Intellect`.
 - **Offensive:** `CritChance`, `CritDamage`, `AttackSpeed`
-- **Damage buckets** (multiply abilities of the matching shape/element):
-  `WeaponDamage`, `SpellDamage`, `PhysicalDamage`, `FireDamage`, `IceDamage`,
-  `LightningDamage`, `ProjectileDamage`, `BeamDamage`, `AoeDamage`,
-  `MeleeDamage`
-- **Defensive:** `Health`, `Vitality` (distinct from Health so the
-  guaranteed slot line stacks), `Armor`, `Evasion`, `HealthRegen`,
+- **Damage buckets** (multiply abilities of the matching element):
+  `PhysicalDamage`, `FireDamage`, `IceDamage`, `LightningDamage`. There
+  is no separate `WeaponDamage` / `SpellDamage` bucket — weapon
+  implicits push the Element axis directly. There is no separate
+  archetype axis either: the original `ProjectileDamage` /
+  `MeleeDamage` / `BeamDamage` / `AoeDamage` stats were retired in May
+  2026 because they didn't carry information independent of the
+  element family.
+- **Defensive:** `Health`, `Armor`, `Evasion`, `HealthRegen`,
   `ElementalResist`, `HealingReceived`. `Armor` is the sole
   mitigation channel for physical damage (soft-capped flat
   reduction); `ElementalResist` covers Fire / Ice / Lightning.
@@ -142,12 +158,12 @@ vocabulary used by affixes, implicits, tooltips, and the resolved
 enum Rarity { Common = 0, Magic = 1, Rare = 2, Legendary = 3 }
 ```
 
-| Rarity    | Bonus affix range | Trio shape (Attr × Element × Archetype) | Color (sRGB)       | Salvage base | What it unlocks                          |
-| --------- | ----------------- | --------------------------------------- | ------------------ | ------------ | ---------------------------------------- |
-| Common    | 1 – 2             | Attribute only                          | (0.85, 0.85, 0.85) | 1            | Pure stats; occasionally a Perfect roll  |
-| Magic     | 2 – 3             | Attribute + (Element xor Archetype)     | (0.40, 0.65, 1.00) | 3            | First synergy line                       |
-| Rare      | 3 – 4             | Full trio                               | (1.00, 0.85, 0.30) | 8            | Ability **amplifiers** (dmg / CDR)       |
-| Legendary | 3 – 4             | Full trio + hand-authored unique        | (1.00, 0.45, 0.10) | 25           | Named unique effect (Transform/Proc/...) |
+| Rarity    | Bonus affix range | Duo shape (Attr × Element)      | Color (sRGB)       | Salvage base | What it unlocks                          |
+| --------- | ----------------- | ------------------------------- | ------------------ | ------------ | ---------------------------------------- |
+| Common    | 1 – 2             | Attribute only                  | (0.85, 0.85, 0.85) | 1            | Pure stats; occasionally a Perfect roll  |
+| Magic     | 2 – 3             | Attribute + Element             | (0.40, 0.65, 1.00) | 3            | First synergy line                       |
+| Rare      | 3 – 4             | Full duo                        | (1.00, 0.85, 0.30) | 8            | Ability **amplifiers** (dmg / CDR)       |
+| Legendary | 3 – 4             | Full duo + hand-authored unique | (1.00, 0.45, 0.10) | 25           | Named unique effect (Transform/Proc/...) |
 
 Salvage scales with ilvl: `base * (1 + ilvl/20)`.
 
@@ -185,7 +201,7 @@ combat layer** — see
 | `Proc(ProcEvent, ProcAction)`                 | Trigger   | proc chance is the rolled value | `AbilityMods::procs` → `sim/procs.rs::dispatch`                                             |
 
 `AffixCategory` (in `affixes.rs`) classifies each def into one of
-`Attribute | Element | Archetype | Resonance | RiftTouched | Bonus`.
+`Attribute | Element | Resonance | RiftTouched | Bonus`.
 `category()` reads it from the effect + pool membership; the roll
 pipeline (§1.8) walks one phase per category.
 
@@ -238,8 +254,8 @@ independently. All three live in
 
 #### Main pool — `AFFIX_POOL` (~21 entries)
 
-Carries everything the roll pipeline samples for **trio axes**
-(Attribute / Element / Archetype) and **bonus** rolls.
+Carries everything the roll pipeline samples for **duo axes**
+(Attribute / Element) and **bonus** rolls.
 
 **Attribute axis** (signature: 1 line on most items, derived from
 `base.family.attribute`):
@@ -262,13 +278,6 @@ pull one of these if the base accepts it.)
 | `pct_ice_damage`       | IceDamage (%)       | 6 .. 14 %     |
 | `pct_lightning_damage` | LightningDamage (%) | 6 .. 14 %     |
 
-**Archetype axis** (signature: 1 line gated by `base.family.archetype`):
-
-| id                      | Effect               | Roll @ ilvl 1 | Notes          |
-| ----------------------- | -------------------- | ------------- | -------------- |
-| `pct_projectile_damage` | ProjectileDamage (%) | 8 .. 16 %     | signature-only |
-| `pct_melee_damage`      | MeleeDamage (%)      | 8 .. 16 %     | signature-only |
-
 **Defensive / utility (bonus pool — `weight > 0`, all rarities):**
 
 `flat_health`, `flat_armor`, `flat_health_regen`,
@@ -288,9 +297,12 @@ pull one of these if the base accepts it.)
 
 **Slot-signature affixes (weight 0, never bonus-rolled):**
 
-`flat_vitality`, `pct_weapon_damage`, `pct_spell_damage`,
-`pct_physical_damage`, `pct_projectile_damage`, `pct_melee_damage` —
-these only enter items via the per-slot signature pass.
+`flat_armor`, `flat_health`, `pct_cooldown`, `pct_crit_chance`,
+`pct_crit_damage`, `pct_move_speed` — these enter items via the
+per-slot signature pass (`signature_for` in `affixes.rs`). Note: in
+the current implementation Weapons / Rings / Amulets get **no**
+signature line; their identity comes entirely from the family-locked
+Element axis.
 
 **Legacy legendary-effect lines (still in the main pool — being
 migrated to `UNIQUES`):**
@@ -303,24 +315,22 @@ migrated to `UNIQUES`):**
 Phase 7 will retire these once the equivalent uniques (Embercrown,
 "Frost Ray legendary") are confirmed authored.
 
-#### Resonance pool — `RESONANCE_POOL` (9 entries)
+#### Resonance pool — `RESONANCE_POOL` (7 entries)
 
 A **separate** pool sampled in its own phase that **breaks the family
-lock** — the resonance line specifically grants a trio axis the base
+lock** — the resonance line specifically grants a duo axis the base
 would otherwise reject. Resonance affixes carry `AffixCategory::Resonance`
 and use the `res_*` id prefix.
 
-| id                      | Grants                   |
-| ----------------------- | ------------------------ |
-| `res_physical_damage`   | Physical element synergy |
-| `res_fire_damage`       | Fire element             |
-| `res_ice_damage`        | Ice element              |
-| `res_lightning_damage`  | Lightning element        |
-| `res_projectile_damage` | Projectile archetype     |
-| `res_melee_damage`      | Melee archetype          |
-| `res_strength`          | Strength attribute       |
-| `res_agility`           | Agility attribute        |
-| `res_intellect`         | Intellect attribute      |
+| id                     | Grants                   |
+| ---------------------- | ------------------------ |
+| `res_physical_damage`  | Physical element synergy |
+| `res_fire_damage`      | Fire element             |
+| `res_ice_damage`       | Ice element              |
+| `res_lightning_damage` | Lightning element        |
+| `res_strength`         | Strength attribute       |
+| `res_agility`          | Agility attribute        |
+| `res_intellect`        | Intellect attribute      |
 
 Drop chance per rarity (from `resonance_chance(rarity)`):
 Common 0, Magic 0, Rare 5 %, Legendary 25 %.
@@ -361,21 +371,21 @@ Now **seven phases**, each consulting one pool. See
    rarity. (Slot table below — the `pct_armor` bug noted in earlier
    revisions is **fixed**: Shoulders now returns `flat_armor`.)
 
-   | Slot          | Signature                                                |
-   | ------------- | -------------------------------------------------------- |
-   | Weapon        | Vitality + WeaponDamage + SpellDamage                    |
-   | Hands         | Vitality + CritChance + CritDamage                       |
-   | Helm          | Vitality + CooldownReduction                             |
-   | Shoulders     | flat_armor                                               |
-   | Chest         | Vitality + Health (`flat_health`)                        |
-   | Legs          | Vitality + Armor (`flat_armor`)                          |
-   | Boots         | Vitality + MoveSpeed                                     |
-   | Ring1 / Ring2 | Vitality + one of `{fire, ice, lightning, physical}` dmg |
-   | Amulet        | Vitality + one of `{projectile, melee}` dmg              |
+   | Slot          | Signature                             |
+   | ------------- | ------------------------------------- |
+   | Weapon        | (none — identity comes from trio)     |
+   | Hands         | `pct_crit_chance` + `pct_crit_damage` |
+   | Helm          | `pct_cooldown`                        |
+   | Shoulders     | `flat_armor`                          |
+   | Chest         | `flat_health`                         |
+   | Legs          | `flat_armor`                          |
+   | Boots         | `pct_move_speed`                      |
+   | Ring1 / Ring2 | (none — trio only)                    |
+   | Amulet        | (none — trio only)                    |
 
-2. **Trio rolls (Attribute × Element × Archetype).** One pick per axis
-   the base permits, gated by `BaseFamily::accepts_*`. Magic items get
-   Attribute + one of Element/Archetype; Rare/Legendary get all three.
+2. **Duo rolls (Attribute × Element).** One pick per axis
+   the base permits, gated by `BaseFamily::accepts_*`. Common gets
+   Attribute only; Magic / Rare / Legendary get both.
    `pick_affix_in_category(AFFIX_POOL, category, ...)` does the
    weighted draw, skipping ids already on the item.
 
@@ -385,7 +395,7 @@ Now **seven phases**, each consulting one pool. See
 
    ```text
    not in item's affix ids
-   AND category == Bonus  (i.e. not Attribute/Element/Archetype/Resonance/RiftTouched)
+   AND category == Bonus  (i.e. not Attribute/Element/Resonance/RiftTouched)
    AND min_ilvl <= ilvl
    AND rarity >= rarity_min
    AND weight > 0
@@ -402,7 +412,7 @@ Now **seven phases**, each consulting one pool. See
    success draw one entry from `RESONANCE_POOL`. The chosen axis is
    recorded on the affix's `AffixCategory` and **bypasses** the family
    lock — this is the only legitimate way to attach an off-family
-   trio line.
+   duo line.
 
 6. **Rift-touched.** When `loot::finalise_kills` rolls the drop and
    the kill happened inside a rift at `floor >= RIFT_TOUCHED_MIN_FLOOR`,
@@ -427,7 +437,7 @@ struct Item {
     base: &'static BaseItem,
     rarity: Rarity,
     ilvl: u32,
-    affixes: Vec<RolledAffix>,   // [signatures.. , trio.. , bonus.. , unique?, resonance?]
+    affixes: Vec<RolledAffix>,   // [signatures.. , duo.. , bonus.. , unique?, resonance?]
     unique_id: Option<&'static str>,         // points into UNIQUES catalogue
     rift_touched: Option<RolledRiftTouched>, // depth-scaled endgame line
     anchored: bool,              // survives wipe-on-death (Legendary 1/5000)
@@ -506,9 +516,9 @@ order:
 4. `⚠ Unstable — extract to stabilise` (if set)
 5. `⚓ Anchored — survives death` (if set)
 6. Implicits (base lines)
-7. **Signature block**, ordered `[primary, Vitality, secondary?]`
+7. **Signature block**, ordered `[primary, secondary?]`
 8. `───` separator + bonus stat affixes
-9. Trio affixes (Attribute / Element / Archetype) — each tagged with
+9. Duo affixes (Attribute / Element) — each tagged with
    its `AffixCategory` so the renderer can colour-stripe them.
 10. `TooltipLineKind::Resonance` line (cyan stripe) — if the item
     rolled a resonance.
@@ -547,8 +557,11 @@ longer displayed.
 **A Diablo-style baseline — readable, punchy, drops feel meaningful — with
 a Rift twist that makes items _of the rift, not of the shop_.** Every
 weapon respects its physical truth (a sword does not roll spell
-scaling). Damage rolls follow a clean **Attribute × Element × Archetype**
-ladder that rarity climbs one rung at a time. Procedural rolls are
+scaling). Damage rolls follow a clean **Attribute × Element**
+ladder that rarity climbs one rung at a time. (The original design
+included a third **Archetype** rung — `Projectile | Melee` — that
+shipped in Phase 1 and was retired in May 2026; see the status note
+at the top of §1.) Procedural rolls are
 honest stat blocks; **Legendaries are hand-authored named items** with
 fixed unique effects — Embercrown, Stormcaller, Splinterstep — each one
 a build seed. The _Rift_ part comes from the loop: every item you carry
@@ -557,40 +570,52 @@ the boss-room portal; the rare **Anchored** trait is the only thing
 that escapes that rule. Deep-rift drops carry a single **Rift-touched**
 slot — one extra line, no clutter.
 
-### 2.1 The Attribute × Element × Archetype ladder
+### 2.1 The Attribute × Element ladder
 
-Every item has three axis tags it scales with:
+> **May 2026 retcon.** This section originally documented an
+> **Attribute × Element × Archetype** trio. The Archetype axis was
+> retired — see the status note at the top of §1 — and the shipped
+> ladder is the duo below. The original three-axis prose has been
+> pruned; the migration phase logs in §3 still reference "trio" where
+> they describe historical work.
+
+Every item has two axis tags it scales with:
 
 - **Attribute** — `Strength | Agility | Intellect` (the core stat the
   item's identity binds to; also the class-scaling stat for damage)
 - **Element** — `Physical | Fire | Ice | Lightning` (what it deals)
-- **Archetype** — `Projectile | Melee` (its shape)
 
 > The original design had a **Source** axis (`Weapon` / `Spell`).
 > That axis was retired — it overlapped completely with the Element
-> family (physical = weapon, elemental = spell) and added a fourth
-> rung with no real information. **Attribute** replaces it as the
-> third axis: items now also carry the flat point totals
-> (`+14 Strength`, `+8 Intellect`) that previously could only come
-> from the manual point-spend screen. Gear and the level-up screen
-> are interchangeable inputs to the same `Attributes` block.
+> family (physical = weapon, elemental = spell) and added a rung
+> with no real information. **Attribute** replaces it: items now
+> also carry the flat point totals (`+14 Strength`, `+8 Intellect`)
+> that previously could only come from the manual point-spend
+> screen. Gear and the level-up screen are interchangeable inputs to
+> the same `Attributes` block.
+>
+> A third **Archetype** axis (`Projectile | Melee`) shipped in
+> Phase 1 and was retired in May 2026 — the per-shape damage stats it
+> carried (`ProjectileDamage`, `MeleeDamage`, etc.) duplicated the
+> Element axis in practice and have been folded back into the
+> matching Element bucket.
 
 Items roll **at most one line per axis**. This is the core rule
-that fixes the "+Weapon Damage on a staff with Fire affixes"
+that fixes the "+Physical Damage on a staff with Fire affixes"
 incoherence. A normal item is now:
 
 ```
-[ Attribute line ] × [ Element line ] × [ Archetype line ] + defensives/utility + (legendary?)
+[ Attribute line ] × [ Element line ] + defensives/utility + (legendary?)
 ```
 
 Rarity gates how many of those axis lines actually roll:
 
-| Rarity    | Attribute | Element | Archetype | Bonus (defensives / crit / utility / ability-mod) | Legendary effect |
-| --------- | :-------: | :-----: | :-------: | :-----------------------------------------------: | :--------------: |
-| Common    |     ✓     |         |           |                        1–2                        |                  |
-| Magic     |     ✓     | ✓ _or_  |     ✓     |                        2–3                        |                  |
-| Rare      |     ✓     |    ✓    |     ✓     |                        3–4                        |                  |
-| Legendary |     ✓     |    ✓    |     ✓     |                        3–4                        |  1 named unique  |
+| Rarity    | Attribute | Element | Bonus (defensives / crit / utility / ability-mod) | Legendary effect |
+| --------- | :-------: | :-----: | :-----------------------------------------------: | :--------------: |
+| Common    |     ✓     |         |                        1–2                        |                  |
+| Magic     |     ✓     |    ✓    |                        2–3                        |                  |
+| Rare      |     ✓     |    ✓    |                        3–4                        |                  |
+| Legendary |     ✓     |    ✓    |                        3–4                        |  1 named unique  |
 
 > Bonus-count **ranges** (not fixed) so some rares feel rare. Final
 > numbers in §2.7.
@@ -621,8 +646,9 @@ Within the locked family, **non-damage** stats (crit, defensive,
 utility, ability-mod) ride on top freely.
 
 **Implicits stay** — they're the _only_ differentiator between two
-weapons of the same family (a staff vs. a wand both roll Spell+Fire,
-but the staff has a fatter Spell Damage implicit and the wand has CDR).
+weapons of the same family (a staff vs. a wand both roll Intellect
+/ Fire affixes, but the staff has a fatter Fire Damage implicit and
+the wand has CDR + Projectile Damage).
 This matches the answer "implicit-only differentiation". Affix pools
 themselves don't bias by weapon sub-type beyond the family lock.
 
@@ -715,12 +741,12 @@ produced.
 
 Ranges, not fixed:
 
-| Rarity    | Bonus affix count (range) | Attribute × Element × Archetype    | Legendary unique | Resonance odds | Rift-touched (floor 20+) |
-| --------- | ------------------------- | ---------------------------------- | ---------------- | -------------- | ------------------------ |
-| Common    | 1–2                       | Attribute only                     | —                | —              | yes                      |
-| Magic     | 2–3                       | Attribute + (Element or Archetype) | —                | —              | yes                      |
-| Rare      | 3–4                       | full trio                          | —                | 5 %            | yes                      |
-| Legendary | 3–4                       | full trio + fixed                  | yes (named)      | 25 %           | yes                      |
+| Rarity    | Bonus affix count (range) | Attribute × Element | Legendary unique | Resonance odds | Rift-touched (floor 20+) |
+| --------- | ------------------------- | ------------------- | ---------------- | -------------- | ------------------------ |
+| Common    | 1–2                       | Attribute only      | —                | —              | yes                      |
+| Magic     | 2–3                       | Attribute + Element | —                | —              | yes                      |
+| Rare      | 3–4                       | full duo            | —                | 5 %            | yes                      |
+| Legendary | 3–4                       | full duo + fixed    | yes (named)      | 25 %           | yes                      |
 
 (Common's `1–2` is a real bump from today's `0`; the trade is that
 Common is now the "vendor / stepping-stone" tier that _can_ be useful
@@ -780,22 +806,28 @@ Perfect". The bulk-salvage path already handles the trash case.
 
 ### 2.12 Stat refactor implied by all of the above
 
-To make the trio-rule honest, the live `Stat` vocabulary needs to be
-narrowed and re-grouped:
+To make the axis-rule honest, the live `Stat` vocabulary is
+narrowed and re-grouped around the two axes:
 
-- Keep **Source**: `WeaponDamage`, `SpellDamage`.
+- **Attribute axis** (replaces the earlier Source pool —
+  `WeaponDamage` / `SpellDamage` were proposed but never
+  shipped; weapon identity comes from the Element implicits
+  instead): `Strength`, `Agility`, `Intellect`.
 - Keep **Element**: `PhysicalDamage`, `FireDamage`, `IceDamage`,
   `LightningDamage`.
-- Keep **Archetype**: `ProjectileDamage`, `BeamDamage`, `AoeDamage`,
-  `MeleeDamage`.
 - **All other stats stay as today** (Crit, defensives, regen, etc.) —
   they live in the "bonus" pool, no axis rules.
 - Drop the bias bitmasks (`tag::FIRE | tag::CASTER` etc.) — the
   _family lock_ on the base item replaces them. Tag-soup goes away;
   base-item identity is enough.
 
+> The original spec also listed an **Archetype axis**
+> (`ProjectileDamage` / `BeamDamage` / `AoeDamage` / `MeleeDamage`).
+> Phase 1 shipped it as a `{Projectile, Melee}` enum with matching
+> stats; it was retired in May 2026 once the duo proved sufficient.
+
 This is a meaningful refactor (`signature_for` and `Item::roll`
-restructure, every base needs to declare its family triple), but it's
+restructure, every base needs to declare its family pair), but it's
 the change that fixes the incoherence you started this conversation
 with.
 
@@ -856,15 +888,20 @@ spell affixes"). Everything else builds on top.
 Restructure `Item::roll` ([item.rs L207](crates/rift-game/src/loot/item.rs#L207))
 to follow the Source × Element × Archetype ladder from §2.1.
 
-> **Landed.** `Rarity::affix_count_range` now returns 1-2 / 2-3 / 3-4 /
-> 3-4 ([rarity.rs](crates/rift-game/src/loot/rarity.rs)).
+> **Landed (with revisions).** `Rarity::affix_count_range` now returns
+> 1-2 / 2-3 / 3-4 / 3-4 ([rarity.rs](crates/rift-game/src/loot/rarity.rs)).
 > `affixes.rs` exports `AffixCategory` + `category()` and the
-> `affix_source / affix_element / affix_archetype` helpers, plus
-> slimmed `signature_count` / `signature_for` (Vitality + one
-> slot-defensive line; Hands keeps the crit pair).
+> `affix_attribute / affix_element / affix_archetype` helpers, plus
+> `signature_count` / `signature_for` (slim slot-defensive line
+> only — the originally-proposed Vitality stat was dropped; Hands
+> keeps the crit pair, Weapons / Rings / Amulets get no signature).
+> The proposed Source axis (`WeaponDamage` / `SpellDamage`) was also
+> cut — weapon identity comes from the Element × Archetype implicits
+> on the base instead. The shipped trio is **Attribute × Element ×
+> Archetype**, gated by `BaseFamily`.
 > `Item::roll` ([item.rs](crates/rift-game/src/loot/item.rs)) now
 > runs the five-phase pipeline: signature injection, family-locked
-> Source × Element × Archetype trio (per the rarity ladder below),
+> Attribute × Element × Archetype trio (per the rarity ladder below),
 > bonus rolls with a `HashSet<Stat>` dedupe set, Legendary effect
 > (procedural — Phase 4 replaces with named uniques), Anchored.
 > Three new invariant tests guard the result —
@@ -873,20 +910,22 @@ to follow the Source × Element × Archetype ladder from §2.1.
 
 1. **Split `AFFIX_POOL` into four logical sub-pools** (still one slice
    under the hood, tagged via the existing `AffixDef.effect`):
-   - **Source pool** — `Stat(WeaponDamage | SpellDamage)`.
+   - **Attribute pool** — `Stat(Strength | Agility | Intellect)`
+     (this replaced the originally-proposed Source pool, which
+     `WeaponDamage` / `SpellDamage` never shipped).
    - **Element pool** — `Stat(Physical|Fire|Ice|Lightning Damage)`.
    - **Archetype pool** — `Stat(Projectile|Beam|AoE|Melee Damage)`.
    - **Bonus pool** — everything else (crit, defensive, utility,
      regen, ability-amp / CDR).
-     Helper: `fn category(&AffixDef) -> AffixCategory { Source | Element | Archetype | Bonus }`.
+     Helper: `fn category(&AffixDef) -> AffixCategory { Attribute | Element | Archetype | Bonus }`.
 
 2. **Roll the trio per rarity, gated by base family.**
 
    ```text
-   Common    : 1×Source                              + 1..2 bonus
-   Magic     : 1×Source + 1×(Element xor Archetype)  + 2..3 bonus
-   Rare      : 1×Source + 1×Element + 1×Archetype    + 3..4 bonus
-   Legendary : 1×Source + 1×Element + 1×Archetype    + 3..4 bonus  +named effect
+   Common    : 1×Attribute                                  + 1..2 bonus
+   Magic     : 1×Attribute + 1×(Element xor Archetype)      + 2..3 bonus
+   Rare      : 1×Attribute + 1×Element + 1×Archetype        + 3..4 bonus
+   Legendary : 1×Attribute + 1×Element + 1×Archetype        + 3..4 bonus  +named effect
    ```
 
    Magic's `Element xor Archetype` choice picks whichever the base has

@@ -116,6 +116,26 @@ impl Server {
         ServerMsg::PartyState { leader, members }
     }
 
+    /// Rebroadcast a fresh `PartyState` to every client that is
+    /// currently in a party. Called on a 1 Hz cadence from the
+    /// main loop so party-frame HUDs see live hp / level /
+    /// floor updates (the per-event broadcasts only fire on
+    /// join / leave / kick / promote).
+    pub(crate) fn broadcast_party_states(&mut self) {
+        // Snapshot the viewer set first so we don't hold any
+        // borrow into `self` across the per-viewer build + send.
+        let viewers: Vec<ClientId> = self
+            .sessions
+            .iter()
+            .map(|s| s.client_id)
+            .filter(|cid| self.parties.party_of(*cid).is_some())
+            .collect();
+        for cid in viewers {
+            let msg = self.build_party_state_for(cid);
+            self.send_to(cid, Channel::Control, &msg);
+        }
+    }
+
     /// Drive the broadcast / cleanup chain after a remove
     /// (`/leave`, `/kick`, disconnect). `removed` carries the
     /// post-remove state of the party.

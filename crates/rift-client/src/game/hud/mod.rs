@@ -453,7 +453,49 @@ pub fn render_ability_bar(
     // but the field-by-field assignment in `from_fn` keeps the
     // binding "mutable" semantically.
     let _ = &mut slots;
-    let view = rift_ui_types::hud::AbilityBarView { slots };
+    // Passive (Space) tile — Evasive Roll lives on
+    // `AbilitySlot::roll` outside the 6-slot loadout. Build
+    // the same view shape so the widget renders it with the
+    // same chrome and tooltip pipeline.
+    let passive_abbrev: Option<char> = abilities.roll.as_ref().and_then(|state| {
+        if state.ability.icon.is_some() {
+            None
+        } else {
+            ability_abbrev(state.ability.name).chars().next()
+        }
+    });
+    let passive = abilities.roll.as_ref().map(|state| {
+        let cd = (1.0 - state.cooldown_progress()).clamp(0.0, 1.0);
+        let effective_cd = state.ability.cooldown;
+        let damage_line = if effective_cd > 0.0 {
+            Some(format!("CD: {:.1}s", effective_cd))
+        } else {
+            None
+        };
+        let tip = rift_ui_types::hud::AbilityTooltip {
+            name: state.ability.name,
+            description: state.ability.description,
+            damage_line,
+            crit_line: None,
+            cost_line: None,
+            cost_affordable: true,
+            projectiles_line: None,
+            transform_line: None,
+            bonus_line: None,
+        };
+        rift_ui_types::hud::AbilitySlotView {
+            key_hint: "SPACE",
+            icon: state.ability.icon,
+            fallback_glyph: passive_abbrev,
+            cooldown_remaining: cd,
+            unlocked: true,
+            unlock_level: 1,
+            affordable: true,
+            selected: false,
+            tooltip: Some(tip),
+        }
+    });
+    let view = rift_ui_types::hud::AbilityBarView { slots, passive };
 
     let result = rift_ui::hud::frame_ability_bar(ui, &view).map(|action| match action {
         rift_ui_types::hud::HudAction::AbilitySlotClicked(idx) => idx,

@@ -177,15 +177,19 @@ impl Item {
             };
             return format!("{}{}", prefix, def.name);
         }
-        // Prefix order: Unstable > Anchored > plain. Unstable
-        // is the most action-relevant tag ("will shatter on
-        // death") so it leads.
+        // Procedural name for every other rolled drop:
+        // `<Adjective?> <BaseName> <of-Suffix?>` (ITEMS.md
+        // Phase 7 §1). The rarity prefix ("Magic"/"Rare"/...)
+        // is dropped from the headline — rarity is already
+        // signalled by the name colour and by the tooltip's
+        // band glyphs, and the procedural words read more
+        // diegetically than the bare tier label.
         let prefix = match (self.unstable, self.anchored) {
             (true, _) => "Unstable ",
             (false, true) => "Anchored ",
             (false, false) => "",
         };
-        format!("{}{} {}", prefix, self.rarity.name(), self.base.name)
+        format!("{}{}", prefix, super::name_gen::procedural_name(self))
     }
 
     /// Multi-line tooltip ready for UI rendering, with each line
@@ -320,22 +324,18 @@ impl Item {
             .filter(|a| !super::affixes::is_legendary_effect(&a.def.effect))
             .collect();
 
-        // Trio block (Attribute → Element → Archetype). These
-        // are the item's damage / identity axis lines and lead
-        // the stat list. Rendered as a single contiguous group
-        // — no inner dividers — so the trio reads as one block.
+        // Trio block (Attribute → Element). These are the
+        // item's damage / identity axis lines and lead the stat
+        // list. Rendered as a single contiguous group — no inner
+        // dividers — so the duo reads as one block.
         use super::affixes::{category, AffixCategory};
         let by_cat = |cat: AffixCategory| -> Option<&RolledAffix> {
             rest.iter().find(|a| category(a.def) == cat)
         };
-        let trio: Vec<&RolledAffix> = [
-            AffixCategory::Attribute,
-            AffixCategory::Element,
-            AffixCategory::Archetype,
-        ]
-        .into_iter()
-        .filter_map(by_cat)
-        .collect();
+        let trio: Vec<&RolledAffix> = [AffixCategory::Attribute, AffixCategory::Element]
+            .into_iter()
+            .filter_map(by_cat)
+            .collect();
         if !trio.is_empty() {
             out.push(TooltipLine::new("", TooltipKind::Blank));
             for a in &trio {
@@ -390,7 +390,6 @@ impl Item {
                         category(a.def),
                         AffixCategory::Attribute
                             | AffixCategory::Element
-                            | AffixCategory::Archetype
                             | AffixCategory::Resonance
                     )
             })
@@ -510,7 +509,7 @@ impl Item {
     /// slotted ability this item helps. Pure read-only — no
     /// allocation beyond the returned `Vec`.
     fn synergy_against(&self, loadout: &crate::loadout::Loadout) -> Vec<String> {
-        use crate::abilities::{Archetype, Element};
+        use crate::abilities::Element;
         use crate::stats::Stat;
         let mut out: Vec<String> = Vec::new();
         // Gather slotted abilities once so each affix scan is O(6).
@@ -550,20 +549,6 @@ impl Item {
                         matches!(x.element, Element::Lightning)
                     })
                 }
-                AffixEffect::Stat(Stat::ProjectileDamage) => {
-                    push_match(&mut out, "Projectile", |x| {
-                        matches!(x.archetype, Archetype::Projectile)
-                    })
-                }
-                AffixEffect::Stat(Stat::BeamDamage) => {
-                    push_match(&mut out, "Beam", |x| matches!(x.archetype, Archetype::Beam))
-                }
-                AffixEffect::Stat(Stat::AoeDamage) => {
-                    push_match(&mut out, "AoE", |x| matches!(x.archetype, Archetype::Aoe))
-                }
-                AffixEffect::Stat(Stat::MeleeDamage) => push_match(&mut out, "Melee", |x| {
-                    matches!(x.archetype, Archetype::Melee)
-                }),
                 AffixEffect::AmplifyAbilityDamage(id)
                 | AffixEffect::ReduceAbilityCooldown(id)
                 | AffixEffect::ExtraProjectiles(id)

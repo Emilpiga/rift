@@ -103,6 +103,7 @@ impl NetClient {
             .collect();
         for (net_id, is_leave) in stale {
             if let Some(entity) = self.avatar_entities.remove(&net_id) {
+                self.prev_action_byte.remove(&net_id);
                 // Capture the avatar's last transform position
                 // *before* despawn so we can anchor the rapture
                 // VFX where the body actually was. Falls back to
@@ -388,6 +389,39 @@ impl NetClient {
                     p.action_timer = 0.0;
                 }
             }
+
+            // Melee swing mirror. The server stamps one of
+            // `action::ATTACK_A..ATTACK_D` on the swinger's
+            // kinematic when an `AbilityKind::MeleeArc` cast
+            // dispatches, with the byte encoding the combo
+            // step (0\u20133). We detect *any* transition into
+            // (or between) those bytes and play the matching
+            // upper-body swing clip via the remote avatar's
+            // `SpellCast` layer so the swing rides on top of
+            // locomotion via the upper-body mask. The
+            // shared clip table in
+            // `rift_game::kinematic::MELEE_COMBO_CLIPS`
+            // keeps the local and remote paths in sync.
+            let prev = self.prev_action_byte.get(&net_id).copied().unwrap_or(0);
+            let curr_attack = rift_game::kinematic::action::is_attack(re.action);
+            let prev_attack = rift_game::kinematic::action::is_attack(prev);
+            let stepped = curr_attack && (!prev_attack || prev != re.action);
+            if stepped {
+                let step = rift_game::kinematic::action::attack_step(re.action);
+                let candidates = rift_game::kinematic::MELEE_COMBO_CLIPS[(step & 0b11) as usize];
+                let clip = world
+                    .get::<&AnimationSet>(entity)
+                    .ok()
+                    .and_then(|s| s.find_any(candidates));
+                if let Some(clip) = clip {
+                    if let Ok(mut cast) =
+                        world.get::<&mut rift_engine::ecs::components::SpellCast>(entity)
+                    {
+                        cast.play_oneshot(clip);
+                    }
+                }
+            }
+            self.prev_action_byte.insert(net_id, re.action);
 
             // Mirror the snapshot's active-effect list into the
             // remote avatar's `Effects` component. Drives buff /

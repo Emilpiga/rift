@@ -680,6 +680,34 @@ impl Server {
         self.persist_inventory_state(from);
     }
 
+    /// Drop an equipped item directly onto the ground (no
+    /// bag detour). Same town-drop ban + ghost-rejection as
+    /// `handle_drop_inventory_item`. Replies with fresh
+    /// `InventorySync` + `EquipmentSync` + peer visuals.
+    pub(crate) fn handle_drop_equipped_item(&mut self, from: ClientId, slot_byte: u8) {
+        if self.sim_for_client(from).is_hub() {
+            log::debug!("inv: drop-equip rejected for {from:?} slot={slot_byte} (in hub)");
+            return;
+        }
+        let Some(slot) = rift_game::loot::EquipSlot::from_u8(slot_byte) else {
+            log::debug!("inv: drop-equip unknown slot byte {slot_byte} from {from:?}");
+            return;
+        };
+        let Some((item, pos)) = self.sim_for_client_mut(from).pop_equipment_item(from, slot) else {
+            log::debug!("inv: drop-equip rejected for {from:?} slot={slot_byte}");
+            return;
+        };
+        log::info!(
+            "inv: {from:?} dropped equipped {} (slot={slot_byte}) at {pos:?}",
+            item.display_name(),
+        );
+        self.sim_for_client_mut(from)
+            .spawn_player_drop(item, pos, from);
+        self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
+        self.persist_inventory_state(from);
+    }
+
     /// Salvage the bag item at `inventory_index` for shards.
     /// Sends back a fresh `InventorySync` (slot is gone) and a
     /// `ShardsSync` (new total), and persists both the bag and
@@ -752,6 +780,26 @@ impl Server {
             .sim_for_client_mut(from)
             .unequip_to_bag_slot(from, slot, inventory_index)
         {
+            return;
+        }
+        self.broadcast_inventory_state(from);
+        self.broadcast_peer_equipment_visuals(from);
+        self.persist_inventory_state(from);
+    }
+
+    /// Swap the items between two equipment slots (e.g. ring1
+    /// ↔ ring2). Validates that each item is still legal in
+    /// the destination slot via `Equipment::accepts`.
+    pub(crate) fn handle_swap_equip_slots(&mut self, from: ClientId, a_byte: u8, b_byte: u8) {
+        let Some(a) = rift_game::loot::EquipSlot::from_u8(a_byte) else {
+            log::debug!("swap-equip: unknown slot byte {a_byte} from {from:?}");
+            return;
+        };
+        let Some(b) = rift_game::loot::EquipSlot::from_u8(b_byte) else {
+            log::debug!("swap-equip: unknown slot byte {b_byte} from {from:?}");
+            return;
+        };
+        if !self.sim_for_client_mut(from).swap_equip_slots(from, a, b) {
             return;
         }
         self.broadcast_inventory_state(from);

@@ -1,19 +1,18 @@
-//! Item damage-family lock — Attribute × Element × Archetype.
+//! Item damage-family lock — Attribute × Element.
 //!
 //! Phase 1 of the §2 itemisation refactor. See `ITEMS.md` §2.1 — every
 //! item declares (at most) one **Attribute** (Strength / Agility /
-//! Intellect), one or more permitted **Element** picks, and one or
-//! more permitted **Archetype** picks. Phase 2's affix-roll code
-//! restricts axis-line candidates to the base's family; cross-family
-//! rolls become impossible rather than merely unlikely.
+//! Intellect) and one or more permitted **Element** picks. Phase 2's
+//! affix-roll code restricts axis-line candidates to the base's
+//! family; cross-family rolls become impossible rather than merely
+//! unlikely.
 //!
 //! These enums intentionally mirror — but do not re-use —
-//! [`crate::abilities::Element`] and [`crate::abilities::Archetype`].
-//! The ability versions carry `None` / `Utility` / `Movement` variants
-//! that are meaningful for *casting* but meaningless for *gear* (an
-//! item that drops with "no element" is just a non-elemental item;
-//! same for archetype). Keeping the item vocabulary minimal pays for
-//! itself the first time you write a `match` over it.
+//! [`crate::abilities::Element`]. The ability version carries a
+//! `None` variant that is meaningful for *casting* but meaningless
+//! for *gear* (an item that drops with "no element" is just a
+//! non-elemental item). Keeping the item vocabulary minimal pays
+//! for itself the first time you write a `match` over it.
 
 /// Which core attribute an item's identity is bound to. Weapons and
 /// heavy armor commit to one; accessories and light armor stay
@@ -60,29 +59,6 @@ impl Element {
     }
 }
 
-/// Ability shape an item can roll archetype scaling for.
-///
-/// Intentionally narrow: only `Projectile` and `Melee` carry
-/// dedicated archetype-damage affixes. Beam and AoE are covered
-/// by their element axis (a Frost Ray scales off Ice; a Whirlwind
-/// off Physical) and don't need an extra trio line of their own.
-/// Kept basic; expand if a future archetype actually pulls its
-/// weight on the item axis.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Archetype {
-    Projectile,
-    Melee,
-}
-
-impl Archetype {
-    pub fn name(self) -> &'static str {
-        match self {
-            Archetype::Projectile => "Projectile",
-            Archetype::Melee => "Melee",
-        }
-    }
-}
-
 /// Declared damage-axis lock for a base item. Phase 2's
 /// [`crate::loot::Item::roll`] reads this to decide which axis lines
 /// the item is *allowed* to roll.
@@ -90,7 +66,7 @@ impl Archetype {
 /// - `None` on an axis means **wildcard** — the item has no lock on
 ///   that axis, and any roll from that axis pool is fair game. Used
 ///   by accessories (rings / amulets) and by armor pieces that
-///   don't commit to an archetype.
+///   don't commit to an element.
 /// - `Some(&[…])` is the **allowed set** for that axis. A roll
 ///   targeting an entry outside the set is filtered out.
 ///
@@ -101,7 +77,6 @@ impl Archetype {
 pub struct BaseFamily {
     pub attribute: Option<Attribute>,
     pub element: Option<&'static [Element]>,
-    pub archetype: Option<&'static [Archetype]>,
 }
 
 impl BaseFamily {
@@ -110,7 +85,6 @@ impl BaseFamily {
     pub const WILDCARD: BaseFamily = BaseFamily {
         attribute: None,
         element: None,
-        archetype: None,
     };
 
     /// Convenience builder for an armor base that commits to a
@@ -119,7 +93,6 @@ impl BaseFamily {
         BaseFamily {
             attribute: Some(a),
             element: None,
-            archetype: None,
         }
     }
 
@@ -129,14 +102,6 @@ impl BaseFamily {
         match self.element {
             None => true,
             Some(list) => list.contains(&e),
-        }
-    }
-
-    /// `true` if `a` is permitted by this family's archetype lock.
-    pub fn allows_archetype(&self, a: Archetype) -> bool {
-        match self.archetype {
-            None => true,
-            Some(list) => list.contains(&a),
         }
     }
 
@@ -168,10 +133,6 @@ pub const ELEMENTS_ALL: &[Element] = &[
 pub const ELEMENTS_CASTER: &[Element] = &[Element::Fire, Element::Ice, Element::Lightning];
 pub const ELEMENTS_PHYSICAL: &[Element] = &[Element::Physical];
 
-pub const ARCHETYPES_ALL: &[Archetype] = &[Archetype::Projectile, Archetype::Melee];
-pub const ARCHETYPES_MELEE: &[Archetype] = &[Archetype::Melee];
-pub const ARCHETYPES_PROJECTILE: &[Archetype] = &[Archetype::Projectile];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,9 +146,6 @@ mod tests {
         for e in ELEMENTS_ALL {
             assert!(f.allows_element(*e));
         }
-        for a in ARCHETYPES_ALL {
-            assert!(f.allows_archetype(*a));
-        }
     }
 
     #[test]
@@ -197,7 +155,6 @@ mod tests {
         assert!(!f.allows_attribute(Attribute::Agility));
         assert!(!f.allows_attribute(Attribute::Intellect));
         assert!(f.allows_element(Element::Fire));
-        assert!(f.allows_archetype(Archetype::Melee));
     }
 
     #[test]
@@ -205,7 +162,6 @@ mod tests {
         let f = BaseFamily {
             attribute: Some(Attribute::Intellect),
             element: Some(ELEMENTS_CASTER),
-            archetype: None,
         };
         assert!(f.allows_element(Element::Fire));
         assert!(f.allows_element(Element::Ice));

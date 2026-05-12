@@ -3208,6 +3208,7 @@ dependencies = [
  "log",
  "rift-dungeon",
  "rift-game",
+ "rift-math",
  "rift-net",
  "rift-persistence",
  "sha2",

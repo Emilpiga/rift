@@ -102,6 +102,16 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         sw,
         sh,
     );
+    // Snapshot which sub-modals are open BEFORE any widget
+    // gets a chance to mutate them this frame. The pause-menu
+    // block at the bottom uses this snapshot to decide
+    // whether Escape should open the pause menu or close the
+    // top-most sub-modal — without it, a widget that closes
+    // itself on Escape would flip `open` to false mid-frame
+    // and the host would then mis-read the state as "no
+    // modal open" and pop the pause menu.
+    let pre_spellbook_open = state.spellbook.open;
+    let pre_inventory_open = state.inventory_ui.open && !state.loot.stash_session;
     // Clear last frame's HUD click-swallow rects before any
     // HUD widget repopulates them. `combat_phase` already read
     // them earlier this frame, so the slate is safe to wipe.
@@ -161,6 +171,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         hub_portal_pos,
     );
     state.combat_text.render(&mut ui, view_proj);
+
+    // Combat-meter panel (bottom-right). Only renders inside
+    // a rift — the hub is meter-free. Drawn *before* the
+    // inventory so the inventory's bag/equip panels sit on
+    // top of the meter when the player opens the bag (the
+    // panels overlap in the bottom-right of the screen).
+    let in_rift = !state.floor.in_hub;
+    state.meters.frame(&mut ui, in_rift);
+
     crate::game::inventory::frame(
         &mut ui,
         &mut state.inventory_ui,
@@ -281,10 +300,91 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         .party
         .frame(&mut ui, &mut state.net, &mut state.chat, &mut state.frame);
 
-    // Combat-meter panel (bottom-right). Only renders inside
-    // a rift — the hub is meter-free.
-    let in_rift = !state.floor.in_hub;
-    state.meters.frame(&mut ui, in_rift);
+    // Pause menu / settings modal. Drawn last so it sits on
+    // top of every other in-game HUD widget. Escape toggles
+    // the menu open when no other modal already owns Escape
+    // (chat typing, inventory text edit, spellbook open,
+    // exit-vote panel, etc.). Inlined here rather than
+    // delegated to a helper because `ui` is holding a mutable
+    // borrow into `state.ui_state`, so a `&mut GameState`
+    // helper signature would conflict on the second borrow.
+    {
+        let escape_busy = state.chat.is_typing() || state.inventory_ui.wants_text_input();
+        let escape_pressed = ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::Escape);
+
+        // Escape is a single state-transition this frame —
+        // *either* it opens the menu, *or* it closes one of
+        // the open sub-modals, never both. Handled here (not
+        // in the widgets) so the open-edge isn't immediately
+        // re-consumed by the widget that just rendered for
+        // the first time, which would slam the menu shut on
+        // the same frame it opened.
+        //
+        // Priority: settings → pause menu → spellbook →
+        // inventory → (otherwise) open the pause menu. The
+        // sub-modal flags (`pre_spellbook_open` /
+        // `pre_inventory_open`) were captured at the very
+        // top of this phase so a widget's self-close doesn't
+        // leak through.
+        if escape_pressed {
+            if state.pause.settings_open {
+                state.pause.settings_open = false;
+                state.pause.menu_open = true;
+            } else if state.pause.menu_open {
+                state.pause.menu_open = false;
+            } else if pre_spellbook_open {
+                state.spellbook.close();
+            } else if pre_inventory_open {
+                state.inventory_ui.open = false;
+            } else if !escape_busy {
+                state.pause.menu_open = true;
+            }
+        }
+
+        if state.pause.settings_open {
+            let view = rift_ui_types::settings::SettingsView {
+                master_volume: state.pause.master_volume,
+            };
+            for action in rift_ui::settings::frame_settings(&mut ui, &view) {
+                use rift_ui_types::settings::SettingsAction;
+                match action {
+                    SettingsAction::SetMasterVolume(v) => {
+                        state.pause.master_volume = v.clamp(0.0, 1.0);
+                        if let Some(audio) = state.audio.as_mut() {
+                            audio.set_master_volume(state.pause.master_volume);
+                        }
+                    }
+                    SettingsAction::Close => {
+                        state.pause.settings_open = false;
+                        state.pause.menu_open = true;
+                    }
+                }
+            }
+        } else if state.pause.menu_open {
+            if let Some(action) = rift_ui::pause_menu::frame_pause_menu(&mut ui) {
+                use rift_ui_types::pause_menu::PauseMenuAction;
+                match action {
+                    PauseMenuAction::Resume => state.pause.menu_open = false,
+                    PauseMenuAction::OpenSettings => {
+                        state.pause.menu_open = false;
+                        state.pause.settings_open = true;
+                    }
+                    PauseMenuAction::ExitToCharacterSelect | PauseMenuAction::ExitGame => {
+                        // Both routes currently terminate the
+                        // process. `main.rs` polls `request_quit`
+                        // after the update tick and calls
+                        // `std::process::exit(0)`. A future
+                        // landing will wire
+                        // ExitToCharacterSelect through a
+                        // graceful session-leave message.
+                        state.pause.request_quit = true;
+                    }
+                }
+            }
+        }
+    }
 
     let _ = ui.end();
 }

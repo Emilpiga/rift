@@ -528,6 +528,14 @@ impl NetClient {
         );
     }
 
+    /// Drop the equipped item in `slot` onto the ground at
+    /// the player's position. Server validates + responds
+    /// with fresh `InventorySync` + `EquipmentSync`.
+    pub fn request_drop_equipped_item(&mut self, slot: u8) {
+        log::debug!("net: -> DropEquippedItem slot={slot}");
+        self.send(Channel::Control, &ClientMsg::DropEquippedItem { slot });
+    }
+
     /// Salvage the bag item at `inventory_index` for shards.
     /// Server validates the slot and the item's anchored flag,
     /// then replies with fresh `InventorySync` + `ShardsSync`.
@@ -563,6 +571,14 @@ impl NetClient {
                 inventory_index,
             },
         );
+    }
+
+    /// Swap the contents of two equipment slots (e.g. ring1
+    /// ↔ ring2). Server validates `Equipment::accepts` in
+    /// both directions and rejects mismatched pairs.
+    pub fn request_swap_equip_slots(&mut self, a: u8, b: u8) {
+        log::debug!("net: -> SwapEquipSlots {a} <-> {b}");
+        self.send(Channel::Control, &ClientMsg::SwapEquipSlots { a, b });
     }
 
     /// Ship a chat line. `target` is meaningful only on the

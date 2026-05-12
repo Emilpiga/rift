@@ -519,6 +519,13 @@ pub fn skinning_system(
 
         // Compute torso twist: difference between aim yaw and body yaw,
         // clamped so we never twist past ~120° (rig would tear apart).
+        // Past the clamp the spine has nowhere left to go, so a naked
+        // clamp would jump from +120° to −120° the instant the cursor
+        // crosses directly behind the player — a 240° pose flip in one
+        // frame, which reads as a snap. Past 120°, smoothstep the
+        // twist back toward 0 (fully relaxed at exactly 180° behind)
+        // so a cursor sweeping across the back blends smoothly through
+        // a neutral pose instead of slamming.
         let twist = if let Some(p) = player {
             let aim = p.aim_dir;
             if aim.length_squared() > 1e-4 {
@@ -532,10 +539,21 @@ pub fn skinning_system(
                 while delta < -std::f32::consts::PI {
                     delta += std::f32::consts::TAU;
                 }
-                let limit = std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_6; // ~120°
-                let clamped = delta.clamp(-limit, limit);
+                const LIMIT: f32 = std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_6; // ~120°
+                let clamped = delta.clamp(-LIMIT, LIMIT);
+                let abs = delta.abs();
+                let scale = if abs <= LIMIT {
+                    1.0
+                } else if abs >= std::f32::consts::PI {
+                    0.0
+                } else {
+                    // Smoothstep from 1 at LIMIT to 0 at PI.
+                    let t = (std::f32::consts::PI - abs) / (std::f32::consts::PI - LIMIT);
+                    t * t * (3.0 - 2.0 * t)
+                };
+                let twisted = clamped * scale;
                 if p.spine_joint != u32::MAX {
-                    Some((p.spine_joint as usize, clamped))
+                    Some((p.spine_joint as usize, twisted))
                 } else {
                     None
                 }
@@ -878,27 +896,17 @@ pub fn camera_follow_system(
         // multiplier on the porthole, so transitions in and
         // out of cover fade over a few frames instead of
         // popping the instant the camera ray clips a wall.
-        // Raycast from the camera past the player by a few
-        // metres. The extension is what makes the locked-pitch
-        // top-down camera readable when the player walks up
-        // to a wall: with no extension, only walls strictly
-        // between camera and player carve, and a wall directly
-        // *in front of* the player (e.g. a corridor end) would
-        // hide the player's torso under it on screen even
-        // though the player is technically "in front of" the
-        // wall along the camera ray. Extending the raycast
-        // (and the shader's `tFrag` allowance) ~3 m past the
-        // player picks up those near-front walls and lets the
-        // porthole open through them too.
-        const XRAY_LOOKAHEAD: f32 = 12.0;
-        let cam_to_player = target - desired;
-        let dist_to_player = cam_to_player.length();
-        let extended_target = if dist_to_player > 1e-3 {
-            target + cam_to_player.normalize() * XRAY_LOOKAHEAD
-        } else {
-            target
-        };
-        let (ray, ray_len) = Ray::between(desired, extended_target);
+        //
+        // Raycast strictly between the camera and the player —
+        // no lookahead past the player. Extending the ray past
+        // the player makes walls in the *next* room qualify
+        // for the porthole, which lets the player see through
+        // into adjacent rooms even when nothing is occluding
+        // them. The locked top-down pitch means a wall ahead
+        // of the player is already above-frame on the camera
+        // ray, so cutting the lookahead doesn't hide the
+        // player's torso in practice.
+        let (ray, ray_len) = Ray::between(desired, target);
         let occluded = physics::raycast(&ray, ray_len, wall_aabbs).is_some();
         let target_strength = if occluded { 1.0 } else { 0.0 };
         // First-order exponential ease. tau = 0.12 s gives a

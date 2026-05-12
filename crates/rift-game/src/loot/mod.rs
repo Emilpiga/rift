@@ -50,6 +50,7 @@ pub mod families;
 pub mod inventory;
 pub mod item;
 pub mod items;
+pub mod name_gen;
 pub mod rarity;
 pub mod rng;
 pub mod roll;
@@ -68,7 +69,7 @@ pub use drops::{
     CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
 };
 pub use equipment::Equipment;
-pub use families::{Archetype, Attribute, BaseFamily, Element};
+pub use families::{Attribute, BaseFamily, Element};
 pub use inventory::{Inventory, Loadout};
 pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix, RolledRiftTouched};
 pub use items::{

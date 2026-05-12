@@ -6,6 +6,7 @@ pub use glam::*;
 
 pub mod noise;
 pub mod physics;
+pub mod spatial;
 pub mod terrain;
 
 /// Linear interpolation between `a` and `b` by `t`. `t` is not

@@ -122,6 +122,11 @@ pub struct GameState {
     /// path-keyed sound cache, and a generational emitter
     /// table. See `rift_audio` for the full API.
     pub audio: Option<rift_audio::AudioSystem>,
+    /// In-game pause menu (opened with Escape). Owned here so
+    /// the menu survives across `ui_phase` ticks and so the
+    /// `request_quit` flag this drives is reachable from
+    /// `main.rs` after `update`.
+    pub pause: super::pause::PauseState,
 }
 
 /// Hub entry portal. Visual + interaction state for the glowing ring
@@ -189,6 +194,7 @@ impl GameState {
                     None
                 }
             },
+            pause: super::pause::PauseState::default(),
         }
     }
 

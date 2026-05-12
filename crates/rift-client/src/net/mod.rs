@@ -148,6 +148,14 @@ pub struct NetClient {
     /// and the kinematic state (from a snapshot) are available.
     /// Cleared on `PlayerLeft`.
     pub avatar_entities: HashMap<NetId, hecs::Entity>,
+    /// Per-remote-player previous `Kinematic::action` byte
+    /// observed in the last applied snapshot. Used by the
+    /// melee-swing mirror in `world_sync` to detect step-to-
+    /// step transitions in the `ATTACK_A..ATTACK_D` combo
+    /// range so each new swing triggers a fresh
+    /// `SpellCast::play_oneshot` on the upper-body layer
+    /// (rather than just a level-edge from none\u2192attack).
+    pub(super) prev_action_byte: HashMap<NetId, u8>,
     /// ECS entity per replicated server-driven enemy. Spawned
     /// lazily by `sync_enemies` the first frame a fresh enemy
     /// `NetId` shows up in a snapshot, despawned when the server
@@ -441,6 +449,7 @@ impl NetClient {
             input_seq: 0,
             input_accumulator: Duration::ZERO,
             avatar_entities: HashMap::new(),
+            prev_action_byte: HashMap::new(),
             enemy_entities: HashMap::new(),
             projectile_objects: HashMap::new(),
             projectile_trails: HashMap::new(),

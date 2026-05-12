@@ -111,6 +111,13 @@ pub struct AbilitySlotView<'a> {
 #[derive(Clone, Debug)]
 pub struct AbilityBarView<'a> {
     pub slots: [AbilitySlotView<'a>; 6],
+    /// Passive ability bound to a fixed key (currently
+    /// Evasive Roll on Space). Rendered as a 7th tile to the
+    /// right of the main bar with a small visual gap so the
+    /// player can tell it's not part of the loadout. `None`
+    /// while the passive isn't applicable (e.g. degenerate
+    /// test fixtures with no roll ability).
+    pub passive: Option<AbilitySlotView<'a>>,
 }
 
 // ─── Action ───────────────────────────────────────────────────

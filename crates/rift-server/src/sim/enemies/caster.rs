@@ -131,9 +131,9 @@ pub fn tick(
         return;
     }
 
-    let los_clear = floor.line_of_sight(en.k.position, target_pos);
+    let los_blocked = super::cached_los_blocked(en, floor, target_pos);
 
-    if !los_clear {
+    if los_blocked {
         // Wall in the way — the kite ring is meaningless here
         // (a caster strafing sideways behind a pillar never
         // finds an angle), so override with an A* path toward

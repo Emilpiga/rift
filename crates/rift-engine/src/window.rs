@@ -4,7 +4,7 @@ use winit::{
     event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::PhysicalKey,
-    window::{self, WindowAttributes},
+    window::{self, CursorGrabMode, Fullscreen, WindowAttributes},
 };
 
 use crate::input::Input;
@@ -60,10 +60,34 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
         if self.window.is_none() {
             let attrs = WindowAttributes::default()
                 .with_title(&self.title)
-                .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height));
+                .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
+                // Launch in borderless fullscreen on the
+                // current monitor. `Fullscreen::Borderless(None)`
+                // picks whichever monitor the window would
+                // otherwise have spawned on, which matches what
+                // players expect from a "fullscreen" launch and
+                // sidesteps the exclusive-mode pitfalls
+                // (alt-tab flicker, refresh-rate negotiation).
+                .with_fullscreen(Some(Fullscreen::Borderless(None)));
 
             match event_loop.create_window(attrs) {
                 Ok(window) => {
+                    // Confine the OS cursor to the window so a
+                    // fast aim-flick can't slide it off-screen
+                    // mid-fight. We intentionally do NOT fall
+                    // back to `CursorGrabMode::Locked` — Locked
+                    // pins the cursor to a fixed point (the
+                    // center on Windows), which reads as a
+                    // "snap" the first time the player moves
+                    // the mouse. Confined keeps the OS cursor
+                    // free to roam inside the window rectangle,
+                    // which is all the gameplay actually needs.
+                    if let Err(e) = window.set_cursor_grab(CursorGrabMode::Confined) {
+                        log::warn!(
+                            "cursor: Confined grab not supported ({e}); cursor may exit \
+                             the window"
+                        );
+                    }
                     match Renderer::new(&window) {
                         Ok(renderer) => {
                             // App-side init now happens incrementally via
@@ -161,6 +185,14 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 self.input.on_mouse_button(button, pressed);
+                // RMB starts the camera-rotate drag. We do
+                // nothing here: rotation is driven by raw
+                // mouse-motion deltas (`DeviceEvent::MouseMotion`)
+                // and the cursor is already confined to the
+                // window via the `Confined` grab applied at
+                // startup, so a fast aim-flick can't slide it
+                // off-screen. No hide, no warp, no snap.
+                let _ = pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.input.on_cursor_moved(position.x, position.y);
@@ -219,12 +251,39 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                     window.request_redraw();
                 }
             }
+            WindowEvent::Focused(focused) => {
+                // Re-apply cursor confinement when the window
+                // regains focus. Most platforms drop the grab
+                // on focus loss; without this Alt-Tab + click-
+                // back leaves the cursor free to wander out.
+                if focused {
+                    if let Some(w) = &self.window {
+                        let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                    }
+                }
+            }
             WindowEvent::Resized(physical_size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.notify_resized(physical_size.width, physical_size.height);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        // Raw mouse motion bypasses cursor-position clamping,
+        // so it keeps flowing even while the cursor is locked
+        // to the centre of the window during a RMB camera
+        // drag. Used to drive yaw without ever hitting the
+        // screen edge.
+        if let winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            self.input.on_mouse_motion(dx, dy);
         }
     }
 }
@@ -295,7 +354,8 @@ fn draw_loading_overlay(renderer: &mut Renderer, progress: f32, label: &str) {
         sh * 0.40 - title_size,
         title_size,
         [0.85, 0.80, 0.65, 1.0],
-        sw, sh,
+        sw,
+        sh,
     );
 
     // Progress bar geometry.
@@ -327,6 +387,7 @@ fn draw_loading_overlay(renderer: &mut Renderer, progress: f32, label: &str) {
         bar_y + bar_h + 12.0,
         label_size,
         [0.70, 0.70, 0.72, 1.0],
-        sw, sh,
+        sw,
+        sh,
     );
 }

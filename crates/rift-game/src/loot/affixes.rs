@@ -436,28 +436,6 @@ pub const AFFIX_POOL: &[AffixDef] = &[
         rarity_min: Rarity::Common,
         weight: 0,
     },
-    AffixDef {
-        id: "pct_projectile_damage",
-        name_template: "{} Projectile Damage",
-        effect: AffixEffect::Stat(Stat::ProjectileDamage),
-        roll: (0.06, 0.14),
-        ilvl_scale: 0.005,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
-    AffixDef {
-        id: "pct_melee_damage",
-        name_template: "{} Melee Damage",
-        effect: AffixEffect::Stat(Stat::MeleeDamage),
-        roll: (0.06, 0.14),
-        ilvl_scale: 0.005,
-        tags: ALL,
-        min_ilvl: 1,
-        rarity_min: Rarity::Common,
-        weight: 0,
-    },
 ];
 
 // ---------------------------------------------------------------------
@@ -518,29 +496,6 @@ pub const RESONANCE_POOL: &[AffixDef] = &[
         id: "res_lightning_damage",
         name_template: "Resonant {} Lightning Damage",
         effect: AffixEffect::Stat(Stat::LightningDamage),
-        roll: (0.04, 0.08),
-        ilvl_scale: 0.003,
-        tags: ALL,
-        min_ilvl: 5,
-        rarity_min: Rarity::Rare,
-        weight: 1,
-    },
-    // ── Archetype resonance ─────────────────────────────────────
-    AffixDef {
-        id: "res_projectile_damage",
-        name_template: "Resonant {} Projectile Damage",
-        effect: AffixEffect::Stat(Stat::ProjectileDamage),
-        roll: (0.04, 0.08),
-        ilvl_scale: 0.003,
-        tags: ALL,
-        min_ilvl: 5,
-        rarity_min: Rarity::Rare,
-        weight: 1,
-    },
-    AffixDef {
-        id: "res_melee_damage",
-        name_template: "Resonant {} Melee Damage",
-        effect: AffixEffect::Stat(Stat::MeleeDamage),
         roll: (0.04, 0.08),
         ilvl_scale: 0.003,
         tags: ALL,
@@ -723,14 +678,6 @@ pub fn resonance_element(def: &AffixDef) -> Option<families::Element> {
     affix_element(def)
 }
 
-/// Archetype targeted by a resonance affix.
-pub fn resonance_archetype(def: &AffixDef) -> Option<families::Archetype> {
-    if !is_resonance(def) {
-        return None;
-    }
-    affix_archetype(def)
-}
-
 /// Attribute targeted by a resonance affix.
 pub fn resonance_attribute(def: &AffixDef) -> Option<families::Attribute> {
     if !is_resonance(def) {
@@ -810,15 +757,9 @@ use super::families;
 pub enum AffixCategory {
     /// `Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage)`.
     Element,
-    /// `Stat(ProjectileDamage | MeleeDamage)`. Beam / AoE damage
-    /// stats are not gated on the archetype axis — they're
-    /// covered by element scaling. Their `Stat` values are still
-    /// applied at runtime by abilities; they just never roll as
-    /// affixes.
-    Archetype,
     /// `Stat(Strength | Agility | Intellect)` — flat attribute
-    /// points. The third trio axis; family-locked to the base's
-    /// declared attribute (or wildcard).
+    /// points. The second trio axis; family-locked to the
+    /// base's declared attribute (or wildcard).
     Attribute,
     /// Anything in [`RESONANCE_POOL`] — a damage-axis line that
     /// **breaks the family lock by design**. Rolled in its own
@@ -852,7 +793,6 @@ pub fn category(def: &AffixDef) -> AffixCategory {
         AffixEffect::Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage) => {
             AffixCategory::Element
         }
-        AffixEffect::Stat(ProjectileDamage | MeleeDamage) => AffixCategory::Archetype,
         AffixEffect::Stat(Strength | Agility | Intellect) => AffixCategory::Attribute,
         _ => AffixCategory::Bonus,
     }
@@ -877,19 +817,6 @@ pub fn affix_element(def: &AffixDef) -> Option<families::Element> {
         AffixEffect::Stat(FireDamage) => Some(families::Element::Fire),
         AffixEffect::Stat(IceDamage) => Some(families::Element::Ice),
         AffixEffect::Stat(LightningDamage) => Some(families::Element::Lightning),
-        _ => None,
-    }
-}
-
-/// Item-family `Archetype` an affix targets. Beam / AoE damage
-/// stats exist on the [`crate::stats::Stat`] enum (abilities still
-/// apply them at runtime) but no affix rolls them — they're
-/// covered by the element axis. Hence the narrow match.
-pub fn affix_archetype(def: &AffixDef) -> Option<families::Archetype> {
-    use crate::stats::Stat::*;
-    match def.effect {
-        AffixEffect::Stat(ProjectileDamage) => Some(families::Archetype::Projectile),
-        AffixEffect::Stat(MeleeDamage) => Some(families::Archetype::Melee),
         _ => None,
     }
 }

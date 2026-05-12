@@ -256,9 +256,11 @@ pub fn submit(
             // gets silently dropped here rather than burning
             // the cooldown — checked before we touch the
             // cooldown table so a rejected cast leaves no
-            // residue.
+            // residue. Evasive Roll is exempt: it's a passive
+            // bound to Space on the client and never sits in
+            // a loadout slot.
             let p_ref = world.get::<&ServerPlayer>(entity).ok()?;
-            if !p_ref.loadout.contains(ability_id) {
+            if !rift_game::loadout::can_player_cast(&p_ref.loadout, &p_ref.equipment, ability_id) {
                 return None;
             }
             // Snapshot the caster's authoritative state. The
@@ -473,6 +475,33 @@ pub struct DispatchSinks<'a> {
     /// Live `(entity, position)` rows for every player. Read
     /// by `DelayedAoe` to find who's inside the slam disc.
     pub player_targets: &'a [(Entity, Vec3)],
+    /// Queue for player `MeleeArc` swings. Each arm in `dispatch`
+    /// pushes one row when a swing fires; the caller (top of the
+    /// damage pass in `Sim::step`) drains the queue against the
+    /// live enemy snapshot. Deferring resolution lets melee reuse
+    /// the same `apply_hits_to_enemies` pipeline that projectile
+    /// / channel hits use (aggro, procs, kills, loot) without
+    /// `dispatch` having to own a `CombatCtx` itself.
+    pub melee_swings: &'a mut Vec<PendingMeleeSwing>,
+}
+
+/// One queued melee swing emitted by an `AbilityKind::MeleeArc`
+/// dispatch. Resolved at the top of the damage pass — every
+/// enemy within `radius` of `origin` whose bearing from `origin`
+/// is inside the half-`arc_radians` cone around `aim` takes
+/// `damage` exactly once, with the crit roll seeded from the
+/// usual `(tick, target, attacker, ability)` tuple.
+#[derive(Clone, Copy, Debug)]
+pub struct PendingMeleeSwing {
+    pub caster_net_id: NetId,
+    pub ability_id: AbilityWireId,
+    pub origin: Vec3,
+    pub aim: Vec3,
+    pub radius: f32,
+    pub arc_radians: f32,
+    pub damage: f32,
+    pub crit_chance: f32,
+    pub crit_damage: f32,
 }
 
 /// Run the effect pipeline for an [`AcceptedCast`]. One match
@@ -810,6 +839,47 @@ pub fn dispatch(
                 }
             }
         }
+        AbilityKind::MeleeArc {
+            radius,
+            arc_radians,
+        } => {
+            // Advance the combo step on the caster, then stamp
+            // the corresponding `ATTACK_*` byte onto the
+            // kinematic so the snapshot pipeline broadcasts
+            // which swing clip remote clients should play.
+            // Movement is *not* locked \u2014 see
+            // `kinematic::ATTACK_DURATION`. A fresh swing
+            // beyond `ATTACK_COMBO_WINDOW` from the previous
+            // one restarts the chain at step 0; otherwise we
+            // cycle 0\u21921\u21922\u21923\u21920.
+            if let Some(entity) = accepted.caster_entity {
+                let mut step: u8 = 0;
+                if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
+                    let elapsed_ticks = tick.diff(p.last_melee_tick).max(0) as f32;
+                    let elapsed_s = elapsed_ticks / rift_net::TICK_HZ as f32;
+                    step = if elapsed_s <= rift_game::kinematic::ATTACK_COMBO_WINDOW {
+                        (p.melee_combo_step + 1) & 0b11
+                    } else {
+                        0
+                    };
+                    p.melee_combo_step = step;
+                    p.last_melee_tick = tick;
+                    rift_game::kinematic::start_attack(&mut p.k, accepted.aim, step);
+                    p.action_start = tick;
+                }
+                sinks.melee_swings.push(PendingMeleeSwing {
+                    caster_net_id: accepted.caster,
+                    ability_id: accepted.ability_id,
+                    origin: accepted.origin,
+                    aim: accepted.aim,
+                    radius,
+                    arc_radians,
+                    damage: scaled_damage,
+                    crit_chance: accepted.crit_chance,
+                    crit_damage: accepted.crit_damage,
+                });
+            }
+        }
         AbilityKind::ClientOnly => {
             // A handful of "client-only" abilities still have
             // a kinematic side-effect on the caster. Evasive
@@ -822,6 +892,15 @@ pub fn dispatch(
                 if let Some(entity) = accepted.caster_entity {
                     if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
                         rift_game::kinematic::start_roll(&mut p.k, accepted.aim);
+                        // Stamp the roll-start tick so the
+                        // snapshot can carry it to the local
+                        // client. Without this the client's
+                        // local `roll_remaining` clock drifts
+                        // ~RTT/2 ahead of the server's and
+                        // every subsequent snapshot snaps the
+                        // predicted position back into the
+                        // still-rolling server pose.
+                        p.action_start = tick;
                     }
                 }
             }

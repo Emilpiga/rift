@@ -189,8 +189,8 @@ pub fn tick(
         // Pick the steering direction: A* waypoint when LOS is
         // blocked (and the spec opts in), flank offset when
         // close, bee-line when far.
-        let los_clear = floor.line_of_sight(en.k.position, target_pos);
-        let approach = if !los_clear && spec.use_path {
+        let los_blocked = super::cached_los_blocked(en, floor, target_pos);
+        let approach = if los_blocked && spec.use_path {
             // LOS blocked — consume / rebuild the cached path.
             let target_tile = world_to_tile(target_pos);
             let need_recompute = en.path.is_empty()

@@ -47,6 +47,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         let p = rift_engine::ui::im::Pos2::new(mp.0, mp.1);
         state.frame.hud_consume_rects.iter().any(|r| r.contains(p))
     };
+    // Spellbook is a fullscreen modal: while it's open every
+    // click belongs to the UI (picking an ability, assigning
+    // a slot, dismissing). Without this gate the combat tick
+    // sees the LMB press first and fires the currently-slotted
+    // basic attack into the world behind the panel.
+    let spellbook_open = state.spellbook.open;
 
     // Ability-based combat (sends cast requests to the server).
     // Two gates beyond the obvious "alive" check:
@@ -67,7 +73,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
             || pointer_in_party_ui
             || pointer_in_chat
             || pointer_in_meters
-            || pointer_in_hud;
+            || pointer_in_hud
+            || spellbook_open;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
     } else if is_ghost

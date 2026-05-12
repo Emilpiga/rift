@@ -37,7 +37,10 @@ use rift_game::loadout::{
 pub enum SpellbookAction {
     /// Player asked to put `ability_id` into action-bar slot
     /// `slot_index`. `ability_id == EMPTY_SLOT` clears the slot.
-    AssignSlot { slot_index: u8, ability_id: rift_game::abilities::AbilityWireId },
+    AssignSlot {
+        slot_index: u8,
+        ability_id: rift_game::abilities::AbilityWireId,
+    },
 }
 
 #[derive(Default)]
@@ -100,13 +103,6 @@ impl SpellbookUi {
         player_level: u32,
     ) -> Option<SpellbookAction> {
         if !self.open {
-            return None;
-        }
-        if ui
-            .input()
-            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
-        {
-            self.close();
             return None;
         }
 

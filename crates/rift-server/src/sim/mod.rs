@@ -348,6 +348,14 @@ pub struct Sim {
     /// Per-client ability cooldowns.
     cooldowns: ability::CooldownTable,
 
+    /// Melee swings queued by [`ability::dispatch`] for the
+    /// `MeleeArc` ability kind. Resolved at the top of the
+    /// damage pass in [`Sim::step`] where `CombatCtx` and the
+    /// per-tick enemy snapshot are in scope, then drained.
+    /// Each entry produces one set of `apply_hits_to_enemies`
+    /// calls (or zero hits if no enemy is in the arc).
+    pending_melee_swings: Vec<ability::PendingMeleeSwing>,
+
     /// World events generated this tick. Drained by the server main
     /// loop and broadcast on `Channel::Event` (reliable).
     pending_events: Vec<WorldEvent>,
@@ -518,6 +526,7 @@ impl Sim {
             aoe_zones: Vec::new(),
             cooldowns: HashMap::new(),
             pending_events: Vec::new(),
+            pending_melee_swings: Vec::new(),
             rift_progress: RiftProgress::for_floor(floor_index),
             progress_dirty: false,
             pending_stat_updates: Vec::new(),

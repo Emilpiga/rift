@@ -267,6 +267,15 @@ pub struct ItemView<'a> {
     /// player holds Shift while hovering. Empty when there's
     /// nothing to compare against or no stat differences.
     pub compare_delta: &'a [CompareDeltaRow<'a>],
+    /// Second equipped comparison target — used only for
+    /// rings, where both ring slots are equally valid
+    /// destinations. `None` when the item isn't a ring, when
+    /// the second ring slot is empty, or when the secondary
+    /// compare is the same item as `compare_with`.
+    pub compare_with_secondary: Option<&'a ItemView<'a>>,
+    /// Delta rows for [`Self::compare_with_secondary`]. Same
+    /// shape as [`Self::compare_delta`].
+    pub compare_delta_secondary: &'a [CompareDeltaRow<'a>],
     /// Width in bag cells. `1` for ring/amulet, `2` for most
     /// armor, `2..=4` for weapons / chest. Determines the
     /// rectangle the item occupies in the bag grid AND on the
@@ -575,10 +584,20 @@ pub enum InventoryAction {
     /// Unequip into a specific bag slot. The previous occupant,
     /// if any, swaps into the original equip slot.
     UnequipToSlot { slot: u8, inventory_index: u32 },
+    /// Swap two equipment slots in place. Currently only used
+    /// for ring1 ↔ ring2 (the only pair where both items
+    /// remain legal after the swap); the server still
+    /// validates both `Equipment::accepts` directions and
+    /// rejects illegal combinations.
+    SwapEquip { a: u8, b: u8 },
     /// Swap two bag slots in place (reorder).
     SwapBag { a: u32, b: u32 },
     /// Drop a bag item onto the ground at the player's pos.
     DropToWorld { inventory_index: u32 },
+    /// Drop an equipped item directly onto the ground (skips
+    /// the bag entirely). Emitted when the player drags an
+    /// equipped slot outside the inventory drawer.
+    DropEquipToWorld { slot: u8 },
     /// Salvage a single bag item for shards.
     Salvage { inventory_index: u32 },
     /// Bulk-salvage every non-anchored bag item ≤ `rarity_max`.

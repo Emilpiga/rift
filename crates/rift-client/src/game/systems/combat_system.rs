@@ -94,6 +94,13 @@ pub fn tick(state: &mut GameState, input: &Input, renderer: &mut Renderer, dt: f
         return;
     };
 
+    // Tick the local melee-combo "time since last swing"
+    // counter. Saturating add so we don't blow past `f32::MAX`
+    // and produce a NaN comparison the very-first-swing path
+    // is keyed on.
+    state.player_state.melee_time_since_last =
+        (state.player_state.melee_time_since_last + dt).min(1.0e6);
+
     let aim_dir = crate::game::cursor::aim_dir(input, renderer, player_pos);
 
     if tick_placed_targeting(state, input, renderer, player_pos, aim_dir) {
@@ -110,7 +117,7 @@ pub fn tick(state: &mut GameState, input: &Input, renderer: &mut Renderer, dt: f
         return;
     }
 
-    tick_ability_keybinds(state, input, renderer, player_pos, aim_dir);
+    tick_ability_keybinds(state, input, renderer, player_pos, aim_dir, dt);
 }
 
 /// Drive the placed-ability targeting indicator. Returns
@@ -535,6 +542,7 @@ fn tick_ability_keybinds(
     renderer: &mut Renderer,
     player_pos: Vec3,
     aim_dir: Vec3,
+    dt: f32,
 ) {
     let ability_inputs = [
         input.left_clicked(),
@@ -726,14 +734,57 @@ fn tick_ability_keybinds(
         // damage / projectile spawn — we just play the cast
         // animation + any client-side particles immediately so
         // the input feels responsive.
-        crate::game::ability::trigger_local_cast(
-            &ability_clone,
-            aim_dir,
-            player_pos,
-            &mut state.world,
-            renderer,
-            &state.player_state.talents,
-        );
+        if matches!(
+            abilities::lookup(ability_clone.wire_id).map(|d| d.kind),
+            Some(abilities::AbilityKind::MeleeArc { .. })
+        ) {
+            // Melee swings are a combo \u2014 the clip we play
+            // depends on how recently the last swing fired.
+            // Advance / reset is computed against
+            // `melee_time_since_last`, which the outer frame
+            // tick has been incrementing.
+            let step = if state.player_state.melee_time_since_last
+                <= rift_game::kinematic::ATTACK_COMBO_WINDOW
+            {
+                (state.player_state.melee_combo_step + 1) & 0b11
+            } else {
+                0
+            };
+            state.player_state.melee_combo_step = step;
+            state.player_state.melee_time_since_last = 0.0;
+            trigger_local_melee_swing(&mut state.world, step);
+        } else {
+            crate::game::ability::trigger_local_cast(
+                &ability_clone,
+                aim_dir,
+                player_pos,
+                &mut state.world,
+                renderer,
+                &state.player_state.talents,
+            );
+        }
+    }
+
+    // Space → Evasive Roll. Roll is a passive bound to a
+    // fixed key rather than the action bar; it lives on
+    // `AbilitySlot::roll` and shares the same cooldown /
+    // local-feedback path as a normal slotted ability. The
+    // ability itself is `TargetingMode::Instant` with no
+    // resource cost, so we skip the placed / entity-pick /
+    // affordability paths entirely.
+    if input.key_just_pressed(KeyCode::Space) {
+        if let Some(ability) = state.player_state.abilities.try_use_roll() {
+            let ability_clone = ability.clone();
+            send_cast(state, renderer, &ability_clone, player_pos, aim_dir, input);
+            crate::game::ability::trigger_local_cast(
+                &ability_clone,
+                aim_dir,
+                player_pos,
+                &mut state.world,
+                renderer,
+                &state.player_state.talents,
+            );
+        }
     }
 }
 
@@ -812,4 +863,41 @@ fn send_cast(
         // follow-up.
         target_net_id: None,
     });
+}
+
+/// Optimistic upper-body trigger for a melee swing.
+///
+/// Unlike `trigger_local_cast` we don't run the declarative
+/// effects list at all \u2014 the `MELEE_ATTACK` registry entry
+/// intentionally ships an empty effects array because the
+/// swing clip is *combo-step-dependent* and that doesn't fit
+/// the single-clip-list `SetPlayerAction` shape. We resolve
+/// the clip from
+/// [`rift_game::kinematic::MELEE_COMBO_CLIPS`] using `step`
+/// (0..=3) and feed it to
+/// [`rift_engine::ecs::components::SpellCast::play_oneshot`]
+/// on the local avatar so the swing rides on top of locomotion
+/// via the upper-body mask. If `play_oneshot` is rejected
+/// because the upper body is already busy (e.g. mid-Fireball)
+/// the next swing simply doesn't visually play \u2014 the server
+/// still applies damage, so this is a visual-fidelity
+/// trade-off rather than a correctness one.
+fn trigger_local_melee_swing(world: &mut hecs::World, step: u8) {
+    use rift_engine::ecs::components::{AnimationSet, SpellCast};
+
+    let pid = world
+        .query::<(&Player, &LocalPlayer)>()
+        .iter()
+        .map(|(e, _)| e)
+        .next();
+    let Some(pid) = pid else { return };
+    let candidates = rift_game::kinematic::MELEE_COMBO_CLIPS[(step & 0b11) as usize];
+    let clip = match world.get::<&AnimationSet>(pid) {
+        Ok(set) => set.find_any(candidates),
+        Err(_) => None,
+    };
+    let Some(clip) = clip else { return };
+    if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
+        cast.play_oneshot(clip);
+    }
 }

@@ -111,10 +111,62 @@ pub fn frame(
         })
         .collect();
 
+    // Secondary compare slot — only meaningful for rings, the
+    // single slot type with two interchangeable destinations.
+    // For a ring item the primary slot is whichever ring
+    // `default_slot` picked; the secondary is the OTHER ring
+    // (when filled and distinct from primary). For every
+    // other item this stays `None`.
+    let other_ring = |primary: Option<EquipSlot>| -> Option<EquipSlot> {
+        match primary? {
+            EquipSlot::Ring1 => Some(EquipSlot::Ring2),
+            EquipSlot::Ring2 => Some(EquipSlot::Ring1),
+            _ => None,
+        }
+    };
+    let bag_compare_slots_secondary: Vec<Option<EquipSlot>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            slot.as_ref()?;
+            let sec = other_ring(bag_compare_slots[i])?;
+            // Only surface secondary when that ring slot is
+            // actually filled — comparing against an empty
+            // slot has no visual gain.
+            equipment.get(sec).map(|_| sec)
+        })
+        .collect();
+    let stash_compare_slots_secondary: Vec<Vec<Option<EquipSlot>>> = stash_tabs
+        .iter()
+        .enumerate()
+        .map(|(ti, t)| {
+            t.items
+                .iter()
+                .enumerate()
+                .map(|(si, slot)| {
+                    slot.as_ref()?;
+                    let sec = other_ring(stash_compare_slots[ti][si])?;
+                    equipment.get(sec).map(|_| sec)
+                })
+                .collect()
+        })
+        .collect();
+
     let bag_compare_strs: Vec<Vec<(String, bool)>> = items
         .iter()
         .enumerate()
         .map(|(i, slot)| match (slot, bag_compare_slots[i]) {
+            (Some(it), Some(es)) => match equipment.get(es) {
+                Some(eq) => compare_delta_rows(it, eq),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        })
+        .collect();
+    let bag_compare_strs_secondary: Vec<Vec<(String, bool)>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| match (slot, bag_compare_slots_secondary[i]) {
             (Some(it), Some(es)) => match equipment.get(es) {
                 Some(eq) => compare_delta_rows(it, eq),
                 None => Vec::new(),
@@ -136,6 +188,25 @@ pub fn frame(
                     },
                     _ => Vec::new(),
                 })
+                .collect()
+        })
+        .collect();
+    let stash_compare_strs_secondary: Vec<Vec<Vec<(String, bool)>>> = stash_tabs
+        .iter()
+        .enumerate()
+        .map(|(ti, t)| {
+            t.items
+                .iter()
+                .enumerate()
+                .map(
+                    |(si, slot)| match (slot, stash_compare_slots_secondary[ti][si]) {
+                        (Some(it), Some(es)) => match equipment.get(es) {
+                            Some(eq) => compare_delta_rows(it, eq),
+                            None => Vec::new(),
+                        },
+                        _ => Vec::new(),
+                    },
+                )
                 .collect()
         })
         .collect();
@@ -186,6 +257,33 @@ pub fn frame(
                 .collect()
         })
         .collect();
+    let bag_compare_rows_secondary: Vec<Vec<CompareDeltaRow<'_>>> = bag_compare_strs_secondary
+        .iter()
+        .map(|rows| {
+            rows.iter()
+                .map(|(text, pos)| CompareDeltaRow {
+                    text: text.as_str(),
+                    delta_positive: *pos,
+                })
+                .collect()
+        })
+        .collect();
+    let stash_compare_rows_secondary: Vec<Vec<Vec<CompareDeltaRow<'_>>>> =
+        stash_compare_strs_secondary
+            .iter()
+            .map(|tab| {
+                tab.iter()
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|(text, pos)| CompareDeltaRow {
+                                text: text.as_str(),
+                                delta_positive: *pos,
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
 
     // ── Phase 3 ─ ItemViews. ──────────────────────────────
     // Filter-chip key arenas (per-frame). Owned `Vec<&'static str>`
@@ -222,6 +320,8 @@ pub fn frame(
                 &equip_lines[i],
                 &[],
                 None,
+                &[],
+                None,
                 &equip_stat_keys[i],
             ))
         })
@@ -233,11 +333,15 @@ pub fn frame(
             let it = slot.as_ref()?;
             let compare_with =
                 bag_compare_slots[i].and_then(|es| equip_views[es.to_u8() as usize].as_ref());
+            let compare_with_secondary = bag_compare_slots_secondary[i]
+                .and_then(|es| equip_views[es.to_u8() as usize].as_ref());
             Some(build_item_view(
                 it,
                 &bag_lines[i],
                 &bag_compare_rows[i],
                 compare_with,
+                &bag_compare_rows_secondary[i],
+                compare_with_secondary,
                 &bag_stat_keys[i],
             ))
         })
@@ -253,11 +357,15 @@ pub fn frame(
                     let it = slot.as_ref()?;
                     let compare_with = stash_compare_slots[ti][si]
                         .and_then(|es| equip_views[es.to_u8() as usize].as_ref());
+                    let compare_with_secondary = stash_compare_slots_secondary[ti][si]
+                        .and_then(|es| equip_views[es.to_u8() as usize].as_ref());
                     Some(build_item_view(
                         it,
                         &stash_lines[ti][si],
                         &stash_compare_rows[ti][si],
                         compare_with,
+                        &stash_compare_rows_secondary[ti][si],
+                        compare_with_secondary,
                         &stash_stat_keys[ti][si],
                     ))
                 })
@@ -352,11 +460,17 @@ pub fn frame(
                     inventory_index,
                 });
             }
+            InventoryAction::SwapEquip { a, b } => {
+                pending.push(EquipRequest::SwapEquip { a, b });
+            }
             InventoryAction::SwapBag { a, b } => {
                 pending.push(EquipRequest::SwapBag { a, b });
             }
             InventoryAction::DropToWorld { inventory_index } => {
                 pending.push(EquipRequest::DropToWorld { inventory_index });
+            }
+            InventoryAction::DropEquipToWorld { slot } => {
+                pending.push(EquipRequest::DropEquipToWorld { slot });
             }
             InventoryAction::Salvage { inventory_index } => {
                 pending.push(EquipRequest::Salvage { inventory_index });
@@ -465,6 +579,8 @@ fn build_item_view<'a>(
     tooltip_lines: &'a [TooltipLineView<'a>],
     compare_delta: &'a [CompareDeltaRow<'a>],
     compare_with: Option<&'a ItemView<'a>>,
+    compare_delta_secondary: &'a [CompareDeltaRow<'a>],
+    compare_with_secondary: Option<&'a ItemView<'a>>,
     stat_keys: &'a [&'static str],
 ) -> ItemView<'a> {
     let c = it.rarity.color();
@@ -493,6 +609,8 @@ fn build_item_view<'a>(
         },
         compare_with,
         compare_delta,
+        compare_with_secondary,
+        compare_delta_secondary,
         cell_w,
         cell_h,
         rarity_tier: it.rarity as u8,
@@ -607,10 +725,6 @@ fn compare_delta_rows(hovered: &Item, equipped: &Item) -> Vec<(String, bool)> {
         Stat::FireDamage,
         Stat::IceDamage,
         Stat::LightningDamage,
-        Stat::ProjectileDamage,
-        Stat::BeamDamage,
-        Stat::AoeDamage,
-        Stat::MeleeDamage,
     ];
     let h_stats = hovered.stats();
     let e_stats = equipped.stats();

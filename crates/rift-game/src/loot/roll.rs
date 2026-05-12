@@ -140,9 +140,7 @@ impl Item {
     ///
     /// 6. **Anchored roll** — Legendary 1/5000, independent.
     pub fn roll(base: &'static BaseItem, rarity: Rarity, ilvl: u32, rng: &mut LootRng) -> Self {
-        use super::affixes::{
-            affix_archetype, affix_attribute, affix_element, category, AffixCategory,
-        };
+        use super::affixes::{affix_attribute, affix_element, category, AffixCategory};
         use crate::stats::Stat;
 
         let mut rolled: Vec<RolledAffix> = Vec::new();
@@ -188,20 +186,16 @@ impl Item {
             }
         }
 
-        // Trio: Attribute × Element × Archetype damage axes.
+        // Duo: Attribute × Element damage axes.
         //
         // Decide which axes this rarity activates.
         //   Common    — Attribute only (one identity line).
-        //   Magic     — Attribute + one of {Element, Archetype}
-        //               (xor; if family rejects one, fall back).
-        //   Rare/Leg  — full trio.
-        let (do_attribute, do_element, do_archetype) = match rarity {
-            Rarity::Common => (true, false, false),
-            Rarity::Magic => {
-                let want_arch = rng.range(0, 2) == 0;
-                (true, !want_arch, want_arch)
-            }
-            Rarity::Rare | Rarity::Legendary => (true, true, true),
+        //   Magic     — Attribute + Element.
+        //   Rare/Leg  — Attribute + Element (same as Magic; the
+        //               extra slot budget is spent on bonus rolls).
+        let (do_attribute, do_element) = match rarity {
+            Rarity::Common => (true, false),
+            Rarity::Magic | Rarity::Rare | Rarity::Legendary => (true, true),
         };
 
         // Uniform pick from a family-locked axis sub-pool. Returns
@@ -225,9 +219,6 @@ impl Item {
                     match cat {
                         AffixCategory::Element => affix_element(d)
                             .map(|e| base.family.allows_element(e))
-                            .unwrap_or(false),
-                        AffixCategory::Archetype => affix_archetype(d)
-                            .map(|a| base.family.allows_archetype(a))
                             .unwrap_or(false),
                         AffixCategory::Attribute => affix_attribute(d)
                             .map(|a| base.family.allows_attribute(a))
@@ -258,29 +249,10 @@ impl Item {
                 push(def, value, &mut rolled, &mut used_stats);
             }
         }
-        let mut tried = (false, false);
         if do_element {
-            tried.0 = true;
             if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
                 let value = roll_value(def, ilvl, rng);
                 push(def, value, &mut rolled, &mut used_stats);
-            } else if rarity == Rarity::Magic {
-                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
-                    let value = roll_value(def, ilvl, rng);
-                    push(def, value, &mut rolled, &mut used_stats);
-                    tried.1 = true;
-                }
-            }
-        }
-        if do_archetype && !tried.1 {
-            if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Archetype) {
-                let value = roll_value(def, ilvl, rng);
-                push(def, value, &mut rolled, &mut used_stats);
-            } else if rarity == Rarity::Magic && !tried.0 {
-                if let Some(def) = pick_axis(base, ilvl, rng, AffixCategory::Element) {
-                    let value = roll_value(def, ilvl, rng);
-                    push(def, value, &mut rolled, &mut used_stats);
-                }
             }
         }
 
@@ -445,11 +417,6 @@ impl Item {
                     // independently; one match suffices.
                     if let Some(e) = super::affixes::resonance_element(a) {
                         if !base.family.allows_element(e) {
-                            return true;
-                        }
-                    }
-                    if let Some(ar) = super::affixes::resonance_archetype(a) {
-                        if !base.family.allows_archetype(ar) {
                             return true;
                         }
                     }

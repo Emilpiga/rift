@@ -47,10 +47,18 @@ impl FloorConfig {
     pub fn for_floor(floor: u32) -> Self {
         let f = floor as f32;
         Self {
-            width: 80,
-            depth: 80,
-            min_leaf_size: 12,
-            max_leaf_size: 28,
+            // Grid doubled (80\u2192160) and the BSP leaf bounds
+            // doubled in lock-step so rooms come out roughly
+            // twice as wide and twice as deep without changing
+            // the typical room count per floor. Enemy density
+            // (packs_per_room / mobs_per_pack) intentionally
+            // stays the same — bigger rooms with the same pack
+            // count means more breathing room between fights,
+            // which is the gameplay change we want.
+            width: 160,
+            depth: 160,
+            min_leaf_size: 24,
+            max_leaf_size: 56,
             room_padding: 1,
             floor,
             base_enemy_count: 15,

@@ -174,6 +174,7 @@ impl Sim {
             player_heals: &mut player_heals,
             summons: &mut summons,
             player_targets: &no_targets,
+            melee_swings: &mut self.pending_melee_swings,
         };
         ability::dispatch(&mut self.world, accepted, &mut sinks, tick);
         debug_assert!(

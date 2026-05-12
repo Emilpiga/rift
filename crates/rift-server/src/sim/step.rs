@@ -155,6 +155,7 @@ impl Sim {
                         player_heals: &mut player_heals_unused,
                         summons: &mut summon_queue,
                         player_targets: &player_targets,
+                        melee_swings: &mut self.pending_melee_swings,
                     };
                     ability::dispatch(&mut self.world, accepted, &mut sinks, tick);
                     debug_assert!(
@@ -254,6 +255,75 @@ impl Sim {
             proc_casts: &mut proc_cast_queue,
             share_window_ticks: SHARE_WINDOW_TICKS,
         };
+        // Resolve queued player melee swings against the live
+        // enemy snapshot. Each swing fires `apply_hits_to_enemies`
+        // with the same hit pipeline projectiles / channels
+        // use (aggro, on-hit procs, kills, loot). Drained before
+        // `projectile::tick` so the swing damage / death events
+        // appear ahead of any projectile hits this tick — feels
+        // right for the LMB swing being the most immediate
+        // input → outcome chain.
+        if !self.pending_melee_swings.is_empty() {
+            let mut swing_hits: Vec<projectile::Hit> = Vec::new();
+            for swing in self.pending_melee_swings.drain(..) {
+                let r2 = swing.radius * swing.radius;
+                let aim_xz = glam::Vec2::new(swing.aim.x, swing.aim.z);
+                let aim_len2 = aim_xz.length_squared();
+                if aim_len2 < 1.0e-6 {
+                    continue;
+                }
+                let aim_n = aim_xz / aim_len2.sqrt();
+                let half_arc_cos = (swing.arc_radians * 0.5).cos();
+                for (en_entity, en_pos, en_net_id, _en_radius) in &enemies {
+                    let dx = en_pos.x - swing.origin.x;
+                    let dz = en_pos.z - swing.origin.z;
+                    let d2 = dx * dx + dz * dz;
+                    if d2 > r2 || d2 < 1.0e-6 {
+                        // Out of range, or the caster's own
+                        // tile — the latter shouldn't happen
+                        // for enemies vs players but guards
+                        // against a divide-by-zero on the
+                        // bearing check below.
+                        continue;
+                    }
+                    let inv = 1.0 / d2.sqrt();
+                    let dot = (dx * aim_n.x + dz * aim_n.y) * inv;
+                    if dot < half_arc_cos {
+                        continue;
+                    }
+                    swing_hits.push(projectile::Hit {
+                        enemy: *en_entity,
+                        enemy_net_id: *en_net_id,
+                        enemy_pos: *en_pos,
+                        attacker: swing.caster_net_id,
+                        ability_id: swing.ability_id,
+                        damage: swing.damage,
+                        crit_chance: swing.crit_chance,
+                        crit_damage: swing.crit_damage,
+                        crit_seed: projectile::hit_seed(
+                            ctx.tick,
+                            *en_net_id,
+                            swing.caster_net_id,
+                            swing.ability_id.raw() as u64,
+                        ),
+                        apply_debuff: None,
+                        // Swing impulse points from caster
+                        // outward along the aim direction so
+                        // the blood splash kicks away from
+                        // the swinger.
+                        hit_dir: glam::Vec3::new(aim_n.x, 0.0, aim_n.y),
+                    });
+                }
+            }
+            if !swing_hits.is_empty() {
+                projectile::apply_hits_to_enemies(
+                    &mut self.world,
+                    &self.floor,
+                    swing_hits,
+                    &mut ctx,
+                );
+            }
+        }
         // Unified projectile tick — handles both player→enemy
         // and enemy→player bolts (distinguished by `Team`).
         // Enemy-team hits are returned as `(player, damage)`
@@ -350,6 +420,7 @@ impl Sim {
                     player_heals: &mut proc_player_heals,
                     summons: &mut proc_summons,
                     player_targets: &player_targets,
+                    melee_swings: &mut self.pending_melee_swings,
                 };
                 ability::dispatch_proc_cast(&mut self.world, caster, request, &mut sinks, tick);
             }
@@ -624,6 +695,8 @@ impl Sim {
             path: Vec::new(),
             path_target_tile: None,
             path_recompute_in: 0.0,
+            los_blocked_cached: false,
+            los_recheck_in: 0.0,
         };
         self.world.spawn((
             enemy,

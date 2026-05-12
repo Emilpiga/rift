@@ -204,6 +204,14 @@ pub struct Renderer {
     /// crosses a wall edge. Pumped to the shader via
     /// `fogOrigin.w`.
     pub wall_xray_strength: f32,
+    /// World-space xz AABB of the room the player is currently
+    /// in: `(min_x, min_z, max_x, max_z)`. The cel shader uses
+    /// this to gate the see-through-wall porthole: only wall
+    /// fragments inside this AABB (plus a small margin for
+    /// the wall thickness on the boundary) can carve. All
+    /// zero means "no active room" — the porthole is disabled
+    /// entirely. Pumped to the shader via the existing UBO.
+    pub player_room_aabb: Vec4,
     // Dynamic point lights (populated each frame by game code)
     pub point_lights: Vec<PointLight>,
     /// Transient VFX-driven point lights (projectile trails,
@@ -701,6 +709,7 @@ impl Renderer {
             fog_end: 16.0,
             fog_origin: Vec3::ZERO,
             wall_xray_strength: 0.0,
+            player_room_aabb: Vec4::ZERO,
             point_lights: Vec::new(),
             vfx_lights: Vec::new(),
             heat_sources: Vec::new(),
@@ -1818,6 +1827,7 @@ impl Renderer {
                 0.0,
             ),
             blood_field_xform: self.blood_field.world_xform,
+            player_room_aabb: self.player_room_aabb,
         }
     }
 

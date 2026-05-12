@@ -295,6 +295,18 @@ impl AudioSystem {
         self.listener.set_orientation(orientation, smooth_tween());
     }
 
+    /// Set the master output gain. `1.0` = source level, `0.0`
+    /// = silent. Tweens smoothly so a fast settings drag doesn't
+    /// click. Linear 0..=1 input is mapped to dB internally;
+    /// the kira main track sits in front of every spatial track
+    /// so this single call attenuates every sound at once.
+    pub fn set_master_volume(&mut self, linear: f32) {
+        let clamped = linear.clamp(0.0, 1.0);
+        self.manager
+            .main_track()
+            .set_volume(linear_to_db(clamped), smooth_tween());
+    }
+
     /// Reap finished one-shots and dead loop emitters. Cheap;
     /// just walks two short vectors.
     pub fn tick(&mut self) {

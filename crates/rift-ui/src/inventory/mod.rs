@@ -28,7 +28,8 @@ use self::layout::{Layout, HEADER_H, PANEL_PAD_X, PANEL_PAD_Y};
 use self::stash_panel::{render_stash_panel, FilterStateRef, RenameStateRef, StashPanelIn};
 use self::stats_panel::render_stats_panel;
 use self::tooltips::{
-    render_compare_delta_side_of, render_item_tooltip_anchored, render_item_tooltip_side_of,
+    render_compare_delta_side_of, render_item_tooltip, render_item_tooltip_anchored,
+    render_item_tooltip_side_of,
 };
 
 /// Run one frame of the inventory drawer.
@@ -135,17 +136,6 @@ pub fn frame_inventory(
         "INVENTORY",
         theme.fonts.size_lg,
         theme.colors.text,
-    );
-    let hint = "TAB to close";
-    let hw = ui.measure_text(hint, theme.fonts.size_sm);
-    ui.draw_text(
-        Pos2::new(
-            layout.header.max.x - hw,
-            layout.header.y() + theme.fonts.size_lg - theme.fonts.size_sm,
-        ),
-        hint,
-        theme.fonts.size_sm,
-        theme.colors.text_dim,
     );
     ui.draw_rect(
         Rect::from_xywh(
@@ -457,6 +447,26 @@ pub fn frame_inventory(
                 if ui.shift_held() && !item.compare_delta.is_empty() {
                     render_compare_delta_side_of(ui, item.compare_delta, eq_rect, prefer_left);
                 }
+                // Secondary equipped (rings only) stacks
+                // vertically *below* the primary equipped
+                // tooltip, with its own Δ panel chained next
+                // to it in the same `prefer_left` direction
+                // so the player can read both ring slots at
+                // a glance instead of having to swap rings
+                // around to compare.
+                if let Some(equipped2) = item.compare_with_secondary {
+                    let gap = 6.0 * layout.fit;
+                    let anchor2 = Pos2::new(eq_rect.x(), eq_rect.max.y + gap);
+                    let eq2_rect = render_item_tooltip(ui, equipped2, "Equipped", anchor2);
+                    if ui.shift_held() && !item.compare_delta_secondary.is_empty() {
+                        render_compare_delta_side_of(
+                            ui,
+                            item.compare_delta_secondary,
+                            eq2_rect,
+                            prefer_left,
+                        );
+                    }
+                }
             }
         }
     }
@@ -519,10 +529,19 @@ pub fn frame_inventory(
         }
     }
     if let Some(drop) = ui.take_drop_outside::<DragSource>() {
-        if let DragSource::Bag(idx) = drop.payload {
-            actions.push(InventoryAction::DropToWorld {
-                inventory_index: idx,
-            });
+        match drop.payload {
+            DragSource::Bag(idx) => {
+                actions.push(InventoryAction::DropToWorld {
+                    inventory_index: idx,
+                });
+            }
+            DragSource::Equip(slot) => {
+                actions.push(InventoryAction::DropEquipToWorld { slot: slot.0 });
+            }
+            DragSource::Stash(_) => {
+                // Stash items aren't allowed to drop onto the
+                // ground — they're already safe-stored.
+            }
         }
     }
 

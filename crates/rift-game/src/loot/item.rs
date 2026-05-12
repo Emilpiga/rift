@@ -473,8 +473,7 @@ mod tests {
     /// Every damage-axis affix on a rolled item must satisfy the
     /// base's `BaseFamily` lock. A sword (Source::Weapon) must
     /// never roll a Spell-source line; a staff (Element ∈ {Fire,
-    /// Ice, Lightning}) must never roll Physical; a bow
-    /// (Archetype::Projectile) must never roll Beam / AoE / Melee.
+    /// Ice, Lightning}) must never roll Physical.
     /// This is *the* invariant the trio pipeline buys us — it's
     /// why the pipeline exists.
     ///
@@ -484,9 +483,7 @@ mod tests {
     /// ([`resonance_lines_are_always_cross_family`]).
     #[test]
     fn axis_lines_respect_family_lock() {
-        use super::super::affixes::{
-            affix_archetype, affix_attribute, affix_element, is_resonance,
-        };
+        use super::super::affixes::{affix_attribute, affix_element, is_resonance};
         for_every_roll(16, |it| {
             for a in &it.affixes {
                 if is_resonance(a.def) {
@@ -497,16 +494,6 @@ mod tests {
                         it.base.family.allows_element(e),
                         "base `{}` (family {:?}) rolled out-of-family \
                          Element line `{}`",
-                        it.base.id,
-                        it.base.family,
-                        a.def.id,
-                    );
-                }
-                if let Some(ar) = affix_archetype(a.def) {
-                    assert!(
-                        it.base.family.allows_archetype(ar),
-                        "base `{}` (family {:?}) rolled out-of-family \
-                         Archetype line `{}`",
                         it.base.id,
                         it.base.family,
                         a.def.id,
@@ -550,17 +537,13 @@ mod tests {
         });
     }
 
-    /// Common rolls exactly one attribute line. Magic rolls
-    /// attribute + one of {Element, Archetype}. Rare/Legendary
-    /// rolls the full Attribute × Element × Archetype trio.
+    /// Common rolls exactly one attribute line. Magic / Rare /
+    /// Legendary roll the Attribute + Element duo.
     #[test]
     fn rarity_gates_trio_shape() {
-        use super::super::affixes::{
-            affix_archetype, affix_attribute, affix_element, is_resonance,
-        };
+        use super::super::affixes::{affix_attribute, affix_element, is_resonance};
         for_every_roll(16, |it| {
             let mut elements = 0;
-            let mut archetypes = 0;
             let mut attributes = 0;
             for a in &it.affixes {
                 if is_resonance(a.def) {
@@ -568,9 +551,6 @@ mod tests {
                 }
                 if affix_element(a.def).is_some() {
                     elements += 1;
-                }
-                if affix_archetype(a.def).is_some() {
-                    archetypes += 1;
                 }
                 if affix_attribute(a.def).is_some() {
                     attributes += 1;
@@ -584,30 +564,12 @@ mod tests {
                         it.base.id, attributes
                     );
                     assert_eq!(
-                        elements + archetypes,
-                        0,
-                        "base `{}` Common: expected 0 element/archetype lines, got {}+{}",
-                        it.base.id,
-                        elements,
-                        archetypes
+                        elements, 0,
+                        "base `{}` Common: expected 0 element lines, got {}",
+                        it.base.id, elements,
                     );
                 }
-                Rarity::Magic => {
-                    assert_eq!(
-                        attributes, 1,
-                        "base `{}` Magic: expected 1 attribute line, got {}",
-                        it.base.id, attributes
-                    );
-                    assert_eq!(
-                        elements + archetypes,
-                        1,
-                        "base `{}` Magic: expected exactly one of element/archetype, got {}+{}",
-                        it.base.id,
-                        elements,
-                        archetypes
-                    );
-                }
-                Rarity::Rare | Rarity::Legendary => {
+                Rarity::Magic | Rarity::Rare | Rarity::Legendary => {
                     assert_eq!(
                         attributes, 1,
                         "base `{}` {:?}: expected 1 Attribute line, got {}",
@@ -617,11 +579,6 @@ mod tests {
                         elements, 1,
                         "base `{}` {:?}: expected 1 Element line, got {}",
                         it.base.id, it.rarity, elements
-                    );
-                    assert_eq!(
-                        archetypes, 1,
-                        "base `{}` {:?}: expected 1 Archetype line, got {}",
-                        it.base.id, it.rarity, archetypes
                     );
                 }
             }
@@ -640,9 +597,7 @@ mod tests {
     /// in-family lines and the cross-family flavour is gone.
     #[test]
     fn resonance_lines_are_always_cross_family() {
-        use super::super::affixes::{
-            is_resonance, resonance_archetype, resonance_attribute, resonance_element,
-        };
+        use super::super::affixes::{is_resonance, resonance_attribute, resonance_element};
         for_every_roll(64, |it| {
             for a in &it.affixes {
                 if !is_resonance(a.def) {
@@ -651,9 +606,6 @@ mod tests {
                 let cross = resonance_element(a.def)
                     .map(|e| !it.base.family.allows_element(e))
                     .unwrap_or(false)
-                    || resonance_archetype(a.def)
-                        .map(|ar| !it.base.family.allows_archetype(ar))
-                        .unwrap_or(false)
                     || resonance_attribute(a.def)
                         .map(|at| !it.base.family.allows_attribute(at))
                         .unwrap_or(false);

@@ -38,6 +38,13 @@ layout(binding = 0) uniform UniformData {
     // (min corner of floor AABB), zw = inverse extent. When all
     // zero the field is inactive and the composite is skipped.
     vec4 bloodFieldXform;
+    // Reserved \u2014 was a per-room AABB gate for the porthole.
+    // The gate jittered at room boundaries (alcoves /
+    // corridors aren't covered by a single BSP rect) and the
+    // `tFrag < distPlayer` check already prevents seeing past
+    // the player into the next room, so the gate was dropped.
+    // Kept in the layout to preserve the UBO size.
+    vec4 reservedRoomAabb;
 } ubo;
 
 layout(set = 0, binding = 1) uniform sampler2D unusedSampler; // legacy slot, kept for descriptor compatibility
@@ -1973,19 +1980,13 @@ void main() {
             vec3 dirPlayer = camToPlayer / distPlayer;
 
             float tFrag = dot(camToFrag, dirPlayer);
-            // Allow walls well past the player to carve too.
-            // Under the locked top-down pitch, a wall sitting
-            // ahead of the player (the far side of a corridor,
-            // the entrance arch of the next room) will block
-            // the view of what lies beyond unless the porthole
-            // also opens through it. The CPU raycast extends
-            // 12 m past the player and we mirror that here so
-            // the same fragments qualify on the GPU side.
-            // 12 m comfortably reaches across one full room
-            // at the dungeon's typical scale, letting the
-            // player peek into the next chamber as soon as
-            // the camera ray clips its near wall.
-            if (tFrag > 0.2 && tFrag < distPlayer + 12.0) {
+            // Only walls strictly between the camera and the
+            // player carve the porthole. Extending the test
+            // past the player would let walls of adjacent
+            // rooms qualify and reveal them through the
+            // porthole even when nothing was occluding the
+            // player — exactly the leak we want to avoid.
+            if (tFrag > 0.2 && tFrag < distPlayer) {
                 // Decompose the perpendicular offset from the
                 // camera→player ray into horizontal (ground-
                 // plane) and vertical (world-Y) components, so

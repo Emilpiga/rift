@@ -429,6 +429,12 @@ pub enum EquipRequest {
     DropToWorld {
         inventory_index: u32,
     },
+    /// Drop an equipped item directly onto the ground.
+    /// Mirrors [`Self::DropToWorld`] but for the equipment
+    /// slot side.
+    DropEquipToWorld {
+        slot: u8,
+    },
     /// Salvage the bag item for shards. Server validates the
     /// item isn't anchored, removes it from the bag, and
     /// pushes back fresh `InventorySync` + `ShardsSync`.
@@ -447,6 +453,13 @@ pub enum EquipRequest {
     UnequipToSlot {
         slot: u8,
         inventory_index: u32,
+    },
+    /// Swap two equipment slots directly. Only ring1 ↔ ring2
+    /// is legal today; the server validates both
+    /// `Equipment::accepts` directions before applying.
+    SwapEquip {
+        a: u8,
+        b: u8,
     },
     /// Auto-sort the bag in place. Server compacts items by
     /// rarity desc, ilvl desc, footprint area desc.

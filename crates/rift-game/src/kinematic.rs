@@ -44,6 +44,43 @@ pub mod loco {
 pub mod action {
     pub const NONE: u8 = 0;
     pub const ROLL: u8 = 1;
+    /// Melee swing combo — four cycling steps (A/B/C/D). The
+    /// server picks the next step on each `MeleeArc` cast and
+    /// stamps it onto the snapshot's `action` byte. Local +
+    /// remote clients map the step to a per-step clip name
+    /// list and play the swing on the upper-body cast layer.
+    /// Movement is *not* locked: the swing rides on top of
+    /// locomotion via the `SpellCast` mask, so you can keep
+    /// strafing through a combo.
+    pub const ATTACK_A: u8 = 2;
+    pub const ATTACK_B: u8 = 3;
+    pub const ATTACK_C: u8 = 4;
+    pub const ATTACK_D: u8 = 5;
+
+    /// `true` if `byte` is any of the four `ATTACK_*` combo
+    /// steps. Centralised so locomotion / animation gates that
+    /// just need "is the avatar mid-swing" don't have to repeat
+    /// the range check.
+    pub const fn is_attack(byte: u8) -> bool {
+        byte >= ATTACK_A && byte <= ATTACK_D
+    }
+
+    /// 0..3 combo step for an `ATTACK_*` byte, or `0` for any
+    /// other action byte (caller is expected to gate with
+    /// [`is_attack`] first).
+    pub const fn attack_step(byte: u8) -> u8 {
+        if is_attack(byte) {
+            byte - ATTACK_A
+        } else {
+            0
+        }
+    }
+
+    /// Inverse of [`attack_step`] — wrap `step` into the
+    /// `ATTACK_A..=ATTACK_D` band.
+    pub const fn attack_for_step(step: u8) -> u8 {
+        ATTACK_A + (step & 0b11)
+    }
 }
 
 /// Total dodge-roll duration in seconds. Includes the trailing
@@ -64,6 +101,38 @@ pub const ROLL_PEAK_SPEED: f32 = 14.0;
 /// small forward bleed avoids a hard stop that visibly clashes
 /// with the recovery animation.
 pub const ROLL_END_SPEED: f32 = 1.5;
+
+/// Total melee swing duration in seconds. Drives the
+/// `attack_remaining` timer on [`Kinematic`] which gates how
+/// long the snapshot reports the avatar as mid-swing
+/// (`action::ATTACK_*`). The swing does **not** lock
+/// horizontal velocity — movement runs normally through the
+/// locomotion blend while the upper-body `SpellCast` layer
+/// plays the swing clip on top. Roughly matches the melee
+/// cooldown so the combo step on the wire stays valid for the
+/// full window during which the next swing can chain.
+pub const ATTACK_DURATION: f32 = 0.4;
+
+/// Time-since-last-swing window during which a fresh `MeleeArc`
+/// cast advances the combo step instead of resetting to step
+/// 0. Sized so chaining swings on the cooldown roughly keeps
+/// the combo going while a deliberate pause restarts it.
+pub const ATTACK_COMBO_WINDOW: f32 = 1.0;
+
+/// Per-combo-step clip-name candidate lists. Index `i` is the
+/// `0..=3` step value broadcast via [`action::attack_for_step`]
+/// / [`action::attack_step`]; each inner slice is fed to
+/// `AnimationSet::find_any` so the first present clip name wins
+/// (case-insensitive). Same table is read by the local cast
+/// trigger (player-issued LMB swing) and the remote avatar
+/// mirror (snapshot `action` byte transition) so both sides
+/// stay in sync on which step plays which clip.
+pub const MELEE_COMBO_CLIPS: [&[&str]; 4] = [
+    &["Sword_Light_A", "1H_Melee_Attack_Slice_Diagonal", "Slash"],
+    &["Sword_Light_B", "1H_Melee_Attack_Slice_Horizontal", "Slash"],
+    &["Sword_Light_C", "1H_Melee_Attack_Chop", "Slash"],
+    &["Sword_Light_D", "1H_Melee_Attack_Stab", "Slash"],
+];
 
 /// Bit positions inside the input command's button bitfield. These
 /// MUST stay in sync with `rift_net::messages::button_bits` — they are
@@ -119,6 +188,12 @@ pub struct Kinematic {
     /// into the snapshot so clients can drive the matching
     /// animation on remote avatars.
     pub action: u8,
+    /// Time remaining on the active melee swing, in seconds.
+    /// While non-zero `apply_input` forces horizontal velocity
+    /// to zero so the swinger can't slide. Decremented every
+    /// `integrate` step; the trailing zero crossing clears
+    /// `action` back to [`action::NONE`].
+    pub attack_remaining: f32,
 }
 
 /// Apply a fresh input command to the kinematic state. Mirrors
@@ -138,6 +213,15 @@ pub fn apply_input(
     if aim_dir[0] != 0.0 || aim_dir[1] != 0.0 {
         k.aim_yaw = aim_dir[0].atan2(aim_dir[1]);
     }
+
+    // Active melee swing: the upper body plays the swing
+    // clip via the SpellCast mask, but the legs keep doing
+    // their locomotion thing — we deliberately don't override
+    // velocity here so the player can strafe through a combo.
+    // The `attack_remaining` timer ticks down in `integrate`
+    // and clears `action` back to NONE on expiry; the action
+    // byte is informational only at this point (drives the
+    // remote upper-body clip pick).
 
     // Active dodge-roll: lock movement to the captured roll vector
     // with a speed curve that runs at peak until the last
@@ -234,6 +318,27 @@ pub fn start_roll(k: &mut Kinematic, dir: Vec3) {
     if k.airborne {
         k.vy = 0.0;
     }
+}
+
+/// Begin a melee swing facing the given XZ direction. Sets the
+/// swing timer + stamps the supplied combo `step` onto
+/// [`Kinematic::action`] so the snapshot pipeline broadcasts
+/// which of the four combo clips remote clients should play.
+/// Movement is **not** locked — see [`ATTACK_DURATION`] for
+/// the rationale. Body yaw snaps to the swing direction so the
+/// upper-body swing visibly faces the target.
+///
+/// `dir` does not need to be normalised; we project to XZ and
+/// renormalise. A degenerate `dir` keeps the player's existing
+/// body yaw. `step` is wrapped into the `0..=3` band.
+pub fn start_attack(k: &mut Kinematic, dir: Vec3, step: u8) {
+    let xz = Vec3::new(dir.x, 0.0, dir.z);
+    if xz.length_squared() > 1.0e-4 {
+        let n = xz.normalize();
+        k.yaw = n.x.atan2(n.z);
+    }
+    k.attack_remaining = ATTACK_DURATION;
+    k.action = action::attack_for_step(step);
 }
 
 /// Integrate `velocity * dt` into `position` while resisting wall
@@ -441,6 +546,17 @@ pub fn integrate(k: &mut Kinematic, floor: &Floor, dt: f32) {
     if k.roll_remaining > 0.0 {
         k.roll_remaining = (k.roll_remaining - dt).max(0.0);
         if k.roll_remaining == 0.0 {
+            k.action = action::NONE;
+        }
+    }
+
+    // Mirror tick for the melee-swing timer. Same shape as the
+    // roll clock above: when it expires we flip `action` back
+    // to `NONE` so the snapshot pipeline returns the avatar to
+    // its locomotion blend on the next tick.
+    if k.attack_remaining > 0.0 {
+        k.attack_remaining = (k.attack_remaining - dt).max(0.0);
+        if k.attack_remaining == 0.0 && action::is_attack(k.action) {
             k.action = action::NONE;
         }
     }

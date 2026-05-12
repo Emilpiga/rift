@@ -381,6 +381,16 @@ pub enum ClientMsg {
     /// the picker. Reliable on `Channel::Control`.
     DropInventoryItem { inventory_index: u32 },
 
+    /// Drop the equipped item in `slot` directly onto the
+    /// ground (skipping the bag). Server validates the slot
+    /// is occupied + the player is outside the hub, takes
+    /// the item out of the equipment loadout, spawns a
+    /// `ServerLoot` entity at the player's feet, and replies
+    /// with fresh `InventorySync` + `EquipmentSync`. Same
+    /// town-drop ban as `DropInventoryItem` applies.
+    /// Reliable on `Channel::Control`.
+    DropEquippedItem { slot: u8 },
+
     /// Permanently destroy the bag item at `inventory_index` in
     /// exchange for [shards](`ServerMsg::ShardsSync`). Yield is
     /// computed by the server from the item's rarity and ilvl.
@@ -428,6 +438,15 @@ pub enum ClientMsg {
     /// always appending to the end as `UnequipItem` does. Server
     /// replies with fresh `InventorySync` + `EquipmentSync`.
     UnequipToBagSlot { slot: u8, inventory_index: u32 },
+
+    /// Swap the contents of two equipment slots in place.
+    /// Server validates `Equipment::accepts` in BOTH
+    /// directions (item at `a` must fit into `b`, item at
+    /// `b` must fit into `a`) — illegal pairs are rejected.
+    /// Currently only ring1 ↔ ring2 satisfies the check, but
+    /// the wire shape stays generic. Server replies with a
+    /// fresh `EquipmentSync` on success.
+    SwapEquipSlots { a: u8, b: u8 },
 
     /// Mutate one slot of the player's persisted ability loadout.
     /// `slot_index` is the action-bar slot (0..6); `ability_id`

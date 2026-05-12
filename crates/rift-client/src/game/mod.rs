@@ -23,6 +23,7 @@ pub mod loot_models;
 pub mod meters;
 pub mod monster_assets;
 pub mod party;
+pub mod pause;
 pub mod phases;
 pub mod props;
 pub mod spellbook;
