@@ -9,9 +9,7 @@
 use rift_game::talents::{
     AbilityModifier, KeystoneId, Route, TalentEffect, TalentId, TalentStat, TalentTree,
 };
-use rift_ui_types::talents::{
-    TalentNodeKind, TalentNodeView, TalentRouteView, TalentTreeView,
-};
+use rift_ui_types::talents::{TalentNodeKind, TalentNodeView, TalentRouteView, TalentTreeView};
 
 /// Build a flat view of `tree` ready to hand to
 /// `rift_ui::talents::frame_talent_panel`. Cheap to do every
@@ -35,11 +33,10 @@ pub fn build_talent_view(tree: &TalentTree) -> TalentTreeView<'_> {
             .filter_map(|id| id_to_idx.get(id).copied())
             .collect();
 
-        let prereqs_met = node.prerequisites.iter().all(|p| {
-            tree.nodes
-                .iter()
-                .any(|n| n.id == *p && n.current_rank >= 1)
-        });
+        let prereqs_met = node
+            .prerequisites
+            .iter()
+            .all(|p| tree.nodes.iter().any(|n| n.id == *p && n.current_rank >= 1));
         let investable = tree.can_invest(node.id);
 
         nodes.push(TalentNodeView {
@@ -76,9 +73,7 @@ fn route_view(r: Route) -> TalentRouteView {
 
 fn kind_view(effect: &TalentEffect) -> TalentNodeKind {
     match effect {
-        TalentEffect::PercentBonus { .. } | TalentEffect::FlatBonus { .. } => {
-            TalentNodeKind::Stat
-        }
+        TalentEffect::PercentBonus { .. } | TalentEffect::FlatBonus { .. } => TalentNodeKind::Stat,
         TalentEffect::UnlockAbility { .. } => TalentNodeKind::Unlock,
         TalentEffect::AbilityMod { .. } => TalentNodeKind::Modifier,
         TalentEffect::PassiveProc { .. } => TalentNodeKind::Proc,
@@ -105,7 +100,11 @@ fn tooltip_lines(node: &rift_game::talents::TalentNode) -> Vec<String> {
         TalentEffect::AbilityMod { modifier, .. } => {
             lines.push(format!("Modifier: {}", modifier_label(modifier)));
         }
-        TalentEffect::PassiveProc { chance, per_rank, description } => {
+        TalentEffect::PassiveProc {
+            chance,
+            per_rank,
+            description,
+        } => {
             if !description.is_empty() {
                 lines.push(description.to_string());
             }

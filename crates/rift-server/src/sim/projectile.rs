@@ -586,6 +586,26 @@ pub(super) fn apply_hits_to_enemies(
             }
             en.hp = (en.hp - scaled).max(0.0);
             let died = en.hp <= 0.0;
+            // Punch knockback. Sets a short-lived knockback
+            // velocity that the AI tick reads each frame and
+            // fades to zero across the window, so the enemy
+            // slides visibly across several snapshots instead
+            // of teleporting one frame. Skipped on the killing
+            // blow (the death anim takes over) and on
+            // juggernauts (mirrors the stagger rule).
+            // `integrate_motion` consumes the velocity later
+            // in the tick so walls / props stop the slide.
+            let punch_knockback = !died && hit.ability_id == rift_game::abilities::id::PUNCH;
+            if punch_knockback {
+                let juggernaut = (en.elite_mods & super::enemies::elite_mod::JUGGERNAUT) != 0;
+                if !juggernaut {
+                    let dir = Vec3::new(hit.hit_dir.x, 0.0, hit.hit_dir.z);
+                    if dir.length_squared() > 1.0e-6 {
+                        en.knockback_velocity = dir.normalize() * 6.0;
+                        en.knockback_remaining = 0.18;
+                    }
+                }
+            }
             // Stagger: any crit, or any hit > threshold of hp_max,
             // and the enemy isn't a juggernaut. Skipped on the
             // killing blow — the death anim takes over there.

@@ -14,8 +14,7 @@ use std::collections::HashMap;
 use hecs::Entity;
 use rift_game::abilities::AbilityWireId;
 use rift_net::messages::{
-    MeterAbilityBreakdown, MeterEntry, MeterTakenAbility, MeterTakenAttackerBreakdown,
-    ServerMsg,
+    MeterAbilityBreakdown, MeterEntry, MeterTakenAbility, MeterTakenAttackerBreakdown, ServerMsg,
 };
 use rift_net::ClientId;
 
@@ -94,12 +93,7 @@ impl MeterAccum {
     /// `damage_taken` total *and* both axes of the
     /// `taken_by_attacker` two-level map so the TAKEN tab can
     /// drill from attacker → ability.
-    pub fn add_damage_taken(
-        &mut self,
-        attacker_kind: u8,
-        ability_id: AbilityWireId,
-        amount: f32,
-    ) {
+    pub fn add_damage_taken(&mut self, attacker_kind: u8, ability_id: AbilityWireId, amount: f32) {
         self.damage_taken += amount;
         let bucket = self.taken_by_attacker.entry(attacker_kind).or_default();
         bucket.damage_taken += amount;

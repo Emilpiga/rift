@@ -96,12 +96,21 @@ pub fn record_render_pass(
         .clear_values(&clear_values);
 
     unsafe {
-        device.cmd_begin_render_pass(command_buffer, &render_pass_begin, vk::SubpassContents::INLINE);
+        device.cmd_begin_render_pass(
+            command_buffer,
+            &render_pass_begin,
+            vk::SubpassContents::INLINE,
+        );
         device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
         for draw in draws {
             device.cmd_bind_vertex_buffers(command_buffer, 0, &[draw.vertex_buffer], &[0]);
-            device.cmd_bind_index_buffer(command_buffer, draw.index_buffer, 0, vk::IndexType::UINT32);
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                draw.index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
             device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,

@@ -25,8 +25,7 @@ impl VulkanInstance {
             .api_version(vk::API_VERSION_1_3);
 
         let mut extension_names =
-            ash_window::enumerate_required_extensions(window.display_handle()?.as_raw())?
-                .to_vec();
+            ash_window::enumerate_required_extensions(window.display_handle()?.as_raw())?.to_vec();
 
         let enable_validation = cfg!(debug_assertions) && Self::validation_layers_available(&entry);
         let layer_names: Vec<CString> = if enable_validation {
@@ -89,8 +88,7 @@ impl VulkanInstance {
 impl Drop for VulkanInstance {
     fn drop(&mut self) {
         unsafe {
-            if let (Some(debug_utils), Some(messenger)) =
-                (&self.debug_utils, self.debug_messenger)
+            if let (Some(debug_utils), Some(messenger)) = (&self.debug_utils, self.debug_messenger)
             {
                 debug_utils.destroy_debug_utils_messenger(messenger, None);
             }

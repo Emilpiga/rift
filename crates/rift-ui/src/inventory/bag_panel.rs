@@ -264,6 +264,7 @@ pub fn render_paperdoll(
             bag_in.stash_open,
             false,
             bag_in.active_tab_u8,
+            false,
             out_actions,
             in_transit,
         );
@@ -410,6 +411,7 @@ pub fn render_bag_grid(
                 bag_in.stash_open,
                 false,
                 bag_in.active_tab_u8,
+                false,
                 out_actions,
                 &mut out.in_transit_from_drop,
             );
@@ -484,6 +486,7 @@ pub fn render_bag_grid(
                 bag_in.stash_open,
                 false,
                 bag_in.active_tab_u8,
+                item.is_consumable,
                 out_actions,
                 &mut out.in_transit_from_drop,
             );

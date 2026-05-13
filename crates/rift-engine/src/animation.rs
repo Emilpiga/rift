@@ -707,11 +707,7 @@ pub fn build_bone_palette_layered(
             // forward lean (which on top of a run cycle reads as
             // "punching into the ground").
             let yaw_only = layer_yaw_only_mask.get(i).copied().unwrap_or(0.0) > 0.5;
-            let target = if yaw_only {
-                project_yaw(rl[i])
-            } else {
-                rl[i]
-            };
+            let target = if yaw_only { project_yaw(rl[i]) } else { rl[i] };
             r[i] = r[i].slerp(target, m);
         }
     }

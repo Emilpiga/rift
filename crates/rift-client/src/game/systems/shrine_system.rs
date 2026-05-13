@@ -21,9 +21,8 @@ use rift_net::messages::SHRINE_INTERACT_RADIUS;
 use rift_net::NetId;
 use std::collections::HashMap;
 
-use crate::game::sub_state::ShrineClientState;
 use crate::game::sub_state::NetState;
-
+use crate::game::sub_state::ShrineClientState;
 
 /// Per-shrine on-screen state mirrored from the snapshot. The
 /// emitter id lets us tear the VFX down cleanly when the server
@@ -32,7 +31,7 @@ use crate::game::sub_state::NetState;
 pub struct ShrineVisual {
     pub net_id: NetId,
     pub position: Vec3,
-    pub progress: f32,   // 0.0..=1.0
+    pub progress: f32, // 0.0..=1.0
     pub channelers: u8,
     pub required: u8,
     pub pillar_emitter: EffectId,
@@ -85,10 +84,7 @@ pub fn sync_visuals(
 /// Find the closest shrine the local player is standing inside
 /// the interact radius of. Used by the HUD prompt + F-press
 /// dispatch. Returns `None` if no shrine is in range.
-pub fn nearest_in_range(
-    world: &hecs::World,
-    shrines: &ShrineClientState,
-) -> Option<NetId> {
+pub fn nearest_in_range(world: &hecs::World, shrines: &ShrineClientState) -> Option<NetId> {
     if shrines.visuals.is_empty() {
         return None;
     }
@@ -187,16 +183,19 @@ pub fn tick_channel_pose(
     // even if `local_intent` still has a stale id; treat that
     // same as a `Some -> None` transition.
     let shrine_pos = curr.and_then(|id| {
-        shrines.visuals.iter().find(|v| v.net_id == id).map(|v| v.position)
+        shrines
+            .visuals
+            .iter()
+            .find(|v| v.net_id == id)
+            .map(|v| v.position)
     });
     let active = shrine_pos.is_some();
     let was_active = prev.is_some();
 
     // Player-position lookup. Bail entirely if we have no local
     // avatar yet (loading screen, character select, etc.).
-    let player_pos = player_id.and_then(|pid| {
-        world.get::<&Transform>(pid).ok().map(|t| t.position)
-    });
+    let player_pos =
+        player_id.and_then(|pid| world.get::<&Transform>(pid).ok().map(|t| t.position));
 
     // Hand position from the rigged skeleton. Mirrors the same
     // join lookup the cast pipeline uses for projectile origins
@@ -205,19 +204,21 @@ pub fn tick_channel_pose(
     // transform by the avatar's world matrix. Falls back to a
     // chest-height offset if anything is missing (e.g. unrigged
     // mesh, hand_joint not yet bound).
-    let hand_pos = player_id.and_then(|pid| {
-        let mut q = world
-            .query_one::<(&Transform, &Player, Option<&Skinned>)>(pid)
-            .ok()?;
-        let (t, p, s) = q.get()?;
-        if p.hand_joint == u32::MAX {
-            return None;
-        }
-        let s = s?;
-        let m = s.joint_worlds.get(p.hand_joint as usize)?;
-        let local = m.col(3).truncate();
-        Some(t.matrix().transform_point3(local))
-    }).or_else(|| player_pos.map(|p| p + Vec3::new(0.0, 1.15, 0.0)));
+    let hand_pos = player_id
+        .and_then(|pid| {
+            let mut q = world
+                .query_one::<(&Transform, &Player, Option<&Skinned>)>(pid)
+                .ok()?;
+            let (t, p, s) = q.get()?;
+            if p.hand_joint == u32::MAX {
+                return None;
+            }
+            let s = s?;
+            let m = s.joint_worlds.get(p.hand_joint as usize)?;
+            let local = m.col(3).truncate();
+            Some(t.matrix().transform_point3(local))
+        })
+        .or_else(|| player_pos.map(|p| p + Vec3::new(0.0, 1.15, 0.0)));
 
     // ── Edge: enter channel ──────────────────────────────────
     if active && !was_active {
@@ -243,7 +244,7 @@ pub fn tick_channel_pose(
                 if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
                     cast.phase = SpellPhase::Entering;
                     cast.channeling = true;
-                    cast.fired = true;        // suppress projectile fire-out
+                    cast.fired = true; // suppress projectile fire-out
                     cast.pending_ability = None;
                     cast.pending_oneshot = None;
                     cast.oneshot_is_hit = false;
@@ -276,11 +277,7 @@ pub fn tick_channel_pose(
 
     // ── Active: refresh endpoints + anchor ───────────────────
     if active {
-        if let (Some(beam), Some(hp), Some(sp)) = (
-            shrines.channel_beam,
-            hand_pos,
-            shrine_pos,
-        ) {
+        if let (Some(beam), Some(hp), Some(sp)) = (shrines.channel_beam, hand_pos, shrine_pos) {
             // Aim at the shrine's mid-height so the beam doesn't
             // dive into the floor on tall avatars.
             let tip = sp + Vec3::new(0.0, 0.8, 0.0);

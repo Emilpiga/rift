@@ -167,10 +167,25 @@ impl LootProvenance {
 impl Item {
     /// Bag-grid footprint `(width_cells, height_cells)`. The
     /// item anchors at its inventory storage index and
+    /// Footprint in bag cells, `(width, height)`. The item
     /// extends down + right by these dimensions; all covered
     /// cells must remain empty in the storage `Vec`.
+    ///
+    /// Bag-only items (consumables) have `base.equip_slot ==
+    /// None` and fall through to the 1×1 default — no
+    /// per-call `ItemSlot::Consumable(_)` check needed.
     pub fn footprint(&self) -> (u8, u8) {
-        self.base.equip_slot.inventory_size()
+        self.base.equip_slot.map_or((1, 1), |s| s.inventory_size())
+    }
+
+    /// `true` for bag-only consumable items (potions, respec
+    /// tokens). Used to gate equip / use paths.
+    pub fn consumable_kind(&self) -> Option<super::ConsumableKind> {
+        if let super::ItemSlot::Consumable(k) = self.base.slot {
+            Some(k)
+        } else {
+            None
+        }
     }
 
     /// Stat-only contribution of this item (implicits + Stat affixes).
@@ -405,6 +420,13 @@ mod tests {
         // Drive several seeds per cell so Ring/Amulet's random
         // signature pick is exercised in every branch.
         for b in BASE_ITEMS {
+            // Bag-only bases (consumables) ship with no equip
+            // slot and bypass the affix pipeline entirely \u2014
+            // they have no signature lines to assert. Skip them
+            // so the rest of the loop's invariants stay tight.
+            let Some(equip_slot) = b.equip_slot else {
+                continue;
+            };
             for r in rarities {
                 for seed in 0..8u64 {
                     let mut rng = LootRng::new(
@@ -414,7 +436,7 @@ mod tests {
                             .wrapping_add(seed),
                     );
                     let it = Item::roll(b, r, b.min_ilvl.max(1), &mut rng);
-                    let sig = signature_count(b.equip_slot);
+                    let sig = signature_count(equip_slot);
                     assert!(
                         it.affixes.len() >= sig,
                         "base `{}` rarity {:?}: rolled {} affixes, \
@@ -455,6 +477,13 @@ mod tests {
             Rarity::Legendary,
         ];
         for b in BASE_ITEMS {
+            // Bag-only bases (consumables) bypass the affix
+            // pipeline and have no trio / family / signature
+            // structure to assert. Skip so the assertions in
+            // the closure can stay precise.
+            if b.equip_slot.is_none() {
+                continue;
+            }
             for r in rarities {
                 for seed in 0..seeds {
                     let mut rng = LootRng::new(

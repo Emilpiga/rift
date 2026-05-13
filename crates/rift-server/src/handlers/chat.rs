@@ -20,13 +20,9 @@
 
 use std::time::Instant;
 
-use rift_net::{
-    messages::chat_channel, Channel, ClientId, ServerMsg,
-};
+use rift_net::{messages::chat_channel, Channel, ClientId, ServerMsg};
 
-use crate::chat::{
-    is_client_sendable, sanitise_text, ChatEntry, Recipient, REPLAY_HISTORY,
-};
+use crate::chat::{is_client_sendable, sanitise_text, ChatEntry, Recipient, REPLAY_HISTORY};
 use crate::Server;
 
 impl Server {
@@ -96,10 +92,7 @@ impl Server {
                         // Malformed whisper (no name). Reply
                         // with a system line so the typer
                         // knows their /w syntax was wrong.
-                        self.emit_system_to(
-                            from,
-                            "Whisper requires a recipient name.",
-                        );
+                        self.emit_system_to(from, "Whisper requires a recipient name.");
                         return;
                     }
                 };
@@ -110,9 +103,7 @@ impl Server {
                         // they see their own message.
                         let mut v = vec![r];
                         if v[0].client_id != from {
-                            v.push(Recipient {
-                                client_id: from,
-                            });
+                            v.push(Recipient { client_id: from });
                         }
                         v
                     }
@@ -163,12 +154,7 @@ impl Server {
     /// any whose `mute_list` contains the sender. The mute
     /// filter is recipient-side so a sender can't probe for
     /// who has them muted.
-    pub(crate) fn fan_out(
-        &mut self,
-        recipients: &[Recipient],
-        sender_name: &str,
-        msg: &ServerMsg,
-    ) {
+    pub(crate) fn fan_out(&mut self, recipients: &[Recipient], sender_name: &str, msg: &ServerMsg) {
         for r in recipients {
             // Skip if recipient has muted the sender. Pulled
             // through the session manager so the check is
@@ -187,7 +173,9 @@ impl Server {
         self.sessions
             .iter()
             .filter(|s| s.character_name.is_some())
-            .map(|s| Recipient { client_id: s.client_id })
+            .map(|s| Recipient {
+                client_id: s.client_id,
+            })
             .collect()
     }
 
@@ -202,7 +190,9 @@ impl Server {
             .iter()
             .filter(|s| hub_clients.contains(&s.client_id))
             .filter(|s| s.character_name.is_some())
-            .map(|s| Recipient { client_id: s.client_id })
+            .map(|s| Recipient {
+                client_id: s.client_id,
+            })
             .collect()
     }
 
@@ -217,7 +207,9 @@ impl Server {
             .iter()
             .filter(|s| cohort.contains(&s.client_id))
             .filter(|s| s.character_name.is_some())
-            .map(|s| Recipient { client_id: s.client_id })
+            .map(|s| Recipient {
+                client_id: s.client_id,
+            })
             .collect()
     }
 
@@ -237,7 +229,9 @@ impl Server {
             .iter()
             .filter(|s| members.contains(&s.client_id))
             .filter(|s| s.character_name.is_some())
-            .map(|s| Recipient { client_id: s.client_id })
+            .map(|s| Recipient {
+                client_id: s.client_id,
+            })
             .collect()
     }
 
@@ -277,8 +271,7 @@ impl Server {
         };
         // System messages bypass the mute filter (and aren't
         // attributed to a sender to filter on anyway).
-        let recipients: Vec<ClientId> =
-            self.sessions.iter().map(|s| s.client_id).collect();
+        let recipients: Vec<ClientId> = self.sessions.iter().map(|s| s.client_id).collect();
         for cid in recipients {
             self.send_to(cid, Channel::Control, &msg);
         }

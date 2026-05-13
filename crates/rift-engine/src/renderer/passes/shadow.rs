@@ -7,13 +7,13 @@
 //! a top-down dungeon: 28 m × 28 m projection, 60 m near→far. The frustum is
 //! deliberately tight around the play-area so the 2k depth buffer maps to
 //! ~73 texels / world-meter, which is what the 12-tap Poisson PCF in
-//! `triangle.frag::sampleShadow` relies on for soft-but-defined penumbras.
+//! `forward/shadow_sampling.glsl::sampleShadow` relies on for soft-but-defined penumbras.
 
 use anyhow::Result;
 use ash::vk;
 use glam::{Mat4, Vec3};
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,7 @@ pub const SHADOW_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// character's torso reads as a soft cohesive shape rather than a chunky
 /// 2 cm staircase along the silhouette. The frustum still extends well
 /// past the third-person camera's visible radius, and the edge feather
-/// in `triangle.frag::sampleShadow` lands inside the fog band at any
+/// in `forward/shadow_sampling.glsl::sampleShadow` lands inside the fog band at any
 /// camera angle so shadow despawn at the boundary stays invisible.
 pub const SHADOW_ORTHO_HALF_EXTENT: f32 = 16.0;
 /// Distance behind the focus point at which to place the light camera.

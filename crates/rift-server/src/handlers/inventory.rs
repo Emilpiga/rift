@@ -763,6 +763,35 @@ impl Server {
         }
     }
 
+    /// Apply a `ClientMsg::UseItem`. Validates the bag slot
+    /// holds a consumable, dispatches by `ConsumableKind`,
+    /// burns the token on success, and pushes the appropriate
+    /// `InventorySync` (always) + `TalentsSync` (when the
+    /// consumable touched the tree). Silent no-op on
+    /// rejection \u2014 the bag slot is preserved so a
+    /// failed lesser-respec (e.g. orphaning target) lets the
+    /// player retry.
+    pub(crate) fn handle_use_item(
+        &mut self,
+        from: ClientId,
+        inventory_index: usize,
+        target_arg: u16,
+    ) {
+        let Some(talent_snapshot) =
+            self.sim_for_client_mut(from)
+                .use_bag_consumable(from, inventory_index, target_arg)
+        else {
+            log::debug!("inv: use_item rejected for {from:?} idx={inventory_index}");
+            return;
+        };
+        log::info!("inv: {from:?} consumed bag idx={inventory_index} (target_arg={target_arg})");
+        self.broadcast_inventory_state(from);
+        self.persist_inventory_state(from);
+        if let Some(snapshot) = talent_snapshot {
+            self.persist_and_sync_talents(from, snapshot);
+        }
+    }
+
     /// Move whatever's currently in `slot` into the bag at
     /// `inventory_index` (drag-drop counterpart to
     /// `handle_unequip_item`).

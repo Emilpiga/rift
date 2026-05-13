@@ -65,6 +65,26 @@ pub enum AccessoryKind {
     Amulet,
 }
 
+/// One-shot consumable items. Sit in the bag, consumed by
+/// right-click → `ClientMsg::UseItem`. Each variant maps 1:1 to
+/// a [`crate::loot::ConsumableEffect`] dispatch arm on the
+/// server.
+///
+/// Adding a kind: append a variant here, give it a `BaseItem`
+/// row in [`BASE_ITEMS`] with `slot: ItemSlot::Consumable(…)`,
+/// and add the matching `ConsumableEffect` dispatch case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConsumableKind {
+    /// Greater Respec Token — wipes every invested talent
+    /// point and refunds them all (`TALENT_TREE.md` §7).
+    GreaterRespecToken,
+    /// Lesser Respec Token — refunds every rank of one
+    /// targeted talent node (`TALENT_TREE.md` §7). The use
+    /// payload carries the target `TalentId`; orphan-rejection
+    /// rules apply server-side.
+    LesserRespecToken,
+}
+
 /// Semantic item type — what *kind* of thing it is. Independent of
 /// where on the body it goes (that's [`EquipSlot`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,6 +92,10 @@ pub enum ItemSlot {
     Weapon(WeaponKind),
     Armor(ArmorKind),
     Accessory(AccessoryKind),
+    /// Bag-only consumable (potions, respec tokens, etc.).
+    /// `equip_slot` on the base is irrelevant for these —
+    /// `can_equip` rejects them outright via this discriminator.
+    Consumable(ConsumableKind),
 }
 
 /// Physical slot on the character. Defined here (not in `inventory`)
@@ -175,7 +199,13 @@ pub struct BaseItem {
     pub id: &'static str,
     pub name: &'static str,
     pub slot: ItemSlot,
-    pub equip_slot: EquipSlot,
+    /// Physical body slot this base targets. `None` for
+    /// bag-only items like consumables \u2014 expressing the
+    /// absence directly in the type system avoids "pick a
+    /// dummy `EquipSlot`" bandaids and forces every consumer
+    /// to acknowledge the no-slot case (typically by short-
+    /// circuiting before equip).
+    pub equip_slot: Option<EquipSlot>,
     /// Affix tags this base is willing to roll. Affixes outside the
     /// mask never appear on it.
     pub allowed_tags: u32,
@@ -256,7 +286,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "staff_basic",
         name: "Apprentice Staff",
         slot: ItemSlot::Weapon(WeaponKind::Staff),
-        equip_slot: EquipSlot::Weapon,
+        equip_slot: Some(EquipSlot::Weapon),
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | CRIT,
         favored_tags: ANY_ELEMENT | CASTER,
         implicit: &[(Stat::FireDamage, 0.08)],
@@ -277,7 +307,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "sword_basic",
         name: "Iron Sword",
         slot: ItemSlot::Weapon(WeaponKind::Sword),
-        equip_slot: EquipSlot::Weapon,
+        equip_slot: Some(EquipSlot::Weapon),
         allowed_tags: MELEE | CRIT | SPEED | DEFENSE | UTILITY,
         favored_tags: MELEE | CRIT,
         implicit: &[(Stat::PhysicalDamage, 0.10)],
@@ -294,7 +324,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "dagger_basic",
         name: "Hunter's Dagger",
         slot: ItemSlot::Weapon(WeaponKind::Dagger),
-        equip_slot: EquipSlot::Weapon,
+        equip_slot: Some(EquipSlot::Weapon),
         allowed_tags: MELEE | CRIT | SPEED | UTILITY,
         favored_tags: CRIT | SPEED,
         implicit: &[(Stat::Strength, 3.0), (Stat::CritChance, 0.05)],
@@ -311,7 +341,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "wand_basic",
         name: "Carved Wand",
         slot: ItemSlot::Weapon(WeaponKind::Wand),
-        equip_slot: EquipSlot::Weapon,
+        equip_slot: Some(EquipSlot::Weapon),
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SPEED,
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::Agility, 3.0), (Stat::CooldownReduction, 0.04)],
@@ -342,7 +372,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_helm",
         name: "Leather Helm",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Helm,
+        equip_slot: Some(EquipSlot::Helm),
         allowed_tags: DEFENSE | MELEE | CRIT | UTILITY,
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 12.0), (Stat::Health, 15.0)],
@@ -363,7 +393,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_shoulders",
         name: "Leather Spaulders",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Shoulders,
+        equip_slot: Some(EquipSlot::Shoulders),
         allowed_tags: SPEED | CRIT | DEFENSE | UTILITY,
         favored_tags: SPEED | CRIT,
         implicit: &[(Stat::Evasion, 0.02), (Stat::Health, 12.0)],
@@ -383,7 +413,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "heavy_chest",
         name: "Plated Cuirass",
         slot: ItemSlot::Armor(ArmorKind::Heavy),
-        equip_slot: EquipSlot::Chest,
+        equip_slot: Some(EquipSlot::Chest),
         allowed_tags: DEFENSE | MELEE | UTILITY,
         favored_tags: DEFENSE | MELEE,
         implicit: &[(Stat::Armor, 24.0), (Stat::Health, 30.0)],
@@ -400,7 +430,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_chest",
         name: "Studded Vest",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Chest,
+        equip_slot: Some(EquipSlot::Chest),
         allowed_tags: DEFENSE | SPEED | CRIT | UTILITY,
         favored_tags: SPEED | CRIT,
         implicit: &[(Stat::Evasion, 0.05), (Stat::Health, 18.0)],
@@ -421,7 +451,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_boots",
         name: "Leather Boots",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Boots,
+        equip_slot: Some(EquipSlot::Boots),
         allowed_tags: SPEED | CRIT | DEFENSE | UTILITY,
         favored_tags: SPEED,
         implicit: &[(Stat::MoveSpeed, 0.05), (Stat::Evasion, 0.03)],
@@ -438,7 +468,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "robe_chest",
         name: "Mage Robe",
         slot: ItemSlot::Armor(ArmorKind::Robe),
-        equip_slot: EquipSlot::Chest,
+        equip_slot: Some(EquipSlot::Chest),
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY | DEFENSE,
         favored_tags: CASTER | UTILITY,
         implicit: &[(Stat::Health, 14.0), (Stat::ResourceRegen, 0.08)],
@@ -455,7 +485,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_gloves",
         name: "Leather Gloves",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Hands,
+        equip_slot: Some(EquipSlot::Hands),
         allowed_tags: ANY_ELEMENT | CASTER | UTILITY,
         favored_tags: CASTER | ANY_ELEMENT,
         implicit: &[(Stat::CooldownReduction, 0.03)],
@@ -475,7 +505,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "light_legs",
         name: "Leather Leggings",
         slot: ItemSlot::Armor(ArmorKind::Light),
-        equip_slot: EquipSlot::Legs,
+        equip_slot: Some(EquipSlot::Legs),
         allowed_tags: DEFENSE | MELEE | UTILITY,
         favored_tags: DEFENSE,
         implicit: &[(Stat::Armor, 16.0), (Stat::Health, 20.0)],
@@ -496,7 +526,7 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "ring_basic",
         name: "Plain Ring",
         slot: ItemSlot::Accessory(AccessoryKind::Ring),
-        equip_slot: EquipSlot::Ring1,
+        equip_slot: Some(EquipSlot::Ring1),
         allowed_tags: ALL,
         favored_tags: 0,
         implicit: &[],
@@ -510,12 +540,48 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         id: "amulet_basic",
         name: "Plain Amulet",
         slot: ItemSlot::Accessory(AccessoryKind::Amulet),
-        equip_slot: EquipSlot::Amulet,
+        equip_slot: Some(EquipSlot::Amulet),
         allowed_tags: ALL,
         favored_tags: 0,
         implicit: &[(Stat::Health, 10.0)],
         min_ilvl: 1,
         // Accessories — wildcard. Amulet completes elemental sets.
+        family: BaseFamily::WILDCARD,
+        icon: "loot/Necklaces/Necklace_1",
+        models: None,
+    },
+    // ---- Consumables -------------------------------------------------
+    //
+    // Consumables flow through the same Item / Inventory / wire
+    // pipeline as gear so persistence + drops + tooltips reuse
+    // the existing machinery. They never roll affixes (see
+    // `Item::roll`) and have `equip_slot: None` so every
+    // equip-side codepath rejects them via the absence rather
+    // than via a per-call `matches!(_, ItemSlot::Consumable(_))`
+    // bandaid. Footprint is the 1×1 fallback baked into
+    // `Item::footprint`.
+    BaseItem {
+        id: "token_respec_greater",
+        name: "Greater Respec Token",
+        slot: ItemSlot::Consumable(ConsumableKind::GreaterRespecToken),
+        equip_slot: None,
+        allowed_tags: 0,
+        favored_tags: 0,
+        implicit: &[],
+        min_ilvl: 1,
+        family: BaseFamily::WILDCARD,
+        icon: "loot/Necklaces/Necklace_1",
+        models: None,
+    },
+    BaseItem {
+        id: "token_respec_lesser",
+        name: "Lesser Respec Token",
+        slot: ItemSlot::Consumable(ConsumableKind::LesserRespecToken),
+        equip_slot: None,
+        allowed_tags: 0,
+        favored_tags: 0,
+        implicit: &[],
+        min_ilvl: 1,
         family: BaseFamily::WILDCARD,
         icon: "loot/Necklaces/Necklace_1",
         models: None,

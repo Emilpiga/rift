@@ -213,7 +213,7 @@ void main() {
     gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
 
     // ---- Fog factor ----
-    // Match `triangle.frag`'s player-anchored quadratic fog so
+    // Match `forward/main.glsl`'s player-anchored quadratic fog so
     // particles fade into the same band as world geometry.
     float fogStart = ubo.fogParams.x;
     float fogEnd   = ubo.fogParams.y;

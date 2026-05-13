@@ -923,11 +923,7 @@ pub fn proc_explosion() -> EffectBundle {
         color: Vec3::new(3.6, 1.7, 0.5),
         radius: 5.0,
         intensity: 2.4,
-        intensity_curve: Some(Curve::from_stops([
-            (0.00, 1.0),
-            (0.20, 0.7),
-            (1.00, 0.0),
-        ])),
+        intensity_curve: Some(Curve::from_stops([(0.00, 1.0), (0.20, 0.7), (1.00, 0.0)])),
         lifetime: Some(0.45),
         flicker_amp: 0.10,
         flicker_hz: 10.0,

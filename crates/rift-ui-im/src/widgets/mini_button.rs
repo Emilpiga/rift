@@ -47,7 +47,12 @@ impl MiniButtonFills {
         Self {
             idle: base,
             hover: Color::rgba(lift(base.0[0]), lift(base.0[1]), lift(base.0[2]), base.0[3]),
-            disabled: Color::rgba(dim(base.0[0]), dim(base.0[1]), dim(base.0[2]), base.0[3] * 0.8),
+            disabled: Color::rgba(
+                dim(base.0[0]),
+                dim(base.0[1]),
+                dim(base.0[2]),
+                base.0[3] * 0.8,
+            ),
         }
     }
 
@@ -55,7 +60,11 @@ impl MiniButtonFills {
     /// armed-state colours that don't follow the lift/dim
     /// rules (e.g. the 2-stage Salvage Trash flips to red).
     pub fn explicit(idle: Color, hover: Color, disabled: Color) -> Self {
-        Self { idle, hover, disabled }
+        Self {
+            idle,
+            hover,
+            disabled,
+        }
     }
 }
 

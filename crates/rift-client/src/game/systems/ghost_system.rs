@@ -22,8 +22,8 @@ use hecs::World;
 
 use rift_engine::animation::Animator;
 use rift_engine::ecs::components::{
-    AnimationSet, Ghost, GhostRising, Health, LocalPlayer, Player, PlayerAction,
-    Renderable, SkinnedAttachments, SpellCast, SpellPhase, Velocity,
+    AnimationSet, Ghost, GhostRising, Health, LocalPlayer, Player, PlayerAction, Renderable,
+    SkinnedAttachments, SpellCast, SpellPhase, Velocity,
 };
 use rift_engine::renderer::Renderer;
 
@@ -48,8 +48,13 @@ pub fn is_dead(world: &World, local_ghost_cached: bool) -> bool {
     if local_ghost_cached {
         return false;
     }
-    let Some(pid) = player_id(world) else { return false };
-    world.get::<&Health>(pid).map(|h| h.is_dead()).unwrap_or(false)
+    let Some(pid) = player_id(world) else {
+        return false;
+    };
+    world
+        .get::<&Health>(pid)
+        .map(|h| h.is_dead())
+        .unwrap_or(false)
 }
 
 /// Detect HP drops on the local player since last frame and play
@@ -259,7 +264,11 @@ pub fn apply_tint(world: &World, renderer: &mut Renderer, local_ghost_cached: bo
     // pipeline outputs HDR before tonemap.
     const GHOST_TINT: [f32; 4] = [0.75, 0.92, 1.05, 0.40];
     const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-    let tint = if local_ghost_cached { GHOST_TINT } else { OPAQUE };
+    let tint = if local_ghost_cached {
+        GHOST_TINT
+    } else {
+        OPAQUE
+    };
 
     // Drive the post-composite ghost-view effect (desat + cool
     // tint + radial vignette). Instant-on for now — could be

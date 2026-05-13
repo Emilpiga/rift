@@ -9,7 +9,7 @@ use rift_net::NetId;
 
 use super::effect;
 use super::player::ServerPlayer;
-use super::{trim_trailing_none, Sim};
+use super::{snapshot_talents, trim_trailing_none, Sim};
 
 impl Sim {
     /// `true` if `client_id` is currently a ghost (risen-but-dead).
@@ -216,14 +216,39 @@ impl Sim {
         if !p.talents.invest(id) {
             return None;
         }
-        let invested: Vec<(u16, u8)> = p
-            .talents
-            .nodes
-            .iter()
-            .filter(|n| n.current_rank >= 1)
-            .map(|n| (n.id.0, n.current_rank))
-            .collect();
-        Some((invested, p.talents.unspent_points))
+        Some(snapshot_talents(&p.talents))
+    }
+
+    /// Apply one [`ClientMsg::RespecTalent`] — refund every rank
+    /// of `talent_id`. Returns the fresh invested-pairs +
+    /// unspent snapshot on success, or `None` if the refund was
+    /// rejected (unknown id, no ranks invested, would orphan a
+    /// downstream node — see `TALENT_TREE.md` §7).
+    pub fn respec_talent_for_player(
+        &mut self,
+        client_id: ClientId,
+        talent_id: u16,
+    ) -> Option<(Vec<(u16, u8)>, u32)> {
+        let &entity = self.sessions.get(&client_id)?;
+        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let id = rift_game::talents::TalentId(talent_id);
+        if p.talents.refund_one(id) == 0 {
+            return None;
+        }
+        Some(snapshot_talents(&p.talents))
+    }
+
+    /// Apply one [`ClientMsg::RespecAllTalents`] — wipe every
+    /// invested point. Always succeeds for a known session;
+    /// returns the fresh empty-invested-list + unspent snapshot.
+    pub fn respec_all_talents_for_player(
+        &mut self,
+        client_id: ClientId,
+    ) -> Option<(Vec<(u16, u8)>, u32)> {
+        let &entity = self.sessions.get(&client_id)?;
+        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        p.talents.refund_all();
+        Some(snapshot_talents(&p.talents))
     }
 
     /// Mutate one slot of the player's ability bar. Validates:
@@ -256,7 +281,7 @@ impl Sim {
         // an unlocked player-castable ability.
         let allow_empty = ability == rift_game::loadout::EMPTY_SLOT;
         let allow_ability = rift_game::loadout::is_player_ability(ability)
-            && rift_game::loadout::is_ability_unlocked(ability, player_level);
+            && rift_game::loadout::is_ability_unlocked(ability, &p.talents);
         if !allow_empty && !allow_ability {
             return None;
         }

@@ -471,6 +471,7 @@ pub fn render_stash_panel(
                 true,
                 false,
                 active_tab_u8,
+                false,
                 out_actions,
                 &mut out.in_transit_from_drop,
             );
@@ -556,6 +557,7 @@ pub fn render_stash_panel(
             true,
             false,
             active_tab_u8,
+            false,
             out_actions,
             &mut out.in_transit_from_drop,
         );

@@ -8,7 +8,8 @@ use rift_net::ids::ClientId;
 use super::player::{ServerPlayer, StashTab};
 use super::{
     build_stash_occupancy, footprint_fits_stash, place_inventory_item, place_inventory_item_at,
-    place_stash_item, place_stash_item_at, salvage_yield, sort_grid_items, trim_trailing_none, Sim,
+    place_stash_item, place_stash_item_at, salvage_yield, snapshot_talents, sort_grid_items,
+    trim_trailing_none, Sim,
 };
 
 impl Sim {
@@ -88,11 +89,69 @@ impl Sim {
         if item.anchored {
             return None;
         }
+        if item.consumable_kind().is_some() {
+            // Consumables aren't currency-bearing items \u2014
+            // shredding a respec token would silently destroy
+            // it for zero shards. Reject so the UI can keep the
+            // token in the bag.
+            return None;
+        }
         let yield_amt = salvage_yield(item.rarity, item.ilvl);
         *slot = None;
         trim_trailing_none(&mut p.inventory);
         p.shards = p.shards.saturating_add(yield_amt);
         Some(p.shards)
+    }
+
+    /// Consume a bag-only consumable item.
+    ///
+    /// Returns `Some(touched_talents)` on success, where
+    /// `touched_talents` is `Some((invested, unspent))` iff the
+    /// consumable mutated the player's talent tree (so the
+    /// handler knows to push a `TalentsSync` alongside the
+    /// always-emitted `InventorySync`). Outer `None` is
+    /// rejection (out-of-range index, empty slot, item is not a
+    /// consumable, or the consumable's effect refused to apply
+    /// \u2014 e.g. `LesserRespecToken` with an orphaning
+    /// target).
+    ///
+    /// On accept the bag slot is cleared and trailing `None`s
+    /// are trimmed, mirroring the salvage path. The dispatch
+    /// is by [`rift_game::loot::ConsumableKind`]; new kinds
+    /// add an arm here + a `BaseItem` row.
+    pub fn use_bag_consumable(
+        &mut self,
+        client_id: ClientId,
+        inventory_index: usize,
+        target_arg: u16,
+    ) -> Option<Option<(Vec<(u16, u8)>, u32)>> {
+        use rift_game::loot::ConsumableKind;
+        let &entity = self.sessions.get(&client_id)?;
+        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let slot = p.inventory.get(inventory_index)?;
+        let item = slot.as_ref()?;
+        let kind = item.consumable_kind()?;
+        let talent_snapshot: Option<(Vec<(u16, u8)>, u32)> = match kind {
+            ConsumableKind::GreaterRespecToken => {
+                p.talents.refund_all();
+                Some(snapshot_talents(&p.talents))
+            }
+            ConsumableKind::LesserRespecToken => {
+                let id = rift_game::talents::TalentId(target_arg);
+                if p.talents.refund_one(id) == 0 {
+                    // Refund refused (unknown id, no ranks, or
+                    // would orphan a downstream node). Leave
+                    // the token in the bag so the player can
+                    // retry against a different target.
+                    return None;
+                }
+                Some(snapshot_talents(&p.talents))
+            }
+        };
+        // Effect applied successfully \u2014 burn the token.
+        p.inventory[inventory_index] = None;
+        trim_trailing_none(&mut p.inventory);
+        Some(talent_snapshot)
     }
 
     /// Bulk-salvage every non-anchored bag item whose rarity
@@ -114,7 +173,13 @@ impl Sim {
             // Take the slot only if it matches; otherwise leave
             // it in place so we don't churn `Option` payloads.
             let salvage = match slot.as_ref() {
-                Some(it) if !it.anchored && (it.rarity as u8) <= rarity_max => true,
+                Some(it)
+                    if !it.anchored
+                        && (it.rarity as u8) <= rarity_max
+                        && it.consumable_kind().is_none() =>
+                {
+                    true
+                }
                 _ => false,
             };
             if salvage {
@@ -278,7 +343,12 @@ impl Sim {
             p.stash[tab_index].items[stash_index] = Some(item);
             return false;
         }
-        let slot = p.equipment.default_slot(&item);
+        let Some(slot) = p.equipment.default_slot(&item) else {
+            // Bag-only item (consumable) with no target slot.
+            // Restore and bail — nothing else to validate.
+            p.stash[tab_index].items[stash_index] = Some(item);
+            return false;
+        };
         if !rift_game::loot::Equipment::accepts(slot, &item) {
             p.stash[tab_index].items[stash_index] = Some(item);
             return false;

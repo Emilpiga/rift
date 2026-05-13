@@ -528,6 +528,18 @@ impl Server {
             ClientMsg::InvestTalent { talent_id } => {
                 self.handle_invest_talent(from, talent_id);
             }
+            ClientMsg::RespecTalent { talent_id } => {
+                self.handle_respec_talent(from, talent_id);
+            }
+            ClientMsg::RespecAllTalents => {
+                self.handle_respec_all_talents(from);
+            }
+            ClientMsg::UseItem {
+                inventory_index,
+                target_arg,
+            } => {
+                self.handle_use_item(from, inventory_index as usize, target_arg);
+            }
             ClientMsg::Ack { .. } => { /* phase 4 */ }
             ClientMsg::Goodbye => {
                 log::info!("Goodbye from {from:?}");
@@ -1171,6 +1183,22 @@ impl Server {
             // off-screen.
             if u.levelled_up {
                 self.emit_system_to(u.client_id, &format!("You reached level {}!", u.level));
+                // Level-up grants 1 unspent talent point per
+                // level (see `experience::grant_xp` /
+                // `ServerPlayer::grant_xp`). The unspent pool
+                // is bumped server-side, but the client only
+                // ever sees the updated count via a
+                // `TalentsSync` push \u2014 so we send one
+                // here, mirroring the invest / respec paths.
+                // `persist_and_sync_talents` also writes the
+                // fresh `talent_unspent` into the persistence
+                // record so a relog preserves the gain.
+                if let Some(snapshot) = self
+                    .sim_for_client(u.client_id)
+                    .player_talents_snapshot(u.client_id)
+                {
+                    self.persist_and_sync_talents(u.client_id, snapshot);
+                }
             }
         }
 

@@ -33,14 +33,8 @@ pub fn arcane_bolt_trail() -> Effect {
                 emission: EmissionMode::Continuous { rate: 180.0 },
                 speed: (0.3, 1.0),
                 lifetime: (0.16, 0.28),
-                forces: vec![
-                    ForceField::Drag { coefficient: 5.0 },
-                ],
-                size: Curve::from_stops([
-                    (0.00, 0.18),
-                    (0.30, 0.14),
-                    (1.00, 0.03),
-                ]),
+                forces: vec![ForceField::Drag { coefficient: 5.0 }],
+                size: Curve::from_stops([(0.00, 0.18), (0.30, 0.14), (1.00, 0.03)]),
                 color: Gradient::from_stops([
                     (0.00, [3.6, 1.6, 4.2, 1.0]),
                     (0.40, [1.8, 0.4, 2.6, 0.85]),
@@ -59,13 +53,8 @@ pub fn arcane_bolt_trail() -> Effect {
                 emission: EmissionMode::Continuous { rate: 40.0 },
                 speed: (0.05, 0.4),
                 lifetime: (0.30, 0.55),
-                forces: vec![
-                    ForceField::Drag { coefficient: 2.5 },
-                ],
-                size: Curve::from_stops([
-                    (0.00, 0.14),
-                    (1.00, 0.32),
-                ]),
+                forces: vec![ForceField::Drag { coefficient: 2.5 }],
+                size: Curve::from_stops([(0.00, 0.14), (1.00, 0.32)]),
                 color: Gradient::from_stops([
                     (0.00, [0.6, 0.25, 1.0, 0.55]),
                     (0.50, [0.20, 0.10, 0.45, 0.30]),
@@ -102,10 +91,7 @@ pub fn arcane_bolt_impact() -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.09, 0.11),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 1.10),
-                    (1.00, 1.80),
-                ]),
+                size: Curve::from_stops([(0.00, 1.10), (1.00, 1.80)]),
                 color: Gradient::from_stops([
                     (0.00, [5.0, 3.5, 6.5, 1.0]),
                     (1.00, [1.2, 0.4, 2.2, 0.0]),
@@ -129,11 +115,7 @@ pub fn arcane_bolt_impact() -> Effect {
                         strength: 1.2,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.32),
-                    (0.30, 0.55),
-                    (1.00, 0.22),
-                ]),
+                size: Curve::from_stops([(0.00, 0.32), (0.30, 0.55), (1.00, 0.22)]),
                 color: Gradient::from_stops([
                     (0.00, [3.6, 1.4, 4.6, 1.0]),
                     (0.40, [1.6, 0.4, 2.4, 0.8]),
@@ -158,10 +140,7 @@ pub fn arcane_bolt_impact() -> Effect {
                         strength: 4.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.09),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.09), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [4.5, 1.8, 5.0, 1.0]),
                     (0.50, [1.8, 0.4, 2.6, 0.9]),
@@ -179,10 +158,7 @@ pub fn arcane_bolt_impact() -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.32, 0.32),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 0.35),
-                    (1.00, 2.60),
-                ]),
+                size: Curve::from_stops([(0.00, 0.35), (1.00, 2.60)]),
                 color: Gradient::from_stops([
                     (0.00, [2.4, 1.0, 3.6, 0.9]),
                     (1.00, [0.30, 0.10, 0.55, 0.0]),

@@ -20,7 +20,13 @@ impl Ray {
         let diff = to - from;
         let len = diff.length();
         let dir = if len > 1e-6 { diff / len } else { Vec3::Y };
-        (Self { origin: from, direction: dir }, len)
+        (
+            Self {
+                origin: from,
+                direction: dir,
+            },
+            len,
+        )
     }
 
     /// Get point along ray at distance t.
@@ -153,11 +159,7 @@ pub fn raycast(ray: &Ray, max_distance: f32, aabbs: &[Aabb]) -> Option<RayHit> {
 /// Pure function. Lives here so every LOS user (server AI,
 /// targeted abilities, future client-side telegraph culling)
 /// shares one deterministic implementation.
-pub fn line_of_sight_grid<F: FnMut(i32, i32) -> bool>(
-    a: Vec3,
-    b: Vec3,
-    mut is_blocked: F,
-) -> bool {
+pub fn line_of_sight_grid<F: FnMut(i32, i32) -> bool>(a: Vec3, b: Vec3, mut is_blocked: F) -> bool {
     let dx = b.x - a.x;
     let dz = b.z - a.z;
     let dist = (dx * dx + dz * dz).sqrt();

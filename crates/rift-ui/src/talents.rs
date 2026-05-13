@@ -13,8 +13,8 @@
 //! layout math + visuals).
 
 use rift_ui_im::{
-    widgets::title, Color, Frame, Id, Layer, PanZoom, PanZoomState, PanZoomTransform, Pos2, Rect,
-    TextField, Tooltip, TooltipLine, TooltipLineDecor, Ui, Vec2,
+    widgets::title, Button, Color, Frame, Id, Layer, PanZoom, PanZoomState, PanZoomTransform, Pos2,
+    Rect, TextField, Tooltip, TooltipLine, TooltipLineDecor, Ui, Vec2,
 };
 use rift_ui_types::talents::{
     TalentNodeKind, TalentNodeView, TalentPanelState, TalentRouteView, TalentTreeAction,
@@ -146,7 +146,7 @@ pub fn frame_talent_panel(
     );
     ui.draw_text(
         panel.min + Vec2::new(inner_pad, inner_pad + theme.fonts.size_lg + row_gap * 0.5),
-        "Click an investable node to spend a point. Drag to pan, scroll to zoom.",
+        "Left-click to spend a point. Right-click an invested node to refund it. Drag to pan, scroll to zoom.",
         theme.fonts.size_sm,
         theme.colors.text_dim,
     );
@@ -230,10 +230,7 @@ pub fn frame_talent_panel(
 
             // ── Polyline primitives ──
             let polar = |a: f32, r: f32| -> Pos2 {
-                Pos2::new(
-                    hub_centre.x + a.cos() * r,
-                    hub_centre.y + a.sin() * r,
-                )
+                Pos2::new(hub_centre.x + a.cos() * r, hub_centre.y + a.sin() * r)
             };
             let arc = |ui: &mut Ui<'_>, r: f32, a0: f32, a1: f32, segs: usize, w: f32, c: Color| {
                 if r <= 1.0 {
@@ -276,7 +273,11 @@ pub fn frame_talent_panel(
                         let a = (k as f32 / count as f32) * TAU;
                         let inward = k % 2 == 0;
                         let tick_r0 = if inward { r_in } else { r_out };
-                        let tick_r1 = if inward { r_in + bw * 0.55 } else { r_out - bw * 0.55 };
+                        let tick_r1 = if inward {
+                            r_in + bw * 0.55
+                        } else {
+                            r_out - bw * 0.55
+                        };
                         radial(ui, tick_r0, tick_r1, a, w, c);
                         // Tiny perpendicular cap at the
                         // free end gives the "T" silhouette.
@@ -287,27 +288,23 @@ pub fn frame_talent_panel(
             // Stepped (square-wave) meander running along an
             // arc — Aztec/Greek-key style. `count` is the
             // number of step periods around the full ring.
-            let meander = |ui: &mut Ui<'_>,
-                           r_in: f32,
-                           r_out: f32,
-                           count: usize,
-                           w: f32,
-                           c: Color| {
-                let bw = r_out - r_in;
-                let r_mid_lo = r_in + bw * 0.30;
-                let r_mid_hi = r_in + bw * 0.70;
-                for k in 0..count {
-                    let a0 = (k as f32 / count as f32) * TAU;
-                    let a1 = ((k as f32 + 0.5) / count as f32) * TAU;
-                    let a2 = ((k as f32 + 1.0) / count as f32) * TAU;
-                    // Square wave: low arc → riser → high arc
-                    // → faller → repeat.
-                    arc(ui, r_mid_lo, a0, a1, 4, w, c);
-                    radial(ui, r_mid_lo, r_mid_hi, a1, w, c);
-                    arc(ui, r_mid_hi, a1, a2, 4, w, c);
-                    radial(ui, r_mid_lo, r_mid_hi, a2, w, c);
-                }
-            };
+            let meander =
+                |ui: &mut Ui<'_>, r_in: f32, r_out: f32, count: usize, w: f32, c: Color| {
+                    let bw = r_out - r_in;
+                    let r_mid_lo = r_in + bw * 0.30;
+                    let r_mid_hi = r_in + bw * 0.70;
+                    for k in 0..count {
+                        let a0 = (k as f32 / count as f32) * TAU;
+                        let a1 = ((k as f32 + 0.5) / count as f32) * TAU;
+                        let a2 = ((k as f32 + 1.0) / count as f32) * TAU;
+                        // Square wave: low arc → riser → high arc
+                        // → faller → repeat.
+                        arc(ui, r_mid_lo, a0, a1, 4, w, c);
+                        radial(ui, r_mid_lo, r_mid_hi, a1, w, c);
+                        arc(ui, r_mid_hi, a1, a2, 4, w, c);
+                        radial(ui, r_mid_lo, r_mid_hi, a2, w, c);
+                    }
+                };
 
             // ── Outer concentric labyrinth bands ──
             //
@@ -570,6 +567,7 @@ pub fn frame_talent_panel(
         let (mx, my) = ui.input().mouse_pos();
         let cursor = Pos2::new(mx, my);
         let left_click = ui.input().left_clicked();
+        let right_click = ui.input().right_clicked();
 
         // Find topmost node under cursor (iterate in reverse so
         // later-drawn nodes shadow earlier ones on overlap).
@@ -581,6 +579,15 @@ pub fn frame_talent_panel(
                 hover_screen = Some(screen_pos);
                 if left_click && node.investable {
                     action = Some(TalentTreeAction::Invest { talent_id: node.id });
+                }
+                // Right-click on an invested node = lesser-respec
+                // (refund every rank). Server enforces the
+                // orphan-rejection rule from `TALENT_TREE.md` §7;
+                // the widget doesn't try to predict acceptance —
+                // a rejected refund is a silent no-op and the
+                // next `TalentsSync` reflects the unchanged tree.
+                if right_click && node.current_rank > 0 {
+                    action = Some(TalentTreeAction::Respec { talent_id: node.id });
                 }
                 break;
             }
@@ -618,6 +625,29 @@ pub fn frame_talent_panel(
         if let Some(node) = view.nodes.iter().find(|n| n.id == id) {
             draw_tooltip(ui, node, pos, transform.scale(node_radius(node.kind)));
         }
+    }
+
+    // ── Footer: Refund All ──────────────────────────────
+    // Greater-respec button. Disabled when there's nothing
+    // invested so the player can't fire a no-op into the
+    // network. Sits in the bottom-right corner of the panel
+    // so it stays out of the canvas hit-test region (the
+    // canvas viewport leaves an `inner_pad` gutter on every
+    // side; the button lives inside that gutter).
+    let btn_w = 140.0 * theme.scale;
+    let btn_h = 32.0 * theme.scale;
+    let btn_rect = Rect::from_xywh(
+        panel.max.x - inner_pad - btn_w,
+        panel.max.y - inner_pad - btn_h,
+        btn_w,
+        btn_h,
+    );
+    let refund_resp = Button::danger("Refund All")
+        .small()
+        .enabled(view.total_spent > 0)
+        .show_with_id(ui, Id::root("rift::talents::refund_all"), btn_rect);
+    if refund_resp.clicked {
+        action = Some(TalentTreeAction::RespecAll);
     }
 
     action
@@ -792,7 +822,10 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
         // adjacent cardinal spokes.
         let dodge_radii = [HUB_RING_RADIUS * 0.55, HUB_RING_RADIUS * 0.95];
         for (k, &i) in sorted.iter().enumerate() {
-            let r = dodge_radii.get(k).copied().unwrap_or(HUB_RING_RADIUS * 0.95);
+            let r = dodge_radii
+                .get(k)
+                .copied()
+                .unwrap_or(HUB_RING_RADIUS * 0.95);
             positions[i] = Pos2::new(dodge_angle.cos() * r, dodge_angle.sin() * r);
         }
     }
@@ -1120,7 +1153,10 @@ fn draw_tooltip(ui: &mut Ui<'_>, node: &TalentNodeView<'_>, node_pos: Pos2, node
     // the progress visually as well as numerically; investable
     // rank colourised gold to match the accent on the hint.
     let rank_pips = render_rank_pips(node.current_rank, node.max_rank);
-    let rank_line = format!("Rank {}/{}    {}", node.current_rank, node.max_rank, rank_pips);
+    let rank_line = format!(
+        "Rank {}/{}    {}",
+        node.current_rank, node.max_rank, rank_pips
+    );
     let rank_color = if node.current_rank >= node.max_rank {
         theme.colors.accent
     } else if node.current_rank > 0 {
@@ -1128,7 +1164,11 @@ fn draw_tooltip(ui: &mut Ui<'_>, node: &TalentNodeView<'_>, node_pos: Pos2, node
     } else {
         theme.colors.text_dim
     };
-    lines.push(TooltipLine::new(&rank_line, theme.fonts.size_md, rank_color));
+    lines.push(TooltipLine::new(
+        &rank_line,
+        theme.fonts.size_md,
+        rank_color,
+    ));
 
     // Body lines. The first entry from the view is the node's
     // description (long form), subsequent entries are the

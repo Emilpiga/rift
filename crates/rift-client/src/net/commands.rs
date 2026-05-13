@@ -327,6 +327,43 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::InvestTalent { talent_id });
     }
 
+    /// Ask the server to lesser-respec a single talent node —
+    /// refund every rank of `talent_id` if doing so would not
+    /// orphan a downstream node. Server replies with a fresh
+    /// `TalentsSync` on accept; silent no-op on rejection.
+    pub fn request_respec_talent(&mut self, talent_id: u16) {
+        log::debug!("net: -> RespecTalent talent_id={talent_id}");
+        self.send(Channel::Control, &ClientMsg::RespecTalent { talent_id });
+    }
+
+    /// Ask the server to greater-respec — wipe every invested
+    /// point on the tree. Always accepted; reply is the fresh
+    /// (empty-invested) `TalentsSync`.
+    pub fn request_respec_all_talents(&mut self) {
+        log::debug!("net: -> RespecAllTalents");
+        self.send(Channel::Control, &ClientMsg::RespecAllTalents);
+    }
+
+    /// Ask the server to consume the bag item at
+    /// `inventory_index`. `target_arg` is the consumable's
+    /// dispatch payload \u2014 `u16::MAX` for self-targeted
+    /// consumables, or e.g. a `TalentId` for a
+    /// `LesserRespecToken`. Server validates the slot holds a
+    /// consumable, dispatches by `ConsumableKind`, burns the
+    /// token on success, and replies with fresh `InventorySync`
+    /// (always) + `TalentsSync` (when the consumable touched
+    /// the tree).
+    pub fn request_use_item(&mut self, inventory_index: u32, target_arg: u16) {
+        log::debug!("net: -> UseItem idx={inventory_index} target_arg={target_arg}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::UseItem {
+                inventory_index,
+                target_arg,
+            },
+        );
+    }
+
     /// Ask the server to claim a ground-loot drop on our behalf.
     /// Server validates range and broadcasts [`ServerMsg::LootClaimed`]
     /// on success; clients tear down their visuals on receipt.

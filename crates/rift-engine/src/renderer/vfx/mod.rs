@@ -38,6 +38,6 @@ pub use particle_renderer::ParticleVfxRenderer;
 pub use ribbon_renderer::RibbonRenderer;
 pub use runtime::{EffectId, VfxParticleInstance, VfxRibbonInstance, VfxSystem};
 pub use spec::{
-    BlendMode, Curve, CurveStop, Effect, EmissionMode, ForceField, Gradient, GradientStop,
-    Layer, ParticleSpec, RibbonNoise, RibbonSpec, SpawnShape, SpriteShape,
+    BlendMode, Curve, CurveStop, Effect, EmissionMode, ForceField, Gradient, GradientStop, Layer,
+    ParticleSpec, RibbonNoise, RibbonSpec, SpawnShape, SpriteShape,
 };

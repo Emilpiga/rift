@@ -17,9 +17,7 @@
 //! caller can clamp via [`Banner::min_width`] when several
 //! adjacent banners should agree on a width.
 
-use super::super::{
-    color::Color, ui::Ui,
-};
+use super::super::{color::Color, ui::Ui};
 use super::frame::Frame;
 use crate::rect::{Pad, Pos2, Rect};
 
@@ -145,9 +143,7 @@ impl<'a> Banner<'a> {
                 });
             }
             BannerStyle::Pill => {
-                let fill = self
-                    .fill
-                    .unwrap_or(Color::rgba(0.08, 0.10, 0.16, 0.80));
+                let fill = self.fill.unwrap_or(Color::rgba(0.08, 0.10, 0.16, 0.80));
                 ui.draw_rounded_rect(rect, theme.spacing.corner_radius, fill);
                 let tw = ui.measure_text(self.text, text_size);
                 ui.draw_text(

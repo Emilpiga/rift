@@ -204,6 +204,58 @@ impl TalentTree {
         }
     }
 
+    /// Lesser-respec: refund **every rank** of a single node and
+    /// return its points to the unspent pool.
+    ///
+    /// Per `TALENT_TREE.md` §7 the refund is **rejected** if any
+    /// other invested node lists this one as a prerequisite —
+    /// orphaning would leave the tree in an inconsistent state
+    /// (downstream nodes whose prereq closure is no longer
+    /// satisfied). The player must lesser-respec leaves first or
+    /// use a Greater token.
+    ///
+    /// Returns the number of points refunded (0 = rejected: node
+    /// not found, no ranks invested, or would orphan a downstream
+    /// node).
+    pub fn refund_one(&mut self, id: TalentId) -> u32 {
+        let Some(idx) = self.nodes.iter().position(|n| n.id == id) else {
+            return 0;
+        };
+        let rank = self.nodes[idx].current_rank;
+        if rank == 0 {
+            return 0;
+        }
+        // Orphan check: any other invested node prereq-listing this id?
+        let would_orphan = self
+            .nodes
+            .iter()
+            .any(|n| n.current_rank >= 1 && n.id != id && n.prerequisites.contains(&id));
+        if would_orphan {
+            return 0;
+        }
+        self.nodes[idx].current_rank = 0;
+        let refund = rank as u32;
+        self.unspent_points += refund;
+        self.total_spent = self.total_spent.saturating_sub(refund);
+        refund
+    }
+
+    /// Greater-respec: refund every invested point, wiping the
+    /// tree back to rank 0 across the board. Per `TALENT_TREE.md`
+    /// §7 this never has to worry about orphaning — every node
+    /// drops together. Returns the total points returned to the
+    /// unspent pool.
+    pub fn refund_all(&mut self) -> u32 {
+        let mut refunded = 0u32;
+        for n in self.nodes.iter_mut() {
+            refunded += n.current_rank as u32;
+            n.current_rank = 0;
+        }
+        self.unspent_points += refunded;
+        self.total_spent = 0;
+        refunded
+    }
+
     /// Compute aggregated bonuses from all invested talents.
     pub fn compute_bonuses(&self) -> TalentBonuses {
         let mut bonuses = TalentBonuses::default();

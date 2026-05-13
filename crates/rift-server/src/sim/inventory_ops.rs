@@ -54,11 +54,19 @@ impl Sim {
             p.inventory[inventory_index] = Some(item);
             return false;
         }
-        let slot = p.equipment.default_slot(&item);
+        let Some(slot) = p.equipment.default_slot(&item) else {
+            // Bag-only item (consumable) with no target slot.
+            // Restore the bag entry and bail — the equip
+            // request was never legal.
+            p.inventory[inventory_index] = Some(item);
+            return false;
+        };
         if !rift_game::loot::Equipment::accepts(slot, &item) {
-            // Item base has no equip slot we accept — put it back
-            // and bail. (Currently every BaseItem has a real slot,
-            // so this branch is defensive.)
+            // Item base has no equip slot we accept — put it
+            // back and bail. (With `equip_slot: Option`, the
+            // earlier `let Some` covers the consumable case;
+            // this branch is the residual defensive guard for
+            // any future slot mismatch.)
             p.inventory[inventory_index] = Some(item);
             return false;
         }

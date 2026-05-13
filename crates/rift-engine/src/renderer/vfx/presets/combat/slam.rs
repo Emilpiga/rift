@@ -40,11 +40,7 @@ pub fn ground_slam_telegraph(radius: f32, duration: f32) -> Effect {
                 // Ring sprite size is the *diameter*, so we feed
                 // 2 * radius. Mild pulse via the size curve so
                 // the ring isn't visually static.
-                size: Curve::from_stops([
-                    (0.00, r * 2.0),
-                    (0.50, r * 2.10),
-                    (1.00, r * 2.0),
-                ]),
+                size: Curve::from_stops([(0.00, r * 2.0), (0.50, r * 2.10), (1.00, r * 2.0)]),
                 // Hot orange — reads as "danger". Brightens
                 // toward the impact moment so the eye is drawn
                 // back to the circle just before resolution.
@@ -72,10 +68,7 @@ pub fn ground_slam_telegraph(radius: f32, duration: f32) -> Effect {
                     },
                     ForceField::Drag { coefficient: 1.5 },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.10),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.10), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [3.5, 1.4, 0.30, 0.9]),
                     (1.00, [0.6, 0.10, 0.05, 0.0]),
@@ -108,11 +101,7 @@ pub fn ground_slam_impact(radius: f32) -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.45, 0.45),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, r * 0.4),
-                    (0.40, r * 2.0),
-                    (1.00, r * 2.6),
-                ]),
+                size: Curve::from_stops([(0.00, r * 0.4), (0.40, r * 2.0), (1.00, r * 2.6)]),
                 color: Gradient::from_stops([
                     (0.00, [6.0, 3.0, 0.6, 1.0]),
                     (0.40, [3.5, 1.2, 0.2, 0.85]),
@@ -139,10 +128,7 @@ pub fn ground_slam_impact(radius: f32) -> Effect {
                         strength: 8.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.12),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.12), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [4.5, 2.0, 0.5, 1.0]),
                     (0.50, [2.0, 0.6, 0.10, 0.85]),
@@ -161,10 +147,7 @@ pub fn ground_slam_impact(radius: f32) -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.12, 0.16),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, r * 0.6),
-                    (1.00, r * 1.0),
-                ]),
+                size: Curve::from_stops([(0.00, r * 0.6), (1.00, r * 1.0)]),
                 color: Gradient::from_stops([
                     (0.00, [6.0, 4.5, 2.0, 1.0]),
                     (1.00, [2.0, 0.8, 0.2, 0.0]),

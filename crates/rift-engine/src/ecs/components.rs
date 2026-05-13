@@ -205,6 +205,21 @@ pub struct SpellCast {
     /// actually reaches its forward-extension frames before
     /// the next click preempts it.
     pub pending_oneshot_speed: f32,
+    /// Real-time seconds until a scheduled cast-layer freeze
+    /// (hit-stop) engages. While `> 0` it counts down each
+    /// tick and the layer animator advances normally. Once it
+    /// hits `0`, [`Self::oneshot_freeze_for`] takes over and
+    /// the layer animator's `dt` is gated to zero for the
+    /// freeze window. Used by Punch to inject a ~50 ms hold
+    /// at the contact frame so each swing reads as a hit
+    /// rather than a continuous wind-mill.
+    pub oneshot_freeze_in: f32,
+    /// Remaining real-time seconds of the active hit-stop. Once
+    /// [`Self::oneshot_freeze_in`] reaches `0`, this counter
+    /// ticks down while the layer animator is held in place.
+    /// Cleared on cast end so a fresh one-shot doesn't inherit
+    /// the previous swing's stop window.
+    pub oneshot_freeze_for: f32,
 }
 
 impl SpellCast {
@@ -232,6 +247,8 @@ impl SpellCast {
             oneshot_is_hit: false,
             channeling: false,
             pending_oneshot_speed: 1.0,
+            oneshot_freeze_in: 0.0,
+            oneshot_freeze_for: 0.0,
         }
     }
     pub fn is_active(&self) -> bool {
@@ -363,6 +380,8 @@ impl SpellCast {
         self.fired = true;
         self.pending_ability = None;
         self.channeling = false;
+        self.oneshot_freeze_in = 0.0;
+        self.oneshot_freeze_for = 0.0;
     }
 }
 

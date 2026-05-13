@@ -230,14 +230,18 @@ impl SkinningSystem {
         if rest_vertices.len() != skin_data.len() {
             anyhow::bail!(
                 "SkinningSystem::register_mesh: rest ({}) and skin ({}) length mismatch",
-                rest_vertices.len(), skin_data.len(),
+                rest_vertices.len(),
+                skin_data.len(),
             );
         }
         let vertex_count = rest_vertices.len() as u32;
 
         // Rest VB — needs STORAGE for the compute shader to read it.
         let rest_vb = buffer::create_device_local_buffer(
-            device, allocator, queue, command_pool,
+            device,
+            allocator,
+            queue,
+            command_pool,
             rest_vertices,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "skinned_rest_vb",
@@ -247,7 +251,10 @@ impl SkinningSystem {
         // (`[u16; 4]` + `[f32; 4]`); we ship it verbatim and the
         // compute shader unpacks the joint pairs from u32 lanes.
         let skin_buf = buffer::create_device_local_buffer(
-            device, allocator, queue, command_pool,
+            device,
+            allocator,
+            queue,
+            command_pool,
             skin_data,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "skinned_skin_data",
@@ -261,7 +268,8 @@ impl SkinningSystem {
         // would draw garbage on frame 0).
         let vb_size = (rest_vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
         let output_vb = GpuBuffer::new(
-            device, allocator,
+            device,
+            allocator,
             vb_size,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::VERTEX_BUFFER
@@ -269,7 +277,14 @@ impl SkinningSystem {
             gpu_allocator::MemoryLocation::GpuOnly,
             "skinned_output_vb",
         )?;
-        prime_output_vb(device, allocator, queue, command_pool, &output_vb, rest_vertices)?;
+        prime_output_vb(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            &output_vb,
+            rest_vertices,
+        )?;
 
         // Per-frame palette UBOs (held in a STORAGE buffer for binding
         // simplicity — see set-layout note above). Initialise with
@@ -278,7 +293,8 @@ impl SkinningSystem {
         let identity_palette = vec![Mat4::IDENTITY; MAX_PALETTE_JOINTS];
         let palette_ubos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|i| {
             buffer::create_host_buffer(
-                device, allocator,
+                device,
+                allocator,
                 &identity_palette,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 &format!("skinned_palette_ubo[{}]", i),
@@ -303,7 +319,10 @@ impl SkinningSystem {
             let mut sets = [vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
             sets.copy_from_slice(&raw_sets);
             let idx = self.slots.len();
-            self.slots.push(SkinSlot { resources: None, descriptor_sets: sets });
+            self.slots.push(SkinSlot {
+                resources: None,
+                descriptor_sets: sets,
+            });
             (idx, sets)
         };
 
@@ -314,8 +333,12 @@ impl SkinningSystem {
         // retired the previous occupant's buffers.
         for (frame, set) in descriptor_sets.iter().enumerate() {
             write_set(
-                device, *set,
-                &rest_vb, &skin_buf, &palette_ubos[frame], &output_vb,
+                device,
+                *set,
+                &rest_vb,
+                &skin_buf,
+                &palette_ubos[frame],
+                &output_vb,
             );
         }
 
@@ -367,7 +390,11 @@ impl SkinningSystem {
     /// recorded by the next `record_dispatches`. No-op for stale
     /// or freed handles.
     pub fn update_palette(&mut self, current_frame: usize, handle: SkinHandle, palette: &[Mat4]) {
-        let mesh = match self.slots.get_mut(handle.0).and_then(|s| s.resources.as_mut()) {
+        let mesh = match self
+            .slots
+            .get_mut(handle.0)
+            .and_then(|s| s.resources.as_mut())
+        {
             Some(m) => m,
             None => return,
         };
@@ -398,7 +425,13 @@ impl SkinningSystem {
     /// updated this frame, followed by a single barrier publishing
     /// the writes to subsequent vertex-input reads. Call once near
     /// the top of `draw_frame`, before the shadow pass begins.
-    pub fn record_dispatches(&mut self, device: &ash::Device, cmd: vk::CommandBuffer, current_frame: usize, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn record_dispatches(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        current_frame: usize,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
         // Tick the deferred-destruction queue first — any pending
         // free that has aged past the in-flight depth is safe to
         // destroy now (no queued frame can still reference it).
@@ -452,8 +485,11 @@ impl SkinningSystem {
                     std::mem::size_of::<PushConsts>(),
                 );
                 device.cmd_push_constants(
-                    cmd, self.pipeline_layout,
-                    vk::ShaderStageFlags::COMPUTE, 0, pc_bytes,
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    pc_bytes,
                 );
                 let groups = (mesh.vertex_count + COMPUTE_LOCAL_X - 1) / COMPUTE_LOCAL_X;
                 device.cmd_dispatch(cmd, groups, 1, 1);
@@ -518,7 +554,11 @@ impl SkinningSystem {
         for slot in self.slots.drain(..) {
             if let Some(res) = slot.resources {
                 let SkinnedMeshResources {
-                    mut rest_vb, mut skin_buf, mut output_vb, mut palette_ubos, ..
+                    mut rest_vb,
+                    mut skin_buf,
+                    mut output_vb,
+                    mut palette_ubos,
+                    ..
                 } = res;
                 rest_vb.cleanup(device, allocator);
                 skin_buf.cleanup(device, allocator);
@@ -602,7 +642,10 @@ fn create_pool(device: &ash::Device) -> Result<vk::DescriptorPool> {
     Ok(unsafe { device.create_descriptor_pool(&info, None)? })
 }
 
-fn descriptor_binding(binding: u32, ty: vk::DescriptorType) -> vk::DescriptorSetLayoutBinding<'static> {
+fn descriptor_binding(
+    binding: u32,
+    ty: vk::DescriptorType,
+) -> vk::DescriptorSetLayoutBinding<'static> {
     vk::DescriptorSetLayoutBinding::default()
         .binding(binding)
         .descriptor_type(ty)
@@ -646,10 +689,26 @@ fn write_set(
     out: &GpuBuffer,
 ) {
     let infos = [
-        vk::DescriptorBufferInfo { buffer: rest.buffer, offset: 0, range: rest.size },
-        vk::DescriptorBufferInfo { buffer: skin.buffer, offset: 0, range: skin.size },
-        vk::DescriptorBufferInfo { buffer: palette.buffer, offset: 0, range: PALETTE_BYTES.min(palette.size) },
-        vk::DescriptorBufferInfo { buffer: out.buffer,  offset: 0, range: out.size },
+        vk::DescriptorBufferInfo {
+            buffer: rest.buffer,
+            offset: 0,
+            range: rest.size,
+        },
+        vk::DescriptorBufferInfo {
+            buffer: skin.buffer,
+            offset: 0,
+            range: skin.size,
+        },
+        vk::DescriptorBufferInfo {
+            buffer: palette.buffer,
+            offset: 0,
+            range: PALETTE_BYTES.min(palette.size),
+        },
+        vk::DescriptorBufferInfo {
+            buffer: out.buffer,
+            offset: 0,
+            range: out.size,
+        },
     ];
     let writes = [
         write(set, 0, &infos[0]),
@@ -684,7 +743,8 @@ fn prime_output_vb(
     rest_vertices: &[Vertex],
 ) -> Result<()> {
     let mut staging = buffer::create_host_buffer(
-        device, allocator,
+        device,
+        allocator,
         rest_vertices,
         vk::BufferUsageFlags::TRANSFER_SRC,
         "skinned_output_prime_staging",
@@ -694,13 +754,19 @@ fn prime_output_vb(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cmd = unsafe { device.allocate_command_buffers(&alloc_info)?[0] };
-    let begin = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
         device.begin_command_buffer(cmd, &begin)?;
         device.cmd_copy_buffer(
-            cmd, staging.buffer, output_vb.buffer,
-            &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: staging.size }],
+            cmd,
+            staging.buffer,
+            output_vb.buffer,
+            &[vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: staging.size,
+            }],
         );
         device.end_command_buffer(cmd)?;
         let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));

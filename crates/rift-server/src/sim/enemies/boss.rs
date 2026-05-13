@@ -18,7 +18,7 @@ use rift_game::abilities::AbilityWireId;
 use rift_game::kinematic::loco;
 
 use super::brute;
-use super::{AiOutcome, ATTACK_ANIM_DUR, EnemyCast, ServerEnemy};
+use super::{AiOutcome, EnemyCast, ServerEnemy, ATTACK_ANIM_DUR};
 
 // ---- Phase + enrage tuning -----------------------------------
 
@@ -149,7 +149,11 @@ pub fn tick(
     use rift_game::abilities::{id as ab_id, lookup, AbilityKind};
 
     // Phase + per-phase modifiers.
-    let hp_frac = if en.hp_max > 0.0 { en.hp / en.hp_max } else { 0.0 };
+    let hp_frac = if en.hp_max > 0.0 {
+        en.hp / en.hp_max
+    } else {
+        0.0
+    };
     let phase: u8 = if hp_frac > PHASE_2_HP {
         1
     } else if hp_frac > PHASE_3_HP {
@@ -176,7 +180,13 @@ pub fn tick(
     //    emit an `EnemyCast::Resolve` and let the central
     //    dispatcher in the kernel pipeline actually apply the
     //    effect (spawn projectiles / damage / queue summons).
-    if let BossAttack::Windup { ability_id, remaining, aim, param_a } = boss.attack {
+    if let BossAttack::Windup {
+        ability_id,
+        remaining,
+        aim,
+        param_a,
+    } = boss.attack
+    {
         en.k.velocity = Vec3::ZERO;
         en.k.locomotion = loco::IDLE;
         // For projectile fans, lock the boss's facing to the
@@ -239,8 +249,7 @@ pub fn tick(
     // [`rift_game::abilities::REGISTRY`]; this body only owns
     // the *selection* logic.
     if enraged && boss.cooldowns[ab_id::SUMMON_BRUTES.raw() as usize] <= 0.0 {
-        let summon = lookup(ab_id::SUMMON_BRUTES)
-            .expect("REGISTRY missing SUMMON_BRUTES");
+        let summon = lookup(ab_id::SUMMON_BRUTES).expect("REGISTRY missing SUMMON_BRUTES");
         let windup = match summon.kind {
             AbilityKind::Summon { windup, .. } => windup,
             _ => 1.2,
@@ -272,7 +281,11 @@ pub fn tick(
             // radius rides through the wind-up via `param_a`
             // so resolve damage uses it too.
             let radius = slam_radius
-                * if enraged { SLAM_RADIUS_ENRAGE_MULT } else { 1.0 };
+                * if enraged {
+                    SLAM_RADIUS_ENRAGE_MULT
+                } else {
+                    1.0
+                };
             boss.attack = BossAttack::Windup {
                 ability_id: ab_id::GROUND_SLAM,
                 remaining: windup,
@@ -329,12 +342,14 @@ pub fn tick(
         if en.attack_cooldown <= 0.0 {
             en.attack_cooldown = melee.attack_cooldown;
             en.attack_anim_remaining = ATTACK_ANIM_DUR;
-            outcome.melee_damage.push(super::super::combat_ctx::PlayerHit {
-                target: target_entity,
-                attacker_kind: en.role.to_wire_byte(),
-                ability_id: rift_game::abilities::id::MELEE_ATTACK,
-                amount: melee.attack_damage * damage_mult,
-            });
+            outcome
+                .melee_damage
+                .push(super::super::combat_ctx::PlayerHit {
+                    target: target_entity,
+                    attacker_kind: en.role.to_wire_byte(),
+                    ability_id: rift_game::abilities::id::MELEE_ATTACK,
+                    amount: melee.attack_damage * damage_mult,
+                });
         }
     }
 }

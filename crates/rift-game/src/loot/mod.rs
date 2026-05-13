@@ -73,8 +73,8 @@ pub use families::{Attribute, BaseFamily, Element};
 pub use inventory::{Inventory, Loadout};
 pub use item::{CharacterIdBytes, Item, LootProvenance, RolledAffix, RolledRiftTouched};
 pub use items::{
-    tag, AccessoryKind, ArmorKind, BaseItem, EquipSlot, GenderedModel, ItemSlot, WeaponKind,
-    BASE_ITEMS,
+    tag, AccessoryKind, ArmorKind, BaseItem, ConsumableKind, EquipSlot, GenderedModel, ItemSlot,
+    WeaponKind, BASE_ITEMS,
 };
 pub use rarity::salvage_yield;
 pub use rarity::Rarity;

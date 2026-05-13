@@ -1,20 +1,24 @@
-pub mod forward;
 pub mod asset_decode;
-pub mod camera;
-pub mod mesh;
-pub mod uniform;
-pub mod depth;
-pub mod texture;
-pub mod material;
-pub mod shadow;
-pub mod shadow_point;
-pub mod sky;
-pub mod post;
-pub mod overlay;
-pub mod font;
-pub mod vfx;
 pub mod blood;
+pub mod camera;
+pub mod depth;
+pub mod draw_loop;
+pub mod font;
+pub mod forward;
 pub mod gpu_skin;
+pub mod material;
+pub mod mesh;
+pub mod objects;
+pub mod passes;
+pub mod pipeline;
+pub mod texture;
+pub mod uniform;
+pub mod uniforms;
+pub mod vfx;
+
+// Backwards-compat re-exports: pass modules moved under `passes/`,
+// but external code still imports them as `renderer::shadow::*` etc.
+pub use passes::{overlay, post, shadow, shadow_point, sky};
 
 pub use forward::Renderer;
 pub use overlay::{OverlayBatch, OverlayRenderer};

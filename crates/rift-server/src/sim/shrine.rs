@@ -118,9 +118,7 @@ pub fn maybe_spawn(
         channelers: 0,
         required: 0,
     };
-    log::info!(
-        "shrine: spawned revive shrine {net_id:?} on floor {floor_index} at {position:?}"
-    );
+    log::info!("shrine: spawned revive shrine {net_id:?} on floor {floor_index} at {position:?}");
     let _ = world.spawn((shrine,));
 }
 
@@ -160,11 +158,7 @@ pub fn find(world: &hecs::World, shrine: NetId) -> Option<(Entity, Vec3)> {
 ///   if the survivor finishes solo.
 /// - If `channelers < required` (or `required == 0`) progress
 ///   resets to 0; partial progress doesn't bank.
-pub fn tick(
-    world: &mut hecs::World,
-    events: &mut Vec<WorldEvent>,
-    dt: f32,
-) {
+pub fn tick(world: &mut hecs::World, events: &mut Vec<WorldEvent>, dt: f32) {
     if dt <= 0.0 {
         return;
     }
@@ -212,9 +206,7 @@ pub fn tick(
             continue;
         };
         let still_valid = shrines.iter().any(|(_, id, pos)| {
-            *id == target
-                && info.living
-                && (info.position - *pos).length_squared() <= radius_sq
+            *id == target && info.living && (info.position - *pos).length_squared() <= radius_sq
         });
         if !still_valid {
             if let Ok(mut p) = world.get::<&mut ServerPlayer>(info.entity) {

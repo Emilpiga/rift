@@ -23,12 +23,7 @@ use crate::vulkan::buffer::GpuBuffer;
 use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
 use gpu_allocator::vulkan::Allocator;
 
-const QUAD_VERTICES: [[f32; 2]; 4] = [
-    [-0.5, -0.5],
-    [0.5, -0.5],
-    [0.5, 0.5],
-    [-0.5, 0.5],
-];
+const QUAD_VERTICES: [[f32; 2]; 4] = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
 
 const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
@@ -243,8 +238,11 @@ impl ParticleVfxRenderer {
 
         let vert_spv =
             hot_reload::compile_glsl(&vert_src, "vfx_particle.vert", shaderc::ShaderKind::Vertex)?;
-        let frag_spv =
-            hot_reload::compile_glsl(&frag_src, "vfx_particle.frag", shaderc::ShaderKind::Fragment)?;
+        let frag_spv = hot_reload::compile_glsl(
+            &frag_src,
+            "vfx_particle.frag",
+            shaderc::ShaderKind::Fragment,
+        )?;
 
         let vert_module = crate::vulkan::pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = crate::vulkan::pipeline::create_shader_module(device, &frag_spv)?;
@@ -421,7 +419,11 @@ impl ParticleVfxRenderer {
 
         let pipelines = unsafe {
             device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info_alpha, info_additive], None)
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[info_alpha, info_additive],
+                    None,
+                )
                 .map_err(|(_, e)| e)?
         };
 

@@ -295,6 +295,11 @@ pub struct ItemView<'a> {
     /// dynamically from the union of these keys, so adding a
     /// new `Stat` variant in `rift-game` shows up automatically.
     pub stat_keys: &'a [&'static str],
+    /// `true` when the item is a `ItemSlot::Consumable(_)` \u2014
+    /// drives bag right-click routing (`UseConsumable` instead
+    /// of `Equip` / `DepositToStash`) and disables salvage /
+    /// equip affordances.
+    pub is_consumable: bool,
 }
 
 // ─── Stash views ─────────────────────────────────────────────
@@ -602,6 +607,13 @@ pub enum InventoryAction {
     Salvage { inventory_index: u32 },
     /// Bulk-salvage every non-anchored bag item ≤ `rarity_max`.
     SalvageBulk { rarity_max: u8 },
+    /// Begin consuming the bag item at `inventory_index`. The
+    /// host inspects the item's `ConsumableKind`: self-targeted
+    /// kinds (e.g. `GreaterRespecToken`) fire the `UseItem`
+    /// wire request immediately; two-step kinds (e.g.
+    /// `LesserRespecToken`) enter a "pick a target" UI mode
+    /// before pushing the request.
+    UseConsumable { inventory_index: u32 },
     /// Deposit a bag item into the active stash tab.
     DepositToStash { inventory_index: u32, tab_index: u8 },
     /// Deposit a bag item into a specific stash slot.

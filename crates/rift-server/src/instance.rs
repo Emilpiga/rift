@@ -113,12 +113,7 @@ impl InstanceManager {
     /// a positive floor index — the caller is responsible for
     /// clamping against the party-wide
     /// `deepest_cleared_floor + 1`.
-    pub fn create_private(
-        &mut self,
-        start_floor: u32,
-        capacity: u8,
-        seed: u64,
-    ) -> RiftInstanceId {
+    pub fn create_private(&mut self, start_floor: u32, capacity: u8, seed: u64) -> RiftInstanceId {
         let id = RiftInstanceId(self.next_id);
         self.next_id += 1;
         let sim = Sim::new(seed, start_floor.max(1));
@@ -170,11 +165,7 @@ impl InstanceManager {
     /// Spin up a fresh Matchmade instance. Capacity always
     /// equals [`rift_net::messages::MAX_PARTY`] — the whole
     /// point of matchmade is to fill the lobby.
-    pub fn create_matchmade(
-        &mut self,
-        start_floor: u32,
-        seed: u64,
-    ) -> RiftInstanceId {
+    pub fn create_matchmade(&mut self, start_floor: u32, seed: u64) -> RiftInstanceId {
         let id = RiftInstanceId(self.next_id);
         self.next_id += 1;
         let sim = Sim::new(seed, start_floor.max(1));

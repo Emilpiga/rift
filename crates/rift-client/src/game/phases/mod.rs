@@ -4,7 +4,7 @@
 //! `pub(super)` fields on `GameState`. The pipeline order +
 //! dispatch lives in [`crate::game::state::GameState::update`].
 
-pub mod gameplay_phase;
 pub mod combat_phase;
+pub mod gameplay_phase;
 pub mod render_phase;
 pub mod ui_phase;

@@ -315,6 +315,20 @@ pub struct ServerEnemy {
     /// the damage roll. Suppressed on
     /// [`elite_mod::JUGGERNAUT`] enemies.
     pub stagger_remaining: f32,
+    /// Remaining seconds of an active knockback slide. While
+    /// `> 0` the AI tick overrides `k.velocity` with
+    /// `knockback_velocity` (decayed linearly to zero across
+    /// the window) and skips role logic, so the enemy slides
+    /// for a few snapshots after a punch instead of
+    /// teleporting one frame and freezing. Stacked by
+    /// `apply_hits_to_enemies` — each fresh hit refreshes the
+    /// timer and velocity so chain hits keep them sliding.
+    pub knockback_remaining: f32,
+    /// World-space velocity of the active knockback slide.
+    /// Read each AI tick while `knockback_remaining > 0`,
+    /// faded to zero across the window so the slide eases
+    /// out rather than snapping.
+    pub knockback_velocity: Vec3,
     /// Pending aggro signal queued by [`notify_attacked`].
     /// `Some((attacker, delay))` — the enemy promotes
     /// `target_lock` to `attacker` once `delay` ticks down to
@@ -504,6 +518,22 @@ pub fn tick_ai(
         // death-fade timer expires and they're despawned.
         if en.is_dying() {
             en.k.velocity = Vec3::ZERO;
+            continue;
+        }
+        // Knockback slide. Runs *before* stagger so a punch
+        // that doesn't qualify for a stagger still produces
+        // visible motion. Velocity is faded linearly to zero
+        // across the window so the slide eases out and
+        // `integrate_motion` lets walls / props stop it. AI
+        // role logic + separation are skipped this tick so
+        // the slide reads cleanly; threat decays normally.
+        if en.knockback_remaining > 0.0 {
+            const KNOCKBACK_DUR: f32 = 0.18;
+            en.knockback_remaining = (en.knockback_remaining - dt).max(0.0);
+            let t = (en.knockback_remaining / KNOCKBACK_DUR).clamp(0.0, 1.0);
+            en.k.velocity = en.knockback_velocity * t;
+            en.k.locomotion = loco::IDLE;
+            decay_threat(en, dt);
             continue;
         }
         // Hit-flinch: if a recent hit set `stagger_remaining`,
@@ -970,6 +1000,8 @@ pub fn spawn_summon(
         crit_chance: 0.0,
         crit_damage: 0.0,
         stagger_remaining: 0.0,
+        knockback_remaining: 0.0,
+        knockback_velocity: Vec3::ZERO,
         pending_aggro: None,
         threat: std::collections::HashMap::new(),
         elite_mods: 0,
@@ -1154,6 +1186,8 @@ pub fn spawn_for_floor(
                     crit_chance: 0.0,
                     crit_damage: 0.0,
                     stagger_remaining: 0.0,
+                    knockback_remaining: 0.0,
+                    knockback_velocity: Vec3::ZERO,
                     pending_aggro: None,
                     threat: std::collections::HashMap::new(),
                     elite_mods,

@@ -51,11 +51,7 @@ pub fn heal_burst() -> Effect {
                 speed: (0.0, 0.0),
                 lifetime: (0.40, 0.40),
                 forces: vec![],
-                size: Curve::from_stops([
-                    (0.00, 0.40),
-                    (0.50, 1.60),
-                    (1.00, 2.20),
-                ]),
+                size: Curve::from_stops([(0.00, 0.40), (0.50, 1.60), (1.00, 2.20)]),
                 color: Gradient::from_stops([
                     (0.00, [1.4, 2.4, 1.4, 0.85]),
                     (1.00, [0.4, 1.0, 0.5, 0.0]),

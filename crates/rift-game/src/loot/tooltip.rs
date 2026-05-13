@@ -250,6 +250,25 @@ impl Item {
             ));
         }
 
+        // Consumable description \u2014 a single explainer line so
+        // the player knows what right-clicking the token does.
+        // Keeps the tooltip terminal: no affix block, no
+        // legendary banner, no signature partition (consumables
+        // ship with `affixes: Vec::new()`).
+        if let Some(kind) = self.consumable_kind() {
+            out.push(TooltipLine::new("", TooltipKind::Blank));
+            let body = match kind {
+                super::ConsumableKind::GreaterRespecToken => {
+                    "Right-click to refund every invested talent point."
+                }
+                super::ConsumableKind::LesserRespecToken => {
+                    "Right-click, then choose a talent node to refund every rank of."
+                }
+            };
+            out.push(TooltipLine::new(body, TooltipKind::Stat));
+            return out;
+        }
+
         // Legendary banner — promoted to the top of the body so
         // the most build-defining line of the item lands where
         // the player's eye is already focused. `╔` / `╚` are
@@ -310,7 +329,15 @@ impl Item {
         // `signature_count`); we render them with a deliberate
         // primary → Vitality → secondary order so every item's
         // headline stat is the topmost line of the stat block.
-        let sig_n = super::affixes::signature_count(self.base.equip_slot).min(self.affixes.len());
+        //
+        // Consumables short-circuit above so every base
+        // reaching here has a real equip slot; unwrap is safe
+        // and documents the invariant.
+        let equip_slot = self
+            .base
+            .equip_slot
+            .expect("non-consumable base must declare an equip slot");
+        let sig_n = super::affixes::signature_count(equip_slot).min(self.affixes.len());
         let (raw_signatures, rest) = self.affixes.split_at(sig_n);
         // Defensive filter: skip any legendary effect that
         // somehow lands in the first N positions (older

@@ -19,7 +19,11 @@ pub enum TextureSource<'a> {
     /// (e.g. an image embedded in a glTF bufferView).
     Bytes(&'a [u8]),
     /// Upload raw RGBA8 sRGB pixels (e.g. procedurally generated).
-    Rgba { width: u32, height: u32, pixels: &'a [u8] },
+    Rgba {
+        width: u32,
+        height: u32,
+        pixels: &'a [u8],
+    },
     /// Upload an image already decoded off-thread by
     /// [`crate::renderer::asset_decode`].
     Decoded(crate::renderer::asset_decode::DecodedTexture),
@@ -156,7 +160,11 @@ impl Texture {
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .extent(vk::Extent3D { width, height, depth: 1 })
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
             .mip_levels(mip_levels)
             .array_layers(1)
             .format(format)
@@ -236,7 +244,11 @@ impl Texture {
                 layer_count: 1,
             },
             image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-            image_extent: vk::Extent3D { width, height, depth: 1 },
+            image_extent: vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            },
         };
 
         unsafe {
@@ -299,7 +311,11 @@ impl Texture {
                 })
                 .src_offsets([
                     vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D { x: mip_w, y: mip_h, z: 1 },
+                    vk::Offset3D {
+                        x: mip_w,
+                        y: mip_h,
+                        z: 1,
+                    },
                 ])
                 .dst_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -309,7 +325,11 @@ impl Texture {
                 })
                 .dst_offsets([
                     vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D { x: next_w, y: next_h, z: 1 },
+                    vk::Offset3D {
+                        x: next_w,
+                        y: next_h,
+                        z: 1,
+                    },
                 ]);
             unsafe {
                 device.cmd_blit_image(
@@ -386,7 +406,9 @@ impl Texture {
         end_single_command(device, command_pool, queue, cmd)?;
 
         // Clean up staging
-        unsafe { device.destroy_buffer(staging_buffer, None); }
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+        }
         allocator.lock().unwrap().free(staging_alloc)?;
 
         // Create image view
@@ -481,7 +503,11 @@ impl Texture {
 
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .extent(vk::Extent3D { width, height, depth: 1 })
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .format(format)
@@ -541,7 +567,11 @@ impl Texture {
                 layer_count: 1,
             },
             image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-            image_extent: vk::Extent3D { width, height, depth: 1 },
+            image_extent: vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            },
         };
         unsafe {
             device.cmd_copy_buffer_to_image(
@@ -579,7 +609,9 @@ impl Texture {
             );
         }
         end_single_command(device, command_pool, queue, cmd)?;
-        unsafe { device.destroy_buffer(staging_buffer, None); }
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+        }
         allocator.lock().unwrap().free(staging_alloc)?;
 
         let view_info = vk::ImageViewCreateInfo::default()
@@ -650,7 +682,8 @@ impl Texture {
 
                 // Pseudo-random noise for stone variation
                 let hash = |a: u32, b: u32| -> u8 {
-                    let n = a.wrapping_mul(374761393)
+                    let n = a
+                        .wrapping_mul(374761393)
                         .wrapping_add(b.wrapping_mul(668265263))
                         .wrapping_add(row.wrapping_mul(1013904223));
                     let n = n ^ (n >> 13);
@@ -710,18 +743,24 @@ impl Texture {
         src: TextureSource<'_>,
     ) -> Result<Self> {
         match src {
-            TextureSource::File(p) => {
-                Self::from_file(device, allocator, queue, command_pool, p)
-            }
+            TextureSource::File(p) => Self::from_file(device, allocator, queue, command_pool, p),
             TextureSource::FileLinear(p) => {
                 Self::from_file_linear(device, allocator, queue, command_pool, p)
             }
-            TextureSource::Bytes(b) => {
-                Self::from_memory(device, allocator, queue, command_pool, b)
-            }
-            TextureSource::Rgba { width, height, pixels } => {
-                Self::from_rgba(device, allocator, queue, command_pool, width, height, pixels)
-            }
+            TextureSource::Bytes(b) => Self::from_memory(device, allocator, queue, command_pool, b),
+            TextureSource::Rgba {
+                width,
+                height,
+                pixels,
+            } => Self::from_rgba(
+                device,
+                allocator,
+                queue,
+                command_pool,
+                width,
+                height,
+                pixels,
+            ),
             TextureSource::Decoded(d) => {
                 Self::from_decoded(device, allocator, queue, command_pool, &d)
             }
@@ -740,7 +779,11 @@ impl Texture {
         path: P,
     ) -> Result<Self> {
         Self::from_file_with_format(
-            device, allocator, queue, command_pool, path,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            path,
             vk::Format::R8G8B8A8_SRGB,
         )
     }
@@ -757,7 +800,11 @@ impl Texture {
         path: P,
     ) -> Result<Self> {
         Self::from_file_with_format(
-            device, allocator, queue, command_pool, path,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            path,
             vk::Format::R8G8B8A8_UNORM,
         )
     }
@@ -772,9 +819,7 @@ impl Texture {
     ) -> Result<Self> {
         let original = path.as_ref();
         let resolved = crate::renderer::asset_decode::resolve_asset_path(original)
-            .map_err(|e| anyhow::anyhow!(
-                "texture file not found: {:?}: {}", original, e
-            ))?;
+            .map_err(|e| anyhow::anyhow!("texture file not found: {:?}: {}", original, e))?;
         let img = image::open(&resolved)
             .map_err(|e| anyhow::anyhow!("texture decode failed for {:?}: {}", resolved, e))?
             .to_rgba8();
@@ -782,10 +827,20 @@ impl Texture {
         let pixels = img.into_raw();
         log::info!(
             "Loaded texture {:?}: {}x{} ({:?})",
-            resolved.file_name().unwrap_or_default(), w, h, format,
+            resolved.file_name().unwrap_or_default(),
+            w,
+            h,
+            format,
         );
         Self::from_rgba_with_format(
-            device, allocator, queue, command_pool, w, h, &pixels, format,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            w,
+            h,
+            &pixels,
+            format,
         )
     }
 
@@ -821,8 +876,14 @@ impl Texture {
         decoded: &crate::renderer::asset_decode::DecodedTexture,
     ) -> Result<Self> {
         Self::from_rgba_with_format(
-            device, allocator, queue, command_pool,
-            decoded.width, decoded.height, &decoded.pixels, decoded.format,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            decoded.width,
+            decoded.height,
+            &decoded.pixels,
+            decoded.format,
         )
     }
 
@@ -838,14 +899,17 @@ impl Texture {
     }
 }
 
-fn begin_single_command(device: &ash::Device, command_pool: vk::CommandPool) -> Result<vk::CommandBuffer> {
+fn begin_single_command(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+) -> Result<vk::CommandBuffer> {
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cmd = unsafe { device.allocate_command_buffers(&alloc_info)?[0] };
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { device.begin_command_buffer(cmd, &begin_info)? };
     Ok(cmd)
 }

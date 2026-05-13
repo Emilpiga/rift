@@ -71,6 +71,22 @@ pub(super) fn push_into_sparse<T>(v: &mut Vec<Option<T>>, item: T) {
     }
 }
 
+/// Snapshot a [`rift_game::talents::TalentTree`] into the
+/// `(invested_pairs, unspent)` payload shape used by every
+/// `ServerMsg::TalentsSync` send site. Centralised so the
+/// invest / lesser-respec / greater-respec / use-token paths
+/// all build the same wire shape from the same authoritative
+/// source.
+pub(super) fn snapshot_talents(tree: &rift_game::talents::TalentTree) -> (Vec<(u16, u8)>, u32) {
+    let invested: Vec<(u16, u8)> = tree
+        .nodes
+        .iter()
+        .filter(|n| n.current_rank >= 1)
+        .map(|n| (n.id.0, n.current_rank))
+        .collect();
+    (invested, tree.unspent_points)
+}
+
 /// Build a `cols × rows` occupancy mask for `slots`,
 /// honouring each item's multi-cell footprint. A cell is
 /// `true` iff some item's anchor + footprint covers it.

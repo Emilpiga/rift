@@ -29,9 +29,7 @@
 use rift_engine::ui::im::{Color, Pos2, Rect, Ui};
 use rift_game::abilities;
 use rift_game::monsters::MonsterRole;
-use rift_net::messages::{
-    MeterAbilityBreakdown, MeterEntry, MeterTakenAttackerBreakdown,
-};
+use rift_net::messages::{MeterAbilityBreakdown, MeterEntry, MeterTakenAttackerBreakdown};
 use rift_net::NetId;
 
 use crate::net::NetClient;
@@ -124,12 +122,7 @@ impl MeterUi {
     /// Replace the panel's data with the freshest server push.
     /// `net` is consulted once to resolve `NetId → name` so the
     /// per-frame draw can run without a `NetClient` reference.
-    pub fn apply_snapshot(
-        &mut self,
-        elapsed: f32,
-        entries: Vec<MeterEntry>,
-        net: &NetClient,
-    ) {
+    pub fn apply_snapshot(&mut self, elapsed: f32, entries: Vec<MeterEntry>, net: &NetClient) {
         self.elapsed = elapsed;
         let our_net_id = net.our_net_id();
         let our_name = net.character_name();
@@ -137,7 +130,9 @@ impl MeterUi {
             .into_iter()
             .map(|e| {
                 let name = if Some(e.net_id) == our_net_id {
-                    our_name.map(str::to_string).unwrap_or_else(|| "You".to_string())
+                    our_name
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "You".to_string())
                 } else if let Some(n) = net.name_for_net_id(e.net_id) {
                     n.to_string()
                 } else {
@@ -211,12 +206,7 @@ impl MeterUi {
         let want_h = header_h + body_target + pad * 2.0;
         let h = want_h.min(max_panel_h);
         let inset = 12.0 * s;
-        let rect = Rect::from_xywh(
-            screen.x - w - inset,
-            screen.y - h - inset,
-            w,
-            h,
-        );
+        let rect = Rect::from_xywh(screen.x - w - inset, screen.y - h - inset, w, h);
 
         // Background. Drawn directly rather than via `Frame`
         // because we want a subtle dark tint, not a panel-style
@@ -226,12 +216,7 @@ impl MeterUi {
             theme.spacing.corner_radius,
             Color::rgba(0.05, 0.05, 0.07, 0.78),
         );
-        ui.draw_rounded_outline(
-            rect,
-            theme.spacing.corner_radius,
-            1.0,
-            theme.colors.border,
-        );
+        ui.draw_rounded_outline(rect, theme.spacing.corner_radius, 1.0, theme.colors.border);
         // Whole-panel hit rect: lets the gameplay layer skip
         // basic-attack clicks under us.
         self.cached_consume_rects.push(rect);
@@ -299,7 +284,10 @@ impl MeterUi {
             // the glyph run: the button rects are uniform, so a
             // fixed offset reads OK at every UI scale.
             let _ = ui.draw_text(
-                Pos2::new(tx + tab_w * 0.5 - (label.len() as f32) * 3.5 * s, tab_y + 4.0 * s),
+                Pos2::new(
+                    tx + tab_w * 0.5 - (label.len() as f32) * 3.5 * s,
+                    tab_y + 4.0 * s,
+                ),
                 label,
                 theme.fonts.size_sm,
                 text_color,
@@ -315,7 +303,8 @@ impl MeterUi {
         // rows now (TAKEN is credited at the receiving player
         // by `apply_player_damage`). THREAT is still a single
         // instantaneous number with no per-ability slice.
-        let supports_breakdown = matches!(self.tab, MeterTab::Dmg | MeterTab::Hps | MeterTab::Taken);
+        let supports_breakdown =
+            matches!(self.tab, MeterTab::Dmg | MeterTab::Hps | MeterTab::Taken);
         if !supports_breakdown {
             self.expanded = None;
         }
@@ -334,8 +323,8 @@ impl MeterUi {
         let top = indexed.first().map(|r| r.1).unwrap_or(0.0);
         // Per-second display for DMG / HPS / TAKEN. THREAT is
         // an instantaneous value so we leave it alone.
-        let per_second = secs > 0.5
-            && matches!(self.tab, MeterTab::Dmg | MeterTab::Hps | MeterTab::Taken);
+        let per_second =
+            secs > 0.5 && matches!(self.tab, MeterTab::Dmg | MeterTab::Hps | MeterTab::Taken);
 
         // Body region: everything below the tabs is scrollable.
         let body_top = tab_y + tab_h + 8.0 * s;
@@ -352,12 +341,9 @@ impl MeterUi {
         let mut total_rows_h = (self.rows.len() as f32) * row_h;
         if let Some(open) = self.expanded {
             if let Some(open_row) = self.rows.iter().find(|r| r.net_id == open) {
-                total_rows_h += taken_or_ability_sub_count(
-                    self.tab,
-                    open_row,
-                    self.expanded_attacker,
-                ) as f32
-                    * sub_row_h;
+                total_rows_h +=
+                    taken_or_ability_sub_count(self.tab, open_row, self.expanded_attacker) as f32
+                        * sub_row_h;
             }
         }
         let max_scroll = (total_rows_h - body_h).max(0.0);
@@ -393,7 +379,11 @@ impl MeterUi {
             let row_visible = y + row_h > body_top && y < body_bottom;
             if row_visible {
                 let bar_rect = Rect::from_xywh(row_x, y, row_w, row_h - 4.0 * s);
-                let frac = if top > 0.0 { (value / top).clamp(0.0, 1.0) } else { 0.0 };
+                let frac = if top > 0.0 {
+                    (value / top).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 draw_meter_bar(ui, bar_rect, frac, bar_color(self.tab), 1.0);
 
                 let row = &self.rows[idx];
@@ -401,7 +391,11 @@ impl MeterUi {
                 // Caret hint when the tab supports breakdown,
                 // so players can tell rows are clickable.
                 let caret = if supports_breakdown {
-                    if is_open { "v " } else { "> " }
+                    if is_open {
+                        "v "
+                    } else {
+                        "> "
+                    }
                 } else {
                     ""
                 };
@@ -577,7 +571,9 @@ fn ability_value(tab: MeterTab, a: &MeterAbilityBreakdown) -> f32 {
 /// Resolve a wire ability id to a display name. Falls back to
 /// "Other" for the unattributed sentinel and unknown ids.
 fn ability_name(id: u8) -> &'static str {
-    abilities::from_wire_id(abilities::AbilityWireId::new(id)).map(|a| a.name).unwrap_or("Other")
+    abilities::from_wire_id(abilities::AbilityWireId::new(id))
+        .map(|a| a.name)
+        .unwrap_or("Other")
 }
 
 /// Resolve an attacker-kind wire byte to a display name.
@@ -672,11 +668,7 @@ fn taken_or_ability_sub_count(
         MeterTab::Taken => {
             let mut n = row.taken_attackers.len();
             if let Some(kind) = expanded_attacker {
-                if let Some(att) = row
-                    .taken_attackers
-                    .iter()
-                    .find(|a| a.attacker_kind == kind)
-                {
+                if let Some(att) = row.taken_attackers.iter().find(|a| a.attacker_kind == kind) {
                     n += att.abilities.len();
                 }
             }
@@ -747,17 +739,7 @@ fn draw_taken_breakdown(
                 theme.fonts.size_sm,
                 theme.colors.text_dim,
             );
-            draw_value_columns(
-                ui,
-                &theme,
-                row_x,
-                row_w,
-                sy,
-                s,
-                v,
-                secs,
-                per_second,
-            );
+            draw_value_columns(ui, &theme, row_x, row_w, sy, s, v, secs, per_second);
             if bar.contains(mouse) {
                 *attacker_click_target = Some(att.attacker_kind);
             }
@@ -796,17 +778,7 @@ fn draw_taken_breakdown(
                         theme.fonts.size_sm,
                         theme.colors.text_dim,
                     );
-                    draw_value_columns(
-                        ui,
-                        &theme,
-                        row_x,
-                        row_w,
-                        isy,
-                        s,
-                        av,
-                        secs,
-                        per_second,
-                    );
+                    draw_value_columns(ui, &theme, row_x, row_w, isy, s, av, secs, per_second);
                 }
                 *cursor_y += sub_row_h;
             }
@@ -863,17 +835,7 @@ fn draw_ability_breakdown(
                 theme.fonts.size_sm,
                 theme.colors.text_dim,
             );
-            draw_value_columns(
-                ui,
-                &theme,
-                row_x,
-                row_w,
-                sy,
-                s,
-                v,
-                secs,
-                per_second,
-            );
+            draw_value_columns(ui, &theme, row_x, row_w, sy, s, v, secs, per_second);
         }
         *cursor_y += sub_row_h;
     }

@@ -99,7 +99,10 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         id: BURN,
         name: "Burn",
         default_duration: 4.0,
-        effects: &[EffectKind::DamageOverTime { dps: 6.0, interval: 0.5 }],
+        effects: &[EffectKind::DamageOverTime {
+            dps: 6.0,
+            interval: 0.5,
+        }],
         color: [1.00, 0.45, 0.15],
         icon: Some("FireMage_12"),
     };
@@ -128,7 +131,10 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         default_duration: 10.0,
         // 6 hps × 10 s = 60 HP total, ticked every 1 s. Matches
         // the `Rejuvenation` ability tooltip.
-        effects: &[EffectKind::HealOverTime { hps: 6.0, interval: 1.0 }],
+        effects: &[EffectKind::HealOverTime {
+            hps: 6.0,
+            interval: 1.0,
+        }],
         color: [0.55, 1.00, 0.65],
         icon: Some("Druid_16"),
     };

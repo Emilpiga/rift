@@ -70,12 +70,15 @@ impl Equipment {
     }
 
     /// Whether `item` is allowed in `slot`. Currently a strict
-    /// match (`item.base.equip_slot == slot`) with the single
-    /// exception that any ring may live in either ring slot —
-    /// `Ring1` and `Ring2` are interchangeable from the
-    /// validation perspective.
+    /// match (`item.base.equip_slot == Some(slot)`) with the
+    /// single exception that any ring may live in either ring
+    /// slot \u2014 `Ring1` and `Ring2` are interchangeable
+    /// from the validation perspective. Items with no equip
+    /// slot (consumables) are rejected by the `let Some` bail.
     pub fn accepts(slot: EquipSlot, item: &Item) -> bool {
-        let want = item.base.equip_slot;
+        let Some(want) = item.base.equip_slot else {
+            return false;
+        };
         match (slot, want) {
             (EquipSlot::Ring1 | EquipSlot::Ring2, EquipSlot::Ring1 | EquipSlot::Ring2) => true,
             (a, b) => a == b,
@@ -84,11 +87,13 @@ impl Equipment {
 
     /// Default slot to drop `item` into when the user hasn't
     /// picked one explicitly. Mirrors the base item's
-    /// `equip_slot`, except that rings prefer the empty ring slot
-    /// (or `Ring1` if both are full).
-    pub fn default_slot(&self, item: &Item) -> EquipSlot {
-        let base = item.base.equip_slot;
-        match base {
+    /// `equip_slot`, except that rings prefer the empty ring
+    /// slot (or `Ring1` if both are full). Returns `None` for
+    /// bag-only items (consumables) that don't have a target
+    /// slot at all.
+    pub fn default_slot(&self, item: &Item) -> Option<EquipSlot> {
+        let base = item.base.equip_slot?;
+        Some(match base {
             EquipSlot::Ring1 | EquipSlot::Ring2 => {
                 if self.slots[EquipSlot::Ring1.to_u8() as usize].is_none() {
                     EquipSlot::Ring1
@@ -99,7 +104,7 @@ impl Equipment {
                 }
             }
             other => other,
-        }
+        })
     }
 
     /// Sum every equipped item's [`Item::stats`] into a single

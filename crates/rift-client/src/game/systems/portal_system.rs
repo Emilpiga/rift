@@ -177,7 +177,7 @@ pub struct HubPortal {
 ///     visibly throbs in lock-step with the visible disc. The
 ///     rate constants (`0.85` breathing, `0.14` spasm phase,
 ///     `0.37` tremor phase) mirror the same values inside
-///     `assets/shaders/triangle.frag::shadeRift`.
+///     `assets/shaders/forward/rift_surface.glsl::shadeRift`.
 ///
 /// The 8-light renderer cap means this function is the only
 /// place that should push portal lights — having two portals
@@ -371,7 +371,7 @@ fn spawn(
     // branch synthesises the entire dimensional-tear look
     // procedurally from polar UVs + time, so vertex colors
     // and lighting are bypassed for portal pixels. See
-    // `assets/shaders/triangle.frag` and
+    // `assets/shaders/forward/rift_surface.glsl` and
     // `Mesh::portal_with_palette` for the full contract.
     //
     // Bit 2 (extract portal) tells `shadeRift` to swap its

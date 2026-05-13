@@ -33,7 +33,3 @@ shaderc = "0.10.1"
 [dev-dependencies]
 env_logger = { workspace = true }
 glam = { workspace = true }
-
-[[example]]
-name = "triangle"
-path = "../../examples/triangle.rs"

@@ -3,7 +3,11 @@ use ash::{vk, Device};
 
 use crate::renderer::mesh::Vertex;
 
-pub fn create_render_pass(device: &Device, color_format: vk::Format, depth_format: vk::Format) -> Result<vk::RenderPass> {
+pub fn create_render_pass(
+    device: &Device,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+) -> Result<vk::RenderPass> {
     let attachments = [
         // Color attachment
         vk::AttachmentDescription::default()
@@ -42,24 +46,22 @@ pub fn create_render_pass(device: &Device, color_format: vk::Format, depth_forma
         .color_attachments(std::slice::from_ref(&color_ref))
         .depth_stencil_attachment(&depth_ref);
 
-    let dependencies = [
-        vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            )
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_stage_mask(
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            )
-            .dst_access_mask(
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            ),
-    ];
+    let dependencies = [vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )];
 
     let render_pass_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)

@@ -79,8 +79,16 @@ impl<'u, 'a> WorldUi<'u, 'a> {
         fill: Color,
     ) -> Option<Rect> {
         let anchor = self.world_to_screen(world_pos)?;
-        let rect = Rect::from_xywh(anchor.x - width * 0.5, anchor.y + y_offset_px, width, height);
-        ProgressBar::new(value).fill(fill).rounded(false).show(self.ui, rect);
+        let rect = Rect::from_xywh(
+            anchor.x - width * 0.5,
+            anchor.y + y_offset_px,
+            width,
+            height,
+        );
+        ProgressBar::new(value)
+            .fill(fill)
+            .rounded(false)
+            .show(self.ui, rect);
         Some(rect)
     }
 

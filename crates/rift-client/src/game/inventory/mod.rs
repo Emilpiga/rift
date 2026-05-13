@@ -66,6 +66,8 @@ pub fn frame(
     stash_tabs: &[StashTabClient],
     stash_pending: &mut Vec<StashRequest>,
     player_state: &PlayerState,
+    pending_consume_bag_idx: &mut Option<u32>,
+    open_talents_panel: &mut bool,
 ) -> bool {
     // ── Phase 1 ─ pre-allocate every owned String. ────────
     let viewer_level = player_state.experience.level;
@@ -99,14 +101,14 @@ pub fn frame(
 
     let bag_compare_slots: Vec<Option<EquipSlot>> = items
         .iter()
-        .map(|slot| slot.as_ref().map(|it| equipment.default_slot(it)))
+        .map(|slot| slot.as_ref().and_then(|it| equipment.default_slot(it)))
         .collect();
     let stash_compare_slots: Vec<Vec<Option<EquipSlot>>> = stash_tabs
         .iter()
         .map(|t| {
             t.items
                 .iter()
-                .map(|slot| slot.as_ref().map(|it| equipment.default_slot(it)))
+                .map(|slot| slot.as_ref().and_then(|it| equipment.default_slot(it)))
                 .collect()
         })
         .collect();
@@ -480,6 +482,42 @@ pub fn frame(
                     rarity_max: Rarity::Magic as u8,
                 });
             }
+            InventoryAction::UseConsumable { inventory_index } => {
+                use rift_game::loot::ConsumableKind;
+                // Dispatch by `ConsumableKind` here so the
+                // host owns the two-step vs. self-targeted
+                // policy in one place. Self-targeted kinds
+                // fire `UseItem` immediately with
+                // `target_arg = u16::MAX`. Two-step kinds
+                // (e.g. `LesserRespecToken`) arm a "pick a
+                // node" mode and force-open the talent panel;
+                // the panel emits the actual `UseItem` once
+                // the player right-clicks an invested talent.
+                let kind = items
+                    .get(inventory_index as usize)
+                    .and_then(|s| s.as_ref())
+                    .and_then(|it| it.consumable_kind());
+                match kind {
+                    Some(ConsumableKind::GreaterRespecToken) => {
+                        pending.push(EquipRequest::UseConsumable {
+                            inventory_index,
+                            target_arg: u16::MAX,
+                        });
+                    }
+                    Some(ConsumableKind::LesserRespecToken) => {
+                        *pending_consume_bag_idx = Some(inventory_index);
+                        *open_talents_panel = true;
+                    }
+                    None => {
+                        // UI thought it was a consumable but
+                        // the host item disagrees \u2014
+                        // silently drop. Most likely a stale
+                        // `is_consumable` flag from a torn
+                        // frame; the next frame will reflect
+                        // the truth.
+                    }
+                }
+            }
             InventoryAction::DepositToStash {
                 inventory_index,
                 tab_index,
@@ -592,7 +630,9 @@ fn build_item_view<'a>(
     };
     // Multi-cell footprint mirrors `EquipSlot::inventory_size`
     // and matches the server's authoritative grid layout.
-    let (cell_w, cell_h) = it.base.equip_slot.inventory_size();
+    // Bag-only items (consumables) fall through to the 1\u00d71
+    // default via `Item::footprint`.
+    let (cell_w, cell_h) = it.footprint();
     ItemView {
         rarity_color: [c[0], c[1], c[2], 1.0],
         anchored: it.anchored,
@@ -615,6 +655,7 @@ fn build_item_view<'a>(
         cell_h,
         rarity_tier: it.rarity as u8,
         stat_keys,
+        is_consumable: it.consumable_kind().is_some(),
     }
 }
 

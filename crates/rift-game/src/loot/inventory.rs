@@ -3,7 +3,7 @@
 
 use super::ability_mods::AbilityMods;
 use super::item::Item;
-use super::items::{EquipSlot, ItemSlot};
+use super::items::EquipSlot;
 use crate::stats::StatBlock;
 
 /// All slots a character has, in stable display order.
@@ -108,9 +108,13 @@ impl Loadout {
 }
 
 /// `true` if `item` can legally occupy `slot`. Rings can sit in
-/// either ring slot; everything else is exact.
+/// either ring slot; everything else is exact. Bag-only items
+/// (consumables) carry `base.equip_slot == None` and are
+/// rejected by the `let Some` bail before any slot comparison.
 pub fn can_equip(item: &Item, slot: EquipSlot) -> bool {
-    let target = item.base.equip_slot;
+    let Some(target) = item.base.equip_slot else {
+        return false;
+    };
     if target == slot {
         return true;
     }
@@ -168,16 +172,5 @@ impl Inventory {
 
     pub fn ability_mods(&self) -> AbilityMods {
         self.equipped.ability_mods()
-    }
-}
-
-/// Default destination slot for a freshly-rolled item — used by UI
-/// hover hints.
-pub fn default_slot_for(slot: ItemSlot) -> EquipSlot {
-    match slot {
-        ItemSlot::Weapon(_) => EquipSlot::Weapon,
-        ItemSlot::Armor(_) => EquipSlot::Chest,
-        ItemSlot::Accessory(super::items::AccessoryKind::Ring) => EquipSlot::Ring1,
-        ItemSlot::Accessory(super::items::AccessoryKind::Amulet) => EquipSlot::Amulet,
     }
 }

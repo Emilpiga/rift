@@ -122,7 +122,9 @@ fn drop_for_enemy_stamps_provenance_with_all_sim_peers() {
             break;
         }
     }
-    let prov = found.flatten().expect("provenance must be set on enemy drop");
+    let prov = found
+        .flatten()
+        .expect("provenance must be set on enemy drop");
     for c in &clients {
         assert!(
             prov.allows(&char_uuid(c.0).into_bytes()),

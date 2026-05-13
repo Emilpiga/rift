@@ -42,11 +42,7 @@ pub fn loot_beam(color: [f32; 3]) -> Effect {
                 speed: (0.0, 0.10),
                 lifetime: (1.8, 3.0),
                 forces: vec![ForceField::Drag { coefficient: 2.0 }],
-                size: Curve::from_stops([
-                    (0.0, 0.55),
-                    (0.5, 0.70),
-                    (1.0, 0.55),
-                ]),
+                size: Curve::from_stops([(0.0, 0.55), (0.5, 0.70), (1.0, 0.55)]),
                 color: Gradient::from_stops([
                     (0.0, [color[0] * 1.1, color[1] * 1.1, color[2] * 1.1, 0.0]),
                     (0.3, [color[0] * 1.2, color[1] * 1.2, color[2] * 1.2, 0.14]),

@@ -148,7 +148,8 @@ impl PartyManager {
     /// before any party-mutating handler so the TTL is enforced
     /// independent of new traffic.
     pub fn evict_expired_invites(&mut self, now: Instant) {
-        self.pending.retain(|_, row| now - row.created_at < INVITE_TTL);
+        self.pending
+            .retain(|_, row| now - row.created_at < INVITE_TTL);
     }
 
     /// Record an invite from `inviter` (named `inviter_name`
@@ -198,11 +199,7 @@ impl PartyManager {
     /// Pull the most recent invite to `invitee`, optionally
     /// filtered by `from` (case-insensitive on the inviter
     /// name). Removes the matched row.
-    fn take_invite(
-        &mut self,
-        invitee: ClientId,
-        from: Option<&str>,
-    ) -> Option<InviteRow> {
+    fn take_invite(&mut self, invitee: ClientId, from: Option<&str>) -> Option<InviteRow> {
         let needle = from.map(|s| s.to_ascii_lowercase());
         let key = self
             .pending
@@ -222,11 +219,7 @@ impl PartyManager {
     /// Accept the most recent invite to `invitee`. On success
     /// merges them into the inviter's party (creating the party
     /// if the inviter is currently solo).
-    pub fn accept_invite(
-        &mut self,
-        invitee: ClientId,
-        from: Option<&str>,
-    ) -> AcceptOutcome {
+    pub fn accept_invite(&mut self, invitee: ClientId, from: Option<&str>) -> AcceptOutcome {
         let Some(row) = self.take_invite(invitee, from) else {
             return AcceptOutcome::NoSuchInvite;
         };
@@ -269,11 +262,7 @@ impl PartyManager {
     /// Decline the matching invite. Returns the inviter's
     /// `ClientId` so the server can drop a "X declined your
     /// invite" toast. `None` if the invite no longer exists.
-    pub fn decline_invite(
-        &mut self,
-        invitee: ClientId,
-        from: Option<&str>,
-    ) -> Option<InviteRow> {
+    pub fn decline_invite(&mut self, invitee: ClientId, from: Option<&str>) -> Option<InviteRow> {
         self.take_invite(invitee, from)
     }
 
@@ -320,11 +309,7 @@ impl PartyManager {
     /// Leader-only kick. Returns `Some(updated)` on success or
     /// `None` if the caller wasn't the leader / target wasn't
     /// in the party.
-    pub fn kick(
-        &mut self,
-        leader: ClientId,
-        target: ClientId,
-    ) -> Option<RemoveOutcome> {
+    pub fn kick(&mut self, leader: ClientId, target: ClientId) -> Option<RemoveOutcome> {
         let pid = self.by_member.get(&leader).copied()?;
         let party = self.parties.get(&pid)?;
         if party.leader != leader || !party.members.contains(&target) || target == leader {
@@ -334,11 +319,7 @@ impl PartyManager {
     }
 
     /// Leader-only promote. Returns `Some(updated)` on success.
-    pub fn promote(
-        &mut self,
-        leader: ClientId,
-        target: ClientId,
-    ) -> Option<Party> {
+    pub fn promote(&mut self, leader: ClientId, target: ClientId) -> Option<Party> {
         let pid = self.by_member.get(&leader).copied()?;
         let party = self.parties.get_mut(&pid)?;
         if party.leader != leader || !party.members.contains(&target) || target == leader {
@@ -533,12 +514,7 @@ mod tests {
         let mut mgr = PartyManager::new();
         let now = Instant::now();
         party_of_n(&mut mgr, MAX_PARTY as u64, now);
-        let r = mgr.record_invite(
-            cid(1),
-            "alpha".into(),
-            cid(MAX_PARTY as u64 + 1),
-            now,
-        );
+        let r = mgr.record_invite(cid(1), "alpha".into(), cid(MAX_PARTY as u64 + 1), now);
         assert!(matches!(r, InviteOutcome::InviterPartyFull));
     }
 
@@ -552,18 +528,8 @@ mod tests {
         party_of_n(&mut mgr, MAX_PARTY as u64 - 1, now);
         // Record an invite for one more slot; then fill the
         // party via direct accept of a *different* invite.
-        let _ = mgr.record_invite(
-            cid(1),
-            "alpha".into(),
-            cid(MAX_PARTY as u64),
-            now,
-        );
-        let _ = mgr.record_invite(
-            cid(1),
-            "alpha".into(),
-            cid(MAX_PARTY as u64 + 1),
-            now,
-        );
+        let _ = mgr.record_invite(cid(1), "alpha".into(), cid(MAX_PARTY as u64), now);
+        let _ = mgr.record_invite(cid(1), "alpha".into(), cid(MAX_PARTY as u64 + 1), now);
         let r = mgr.accept_invite(cid(MAX_PARTY as u64), None);
         assert!(matches!(r, AcceptOutcome::Joined(_)));
         let r = mgr.accept_invite(cid(MAX_PARTY as u64 + 1), None);

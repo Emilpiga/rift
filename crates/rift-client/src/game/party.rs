@@ -140,10 +140,7 @@ impl PartyUi {
         // If our context menu's target left the party, drop the
         // menu so we don't act on a stale name.
         if let Some(menu) = &self.context_menu {
-            let still_present = self
-                .members
-                .iter()
-                .any(|m| m.character_name == menu.target);
+            let still_present = self.members.iter().any(|m| m.character_name == menu.target);
             if !still_present {
                 self.context_menu = None;
             }
@@ -153,16 +150,14 @@ impl PartyUi {
     pub fn ingest_invite(&mut self, from: String) {
         self.invite_toasts.push_back(InviteToast {
             from,
-            expires_at: Instant::now()
-                + std::time::Duration::from_secs_f32(INVITE_TOAST_TTL_SECS),
+            expires_at: Instant::now() + std::time::Duration::from_secs_f32(INVITE_TOAST_TTL_SECS),
         });
     }
 
     pub fn ingest_error(&mut self, text: String) {
         self.error_toasts.push_back(ErrorToast {
             text,
-            expires_at: Instant::now()
-                + std::time::Duration::from_secs_f32(ERROR_TOAST_TTL_SECS),
+            expires_at: Instant::now() + std::time::Duration::from_secs_f32(ERROR_TOAST_TTL_SECS),
         });
     }
 
@@ -212,18 +207,16 @@ impl PartyUi {
     /// `Some(Err(local_msg))` for client-side feedback (e.g.
     /// "/kick: not the leader"), or `None` if the head isn't
     /// a party command.
-    pub fn try_handle_slash(
-        &self,
-        head: &str,
-        body: &str,
-    ) -> Option<Result<ClientMsg, String>> {
+    pub fn try_handle_slash(&self, head: &str, body: &str) -> Option<Result<ClientMsg, String>> {
         let body = body.trim();
         let cmd: ClientMsg = match head {
             "invite" => {
                 if body.is_empty() {
                     return Some(Err("/invite <character_name>".into()));
                 }
-                ClientMsg::PartyInvite { name: body.to_string() }
+                ClientMsg::PartyInvite {
+                    name: body.to_string(),
+                }
             }
             "accept" => ClientMsg::PartyAccept {
                 from: if body.is_empty() {
@@ -247,7 +240,9 @@ impl PartyUi {
                 if !self.we_are_leader() {
                     return Some(Err("Only the party leader can kick.".into()));
                 }
-                ClientMsg::PartyKick { name: body.to_string() }
+                ClientMsg::PartyKick {
+                    name: body.to_string(),
+                }
             }
             "promote" => {
                 if body.is_empty() {
@@ -256,7 +251,9 @@ impl PartyUi {
                 if !self.we_are_leader() {
                     return Some(Err("Only the party leader can promote.".into()));
                 }
-                ClientMsg::PartyPromote { name: body.to_string() }
+                ClientMsg::PartyPromote {
+                    name: body.to_string(),
+                }
             }
             _ => return None,
         };
@@ -275,10 +272,18 @@ impl PartyUi {
     ) {
         // Drain expired toasts.
         let now = Instant::now();
-        while self.invite_toasts.front().map_or(false, |t| t.expires_at <= now) {
+        while self
+            .invite_toasts
+            .front()
+            .map_or(false, |t| t.expires_at <= now)
+        {
             self.invite_toasts.pop_front();
         }
-        while self.error_toasts.front().map_or(false, |t| t.expires_at <= now) {
+        while self
+            .error_toasts
+            .front()
+            .map_or(false, |t| t.expires_at <= now)
+        {
             self.error_toasts.pop_front();
         }
 
@@ -360,9 +365,7 @@ impl PartyUi {
             self.cached_consume_rects.push(rect);
             draw_one_frame_static(ui, rect, member, leader.as_deref());
             if rect.contains(ui.mouse_pos()) {
-                if ui.input().right_clicked()
-                    && Some(&member.character_name) != our_name.as_ref()
-                {
+                if ui.input().right_clicked() && Some(&member.character_name) != our_name.as_ref() {
                     new_menu = Some(ContextMenuState {
                         target: member.character_name.clone(),
                         pos: ui.mouse_pos(),
@@ -375,8 +378,7 @@ impl PartyUi {
                 // and resolves the name to a NetId via the
                 // net session.
                 if targeting_active && lmb {
-                    frame_state.party_click_target_name =
-                        Some(member.character_name.clone());
+                    frame_state.party_click_target_name = Some(member.character_name.clone());
                 }
             }
         }
@@ -388,18 +390,15 @@ impl PartyUi {
     // ---- toasts -----------------------------------------------------------
 
     fn draw_invite_toast(&mut self, ui: &mut Ui<'_>, net: &mut NetState) {
-        let Some(toast) = self.invite_toasts.front().cloned() else { return };
+        let Some(toast) = self.invite_toasts.front().cloned() else {
+            return;
+        };
         let theme = *ui.theme();
         let s = theme.scale;
         let screen = ui.screen_size();
         let w = 320.0 * s;
         let h = 92.0 * s;
-        let rect = Rect::from_xywh(
-            (screen.x - w) * 0.5,
-            screen.y * 0.18,
-            w,
-            h,
-        );
+        let rect = Rect::from_xywh((screen.x - w) * 0.5, screen.y * 0.18, w, h);
         Frame::panel(&theme).show(ui, rect, |ui, body| {
             let pad = 8.0 * s;
             let _ = ui.draw_text(
@@ -439,18 +438,15 @@ impl PartyUi {
     }
 
     fn draw_error_toast(&mut self, ui: &mut Ui<'_>) {
-        let Some(toast) = self.error_toasts.front().cloned() else { return };
+        let Some(toast) = self.error_toasts.front().cloned() else {
+            return;
+        };
         let theme = *ui.theme();
         let s = theme.scale;
         let screen = ui.screen_size();
         let w = 360.0 * s;
         let h = 36.0 * s;
-        let rect = Rect::from_xywh(
-            (screen.x - w) * 0.5,
-            screen.y * 0.10,
-            w,
-            h,
-        );
+        let rect = Rect::from_xywh((screen.x - w) * 0.5, screen.y * 0.10, w, h);
         Frame::panel(&theme)
             .with_stroke(rift_engine::ui::im::Stroke {
                 color: Color::rgba(0.95, 0.45, 0.40, 0.9),
@@ -470,8 +466,13 @@ impl PartyUi {
     // ---- portal modal -----------------------------------------------------
 
     fn draw_portal_modal(&mut self, ui: &mut Ui<'_>, net: &mut NetState) {
-        let Some(modal) = self.portal_modal.clone() else { return };
-        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
+        let Some(modal) = self.portal_modal.clone() else {
+            return;
+        };
+        if ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
+        {
             self.portal_modal = None;
             return;
         }
@@ -480,12 +481,7 @@ impl PartyUi {
         let screen = ui.screen_size();
         let w = 360.0 * s;
         let h = 240.0 * s;
-        let rect = Rect::from_xywh(
-            (screen.x - w) * 0.5,
-            (screen.y - h) * 0.5,
-            w,
-            h,
-        );
+        let rect = Rect::from_xywh((screen.x - w) * 0.5, (screen.y - h) * 0.5, w, h);
 
         let cap = self.deepest_floor.saturating_add(1).max(1);
         let mut new_modal = modal.clone();
@@ -573,19 +569,14 @@ impl PartyUi {
                 aw,
                 ah,
             );
-            let confirm = Rect::from_xywh(
-                body.x() + body.width() * 0.5 + 8.0 * s,
-                action_y,
-                aw,
-                ah,
-            );
+            let confirm =
+                Rect::from_xywh(body.x() + body.width() * 0.5 + 8.0 * s, action_y, aw, ah);
             if Button::new("Cancel").show(ui, cancel).clicked {
                 self.portal_modal = None;
                 return;
             }
             if Button::primary("Enter").show(ui, confirm).clicked {
-                net.pending_propose_rift_entry =
-                    Some((new_modal.start_floor, new_modal.mode));
+                net.pending_propose_rift_entry = Some((new_modal.start_floor, new_modal.mode));
                 self.portal_modal = None;
                 return;
             }
@@ -605,18 +596,15 @@ impl PartyUi {
     // ---- per-member confirm prompt ----------------------------------------
 
     fn draw_confirm_prompt(&mut self, ui: &mut Ui<'_>, net: &mut NetState) {
-        let Some(prompt) = self.confirm_prompt.clone() else { return };
+        let Some(prompt) = self.confirm_prompt.clone() else {
+            return;
+        };
         let theme = *ui.theme();
         let s = theme.scale;
         let screen = ui.screen_size();
         let w = 360.0 * s;
         let h = 160.0 * s;
-        let rect = Rect::from_xywh(
-            (screen.x - w) * 0.5,
-            (screen.y - h) * 0.5,
-            w,
-            h,
-        );
+        let rect = Rect::from_xywh((screen.x - w) * 0.5, (screen.y - h) * 0.5, w, h);
         let elapsed = Instant::now()
             .saturating_duration_since(prompt.opened_at)
             .as_secs() as u32;
@@ -654,12 +642,7 @@ impl PartyUi {
                 aw,
                 ah,
             );
-            let yes = Rect::from_xywh(
-                body.x() + body.width() * 0.5 + 8.0 * s,
-                action_y,
-                aw,
-                ah,
-            );
+            let yes = Rect::from_xywh(body.x() + body.width() * 0.5 + 8.0 * s, action_y, aw, ah);
             if Button::new("Decline").show(ui, no).clicked {
                 net.pending_portal_confirm = Some(false);
                 self.confirm_prompt = None;
@@ -674,7 +657,9 @@ impl PartyUi {
     // ---- right-click context menu -----------------------------------------
 
     fn draw_context_menu(&mut self, ui: &mut Ui<'_>, net: &mut NetState, chat: &mut ChatUi) {
-        let Some(menu) = self.context_menu.clone() else { return };
+        let Some(menu) = self.context_menu.clone() else {
+            return;
+        };
         let theme = *ui.theme();
         let s = theme.scale;
         // Dismiss on any outside click. We test before drawing
@@ -741,7 +726,10 @@ impl PartyUi {
             self.context_menu = None;
         }
         // Pressing Escape also closes.
-        if ui.input().key_just_pressed(rift_engine::ui::im::ImKey::Escape) {
+        if ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
+        {
             self.context_menu = None;
         }
     }
@@ -759,12 +747,7 @@ enum ContextAction {
 /// the duration of the loop in `draw_party_frames`. The closure
 /// captures only the inputs it needs and never re-borrows
 /// `PartyUi`.
-fn draw_one_frame_static(
-    ui: &mut Ui<'_>,
-    rect: Rect,
-    member: &PartyMember,
-    leader: Option<&str>,
-) {
+fn draw_one_frame_static(ui: &mut Ui<'_>, rect: Rect, member: &PartyMember, leader: Option<&str>) {
     let theme = *ui.theme();
     let pad = 6.0 * theme.scale;
     Frame::panel(&theme).show(ui, rect, |ui, body| {

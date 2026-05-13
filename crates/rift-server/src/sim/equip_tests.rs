@@ -57,7 +57,9 @@ fn equip_succeeds_when_player_meets_requirement() {
         "bag should be empty after a clean equip",
     );
     assert!(
-        p.equipment.get(rift_game::loot::EquipSlot::Weapon).is_some(),
+        p.equipment
+            .get(rift_game::loot::EquipSlot::Weapon)
+            .is_some(),
         "weapon slot should be filled after a clean equip",
     );
 }
@@ -81,7 +83,9 @@ fn equip_rejected_when_player_under_level() {
         "bag entry should be restored after a rejected equip",
     );
     assert!(
-        p.equipment.get(rift_game::loot::EquipSlot::Weapon).is_none(),
+        p.equipment
+            .get(rift_game::loot::EquipSlot::Weapon)
+            .is_none(),
         "weapon slot must remain empty after a rejected equip",
     );
 }
@@ -92,7 +96,10 @@ fn equip_at_exact_required_level_succeeds() {
     let item = rolled("staff_basic", 12, 3);
     let req = item.required_level();
     let (mut sim, client) = setup(req, item);
-    assert!(sim.equip_from_bag(client, 0), "boundary req == level should equip");
+    assert!(
+        sim.equip_from_bag(client, 0),
+        "boundary req == level should equip"
+    );
 }
 
 #[test]

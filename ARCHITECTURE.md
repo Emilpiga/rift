@@ -181,7 +181,7 @@ Forward, single-pass over a depth pre-pass:
    Poisson PCF.
 2. **Skin compute** — `skin.comp` writes posed vertices into
    per-character VBOs.
-3. **Forward opaque** — `triangle.vert` / `triangle.frag` Blinn-
+3. **Forward opaque** — `forward_opaque.vert` / `forward_opaque.frag` Blinn-
    Phong + 5×5 separable Gaussian PCF on the directional shadow.
 4. **VFX particles & ribbons** — declarative
    `Effect = Vec<Layer>` system, additive / alpha blends.

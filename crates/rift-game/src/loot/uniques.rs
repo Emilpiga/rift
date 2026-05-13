@@ -390,7 +390,7 @@ pub fn tooltip_line(eff: &LegendaryEffect) -> String {
 pub fn candidates_for(base: &BaseItem) -> Vec<&'static UniqueDef> {
     UNIQUES
         .iter()
-        .filter(|u| u.equip_slot == base.equip_slot && (u.matches_base)(base))
+        .filter(|u| base.equip_slot == Some(u.equip_slot) && (u.matches_base)(base))
         .collect()
 }
 
@@ -444,7 +444,7 @@ mod tests {
         for u in UNIQUES {
             let any = BASE_ITEMS
                 .iter()
-                .any(|b| b.equip_slot == u.equip_slot && (u.matches_base)(b));
+                .any(|b| b.equip_slot == Some(u.equip_slot) && (u.matches_base)(b));
             assert!(
                 any,
                 "unique `{}` ({:?}) matches no base in BASE_ITEMS — \

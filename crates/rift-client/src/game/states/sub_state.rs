@@ -76,6 +76,31 @@ pub struct NetState {
     /// `ServerMsg::TalentsSync`; we never mutate the local
     /// tree optimistically.
     pub pending_talent_invests: Vec<u16>,
+    /// Lesser-respec requests — refund every rank of a single
+    /// talent node. Forwarded as `ClientMsg::RespecTalent`.
+    /// Server enforces the orphan-rejection rule
+    /// (`TALENT_TREE.md` §7); reply is the fresh
+    /// `ServerMsg::TalentsSync`.
+    pub pending_talent_respecs: Vec<u16>,
+    /// Greater-respec request flag — fires once on press,
+    /// drained into `ClientMsg::RespecAllTalents`. A bool not a
+    /// counter because spamming the button would just yield
+    /// repeat no-ops on an empty tree.
+    pub pending_talent_respec_all: bool,
+    /// Use-consumable requests — `(inventory_index,
+    /// target_arg)`. Drained into `ClientMsg::UseItem`.
+    /// `target_arg = u16::MAX` for self-targeted consumables;
+    /// for two-step consumables (e.g. `LesserRespecToken`) the
+    /// UI fills the target before pushing here.
+    pub pending_use_item: Vec<(u32, u16)>,
+    /// "Two-step consumable" pick mode \u2014 holds the bag
+    /// index of the consumable the player armed (e.g. a
+    /// `LesserRespecToken`). While set, the talent panel
+    /// enters "choose a node" mode and the next right-click
+    /// on an invested talent fires `UseItem` with that node
+    /// as `target_arg`. Cleared by Esc, by the talent panel
+    /// closing, or by the consumable being consumed.
+    pub pending_consume_bag_idx: Option<u32>,
     /// `true` for one frame when the local player F-presses the
     /// rift-spawn portal, asking the binary to fire
     /// `ClientMsg::RiftExitVoteStart`. Server validates +
@@ -469,6 +494,14 @@ pub enum EquipRequest {
     /// Auto-sort the bag in place. Server compacts items by
     /// rarity desc, ilvl desc, footprint area desc.
     SortBag,
+    /// Use the consumable bag item at `inventory_index` with
+    /// `target_arg` (`u16::MAX` for self-targeted kinds, or
+    /// e.g. a `TalentId` for `LesserRespecToken`). Drained
+    /// into `ClientMsg::UseItem`.
+    UseConsumable {
+        inventory_index: u32,
+        target_arg: u16,
+    },
 }
 
 /// Visual + bookkeeping for a single ground-loot drop. Spawned by

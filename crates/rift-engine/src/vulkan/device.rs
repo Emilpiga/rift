@@ -12,7 +12,11 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
-    pub fn new(instance: &Instance, surface: vk::SurfaceKHR, surface_fn: &ash::khr::surface::Instance) -> Result<Self> {
+    pub fn new(
+        instance: &Instance,
+        surface: vk::SurfaceKHR,
+        surface_fn: &ash::khr::surface::Instance,
+    ) -> Result<Self> {
         let (physical_device, graphics_family, present_family) =
             pick_physical_device(instance, surface, surface_fn)?;
 
@@ -53,7 +57,11 @@ impl VulkanDevice {
         let graphics_queue = unsafe { device.get_device_queue(graphics_family, 0) };
         let present_queue = unsafe { device.get_device_queue(present_family, 0) };
 
-        log::info!("Vulkan device created (graphics family: {}, present family: {})", graphics_family, present_family);
+        log::info!(
+            "Vulkan device created (graphics family: {}, present family: {})",
+            graphics_family,
+            present_family
+        );
 
         Ok(Self {
             physical_device,
@@ -103,7 +111,11 @@ fn pick_physical_device(
                     .get_physical_device_surface_support(*device, i as u32, surface)
                     .unwrap_or(false)
             };
-            if supported { Some(i as u32) } else { None }
+            if supported {
+                Some(i as u32)
+            } else {
+                None
+            }
         });
 
         if let (Some(gf), Some(pf)) = (graphics_family, present_family) {
@@ -134,7 +146,11 @@ fn pick_physical_device(
                     .get_physical_device_surface_support(*device, i as u32, surface)
                     .unwrap_or(false)
             };
-            if supported { Some(i as u32) } else { None }
+            if supported {
+                Some(i as u32)
+            } else {
+                None
+            }
         });
 
         if let (Some(gf), Some(pf)) = (graphics_family, present_family) {

@@ -115,14 +115,7 @@ pub fn fbm2(x: f32, y: f32, seed: u64, octaves: u32, lacunarity: f32, gain: f32)
 /// Combine with [`fbm2`] (e.g. `0.6 * ridged + 0.4 * fbm`) to
 /// keep the silhouette interesting without every peak looking
 /// identical.
-pub fn ridged_fbm2(
-    x: f32,
-    y: f32,
-    seed: u64,
-    octaves: u32,
-    lacunarity: f32,
-    gain: f32,
-) -> f32 {
+pub fn ridged_fbm2(x: f32, y: f32, seed: u64, octaves: u32, lacunarity: f32, gain: f32) -> f32 {
     let mut amp = 1.0_f32;
     let mut freq = 1.0_f32;
     let mut sum = 0.0_f32;

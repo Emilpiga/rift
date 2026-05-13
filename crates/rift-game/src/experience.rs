@@ -35,13 +35,16 @@ impl Experience {
 
     /// XP required to reach next level from current level.
     pub fn xp_to_next_level(&self) -> u64 {
-        self.server_xp_to_next.unwrap_or_else(|| xp_for_level(self.level + 1))
+        self.server_xp_to_next
+            .unwrap_or_else(|| xp_for_level(self.level + 1))
     }
 
     /// Progress to next level as 0.0–1.0.
     pub fn progress(&self) -> f32 {
         let needed = self.xp_to_next_level();
-        if needed == 0 { return 1.0; }
+        if needed == 0 {
+            return 1.0;
+        }
         self.current_xp as f32 / needed as f32
     }
 

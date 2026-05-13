@@ -160,10 +160,7 @@ pub fn warn_not_eligible(world: &hecs::World, combat_text: &mut CombatTextSystem
 
 /// Closest loot drop inside [`PICKUP_RADIUS`] of the local player.
 /// Returns the drop's `NetId` and the squared distance.
-pub fn nearest_drop(
-    world: &hecs::World,
-    loot: &LootClientState,
-) -> Option<(rift_net::NetId, f32)> {
+pub fn nearest_drop(world: &hecs::World, loot: &LootClientState) -> Option<(rift_net::NetId, f32)> {
     if loot.drops.is_empty() {
         return None;
     }
@@ -280,12 +277,15 @@ pub fn on_loot_dropped(
         blob.ilvl,
         &blob.affixes,
         blob.anchored,
-        blob.provenance.clone().map(|v| rift_game::loot::LootProvenance::from_ids(v)),
+        blob.provenance
+            .clone()
+            .map(|v| rift_game::loot::LootProvenance::from_ids(v)),
         blob.unique_id
             .as_deref()
             .and_then(|s| rift_game::loot::uniques::find(s).map(|u| u.id)),
         blob.unique_pick,
-    ).map(|mut it| {
+    )
+    .map(|mut it| {
         it.unstable = blob.unstable;
         it.rift_touched = rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
         it
@@ -299,20 +299,21 @@ pub fn on_loot_dropped(
     };
 
     let color = item.rarity.color();
-    let pillar = renderer
-        .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::loot_beam(color), position);
-    let base = renderer
-        .vfx_system
-        .spawn(rift_engine::renderer::vfx::presets::loot_beam_base(color), position);
+    let pillar = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::loot_beam(color),
+        position,
+    );
+    let base = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::loot_beam_base(color),
+        position,
+    );
     // Anchored drops get an extra orbital halo so the rare
     // trait reads at gameplay distance independent of rarity.
     let anchored_emitter = if item.anchored {
-        Some(
-            renderer
-                .vfx_system
-                .spawn(rift_engine::renderer::vfx::presets::loot_anchored_halo(), position),
-        )
+        Some(renderer.vfx_system.spawn(
+            rift_engine::renderer::vfx::presets::loot_anchored_halo(),
+            position,
+        ))
     } else {
         None
     };
@@ -385,8 +386,7 @@ fn spawn_ground_mesh(
     // Per-drop yaw randomisation: deterministic on `loot_id` so
     // the orientation is stable across late-join snapshot
     // reconciliations and re-spawns from the same id.
-    let rest_yaw = ((loot_id.0 as u64).wrapping_mul(0x9E37_79B9) as u32 as f32)
-        / (u32::MAX as f32)
+    let rest_yaw = ((loot_id.0 as u64).wrapping_mul(0x9E37_79B9) as u32 as f32) / (u32::MAX as f32)
         * std::f32::consts::TAU;
     let rest_position = position + glam::Vec3::new(0.0, REST_HEIGHT, 0.0);
     Some(crate::game::sub_state::LootGroundMesh {
@@ -428,7 +428,9 @@ fn pick_model_path(
 /// the per-drop `anim_t`.
 pub fn tick_drop_animation(loot: &mut LootClientState, renderer: &mut Renderer, dt: f32) {
     for drop in loot.drops.iter_mut() {
-        let Some(ground) = drop.ground_mesh.as_mut() else { continue };
+        let Some(ground) = drop.ground_mesh.as_mut() else {
+            continue;
+        };
         ground.anim_t += dt;
         let matrix = ground_matrix(ground);
         if let Some(obj) = renderer.objects.get_mut(ground.object_index) {
@@ -485,8 +487,7 @@ fn ground_matrix(ground: &crate::game::sub_state::LootGroundMesh) -> glam::Mat4 
     let local_centre = (local_min + local_max) * 0.5;
     let world_centre = total_rot * (local_centre * scale);
     let lift = -local_min.z * scale;
-    let pos = ground.rest_position
-        + glam::Vec3::new(0.0, arc + lift, 0.0)
+    let pos = ground.rest_position + glam::Vec3::new(0.0, arc + lift, 0.0)
         - glam::Vec3::new(world_centre.x, 0.0, world_centre.z);
     glam::Mat4::from_scale_rotation_translation(glam::Vec3::splat(scale), total_rot, pos)
 }

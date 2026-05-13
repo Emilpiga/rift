@@ -13,8 +13,11 @@
 
 use hecs::Entity;
 use rift_game::abilities::AbilityWireId;
-use rift_game::effects::{EffectDef, EffectKind, lookup};
-use rift_net::{messages::{ActiveEffect, WorldEvent}, NetId};
+use rift_game::effects::{lookup, EffectDef, EffectKind};
+use rift_net::{
+    messages::{ActiveEffect, WorldEvent},
+    NetId,
+};
 
 use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
@@ -247,13 +250,12 @@ pub fn tick(
             // time) are skipped — they'd have nowhere to
             // land, and the wire event still fires.
             if let Some(caster) = hit.caster {
-                ctx.meter_events.push(
-                    super::combat_ctx::MeterEvent::DamageDealt {
+                ctx.meter_events
+                    .push(super::combat_ctx::MeterEvent::DamageDealt {
                         attacker: caster,
                         ability_id: hit.ability_id,
                         amount: hit.damage,
-                    },
-                );
+                    });
             }
             if en.hp <= 0.0 {
                 dead.push((hit.target, hit.target_net_id, glam::Vec3::ZERO));
@@ -307,8 +309,7 @@ pub fn tick(
         // healing-amp affixes the target has rolled. Captured
         // before the drain so the pending self-tick this frame
         // can't shrink itself by its own application.
-        let heal_mult =
-            stack.healing_received_mult() * (1.0 + p.stats.healing_received).max(0.0);
+        let heal_mult = stack.healing_received_mult() * (1.0 + p.stats.healing_received).max(0.0);
         for heal in heals.drain(..).filter(|h| h.target == entity) {
             let amount = heal.amount * heal_mult;
             // Capture pre-heal HP so the meter can credit only
@@ -332,13 +333,12 @@ pub fn tick(
             // Anonymous HoTs are skipped (no row to write).
             if effective > 0.0 {
                 if let Some(caster) = heal.caster {
-                    ctx.meter_events.push(
-                        super::combat_ctx::MeterEvent::HealingDone {
+                    ctx.meter_events
+                        .push(super::combat_ctx::MeterEvent::HealingDone {
                             caster,
                             ability_id: heal.ability_id,
                             amount: effective,
-                        },
-                    );
+                        });
                 }
             }
         }

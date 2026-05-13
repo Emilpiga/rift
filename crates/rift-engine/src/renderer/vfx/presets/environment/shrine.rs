@@ -66,7 +66,10 @@ pub fn revive_shrine_pillar() -> Effect {
                 speed: (1.8, 4.5),
                 lifetime: (1.2, 2.6),
                 forces: vec![
-                    ForceField::Gravity { axis: Vec3::Y, strength: 4.5 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 4.5,
+                    },
                     ForceField::Drag { coefficient: 0.5 },
                 ],
                 size: Curve::from_stops([(0.0, 0.08), (1.0, 0.02)]),
@@ -90,9 +93,15 @@ pub fn revive_shrine_pillar() -> Effect {
                 speed: (3.0, 6.0),
                 lifetime: (0.8, 1.5),
                 forces: vec![
-                    ForceField::Gravity { axis: Vec3::Y, strength: 6.0 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 6.0,
+                    },
                     ForceField::Drag { coefficient: 0.4 },
-                    ForceField::Orbit { axis: Vec3::Y, speed: 4.0 },
+                    ForceField::Orbit {
+                        axis: Vec3::Y,
+                        speed: 4.0,
+                    },
                 ],
                 size: Curve::from_stops([(0.0, 0.06), (1.0, 0.0)]),
                 color: Gradient::from_stops([
@@ -141,13 +150,12 @@ pub fn shrine_channel_beam() -> Effect {
                 lifetime: (0.2, 0.5),
                 forces: vec![
                     ForceField::Drag { coefficient: 3.5 },
-                    ForceField::Orbit { axis: Vec3::Y, speed: 7.0 },
+                    ForceField::Orbit {
+                        axis: Vec3::Y,
+                        speed: 7.0,
+                    },
                 ],
-                size: Curve::from_stops([
-                    (0.0, 0.08),
-                    (0.4, 0.10),
-                    (1.0, 0.0),
-                ]),
+                size: Curve::from_stops([(0.0, 0.08), (0.4, 0.10), (1.0, 0.0)]),
                 color: Gradient::from_stops([
                     (0.0, [3.0, 4.0, 5.5, 1.0]),
                     (1.0, [0.4, 0.7, 1.0, 0.0]),

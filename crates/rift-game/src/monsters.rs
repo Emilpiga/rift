@@ -24,11 +24,11 @@ impl MonsterRole {
     /// set (only ground monsters with full Walk/Idle/Bite/Death/Hit).
     pub fn gltf_path(self) -> &'static str {
         match self {
-            MonsterRole::Brute    => "assets/models/animated-monsters/glTF/GreenDemon.gltf",
-            MonsterRole::Stalker  => "assets/models/animated-monsters/glTF/Skull.gltf",
-            MonsterRole::Caster   => "assets/models/animated-monsters/glTF/Cyclops.gltf",
-            MonsterRole::Elite    => "assets/models/animated-monsters/glTF/Demon.gltf",
-            MonsterRole::Boss     => "assets/models/animated-monsters/glTF/Yeti.gltf",
+            MonsterRole::Brute => "assets/models/animated-monsters/glTF/GreenDemon.gltf",
+            MonsterRole::Stalker => "assets/models/animated-monsters/glTF/Skull.gltf",
+            MonsterRole::Caster => "assets/models/animated-monsters/glTF/Cyclops.gltf",
+            MonsterRole::Elite => "assets/models/animated-monsters/glTF/Demon.gltf",
+            MonsterRole::Boss => "assets/models/animated-monsters/glTF/Yeti.gltf",
         }
     }
 
@@ -39,11 +39,11 @@ impl MonsterRole {
     /// that visually outclass the player.
     pub fn scale(self) -> f32 {
         match self {
-            MonsterRole::Brute   => 0.60,
+            MonsterRole::Brute => 0.60,
             MonsterRole::Stalker => 0.55,
-            MonsterRole::Caster  => 0.60,
-            MonsterRole::Elite   => 0.85,
-            MonsterRole::Boss    => 1.60,
+            MonsterRole::Caster => 0.60,
+            MonsterRole::Elite => 0.85,
+            MonsterRole::Boss => 1.60,
         }
     }
 
@@ -123,15 +123,30 @@ impl MonsterRole {
         // match arms in `spawn_for_floor` / `spawn_summon`;
         // only the indirection moved.
         match self {
-            MonsterRole::Brute   => RoleStats { speed_mult: 0.85, hp_mult: 1.15 },
-            MonsterRole::Stalker => RoleStats { speed_mult: 1.35, hp_mult: 0.75 },
-            MonsterRole::Caster  => RoleStats { speed_mult: 0.95, hp_mult: 0.65 },
+            MonsterRole::Brute => RoleStats {
+                speed_mult: 0.85,
+                hp_mult: 1.15,
+            },
+            MonsterRole::Stalker => RoleStats {
+                speed_mult: 1.35,
+                hp_mult: 0.75,
+            },
+            MonsterRole::Caster => RoleStats {
+                speed_mult: 0.95,
+                hp_mult: 0.65,
+            },
             // Elite hp comes from `cfg.elite_hp_mult`, speed
             // from a separate 0.8× multiplier — stats here are
             // the neutral "no extra adjustment" fallback so
             // callers can layer those on uniformly.
-            MonsterRole::Elite   => RoleStats { speed_mult: 0.80, hp_mult: 1.00 },
-            MonsterRole::Boss    => RoleStats { speed_mult: 1.00, hp_mult: 1.00 },
+            MonsterRole::Elite => RoleStats {
+                speed_mult: 0.80,
+                hp_mult: 1.00,
+            },
+            MonsterRole::Boss => RoleStats {
+                speed_mult: 1.00,
+                hp_mult: 1.00,
+            },
         }
     }
 }

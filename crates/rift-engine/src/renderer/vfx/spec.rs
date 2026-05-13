@@ -282,7 +282,11 @@ pub enum SpawnShape {
     Cone { axis: Vec3, half_angle: f32 },
     /// Cylindrical column (XZ disc + Y extent) for upward spew
     /// (loot beams, portals).
-    Column { radius: f32, height: f32, axis: Vec3 },
+    Column {
+        radius: f32,
+        height: f32,
+        axis: Vec3,
+    },
     /// Cone-shaped column that tapers from `radius_base` at the
     /// bottom to `radius_top` at the top, distributed over
     /// `height` along `axis`. Spawn density is biased toward
@@ -305,7 +309,11 @@ pub enum SpawnShape {
     /// orbit a *vertical* mesh ring (axis = +Z) rather than
     /// lying flat on the floor. Outward emission direction is
     /// the ring's radial vector in that plane.
-    RingAxis { radius: f32, thickness: f32, axis: Vec3 },
+    RingAxis {
+        radius: f32,
+        thickness: f32,
+        axis: Vec3,
+    },
     /// Filled disc on the XZ plane — RoF column top, AoE start.
     Disc { radius: f32 },
     /// Line segment between `a` and `b` relative to the spawn
@@ -483,7 +491,10 @@ impl Gradient {
     /// Constant colour over the whole gradient.
     pub fn constant(rgba: [f32; 4]) -> Self {
         Self {
-            stops: vec![GradientStop { t: 0.0, color: rgba }],
+            stops: vec![GradientStop {
+                t: 0.0,
+                color: rgba,
+            }],
         }
     }
 

@@ -54,10 +54,7 @@ pub fn dodge_puff() -> Effect {
                 },
             ],
             size: Curve::from_stops([(0.0, 0.12), (1.0, 0.30)]),
-            color: Gradient::from_stops([
-                (0.0, [0.6, 0.8, 1.0, 0.6]),
-                (1.0, [0.4, 0.6, 0.9, 0.0]),
-            ]),
+            color: Gradient::from_stops([(0.0, [0.6, 0.8, 1.0, 0.6]), (1.0, [0.4, 0.6, 0.9, 0.0])]),
             sprite: SpriteShape::Smoke,
             blend: BlendMode::Alpha,
             opacity: 1.0,

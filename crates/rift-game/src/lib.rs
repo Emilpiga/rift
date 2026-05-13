@@ -18,12 +18,12 @@
 pub mod abilities;
 pub mod attributes;
 pub mod character;
-pub mod hero;
-pub mod loadout;
 pub mod components;
 pub mod effects;
 pub mod experience;
+pub mod hero;
 pub mod kinematic;
+pub mod loadout;
 pub mod loot;
 pub mod monsters;
 pub mod stats;

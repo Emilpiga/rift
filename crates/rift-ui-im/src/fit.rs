@@ -43,12 +43,7 @@ impl FitScale {
     /// every screen edge (e.g. 24px). `min_factor` is the
     /// floor below which we'd rather let the design overflow
     /// than render unreadable text — typical value `0.4`.
-    pub fn compute(
-        ui: &Ui<'_>,
-        total_unscaled: Vec2,
-        margin: f32,
-        min_factor: f32,
-    ) -> Self {
+    pub fn compute(ui: &Ui<'_>, total_unscaled: Vec2, margin: f32, min_factor: f32) -> Self {
         let theme = *ui.theme();
         let screen = ui.screen_size();
         let avail = Vec2::new(

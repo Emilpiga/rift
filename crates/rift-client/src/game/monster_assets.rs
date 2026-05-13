@@ -38,31 +38,31 @@ pub struct MonsterAsset {
 /// failed — the spawner should fall back to a procedural mesh.
 #[derive(Default)]
 pub struct MonsterCache {
-    pub brute:   Option<MonsterAsset>,
+    pub brute: Option<MonsterAsset>,
     pub stalker: Option<MonsterAsset>,
-    pub caster:  Option<MonsterAsset>,
-    pub elite:   Option<MonsterAsset>,
-    pub boss:    Option<MonsterAsset>,
+    pub caster: Option<MonsterAsset>,
+    pub elite: Option<MonsterAsset>,
+    pub boss: Option<MonsterAsset>,
 }
 
 impl MonsterCache {
     pub fn get(&self, role: MonsterRole) -> Option<&MonsterAsset> {
         match role {
-            MonsterRole::Brute   => self.brute.as_ref(),
+            MonsterRole::Brute => self.brute.as_ref(),
             MonsterRole::Stalker => self.stalker.as_ref(),
-            MonsterRole::Caster  => self.caster.as_ref(),
-            MonsterRole::Elite   => self.elite.as_ref(),
-            MonsterRole::Boss    => self.boss.as_ref(),
+            MonsterRole::Caster => self.caster.as_ref(),
+            MonsterRole::Elite => self.elite.as_ref(),
+            MonsterRole::Boss => self.boss.as_ref(),
         }
     }
 
     pub fn slot_mut(&mut self, role: MonsterRole) -> &mut Option<MonsterAsset> {
         match role {
-            MonsterRole::Brute   => &mut self.brute,
+            MonsterRole::Brute => &mut self.brute,
             MonsterRole::Stalker => &mut self.stalker,
-            MonsterRole::Caster  => &mut self.caster,
-            MonsterRole::Elite   => &mut self.elite,
-            MonsterRole::Boss    => &mut self.boss,
+            MonsterRole::Caster => &mut self.caster,
+            MonsterRole::Elite => &mut self.elite,
+            MonsterRole::Boss => &mut self.boss,
         }
     }
 
@@ -76,8 +76,11 @@ impl MonsterCache {
         allocator: &std::sync::Arc<std::sync::Mutex<rift_engine::gpu_allocator::vulkan::Allocator>>,
     ) {
         for slot in [
-            &mut self.brute, &mut self.stalker, &mut self.caster,
-            &mut self.elite, &mut self.boss,
+            &mut self.brute,
+            &mut self.stalker,
+            &mut self.caster,
+            &mut self.elite,
+            &mut self.boss,
         ] {
             if let Some(asset) = slot.as_mut() {
                 if let Some(mut tex) = asset.shared_texture.take() {
@@ -122,11 +125,9 @@ pub fn load_role(role: MonsterRole) -> Option<MonsterAsset> {
         Ok(clips) => {
             let mut set = AnimationSet::default();
             for clip in &clips {
-                let bound = clip.bind_to_skeleton(
-                    &mesh.joint_index_by_name,
-                    mesh.joints.len(),
-                );
-                set.clips.insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
+                let bound = clip.bind_to_skeleton(&mesh.joint_index_by_name, mesh.joints.len());
+                set.clips
+                    .insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
             }
             set
         }

@@ -112,13 +112,20 @@ pub fn desired_visuals_for_base_ids(base_ids: &[u16], gender: Gender) -> Vec<(u8
         .iter()
         .filter_map(|&bid| {
             let base = BASE_ITEMS.get(bid as usize)?;
-            if base.equip_slot == rift_game::loot::items::EquipSlot::Weapon {
+            // Weapons are wielded props, not skinned outfit
+            // pieces \u2014 their visuals live in
+            // `weapon_visuals`. Bag-only items
+            // (`equip_slot == None`) never produce equipment
+            // visuals either; the `?` on `equip_slot` filters
+            // them out before the discriminator check.
+            let slot = base.equip_slot?;
+            if slot == rift_game::loot::items::EquipSlot::Weapon {
                 return None;
             }
             base.models
                 .as_ref()
                 .and_then(|m| m.for_gender(gender))
-                .map(|p| (base.equip_slot.to_u8(), p))
+                .map(|p| (slot.to_u8(), p))
         })
         .collect()
 }

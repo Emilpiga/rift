@@ -79,15 +79,8 @@ impl Server {
         requested.clamp(1, cap)
     }
 
-    pub(crate) fn handle_propose_rift_entry(
-        &mut self,
-        from: ClientId,
-        start_floor: u32,
-        mode: u8,
-    ) {
-        log::info!(
-            "portal: ProposeRiftEntry from {from:?} floor={start_floor} mode={mode}"
-        );
+    pub(crate) fn handle_propose_rift_entry(&mut self, from: ClientId, start_floor: u32, mode: u8) {
+        log::info!("portal: ProposeRiftEntry from {from:?} floor={start_floor} mode={mode}");
         if self.instance_for_client(from).is_some() {
             self.party_error_one(from, "You're already inside a rift.");
             return;
@@ -128,15 +121,16 @@ impl Server {
         if other_members.is_empty() {
             log::info!(
                 "portal: party-of-one fallback (party.members={:?}) -> start_run",
-                party.as_ref().map(|p| p.members.clone()).unwrap_or_default(),
+                party
+                    .as_ref()
+                    .map(|p| p.members.clone())
+                    .unwrap_or_default(),
             );
             self.start_run(from, start_floor, mode, vec![from]);
             return;
         }
 
-        log::info!(
-            "portal: prompt-path proposer={from:?} other_members={other_members:?}"
-        );
+        log::info!("portal: prompt-path proposer={from:?} other_members={other_members:?}");
 
         let proposer_name = self
             .sessions
@@ -174,10 +168,13 @@ impl Server {
         // member with no matching proposal is silently
         // dropped — happens if the proposer cancelled or the
         // proposal already resolved.
-        let proposer_key = self
-            .pending_portal_proposals
-            .iter()
-            .find_map(|(k, p)| if p.awaiting.contains(&from) { Some(*k) } else { None });
+        let proposer_key = self.pending_portal_proposals.iter().find_map(|(k, p)| {
+            if p.awaiting.contains(&from) {
+                Some(*k)
+            } else {
+                None
+            }
+        });
         let Some(proposer) = proposer_key else { return };
         let resolved_now;
         {
@@ -242,13 +239,8 @@ impl Server {
         // the proposer understands why they weren't dropped
         // into a rift.
         if prop.confirmed.len() == 1 && prop.confirmed.contains(&proposer) {
-            log::info!(
-                "portal: aborting proposer={proposer:?} - no party member accepted"
-            );
-            self.party_error_one(
-                proposer,
-                "Nobody accepted the rift entry.",
-            );
+            log::info!("portal: aborting proposer={proposer:?} - no party member accepted");
+            self.party_error_one(proposer, "Nobody accepted the rift entry.");
             return;
         }
         let confirmed: Vec<ClientId> = prop.confirmed.iter().copied().collect();
@@ -268,8 +260,7 @@ impl Server {
         let movers: Vec<ClientId> = confirmed
             .into_iter()
             .filter(|cid| {
-                self.sessions.get(*cid).is_some()
-                    && self.instance_for_client(*cid).is_none()
+                self.sessions.get(*cid).is_some() && self.instance_for_client(*cid).is_none()
             })
             .collect();
         if movers.is_empty() {
@@ -286,38 +277,31 @@ impl Server {
                 // Look up an open matchmade instance with the
                 // right start floor, falling back to a fresh
                 // one if none has room.
-                let live_counts: std::collections::HashMap<
-                    RiftInstanceId,
-                    u8,
-                > = {
+                let live_counts: std::collections::HashMap<RiftInstanceId, u8> = {
                     let mut m = std::collections::HashMap::new();
                     for (id, _) in self.instances.iter() {
-                        m.insert(
-                            *id,
-                            self.clients_in_instance(*id).len() as u8,
-                        );
+                        m.insert(*id, self.clients_in_instance(*id).len() as u8);
                     }
                     m
                 };
-                let count_lookup = |id: RiftInstanceId| {
-                    live_counts.get(&id).copied().unwrap_or(0)
-                };
+                let count_lookup = |id: RiftInstanceId| live_counts.get(&id).copied().unwrap_or(0);
                 if let Some(existing) = self
                     .instances
                     .find_open_matchmade(start_floor, count_lookup)
                 {
                     existing
                 } else {
-                    self.instances
-                        .create_matchmade(start_floor, seed)
+                    self.instances.create_matchmade(start_floor, seed)
                 }
             }
             _ => {
                 // Solo / Party = Private instance sized to
                 // the confirmed mover count.
-                let capacity = movers.len().clamp(1, rift_net::messages::MAX_PARTY as usize) as u8;
-                self.instances
-                    .create_private(start_floor, capacity, seed)
+                let capacity = movers
+                    .len()
+                    .clamp(1, rift_net::messages::MAX_PARTY as usize)
+                    as u8;
+                self.instances.create_private(start_floor, capacity, seed)
             }
         };
 
@@ -372,10 +356,13 @@ impl Server {
             return;
         }
         // Path 2: awaiting confirmer in someone else's proposal.
-        let host = self
-            .pending_portal_proposals
-            .iter()
-            .find_map(|(k, p)| if p.awaiting.contains(&cid) { Some(*k) } else { None });
+        let host = self.pending_portal_proposals.iter().find_map(|(k, p)| {
+            if p.awaiting.contains(&cid) {
+                Some(*k)
+            } else {
+                None
+            }
+        });
         let Some(host) = host else { return };
         let resolved_now;
         {

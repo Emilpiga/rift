@@ -52,7 +52,9 @@ pub struct Props {
 }
 
 impl Default for Props {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Props {
@@ -77,8 +79,12 @@ impl Props {
     pub fn preload_step(&self, paths: &[&'static str], budget: usize) -> usize {
         let mut done = 0;
         for path in paths {
-            if done >= budget { break; }
-            if self.assets.mesh_attempted(path) { continue; }
+            if done >= budget {
+                break;
+            }
+            if self.assets.mesh_attempted(path) {
+                continue;
+            }
             self.assets.load_mesh(path);
             done += 1;
         }
@@ -87,7 +93,10 @@ impl Props {
 
     /// How many of `paths` have already been attempted (success or fail).
     pub fn loaded_count(&self, paths: &[&'static str]) -> usize {
-        paths.iter().filter(|p| self.assets.mesh_attempted(p)).count()
+        paths
+            .iter()
+            .filter(|p| self.assets.mesh_attempted(p))
+            .count()
     }
 
     /// Render every [`PlacedProp`] on `floor` into the
@@ -106,11 +115,7 @@ impl Props {
     /// object index on success; used by the torch system,
     /// which spawns a candlestick visual independently of
     /// the floor's placed-prop list.
-    pub fn render_one(
-        &mut self,
-        renderer: &mut Renderer,
-        placed: &PlacedProp,
-    ) -> Option<usize> {
+    pub fn render_one(&mut self, renderer: &mut Renderer, placed: &PlacedProp) -> Option<usize> {
         let rm = render_meta(placed.id);
         self.render_raw(
             renderer,
@@ -260,8 +265,12 @@ impl Props {
 pub fn hub_asset_paths() -> Vec<&'static str> {
     use PropId::*;
     [
-        GrassCommonShort, GrassWispyShort, PebbleRound2, PebbleRound4,
-        StashChest, CandleStickStand,
+        GrassCommonShort,
+        GrassWispyShort,
+        PebbleRound2,
+        PebbleRound4,
+        StashChest,
+        CandleStickStand,
     ]
     .iter()
     .map(|id| render_meta(*id).gltf)

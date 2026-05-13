@@ -688,6 +688,8 @@ impl Sim {
             crit_chance: 0.0,
             crit_damage: 0.0,
             stagger_remaining: 0.0,
+            knockback_remaining: 0.0,
+            knockback_velocity: glam::Vec3::ZERO,
             pending_aggro: None,
             threat: std::collections::HashMap::new(),
             elite_mods: 0,

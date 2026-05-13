@@ -317,6 +317,6 @@ pub fn apply_weapon_visual_for_base_ids(
     let weapon_base: Option<&'static BaseItem> = base_ids
         .iter()
         .filter_map(|&bid| BASE_ITEMS.get(bid as usize))
-        .find(|base| base.equip_slot == EquipSlot::Weapon);
+        .find(|base| base.equip_slot == Some(EquipSlot::Weapon));
     apply_weapon_visual(world, renderer, cache, entity, weapon_base, gender);
 }

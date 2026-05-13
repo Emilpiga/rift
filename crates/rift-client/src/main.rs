@@ -933,6 +933,12 @@ impl RiftApp {
                 EquipRequest::SortBag => {
                     net.request_sort_inventory();
                 }
+                EquipRequest::UseConsumable {
+                    inventory_index,
+                    target_arg,
+                } => {
+                    net.request_use_item(inventory_index, target_arg);
+                }
             }
         }
 
@@ -974,6 +980,33 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             net.request_invest_talent(talent_id);
+        }
+
+        // Talent respecs. Lesser (single node) is a vec since
+        // the player can right-click multiple nodes per frame;
+        // greater is a one-shot bool flipped by the footer
+        // button. Server replies with `ServerMsg::TalentsSync`
+        // for both — same no-optimistic-mutation policy as
+        // invest.
+        for talent_id in state
+            .net
+            .pending_talent_respecs
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            net.request_respec_talent(talent_id);
+        }
+        if std::mem::take(&mut state.net.pending_talent_respec_all) {
+            net.request_respec_all_talents();
+        }
+
+        // Consumable usage: bag right-click on a self-targeted
+        // consumable (greater respec token) pushes
+        // `(idx, u16::MAX)`; two-step consumables push
+        // `(idx, target_id)` once the player picks the target
+        // in the gated UI mode.
+        for (inv_idx, target_arg) in state.net.pending_use_item.drain(..).collect::<Vec<_>>() {
+            net.request_use_item(inv_idx, target_arg);
         }
 
         // Rift exit-vote requests: F-press on the rift-spawn

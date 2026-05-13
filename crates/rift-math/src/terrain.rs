@@ -106,11 +106,7 @@ pub struct TerrainVertex {
 ///
 /// `radial_t` is `0.0` at `inner_radius`, `1.0` at
 /// `outer_radius`. Returns world-space Y.
-pub fn sample_mountain_ring_height(
-    params: &MountainRingParams,
-    angle: f32,
-    radial_t: f32,
-) -> f32 {
+pub fn sample_mountain_ring_height(params: &MountainRingParams, angle: f32, radial_t: f32) -> f32 {
     // Project the polar sample onto a 2D noise plane. Using
     // `(cos*r, sin*r)` (i.e. world XZ around the ring centre)
     // keeps the noise field continuous around the seam — a
@@ -157,10 +153,7 @@ pub fn sample_mountain_ring_height(
 /// angular and radial axes, in world space. The seam is
 /// wrapped during normal estimation so the lighting is
 /// continuous.
-pub fn generate_mountain_ring(
-    params: &MountainRingParams,
-    center: Vec3,
-) -> MountainRingGrid {
+pub fn generate_mountain_ring(params: &MountainRingParams, center: Vec3) -> MountainRingGrid {
     let cols = params.angular_segments.max(16);
     let rows = params.radial_segments.max(2) + 1;
 
@@ -171,14 +164,9 @@ pub fn generate_mountain_ring(
         let radial_t = j as f32 / (rows - 1) as f32;
         for i in 0..cols {
             let a = (i as f32 / cols as f32) * std::f32::consts::TAU;
-            let r = params.inner_radius
-                + (params.outer_radius - params.inner_radius) * radial_t;
+            let r = params.inner_radius + (params.outer_radius - params.inner_radius) * radial_t;
             let y = sample_mountain_ring_height(params, a, radial_t);
-            positions.push(Vec3::new(
-                center.x + a.cos() * r,
-                y,
-                center.z + a.sin() * r,
-            ));
+            positions.push(Vec3::new(center.x + a.cos() * r, y, center.z + a.sin() * r));
         }
     }
 

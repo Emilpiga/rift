@@ -59,7 +59,9 @@ pub fn projectile_system(
     let mut hits = Vec::new();
 
     for proj in projectiles.iter_mut() {
-        if !proj.alive() { continue; }
+        if !proj.alive() {
+            continue;
+        }
         proj.tick(dt);
 
         // Check collisions with enemies

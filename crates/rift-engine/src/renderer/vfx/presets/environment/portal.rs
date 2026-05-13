@@ -96,23 +96,18 @@ pub fn portal_vortex() -> Effect {
                 // Born small (mote-sized), grow slightly as
                 // they accelerate, then collapse to a point
                 // right when they're consumed.
-                size: Curve::from_stops([
-                    (0.0, 0.03),
-                    (0.6, 0.06),
-                    (0.95, 0.05),
-                    (1.0, 0.005),
-                ]),
+                size: Curve::from_stops([(0.0, 0.03), (0.6, 0.06), (0.95, 0.05), (1.0, 0.005)]),
                 // Cool ash → warm crimson as the particle
                 // approaches the rim's heat. Alpha ramps up
                 // mid-life and snaps to 0 at end-of-life so
                 // particles visibly "vanish into blackness"
                 // rather than fading politely.
                 color: Gradient::from_stops([
-                    (0.0,  [0.45, 0.40, 0.36, 0.0]),
+                    (0.0, [0.45, 0.40, 0.36, 0.0]),
                     (0.25, [0.55, 0.42, 0.32, 0.40]),
                     (0.70, [1.10, 0.45, 0.18, 0.55]),
                     (0.95, [1.80, 0.35, 0.10, 0.35]),
-                    (1.0,  [0.0,  0.0,  0.0,  0.0]),
+                    (1.0, [0.0, 0.0, 0.0, 0.0]),
                 ]),
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
@@ -157,11 +152,7 @@ pub fn portal_vortex() -> Effect {
                 // Fade in (born small, peak in mid-life, dim
                 // out) — feels less like emitter-vomited
                 // particles and more like ambient haze.
-                size: Curve::from_stops([
-                    (0.0, 0.04),
-                    (0.5, 0.09),
-                    (1.0, 0.02),
-                ]),
+                size: Curve::from_stops([(0.0, 0.04), (0.5, 0.09), (1.0, 0.02)]),
                 // Cool charcoal/ash palette; very low alpha so
                 // the layer reads as drifting haze, not bright
                 // pixels. Slight warm tint at end-of-life as
@@ -253,11 +244,7 @@ pub fn portal_vortex() -> Effect {
                 // force accelerates it, then collapses to
                 // pixel-width as drag wins. The `Streak`
                 // sprite renders this as a tapered line.
-                size: Curve::from_stops([
-                    (0.0, 0.06),
-                    (0.35, 0.14),
-                    (1.0, 0.02),
-                ]),
+                size: Curve::from_stops([(0.0, 0.06), (0.35, 0.14), (1.0, 0.02)]),
                 // Cool chromatic palette. Cold white core with
                 // a violet/cyan tint — the colour signature of
                 // *reality fracturing*, distinct from any warm
@@ -269,10 +256,10 @@ pub fn portal_vortex() -> Effect {
                 // dissipates with the same chromatic signature
                 // as its head.
                 color: Gradient::from_stops([
-                    (0.0,  [1.40, 1.60, 2.40, 0.0]),
+                    (0.0, [1.40, 1.60, 2.40, 0.0]),
                     (0.20, [2.40, 2.20, 3.20, 0.95]),
                     (0.65, [1.10, 0.55, 1.80, 0.65]),
-                    (1.0,  [0.30, 0.10, 0.45, 0.0]),
+                    (1.0, [0.30, 0.10, 0.45, 0.0]),
                 ]),
                 // `Streak` orients along velocity → reads as a
                 // tangent-aligned shard of light along the

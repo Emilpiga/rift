@@ -515,8 +515,19 @@ pub fn skinning_system(
             &[f32],
             f32,
         ) = if let Some(c) = cast.as_deref_mut() {
+            let do_advance = if c.oneshot_freeze_in > 0.0 {
+                c.oneshot_freeze_in = (c.oneshot_freeze_in - dt).max(0.0);
+                true
+            } else if c.oneshot_freeze_for > 0.0 {
+                c.oneshot_freeze_for = (c.oneshot_freeze_for - dt).max(0.0);
+                false
+            } else {
+                true
+            };
             if let Some(la) = c.layer_animator.as_mut() {
-                la.advance(dt);
+                if do_advance {
+                    la.advance(dt);
+                }
             }
             let weight = c.weight;
             let active = weight > 0.001;
@@ -735,6 +746,8 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                     cast.layer_animator = None;
                     cast.pending_oneshot = None;
                     cast.oneshot_is_hit = false;
+                    cast.oneshot_freeze_in = 0.0;
+                    cast.oneshot_freeze_for = 0.0;
                 }
                 SpellPhase::Idle => {}
             }
@@ -838,6 +851,8 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                         cast.pending_oneshot = None;
                         cast.oneshot_is_hit = false;
                         cast.weight = 0.0;
+                        cast.oneshot_freeze_in = 0.0;
+                        cast.oneshot_freeze_for = 0.0;
                         // Restore natural playback speed so the next
                         // non-scaled one-shot (pickup, hit-react)
                         // doesn't inherit Punch's speed-up.

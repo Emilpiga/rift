@@ -77,16 +77,10 @@ pub enum TickOutcome {
 /// Build a wire-shape [`VoteState`] from the sim's internal
 /// representation. Voter rows are sorted by `NetId.0` so the
 /// HUD layout is stable across broadcasts.
-pub fn build_state(
-    active: Option<&ExitVote>,
-    cooldown_remaining: f32,
-) -> VoteState {
+pub fn build_state(active: Option<&ExitVote>, cooldown_remaining: f32) -> VoteState {
     if let Some(v) = active {
-        let mut voters: Vec<(NetId, VoteChoice)> = v
-            .votes
-            .iter()
-            .map(|(nid, c)| (*nid, *c))
-            .collect();
+        let mut voters: Vec<(NetId, VoteChoice)> =
+            v.votes.iter().map(|(nid, c)| (*nid, *c)).collect();
         voters.sort_by_key(|(nid, _)| nid.0);
         VoteState {
             kind: v.kind,

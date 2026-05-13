@@ -143,6 +143,26 @@ impl Item {
         use super::affixes::{affix_attribute, affix_element, category, AffixCategory};
         use crate::stats::Stat;
 
+        // Consumables are inert items \u2014 effect comes from the
+        // `ConsumableKind` discriminator on the base, not from
+        // a stat / affix block. Short-circuit the entire roll
+        // pipeline so a respec token is just `(base, rarity,
+        // ilvl)` with no affix surface to (mis)handle later.
+        if matches!(base.slot, super::ItemSlot::Consumable(_)) {
+            return Self {
+                base,
+                rarity,
+                ilvl,
+                affixes: Vec::new(),
+                anchored: false,
+                unstable: false,
+                provenance: None,
+                unique_id: None,
+                unique_pick: None,
+                rift_touched: None,
+            };
+        }
+
         let mut rolled: Vec<RolledAffix> = Vec::new();
         let mut used_stats: std::collections::HashSet<Stat> = Default::default();
         // Seed `used_stats` with the base item's implicit stats so
@@ -166,8 +186,14 @@ impl Item {
             rolled.push(RolledAffix { def, value });
         };
 
-        // Signature injection.
-        let sig_ids = super::affixes::signature_for(base.equip_slot, rng);
+        // Signature injection. The consumable short-circuit
+        // above means every base reaching this point has a
+        // real equip slot — unwrap is safe and documents
+        // the invariant.
+        let equip_slot = base
+            .equip_slot
+            .expect("non-consumable base must declare an equip slot");
+        let sig_ids = super::affixes::signature_for(equip_slot, rng);
         for id in &sig_ids {
             if let Some(def) = super::affixes::lookup(id) {
                 // Skip signature lines whose `Stat` already
@@ -304,8 +330,7 @@ impl Item {
                     // ExtraProjectiles) are unaffected because
                     // they're inherently offensive utility on
                     // a weapon.
-                    if base.equip_slot == super::items::EquipSlot::Weapon && !s.is_offensive_bonus()
-                    {
+                    if equip_slot == super::items::EquipSlot::Weapon && !s.is_offensive_bonus() {
                         return false;
                     }
                 }

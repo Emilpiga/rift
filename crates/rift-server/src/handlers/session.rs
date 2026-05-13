@@ -712,14 +712,52 @@ impl Server {
     /// rank, no unspent points) so a misbehaving client just
     /// sees the last accepted snapshot.
     pub(crate) fn handle_invest_talent(&mut self, from: ClientId, talent_id: u16) {
-        let Some((invested, unspent)) = self
+        let Some(snapshot) = self
             .sim_for_client_mut(from)
             .invest_talent_for_player(from, talent_id)
         else {
             return;
         };
-        // Mirror into the cached `CharacterRecord` so the next
-        // periodic save tick writes the new investment.
+        self.persist_and_sync_talents(from, snapshot);
+    }
+
+    /// Apply a `ClientMsg::RespecTalent`. Refunds every rank of
+    /// `talent_id` if it would not orphan a downstream node, then
+    /// mirrors + persists + syncs like `handle_invest_talent`.
+    /// Silent no-op on rejection (unknown id, no ranks invested,
+    /// would orphan).
+    pub(crate) fn handle_respec_talent(&mut self, from: ClientId, talent_id: u16) {
+        let Some(snapshot) = self
+            .sim_for_client_mut(from)
+            .respec_talent_for_player(from, talent_id)
+        else {
+            return;
+        };
+        self.persist_and_sync_talents(from, snapshot);
+    }
+
+    /// Apply a `ClientMsg::RespecAllTalents`. Wipes every
+    /// invested point and syncs.
+    pub(crate) fn handle_respec_all_talents(&mut self, from: ClientId) {
+        let Some(snapshot) = self
+            .sim_for_client_mut(from)
+            .respec_all_talents_for_player(from)
+        else {
+            return;
+        };
+        self.persist_and_sync_talents(from, snapshot);
+    }
+
+    /// Shared tail for the three talent mutations: cache the
+    /// fresh `(invested, unspent)` into the session's
+    /// `CharacterRecord`, kick a save, and broadcast a
+    /// `TalentsSync` to the client.
+    pub(crate) fn persist_and_sync_talents(
+        &mut self,
+        from: ClientId,
+        snapshot: (Vec<(u16, u8)>, u32),
+    ) {
+        let (invested, unspent) = snapshot;
         let saved_record = if let Some(s) = self.sessions.get_mut(from) {
             if let Some(rec) = s.record.as_mut() {
                 let mut flat: Vec<i16> = Vec::with_capacity(invested.len() * 2);

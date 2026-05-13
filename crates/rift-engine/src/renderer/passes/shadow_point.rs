@@ -14,7 +14,7 @@
 //! shader can index them by push-constant face slot. The fragment shader
 //! writes `length(worldPos - lightPos) / radius` to the color attachment.
 //!
-//! Sampling (in `triangle.frag`): a plain `samplerCubeArray` (no
+//! Sampling (in `forward/shadow_sampling.glsl`): a plain `samplerCubeArray` (no
 //! comparison sampler) returns the stored normalized distance for any
 //! direction. The receiver computes its own normalized distance to the
 //! light and compares with a small bias + 4-tap stochastic PCF for soft
@@ -23,8 +23,8 @@
 use anyhow::Result;
 use ash::vk;
 use glam::{Mat4, Vec3};
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -298,12 +298,8 @@ impl PointShadowAtlas {
         }
 
         // ---- Pipeline ----
-        let (pipeline, pipeline_layout) = create_point_shadow_pipeline(
-            device,
-            render_pass,
-            descriptor_set_layout,
-            shader_dir,
-        )?;
+        let (pipeline, pipeline_layout) =
+            create_point_shadow_pipeline(device, render_pass, descriptor_set_layout, shader_dir)?;
 
         Ok(Self {
             color_image,

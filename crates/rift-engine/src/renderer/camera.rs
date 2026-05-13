@@ -50,11 +50,12 @@ impl Camera {
         // Clamp phi to avoid flipping
         let phi = phi.clamp(0.05, std::f32::consts::PI - 0.05);
 
-        self.position = self.target + Vec3::new(
-            radius * phi.sin() * theta.cos(),
-            radius * phi.cos(),
-            radius * phi.sin() * theta.sin(),
-        );
+        self.position = self.target
+            + Vec3::new(
+                radius * phi.sin() * theta.cos(),
+                radius * phi.cos(),
+                radius * phi.sin() * theta.sin(),
+            );
     }
 
     /// Pan the camera (move target and position together).

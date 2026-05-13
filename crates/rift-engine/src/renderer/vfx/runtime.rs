@@ -28,8 +28,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 
 use super::spec::{
-    Effect, EffectBundle, EffectLight, EmissionMode, ForceField, Layer, ParticleSpec,
-    RibbonSpec, SpawnShape, SpriteShape,
+    Effect, EffectBundle, EffectLight, EmissionMode, ForceField, Layer, ParticleSpec, RibbonSpec,
+    SpawnShape, SpriteShape,
 };
 use crate::renderer::forward::{HeatSource, PointLight};
 
@@ -295,7 +295,12 @@ impl VfxSystem {
     /// and impacts so the engine can drive the attached light
     /// and inherit velocity from the moving anchor.
     pub fn spawn_bundle(&mut self, bundle: EffectBundle, anchor: Vec3) -> EffectId {
-        let EffectBundle { effect, light, tip_light, inherit_velocity } = bundle;
+        let EffectBundle {
+            effect,
+            light,
+            tip_light,
+            inherit_velocity,
+        } = bundle;
         let mut layers: Vec<LayerState> = Vec::with_capacity(effect.layers.len());
         for (i, layer) in effect.layers.iter().enumerate() {
             match layer {
@@ -560,9 +565,7 @@ impl VfxSystem {
                 // because by definition the effect is past
                 // the fog wall.
                 let culled = match (cull, cull_dist_sq) {
-                    (Some((origin, _)), Some(dsq)) => {
-                        (anchor - origin).length_squared() > dsq
-                    }
+                    (Some((origin, _)), Some(dsq)) => (anchor - origin).length_squared() > dsq,
                     _ => false,
                 };
                 if culled {
@@ -572,10 +575,13 @@ impl VfxSystem {
                         inst.light_envelope = (inst.light_envelope * k).max(0.0);
                     }
                     let light_alive = match inst.light.as_ref() {
-                        Some(EffectLight { lifetime: Some(t), .. }) => inst.elapsed < *t,
-                        Some(EffectLight { follow_particles: true, .. }) => {
-                            inst.light_envelope > 1e-3
-                        }
+                        Some(EffectLight {
+                            lifetime: Some(t), ..
+                        }) => inst.elapsed < *t,
+                        Some(EffectLight {
+                            follow_particles: true,
+                            ..
+                        }) => inst.light_envelope > 1e-3,
                         _ => false,
                     };
                     // Yield from the `let alive = { ... }`
@@ -583,116 +589,123 @@ impl VfxSystem {
                     // arm below if not alive.
                     inst.spawning || light_alive
                 } else {
-                // Anchor velocity for inheritance. We only get a
-                // meaningful number on the second-and-later tick
-                // (we can't infer velocity from a single sample).
-                // For the very first frame after spawn this is
-                // zero, so trail particles spawned that frame
-                // sit at the projectile centre — fine, the next
-                // frame onwards they fly with it.
-                let anchor_vel = if let Some(prev) = inst.prev_anchor {
-                    if dt > 1e-5 {
-                        (anchor - prev) / dt
+                    // Anchor velocity for inheritance. We only get a
+                    // meaningful number on the second-and-later tick
+                    // (we can't infer velocity from a single sample).
+                    // For the very first frame after spawn this is
+                    // zero, so trail particles spawned that frame
+                    // sit at the projectile centre — fine, the next
+                    // frame onwards they fly with it.
+                    let anchor_vel = if let Some(prev) = inst.prev_anchor {
+                        if dt > 1e-5 {
+                            (anchor - prev) / dt
+                        } else {
+                            Vec3::ZERO
+                        }
                     } else {
                         Vec3::ZERO
-                    }
-                } else {
-                    Vec3::ZERO
-                };
-                inst.prev_anchor = Some(anchor);
-                inst.anchor_velocity = anchor_vel;
-                let inherit = inst.inherit_velocity;
+                    };
+                    inst.prev_anchor = Some(anchor);
+                    inst.anchor_velocity = anchor_vel;
+                    let inherit = inst.inherit_velocity;
 
-                // 1) Tick particle layers.
-                for layer in inst.layers.iter_mut() {
-                    if let LayerState::Particles(p) = layer {
-                        tick_particles(
-                            p,
-                            anchor,
-                            orientation,
-                            anchor_vel,
-                            inherit,
-                            dt,
-                            inst.spawning,
-                            total_cap,
-                        );
+                    // 1) Tick particle layers.
+                    for layer in inst.layers.iter_mut() {
+                        if let LayerState::Particles(p) = layer {
+                            tick_particles(
+                                p,
+                                anchor,
+                                orientation,
+                                anchor_vel,
+                                inherit,
+                                dt,
+                                inst.spawning,
+                                total_cap,
+                            );
+                        }
                     }
-                }
 
-                // 2) Track peak live-particle count for any
-                //    light using `follow_particles`. Updated
-                //    *after* the tick so freshly-spawned
-                //    particles count toward the peak. Stops
-                //    rising once spawning has stopped, which
-                //    means after impact the peak stays fixed
-                //    and the live/peak ratio strictly decreases
-                //    as embers age out.
-                let live_now: u32 = inst.layers.iter().map(|l| match l {
-                    LayerState::Particles(p) => p.pool.len() as u32,
-                    LayerState::Ribbon(_) => 0,
-                }).sum();
-                if live_now > inst.peak_particle_count {
-                    inst.peak_particle_count = live_now;
-                }
-
-                // 2b) Update the smoothed light envelope. While
-                //     particles are still spawning, the
-                //     envelope rises toward the live ratio so
-                //     the light hits full intensity at the
-                //     spawn peak. Once spawning has stopped,
-                //     it ignores `live_now` entirely and
-                //     decays exponentially with a fixed time
-                //     constant — this is what the user sees
-                //     as the impact light "fading out". The
-                //     constant (~0.85 s half-life) is tuned
-                //     to match the longest particle lifetime
-                //     in the fireball explosion preset, so
-                //     the light goes dark as the last embers
-                //     would naturally die.
-                let peak = inst.peak_particle_count.max(1) as f32;
-                let target = (live_now as f32 / peak).clamp(0.0, 1.0);
-                if inst.spawning {
-                    if target > inst.light_envelope {
-                        inst.light_envelope = target;
+                    // 2) Track peak live-particle count for any
+                    //    light using `follow_particles`. Updated
+                    //    *after* the tick so freshly-spawned
+                    //    particles count toward the peak. Stops
+                    //    rising once spawning has stopped, which
+                    //    means after impact the peak stays fixed
+                    //    and the live/peak ratio strictly decreases
+                    //    as embers age out.
+                    let live_now: u32 = inst
+                        .layers
+                        .iter()
+                        .map(|l| match l {
+                            LayerState::Particles(p) => p.pool.len() as u32,
+                            LayerState::Ribbon(_) => 0,
+                        })
+                        .sum();
+                    if live_now > inst.peak_particle_count {
+                        inst.peak_particle_count = live_now;
                     }
-                } else {
-                    // Exponential decay: env *= exp(-dt / tau).
-                    // tau ≈ 0.55 s gives ~0.85 s half-life.
-                    let tau = 0.55_f32;
-                    let k = (-dt / tau).exp();
-                    inst.light_envelope = (inst.light_envelope * k).max(0.0);
-                }
 
-                // 3) Drop the slot once not spawning *and* every
-                //    particle pool has drained *and* any attached
-                //    light with an independent lifetime has
-                //    expired. Ribbons disappear immediately when
-                //    `spawning` flips false (no pool to drain) —
-                //    that's the contract `despawn` relies on for
-                //    persistent (duration == 0) beams like Frost
-                //    Ray.
-                let any_pool_alive = inst.layers.iter().any(|l| match l {
-                    LayerState::Particles(p) => !p.pool.is_empty(),
-                    LayerState::Ribbon(_) => false,
-                });
-                let light_alive = match inst.light.as_ref() {
-                    Some(EffectLight { lifetime: Some(t), .. }) => inst.elapsed < *t,
-                    // `follow_particles` lights drive their
-                    // own decay envelope after the last
-                    // particle dies — the impact flash needs
-                    // ~0.85 s of ramp-down to read as a
-                    // fading flame, not a hard cut. Keep the
-                    // slot alive until that envelope settles
-                    // close to zero. Without this retention
-                    // the slot is dropped the instant
-                    // `any_pool_alive` flips false and the
-                    // light disappears mid-fade.
-                    Some(EffectLight { follow_particles: true, .. }) => {
-                        inst.light_envelope > 1e-3
+                    // 2b) Update the smoothed light envelope. While
+                    //     particles are still spawning, the
+                    //     envelope rises toward the live ratio so
+                    //     the light hits full intensity at the
+                    //     spawn peak. Once spawning has stopped,
+                    //     it ignores `live_now` entirely and
+                    //     decays exponentially with a fixed time
+                    //     constant — this is what the user sees
+                    //     as the impact light "fading out". The
+                    //     constant (~0.85 s half-life) is tuned
+                    //     to match the longest particle lifetime
+                    //     in the fireball explosion preset, so
+                    //     the light goes dark as the last embers
+                    //     would naturally die.
+                    let peak = inst.peak_particle_count.max(1) as f32;
+                    let target = (live_now as f32 / peak).clamp(0.0, 1.0);
+                    if inst.spawning {
+                        if target > inst.light_envelope {
+                            inst.light_envelope = target;
+                        }
+                    } else {
+                        // Exponential decay: env *= exp(-dt / tau).
+                        // tau ≈ 0.55 s gives ~0.85 s half-life.
+                        let tau = 0.55_f32;
+                        let k = (-dt / tau).exp();
+                        inst.light_envelope = (inst.light_envelope * k).max(0.0);
                     }
-                    _ => false,
-                };
-                inst.spawning || any_pool_alive || light_alive
+
+                    // 3) Drop the slot once not spawning *and* every
+                    //    particle pool has drained *and* any attached
+                    //    light with an independent lifetime has
+                    //    expired. Ribbons disappear immediately when
+                    //    `spawning` flips false (no pool to drain) —
+                    //    that's the contract `despawn` relies on for
+                    //    persistent (duration == 0) beams like Frost
+                    //    Ray.
+                    let any_pool_alive = inst.layers.iter().any(|l| match l {
+                        LayerState::Particles(p) => !p.pool.is_empty(),
+                        LayerState::Ribbon(_) => false,
+                    });
+                    let light_alive = match inst.light.as_ref() {
+                        Some(EffectLight {
+                            lifetime: Some(t), ..
+                        }) => inst.elapsed < *t,
+                        // `follow_particles` lights drive their
+                        // own decay envelope after the last
+                        // particle dies — the impact flash needs
+                        // ~0.85 s of ramp-down to read as a
+                        // fading flame, not a hard cut. Keep the
+                        // slot alive until that envelope settles
+                        // close to zero. Without this retention
+                        // the slot is dropped the instant
+                        // `any_pool_alive` flips false and the
+                        // light disappears mid-fade.
+                        Some(EffectLight {
+                            follow_particles: true,
+                            ..
+                        }) => inst.light_envelope > 1e-3,
+                        _ => false,
+                    };
+                    inst.spawning || any_pool_alive || light_alive
                 } // end of `if !culled` arm of the cull check
             };
             if !alive {
@@ -737,18 +750,15 @@ impl VfxSystem {
                             continue;
                         }
                         let _ = anchor;
-                        let (noise_strength, noise_scroll, noise_tile, noise_octaves) =
-                            match r.spec.noise {
-                                Some(n) => (n.strength, n.scroll, n.tile.max(1e-3), n.octaves as f32),
-                                None => (0.0, 0.0, 1.0, 1.0),
-                            };
+                        let (noise_strength, noise_scroll, noise_tile, noise_octaves) = match r
+                            .spec
+                            .noise
+                        {
+                            Some(n) => (n.strength, n.scroll, n.tile.max(1e-3), n.octaves as f32),
+                            None => (0.0, 0.0, 1.0, 1.0),
+                        };
                         self.ribbon_instances.push(VfxRibbonInstance {
-                            origin: [
-                                inst.origin.x,
-                                inst.origin.y,
-                                inst.origin.z,
-                                r.spec.width,
-                            ],
+                            origin: [inst.origin.x, inst.origin.y, inst.origin.z, r.spec.width],
                             tip: [inst.tip.x, inst.tip.y, inst.tip.z, inst.elapsed],
                             params: [inst.brightness, noise_strength, noise_scroll, noise_tile],
                             flags: [noise_octaves, 0.0, 0.0, 0.0],
@@ -873,7 +883,15 @@ fn tick_particles(
         let mut velocity = part.velocity;
         let mut position = part.position;
         for force in &p.spec.forces {
-            apply_force(force, &mut position, &mut velocity, origin, orientation, noise_phase, dt2);
+            apply_force(
+                force,
+                &mut position,
+                &mut velocity,
+                origin,
+                orientation,
+                noise_phase,
+                dt2,
+            );
         }
         part.velocity = velocity;
         part.position = position + part.velocity * dt2;
@@ -916,7 +934,10 @@ fn apply_force(
             let rot = r * c + n.cross(r) * s + n * n.dot(r) * (1.0 - c);
             *pos = origin + rot;
         }
-        ForceField::Curl { frequency, strength } => {
+        ForceField::Curl {
+            frequency,
+            strength,
+        } => {
             // Cheap pseudo-curl: take the gradient of a hash
             // potential field at three offsets and use the
             // perpendicular components. Not divergence-free in
@@ -972,9 +993,16 @@ fn spawn_one(
             };
             let perp2 = axis.cross(perp);
             let lateral = (perp * rot.cos() + perp2 * rot.sin()) * angle.sin();
-            (Vec3::ZERO, (axis * angle.cos() + lateral).normalize_or(axis))
+            (
+                Vec3::ZERO,
+                (axis * angle.cos() + lateral).normalize_or(axis),
+            )
         }
-        SpawnShape::Column { radius, height, axis } => {
+        SpawnShape::Column {
+            radius,
+            height,
+            axis,
+        } => {
             let axis = axis.normalize_or(Vec3::Y);
             // Pick an arbitrary orthonormal basis around `axis`.
             let perp = if axis.y.abs() < 0.99 {
@@ -1027,7 +1055,11 @@ fn spawn_one(
             let dir = Vec3::new(theta.cos(), 0.0, theta.sin());
             (off, dir)
         }
-        SpawnShape::RingAxis { radius, thickness, axis } => {
+        SpawnShape::RingAxis {
+            radius,
+            thickness,
+            axis,
+        } => {
             // Build an orthonormal basis in the plane perpendicular
             // to `axis`. Same trick as `Cone` / `Column`.
             let axis = axis.normalize_or(Vec3::Y);
@@ -1109,10 +1141,7 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         // screen space to orient their capsules. Any spin
         // would tilt the strand off vertical and ruin the
         // beam alignment, so we hard-zero spin for both.
-        let spin = if matches!(
-            p.spec.sprite,
-            SpriteShape::Wisp | SpriteShape::SilkStrand
-        ) {
+        let spin = if matches!(p.spec.sprite, SpriteShape::Wisp | SpriteShape::SilkStrand) {
             0.0
         } else {
             q.seed * std::f32::consts::TAU + q.age * (0.4 + q.seed * 1.6)
@@ -1176,11 +1205,7 @@ fn anchor_for(inst: &EffectInstance) -> Vec3 {
 ///     pool: visible while spawning or any pool has live
 ///     particles, sampled over `elapsed / duration` for
 ///     finite-duration effects.
-fn compute_envelope(
-    inst: &EffectInstance,
-    spec: &Effect,
-    light: &EffectLight,
-) -> Option<f32> {
+fn compute_envelope(inst: &EffectInstance, spec: &Effect, light: &EffectLight) -> Option<f32> {
     if light.follow_particles {
         let live_now: u32 = inst
             .layers
@@ -1239,8 +1264,7 @@ fn push_effect_light(
     };
 
     let flicker = if light.flicker_amp > 0.0 && light.flicker_hz > 0.0 {
-        let phase_off =
-            ((inst.generation as f32) * 0.6180339).fract() * std::f32::consts::TAU;
+        let phase_off = ((inst.generation as f32) * 0.6180339).fract() * std::f32::consts::TAU;
         let f = light.flicker_hz;
         let t = time_secs;
         let a = (t * f * std::f32::consts::TAU + phase_off).sin();
@@ -1287,11 +1311,7 @@ fn noise3(p: Vec3) -> f32 {
     let f = p - i;
     let u = f * f * (Vec3::splat(3.0) - 2.0 * f); // smoothstep
     let n = |dx: f32, dy: f32, dz: f32| -> f32 {
-        let h = hash3(
-            (i.x + dx) as i32,
-            (i.y + dy) as i32,
-            (i.z + dz) as i32,
-        );
+        let h = hash3((i.x + dx) as i32, (i.y + dy) as i32, (i.z + dz) as i32);
         // Map to [-1, 1].
         (h as f32 / u32::MAX as f32) * 2.0 - 1.0
     };

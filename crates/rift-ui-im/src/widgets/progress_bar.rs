@@ -16,9 +16,7 @@
 //! 4. Border (rounded outline; theme-driven).
 //! 5. Centred label (optional).
 
-use super::super::{
-    color::Color, theme::Theme, ui::Ui,
-};
+use super::super::{color::Color, theme::Theme, ui::Ui};
 use crate::rect::{Pos2, Rect};
 
 /// One filled bar. All parameters except `value` and `rect`
@@ -140,12 +138,7 @@ impl<'a> ProgressBar<'a> {
 
         // Border.
         if radius > 0.0 {
-            ui.draw_rounded_outline(
-                rect,
-                radius,
-                theme.spacing.border_thickness,
-                border,
-            );
+            ui.draw_rounded_outline(rect, radius, theme.spacing.border_thickness, border);
         } else {
             ui.draw_outline(rect, theme.spacing.border_thickness, border);
         }

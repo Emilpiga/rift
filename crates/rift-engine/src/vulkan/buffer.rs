@@ -48,7 +48,9 @@ impl GpuBuffer {
 
     pub fn write<T: Copy>(&mut self, data: &[T]) {
         let allocation = self.allocation.as_mut().unwrap();
-        let dst = allocation.mapped_slice_mut().expect("Buffer not host-visible");
+        let dst = allocation
+            .mapped_slice_mut()
+            .expect("Buffer not host-visible");
         let src = unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
         };

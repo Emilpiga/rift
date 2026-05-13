@@ -75,11 +75,7 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                 speed: (0.0, 0.6),
                 lifetime: (0.16, 0.22),
                 forces: vec![ForceField::Drag { coefficient: 6.0 }],
-                size: Curve::from_stops([
-                    (0.00, 0.55),
-                    (0.30, 0.85),
-                    (1.00, 0.50),
-                ]),
+                size: Curve::from_stops([(0.00, 0.55), (0.30, 0.85), (1.00, 0.50)]),
                 // Deep, slightly-dark red. Alpha drops gracefully
                 // without going additive — blood doesn't emit.
                 color: Gradient::from_stops([
@@ -109,11 +105,7 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                         strength: 22.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.07),
-                    (0.85, 0.07),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.07), (0.85, 0.07), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [0.62, 0.05, 0.05, 1.00]),
                     (0.70, [0.40, 0.03, 0.03, 0.95]),
@@ -137,10 +129,7 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                         strength: 0.8,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.30),
-                    (1.00, 0.55),
-                ]),
+                size: Curve::from_stops([(0.00, 0.30), (1.00, 0.55)]),
                 color: Gradient::from_stops([
                     (0.00, [0.30, 0.02, 0.02, 0.55]),
                     (1.00, [0.10, 0.01, 0.01, 0.00]),
@@ -181,11 +170,7 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
                     strength: 18.0,
                 },
             ],
-            size: Curve::from_stops([
-                (0.00, 0.06),
-                (0.85, 0.06),
-                (1.00, 0.0),
-            ]),
+            size: Curve::from_stops([(0.00, 0.06), (0.85, 0.06), (1.00, 0.0)]),
             color: Gradient::from_stops([
                 (0.00, [0.62, 0.05, 0.05, 1.00]),
                 (0.70, [0.40, 0.03, 0.03, 0.90]),
@@ -224,11 +209,7 @@ pub fn enemy_soul_return() -> Effect {
                 speed: (0.0, 0.6),
                 lifetime: (0.22, 0.34),
                 forces: vec![ForceField::Drag { coefficient: 6.0 }],
-                size: Curve::from_stops([
-                    (0.00, 0.90),
-                    (0.30, 1.80),
-                    (1.00, 0.55),
-                ]),
+                size: Curve::from_stops([(0.00, 0.90), (0.30, 1.80), (1.00, 0.55)]),
                 color: Gradient::from_stops([
                     (0.00, [3.5, 1.4, 0.30, 0.95]),
                     (0.50, [2.0, 0.55, 0.10, 0.70]),
@@ -259,11 +240,7 @@ pub fn enemy_soul_return() -> Effect {
                         strength: 14.0,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.18),
-                    (0.70, 0.13),
-                    (1.00, 0.0),
-                ]),
+                size: Curve::from_stops([(0.00, 0.18), (0.70, 0.13), (1.00, 0.0)]),
                 color: Gradient::from_stops([
                     (0.00, [3.2, 1.10, 0.20, 1.00]),
                     (0.50, [2.0, 0.40, 0.06, 0.90]),
@@ -289,10 +266,7 @@ pub fn enemy_soul_return() -> Effect {
                         strength: 0.5,
                     },
                 ],
-                size: Curve::from_stops([
-                    (0.00, 0.65),
-                    (1.00, 1.55),
-                ]),
+                size: Curve::from_stops([(0.00, 0.65), (1.00, 1.55)]),
                 color: Gradient::from_stops([
                     (0.00, [0.10, 0.06, 0.05, 0.70]),
                     (0.60, [0.06, 0.03, 0.03, 0.45]),

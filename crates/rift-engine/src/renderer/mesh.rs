@@ -616,7 +616,7 @@ impl Mesh {
         floor_num: u32,
         accept: impl Fn((usize, usize), (usize, usize)) -> bool,
     ) -> Self {
-        use rift_dungeon::{StairDir, Tile, ELEVATION_STEP};
+        use rift_dungeon::{ELEVATION_STEP, StairDir, Tile};
 
         // Same palette as `dungeon_floor` but slightly darker
         // so the vertical face reads as receding into shadow,
@@ -864,11 +864,7 @@ impl Mesh {
                     StairDir::PosZ => sz > 0.0,
                     StairDir::NegZ => sz < 0.0,
                 };
-                if on_rise {
-                    step_y
-                } else {
-                    0.0
-                }
+                if on_rise { step_y } else { 0.0 }
             };
 
             // Slope normal: cross product of along-slope and
@@ -1209,7 +1205,7 @@ impl Mesh {
 
         let segments = 64u32;
         let y = 0.08; // safely above floor (y=0) to avoid z-fighting
-                      // Boost color far above 1.0 so it survives texture multiplication and lighting.
+        // Boost color far above 1.0 so it survives texture multiplication and lighting.
         let bright = Vec3::new(color[0] * 8.0, color[1] * 8.0, color[2] * 8.0);
         let dim = Vec3::new(color[0] * 4.0, color[1] * 4.0, color[2] * 4.0);
 
@@ -1817,7 +1813,7 @@ impl Mesh {
     /// Geometry intentionally provides only **polar UVs** and a
     /// **wobbly silhouette**; all the visual content (swirling
     /// depth, chromatic veins, edge tendrils) is generated in
-    /// [`shadeRift`](file://assets/shaders/triangle.frag) at
+    /// `assets/shaders/forward/rift_surface.glsl::shadeRift` at
     /// fragment time. The mesh's job is to:
     ///
     ///   * present an unstable, *non-circular* contour (per-
@@ -2064,8 +2060,15 @@ impl Mesh {
             resolved.file_name().unwrap_or_default(),
             mesh.vertices.len(),
             mesh.indices.len() / 3,
-            mn.x, mn.y, mn.z, mx.x, mx.y, mx.z,
-            mx.x - mn.x, mx.y - mn.y, mx.z - mn.z,
+            mn.x,
+            mn.y,
+            mn.z,
+            mx.x,
+            mx.y,
+            mx.z,
+            mx.x - mn.x,
+            mx.y - mn.y,
+            mx.z - mn.z,
         );
         Ok(mesh)
     }
@@ -2148,11 +2151,20 @@ fn visit_node_inner(
             log::info!(
                 "  primitive material={:?} base_color_factor=[{:.2},{:.2},{:.2},{:.2}] base_tex={} emissive=[{:.2},{:.2},{:.2}] emissive_strength={:.2} emissive_tex={}",
                 material.name(),
-                base_color[0], base_color[1], base_color[2], base_color[3],
+                base_color[0],
+                base_color[1],
+                base_color[2],
+                base_color[3],
                 if base_tex.is_some() { "yes" } else { "no" },
-                material.emissive_factor()[0], material.emissive_factor()[1], material.emissive_factor()[2],
+                material.emissive_factor()[0],
+                material.emissive_factor()[1],
+                material.emissive_factor()[2],
                 material.emissive_strength().unwrap_or(1.0),
-                if material.emissive_texture().is_some() { "yes" } else { "no" },
+                if material.emissive_texture().is_some() {
+                    "yes"
+                } else {
+                    "no"
+                },
             );
 
             // Emissive contribution from the Principled BSDF's
@@ -2545,8 +2557,15 @@ impl SkinnedMesh {
         log::info!(
             "Loaded skinned glTF {:?}: {} verts, {} tris, {} joints, bounds [{:.2},{:.2},{:.2}] -> [{:.2},{:.2},{:.2}]",
             resolved.file_name().unwrap_or_default(),
-            bind_vertices.len(), indices.len() / 3, joints.len(),
-            mn.x, mn.y, mn.z, mx.x, mx.y, mx.z,
+            bind_vertices.len(),
+            indices.len() / 3,
+            joints.len(),
+            mn.x,
+            mn.y,
+            mn.z,
+            mx.x,
+            mx.y,
+            mx.z,
         );
 
         Ok(Self {
@@ -2765,11 +2784,7 @@ impl SkinnedMesh {
                 || n.contains(".l")
                 || n.contains("_l_")
                 || n.contains("lhand");
-            if is_hand && is_left {
-                Some(i)
-            } else {
-                None
-            }
+            if is_hand && is_left { Some(i) } else { None }
         })
     }
 
@@ -2796,11 +2811,7 @@ impl SkinnedMesh {
                 || n.contains(".r")
                 || n.contains("_r_")
                 || n.contains("rhand");
-            if is_hand && is_right {
-                Some(i)
-            } else {
-                None
-            }
+            if is_hand && is_right { Some(i) } else { None }
         })
     }
 

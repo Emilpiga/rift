@@ -11,7 +11,7 @@
 //!
 //! - **Independent shader.** The sky doesn't sample fog, lights or
 //!   the shadow map, so a tiny fragment shader is far cheaper than
-//!   running the cel-shaded `triangle.frag` on every pixel.
+//!   running the cel-shaded forward opaque fragment shader on every pixel.
 //! - **No descriptor sets.** All parameters fit in 128 bytes of
 //!   push constants, so the pipeline layout has zero set bindings
 //!   and never has to wait on UBO updates.
@@ -286,12 +286,10 @@ impl SkyRenderer {
             .map_err(|e| anyhow::anyhow!("read sky.vert: {e}"))?;
         let frag_src = std::fs::read_to_string(shader_dir.join("sky.frag"))
             .map_err(|e| anyhow::anyhow!("read sky.frag: {e}"))?;
-        let vert_spv = hot_reload::compile_glsl(
-            &vert_src, "sky.vert", shaderc::ShaderKind::Vertex,
-        )?;
-        let frag_spv = hot_reload::compile_glsl(
-            &frag_src, "sky.frag", shaderc::ShaderKind::Fragment,
-        )?;
+        let vert_spv =
+            hot_reload::compile_glsl(&vert_src, "sky.vert", shaderc::ShaderKind::Vertex)?;
+        let frag_spv =
+            hot_reload::compile_glsl(&frag_src, "sky.frag", shaderc::ShaderKind::Fragment)?;
         let vert_module = pipe::create_shader_module(device, &vert_spv)?;
         let frag_module = pipe::create_shader_module(device, &frag_spv)?;
 
@@ -320,8 +318,8 @@ impl SkyRenderer {
             .viewport_count(1)
             .scissor_count(1);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
-            .dynamic_states(&dynamic_states);
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
@@ -419,21 +417,24 @@ impl SkyRenderer {
         let push = SkyPush {
             inv_view_proj_dir: inv_vp.to_cols_array_2d(),
             zenith_falloff: [
-                config.zenith[0], config.zenith[1], config.zenith[2],
+                config.zenith[0],
+                config.zenith[1],
+                config.zenith[2],
                 config.horizon_falloff,
             ],
             horizon_sun_size: [
-                config.horizon[0], config.horizon[1], config.horizon[2],
+                config.horizon[0],
+                config.horizon[1],
+                config.horizon[2],
                 config.sun_size,
             ],
             ground_sun_str: [
-                config.ground[0], config.ground[1], config.ground[2],
+                config.ground[0],
+                config.ground[1],
+                config.ground[2],
                 config.sun_strength,
             ],
-            sun_dir: [
-                config.sun_dir.x, config.sun_dir.y, config.sun_dir.z,
-                0.0,
-            ],
+            sun_dir: [config.sun_dir.x, config.sun_dir.y, config.sun_dir.z, 0.0],
             cloud_params: [time_secs, config.cloud_strength, config.cloud_flash, 0.0],
             cloud_flash_color: [
                 config.cloud_flash_color.x,
@@ -445,11 +446,7 @@ impl SkyRenderer {
         let push_bytes: &[u8] = bytemuck::bytes_of(&push);
 
         unsafe {
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,

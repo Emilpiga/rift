@@ -101,6 +101,7 @@ impl SpellbookUi {
         ui: &mut Ui<'_>,
         loadout: &Loadout,
         player_level: u32,
+        talents: &rift_game::talents::TalentTree,
     ) -> Option<SpellbookAction> {
         if !self.open {
             return None;
@@ -288,7 +289,7 @@ impl SpellbookUi {
                 grid_rect.y() + row as f32 * (tile + tile_gap),
             );
             let id = Id::root("spellbook_pool").child(ab.wire_id.raw() as usize);
-            let unlocked = is_ability_unlocked(ab.wire_id, player_level);
+            let unlocked = is_ability_unlocked(ab.wire_id, talents);
             let mut t = ItemSlot::new(tile)
                 .selected(self.selected_ability == Some(ab.wire_id))
                 .enabled(unlocked);

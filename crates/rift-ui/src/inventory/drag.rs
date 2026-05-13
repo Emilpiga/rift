@@ -46,6 +46,7 @@ pub fn route_slot(
     stash_open: bool,
     ctrl: bool,
     active_tab: u8,
+    is_consumable: bool,
     out: &mut Vec<InventoryAction>,
 ) {
     if let Some(drop) = r.dropped {
@@ -65,7 +66,21 @@ pub fn route_slot(
             DropTarget::Equip(slot) => DragSource::Equip(slot),
             DropTarget::Stash(idx) => DragSource::Stash(idx),
         };
-        handle_right_click(src, stash_open, active_tab, out);
+        // Consumables hijack right-click: instead of the
+        // generic "fast transfer" verb (equip / deposit-to-
+        // stash), they emit a `UseConsumable` so the host can
+        // dispatch by `ConsumableKind`. Only meaningful when
+        // the source is a bag slot \u2014 stash / equip
+        // sources can't host consumables today.
+        if is_consumable {
+            if let DragSource::Bag(idx) = src {
+                out.push(InventoryAction::UseConsumable {
+                    inventory_index: idx,
+                });
+            }
+        } else {
+            handle_right_click(src, stash_open, active_tab, out);
+        }
     }
 }
 
@@ -86,12 +101,13 @@ pub fn route_slot_capture(
     stash_open: bool,
     ctrl: bool,
     active_tab: u8,
+    is_consumable: bool,
     out: &mut Vec<InventoryAction>,
     in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
 ) {
     let dropped_payload = r.dropped.as_ref().map(|dp| dp.payload);
     let actions_before = out.len();
-    route_slot(r, target, stash_open, ctrl, active_tab, out);
+    route_slot(r, target, stash_open, ctrl, active_tab, is_consumable, out);
     if let Some(payload) = dropped_payload {
         if out.len() > actions_before {
             *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(

@@ -14,8 +14,8 @@
 //! All five are re-exported flat at the [`crate::game`] root
 //! so existing `crate::game::sub_state::Foo` paths still resolve.
 
-pub mod sub_state;
-pub mod frame_state;
 pub mod floor_state;
+pub mod frame_state;
 pub mod player_state;
 pub mod rift_state;
+pub mod sub_state;

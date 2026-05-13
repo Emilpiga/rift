@@ -41,10 +41,7 @@ impl Sim {
     /// them). Ghosts also can't cast on an open vote (the roll
     /// is built from living players only). Party-wipe recovery
     /// is handled by the existing hub-respawn timer.
-    pub fn request_exit_vote(
-        &mut self,
-        client_id: ClientId,
-    ) -> ExitVoteRequest {
+    pub fn request_exit_vote(&mut self, client_id: ClientId) -> ExitVoteRequest {
         if self.floor_index == 0 {
             return ExitVoteRequest::Refused;
         }
@@ -108,10 +105,7 @@ impl Sim {
     /// next floor unprepared. Same shape + lifetime as
     /// [`Self::request_exit_vote`]; only `kind` and the
     /// resolution path differ (see [`Self::tick_exit_vote`]).
-    pub fn request_descend_vote(
-        &mut self,
-        client_id: ClientId,
-    ) -> ExitVoteRequest {
+    pub fn request_descend_vote(&mut self, client_id: ClientId) -> ExitVoteRequest {
         if self.floor_index == 0 {
             // Hub \u2192 first floor is always instant. Caller falls
             // through to the transition path.
@@ -169,8 +163,12 @@ impl Sim {
     /// voted. Sets the dirty flag so the main loop broadcasts a
     /// fresh `RiftExitVote` next iteration.
     pub fn cast_exit_vote(&mut self, client_id: ClientId, yes: bool) {
-        let Some(vote) = self.exit_vote.as_mut() else { return };
-        let Some(&entity) = self.sessions.get(&client_id) else { return };
+        let Some(vote) = self.exit_vote.as_mut() else {
+            return;
+        };
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return;
+        };
         let Some(net_id) = self
             .world
             .get::<&ServerPlayer>(entity)
@@ -179,7 +177,9 @@ impl Sim {
         else {
             return;
         };
-        let Some(slot) = vote.votes.get_mut(&net_id) else { return };
+        let Some(slot) = vote.votes.get_mut(&net_id) else {
+            return;
+        };
         if !matches!(slot, VoteChoice::Pending) {
             // No changing your mind.
             return;
@@ -268,5 +268,4 @@ impl Sim {
             _ => false,
         }
     }
-
 }

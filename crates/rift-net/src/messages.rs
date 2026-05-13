@@ -469,6 +469,53 @@ pub enum ClientMsg {
     /// Reliable on `Channel::Control`.
     InvestTalent { talent_id: u16 },
 
+    /// Lesser-respec a single talent node — refund every rank
+    /// of `talent_id` and return the points to the player's
+    /// unspent pool. Server validates: the node exists, has
+    /// rank ≥ 1, and refunding it would not orphan any other
+    /// invested node (downstream nodes whose prereq closure
+    /// still requires this one). On success the server mutates
+    /// `ServerPlayer.talents`, persists, and replies with a
+    /// fresh [`ServerMsg::TalentsSync`]. Silent no-op on
+    /// rejection. Per `TALENT_TREE.md` §7 this is what a
+    /// **Lesser Respec Token** consumption boils down to;
+    /// token-cost / inventory consumption is layered on top by
+    /// the eventual consumable-item plumbing.
+    /// Reliable on `Channel::Control`.
+    RespecTalent { talent_id: u16 },
+
+    /// Greater-respec — wipe every invested point in the tree
+    /// back to rank 0 and return them to the unspent pool.
+    /// Always succeeds (no orphan check needed since every node
+    /// drops together). Mirrors the **Greater Respec Token**
+    /// consumption per `TALENT_TREE.md` §7. Reply is the
+    /// fresh [`ServerMsg::TalentsSync`].
+    /// Reliable on `Channel::Control`.
+    RespecAllTalents,
+
+    /// Consume the bag-only consumable item at
+    /// `inventory_index`. Server validates the slot exists and
+    /// holds an `ItemSlot::Consumable(_)`, then dispatches by
+    /// the consumable's kind:
+    ///
+    /// - `GreaterRespecToken` \u2014 ignores `target_arg`, wipes
+    ///   every invested talent point.
+    /// - `LesserRespecToken` \u2014 reads `target_arg` as a
+    ///   `TalentId(u16)` and refunds every rank of that node;
+    ///   subject to the orphan-rejection rule
+    ///   (`TALENT_TREE.md` \u00a77).
+    ///
+    /// On accept the bag slot is cleared and the server replies\n    /// with a fresh `InventorySync` (always) plus a
+    /// `TalentsSync` (when the consumable touched the tree).
+    /// `target_arg` should be `u16::MAX` for self-targeted
+    /// consumables (greater respec, future potions). Silent\n    /// no-op on rejection (unknown index, not a consumable,
+    /// orphaning lesser-respec, etc.). Reliable on
+    /// `Channel::Control`.
+    UseItem {
+        inventory_index: u32,
+        target_arg: u16,
+    },
+
     /// Open the rift exit vote. Sent when a living player
     /// presses F at the rift-spawn portal. Server validates the
     /// caster is alive and on a non-hub floor, with no vote

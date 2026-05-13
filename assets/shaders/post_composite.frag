@@ -1,178 +1,22 @@
 #version 450
 
-// Final composite + tonemap. Reads the HDR scene, blurred bloom
-// and depth, computes a small inline screen-space ambient
-// occlusion term, multiplies the HDR colour by it, then tonemaps
-// to the swapchain (sRGB).
-//
-// Why SSAO here, not as a separate pass? The renderer has no
-// depth pre-pass — depth is produced as a side-effect of the
-// forward scene pass, so the earliest moment SSAO *could* be
-// computed against a complete depth buffer is after the scene
-// pass. By that point the HDR colour already contains shaded
-// ambient. Folding AO into the composite at full screen rate
-// saves an entire framebuffer + render pass and reads visually
-// indistinguishable to the player. The cost is that AO darkens
-// direct-lit pixels too — at moderate strength the eye reads
-// this as soft contact shading, not a bug.
+// Final composite + tonemap. Reads heat-distorted HDR, blurred bloom,
+// graph-produced AO and volumetrics, then tonemaps to the swapchain (sRGB).
 
 layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D u_hdr;
 layout(set = 0, binding = 1) uniform sampler2D u_bloom;
-layout(set = 0, binding = 2) uniform sampler2D u_depth;
+layout(set = 0, binding = 2) uniform sampler2D u_ao;
+layout(set = 0, binding = 3) uniform sampler2D u_volumetrics;
 
 layout(push_constant) uniform Push {
     float bloom_intensity; // multiplier on bloom contribution
     float exposure;        // scene exposure scalar (1.0 default)
     float ghost_mix;       // 0 = normal, 1 = full ghost view
-    float ssao_strength;   // 0 disables AO, 1 = full effect
-    mat4  inv_proj;        // for view-space reconstruction
-    // God-ray data (volumetric scattering toward the sun).
-    //   sun_screen.xy = sun screen UV (may be outside [0,1])
-    //   sun_screen.z  = strength in [0, 1.5]; 0 disables
-    //   sun_screen.w  = 1 if sun is in front of camera, else 0
-    //   sun_color.rgb = ray tint (sun colour); a unused
-    vec4  sun_screen;
-    vec4  sun_color;
-    // Heat-distortion source (warm point light projected to
-    // screen). xy = UV, z = falloff radius, w = strength.
-    vec4  heat_source;
+    float _pad0;
 } pc;
-
-const float PI = 3.14159265359;
-
-// ---------- View-space reconstruction ----------
-// Sampled depth is in NDC [0, 1]. Convert UV + depth to a clip
-// vector, then inv_proj into view space.
-vec3 view_pos_from_depth(vec2 uv, float depth) {
-    // GLSL UV (0,0)=top-left. Vulkan NDC y is also top-down for
-    // the sampled depth here because the renderer flips the
-    // projection matrix's Y. So we map (uv*2-1) directly.
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view = pc.inv_proj * clip;
-    return view.xyz / view.w;
-}
-
-// Cheap hash → [0, 1).
-float hash12(vec2 p) {
-    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
-}
-
-// ---------- Inline SSAO ----------
-// Approach: 8 samples on a rotated Vogel disk in screen space.
-// For each sample we pick a radius proportional to the central
-// pixel's view-space depth (so the kernel covers a fixed
-// world-space neighbourhood, not a fixed pixel count) and
-// compare the sample's view-space position to a hemisphere
-// oriented along the reconstructed view-space normal. The
-// occlusion is a soft falloff on the depth difference.
-//
-// Normal reconstruction uses screen-space derivatives of the
-// view-space position. ddx/ddy of a per-pixel quantity in a
-// fragment shader gives the partial derivatives over a 2x2
-// quad, which is exactly the surface tangent basis at this
-// pixel. The cross product is the surface normal, sign-flipped
-// to match the camera's +Z = into-screen convention.
-float compute_ssao(vec2 uv, float depth) {
-    // Bail on sky / cleared depth. Sampling the kernel against a
-    // depth=1.0 pixel produces unstable normals and we do not
-    // want to darken the sky.
-    if (depth >= 0.9999) return 1.0;
-
-    vec3 origin = view_pos_from_depth(uv, depth);
-    // Bail on degenerate view positions.
-    if (origin.z >= -0.001) return 1.0;
-
-    vec3 nrm = normalize(cross(dFdx(origin), dFdy(origin)));
-    // Same convention as forward shader: normals point toward
-    // the camera (negative view-space Z). The cross-product sign
-    // depends on screen-space derivative direction; force the
-    // facing.
-    if (dot(nrm, vec3(0.0, 0.0, 1.0)) < 0.0) nrm = -nrm;
-
-    // World-space radius of the AO kernel. ~10 cm reads as
-    // tight contact shading — large enough to ground feet,
-    // chairs and props on the floor, but small enough that
-    // it doesn't form a visible halo around silhouettes
-    // (the typical SSAO failure mode where the kernel
-    // straddles a depth discontinuity).
-    const float WORLD_RADIUS = 0.10;
-    // Project that radius to a screen-space delta at this depth.
-    // Any reasonable focal length will do; we use a constant.
-    float radius_uv = WORLD_RADIUS / max(-origin.z, 0.1) * 0.5;
-
-    // Per-pixel rotation breaks the visible Vogel pattern.
-    float rot = hash12(uv * vec2(textureSize(u_depth, 0))) * 2.0 * PI;
-    float cr = cos(rot), sr = sin(rot);
-    mat2 rotate = mat2(cr, -sr, sr, cr);
-
-    // 4 Vogel taps with per-pixel rotation. Halved from 8.
-    // The hash-driven rotation already spreads the discrete
-    // sample positions as spatial noise the eye averages, so
-    // doubling-down on samples buys very little (the
-    // remaining variance is dominated by the rotation jitter,
-    // not the sample count). Cuts the per-pixel depth-fetch
-    // budget in this loop in half — at 1080p that's 4M fewer
-    // texture reads per frame, the single biggest fragment-
-    // bound win in the composite pass for indoor scenes
-    // where god-rays don't fire.
-    const int N = 4;
-    const float GOLDEN = 2.39996323;
-    float occlusion = 0.0;
-
-    for (int i = 0; i < N; ++i) {
-        // Vogel disk: r = sqrt(i/N), theta = i * golden_angle.
-        // The compiler unrolls this loop and constant-folds
-        // the trig because every input is a literal — no
-        // per-pixel runtime cost.
-        float fi = float(i) + 0.5;
-        float r = sqrt(fi / float(N));
-        float theta = fi * GOLDEN;
-        vec2 disk = vec2(cos(theta), sin(theta)) * r;
-        vec2 offset = rotate * disk * radius_uv;
-        vec2 sample_uv = clamp(uv + offset, vec2(0.001), vec2(0.999));
-
-        float sample_depth = texture(u_depth, sample_uv).r;
-        if (sample_depth >= 0.9999) continue;
-        vec3 sample_pos = view_pos_from_depth(sample_uv, sample_depth);
-
-        // Vector from origin to sample.
-        vec3 v = sample_pos - origin;
-        float dist = length(v);
-        // ----- Depth-discontinuity reject -----
-        // The classic SSAO halo around silhouettes happens
-        // when one tap lands on the background surface a few
-        // metres behind the foreground object. The smooth
-        // 3D-distance falloff still gives those samples a
-        // small but visible weight. Reject any tap whose
-        // view-Z is more than 1.5× the kernel radius away
-        // from the origin — beyond that depth gap we are
-        // sampling a different surface entirely, not a real
-        // occluder of this pixel.
-        if (abs(sample_pos.z - origin.z) > WORLD_RADIUS * 1.5) continue;
-        // Falloff: ignore far samples (they're another surface
-        // entirely, not an occluder of this one) and weight by
-        // alignment with the surface normal so flat ground
-        // doesn't occlude itself.
-        float range = smoothstep(WORLD_RADIUS * 1.4, WORLD_RADIUS * 0.05, dist);
-        float ndotv = max(dot(nrm, v / max(dist, 0.0001)), 0.0);
-        // Bias prevents self-occlusion on flat surfaces.
-        const float BIAS = 0.015;
-        occlusion += step(BIAS, ndotv) * ndotv * range;
-    }
-    occlusion /= float(N);
-    // Map [0, 1] occlusion to [1, 0] AO multiplier with a soft
-    // curve. Was `pow(occlusion, 0.7)`. Approximating that
-    // exponent with `mix(occlusion, sqrt(occlusion), 0.7)`
-    // gives a curve that's visually indistinguishable in the
-    // 0..0.5 occlusion range we actually hit, but trades a
-    // `pow` (multiple ALU + log2/exp2) for a `sqrt` (single
-    // hardware op) per pixel. ~5–10% cheaper on the
-    // composite pass; no perceptible change to shading.
-    return clamp(1.0 - mix(occlusion, sqrt(occlusion), 0.7), 0.0, 1.0);
-}
 
 // Narkowicz ACES filmic tonemap — cheap, hits LDR cleanly,
 // holds saturation in highlights. Output is in linear space;
@@ -258,145 +102,14 @@ vec3 grade(vec3 c) {
     return clamp(c, 0.0, 1.0);
 }
 
-// ---------- Volumetric god-rays ----------
-//
-// Cheap radial-blur scattering. For each output pixel, march a
-// fixed number of samples along the ray *toward* the sun's
-// screen position; at each step, accept the HDR sample iff the
-// underlying pixel is sky (depth at far plane). Sum with a
-// gentle exponential decay so contributions closer to this
-// pixel dominate — the result is a soft, bright halo around
-// the sun that streaks out into the surrounding sky and
-// crepuscular rays radiating past silhouetted geometry.
-//
-// Single-pass, no extra render targets, no extra samplers —
-// just the depth + HDR we already have. Cost is `STEPS *
-// (texture(u_depth) + texture(u_hdr))` per pixel; STEPS=24 is
-// fine on contemporary hardware at 1080p.
-vec3 god_rays(vec2 uv) {
-    if (pc.sun_screen.z < 0.001) return vec3(0.0);
-    if (pc.sun_screen.w < 0.5)   return vec3(0.0);
-
-    vec2 sun_uv = pc.sun_screen.xy;
-    vec2 to_sun = sun_uv - uv;
-    float dist  = length(to_sun);
-    // Cap the march length so we don't shoot off-screen with
-    // huge step sizes when the sun is on the opposite side.
-    // Bumped from 0.6 to 0.85 so rays reach further from the
-    // sun's position — makes the crepuscular streaks visible
-    // across most of the frame in the sandstorm hub instead
-    // of only in a tight halo around the disc.
-    const float MAX_DIST = 0.85;
-    float marchDist = min(dist, MAX_DIST);
-    if (marchDist < 1e-4) return vec3(0.0);
-    vec2 dir = to_sun / max(dist, 1e-4);
-
-    // 18 steps (was 12): the longer MAX_DIST means fewer
-    // samples per UV unit, so we add a few back to keep the
-    // banding hidden by the per-pixel jitter. Cost is still
-    // <1 ms at 1080p (texture fetches are L1-resident along
-    // the radial march).
-    const int STEPS = 18;
-    vec3 accum = vec3(0.0);
-    float weightSum = 0.0;
-    // Per-pixel jitter to break up the obvious radial banding.
-    float jitter = hash12(uv * vec2(1023.0, 769.0));
-    for (int i = 0; i < STEPS; i++) {
-        float t = (float(i) + jitter) / float(STEPS);
-        vec2 sample_uv = uv + dir * (marchDist * t);
-        // Reject off-screen samples so we don't pull garbage
-        // from clamped edges.
-        if (sample_uv.x < 0.0 || sample_uv.x > 1.0
-         || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
-        float d = texture(u_depth, sample_uv).r;
-        // Sky-only mask: contribute only when the underlying
-        // pixel is at the far plane (geometry blocks rays).
-        float sky = step(0.9995, d);
-        // Per-sample weight: brightest near the sun, falling
-        // off with distance from the sun (1 - t when marching
-        // toward the sun).
-        float w = (1.0 - t);
-        accum += texture(u_hdr, sample_uv).rgb * sky * w;
-        weightSum += w;
-    }
-    if (weightSum < 1e-4) return vec3(0.0);
-    accum /= weightSum;
-
-    // Distance falloff so rays radiate outward from the sun.
-    // Softened from `exp(-dist * 1.4)` to `exp(-dist * 0.9)`
-    // so streaks reach noticeably further from the sun's
-    // position before fading. The MAX_DIST clamp on the
-    // march above already prevents runaway contribution from
-    // very distant pixels.
-    float falloff = exp(-dist * 0.2);
-    // Boost the per-pixel ray output by 1.6× so the
-    // crepuscular streaks read clearly against a bright
-    // sandstorm sky. Strength is still gated by
-    // `pc.sun_screen.z`, which the CPU clamps, so this can't
-    // blow up under unusual sky configs.
-    return accum * pc.sun_color.rgb * pc.sun_screen.z * falloff * 0.8;
-}
-
 void main() {
-    vec2 hdr_uv = v_uv;
+    vec3 hdr         = texture(u_hdr,         v_uv).rgb;
+    vec3 bloom       = texture(u_bloom,       v_uv).rgb;
+    vec3 volumetrics = texture(u_volumetrics, v_uv).rgb;
 
-    // ---- Heat-distortion warp ----
-    // Cheap pseudo-refraction near a hot source: sample two
-    // value-noise fields (sin/cos hash) at this pixel's UV,
-    // build a 2D offset, scale by a Gaussian falloff around
-    // `heat_source.xy` so the warp ramps off smoothly outside
-    // the hot region. Applied only to the HDR fetch — bloom
-    // and depth fetches stay aligned so SSAO/bloom remain
-    // crisp. Output is composited with the warped HDR so the
-    // tonemap + grade still see a coherent image.
-    if (pc.heat_source.w > 0.001) {
-        vec2 d = (v_uv - pc.heat_source.xy);
-        // Squash horizontally so heat plumes feel taller than
-        // wide — hot air rises, the visible distortion is
-        // mostly vertical.
-        d.x *= 1.6;
-        float r = length(d);
-        float radius = max(pc.heat_source.z, 0.01);
-        // Gaussian falloff: 1 at the source, ~0 at 2x radius.
-        float falloff = exp(-(r * r) / (radius * radius));
-        // Animated noise field. Two offset samples — the
-        // gradient between them is a cheap divergence-free-ish
-        // flow. UVs are scaled to give visible structure at
-        // typical fireball sizes (a few cells across the
-        // particle).
-        vec2 nUV = v_uv * 28.0;
-        float t = pc.heat_source.w * 6.0; // animation rate scales with strength
-        // hash12 + jittered offsets — we already have hash12.
-        float n0 = hash12(nUV + vec2(t, 0.0));
-        float n1 = hash12(nUV + vec2(0.0, t * 1.3));
-        vec2 warp = vec2(n0 - 0.5, n1 - 0.5) * 2.0;
-        // Smooth the random noise by averaging four taps.
-        warp += vec2(hash12(nUV + vec2(t + 7.0, 3.0)) - 0.5,
-                     hash12(nUV + vec2(11.0, t * 0.9 + 5.0)) - 0.5) * 2.0;
-        warp *= 0.5;
-        // Amplitude in UV: 0.012 at full strength is enough to
-        // read as shimmer without smearing details.
-        float amp = 0.012 * falloff * pc.heat_source.w;
-        hdr_uv += warp * amp;
-    }
+    float ao = texture(u_ao, v_uv).r;
 
-    vec3 hdr   = texture(u_hdr,   hdr_uv).rgb;
-    vec3 bloom = texture(u_bloom, v_uv).rgb;
-
-    // Inline SSAO. Skip entirely when strength == 0 to avoid the
-    // depth fetches on lower graphics settings.
-    float ao = 1.0;
-    if (pc.ssao_strength > 0.0001) {
-        float depth = texture(u_depth, v_uv).r;
-        float raw = compute_ssao(v_uv, depth);
-        ao = mix(1.0, raw, pc.ssao_strength);
-    }
-
-    vec3 col   = (hdr * ao + bloom * pc.bloom_intensity) * pc.exposure;
-    // God-rays — added in HDR space *before* the tonemap so
-    // strong rays compress along with the rest of the scene
-    // rather than punching to white.
-    col += god_rays(v_uv);
+    vec3 col = (hdr * ao + volumetrics + bloom * pc.bloom_intensity) * pc.exposure;
     vec3 mapped = aces(col);
     mapped = grade(mapped);
 

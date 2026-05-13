@@ -24,9 +24,8 @@ impl Swapchain {
         let capabilities = unsafe {
             surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?
         };
-        let formats = unsafe {
-            surface_fn.get_physical_device_surface_formats(physical_device, surface)?
-        };
+        let formats =
+            unsafe { surface_fn.get_physical_device_surface_formats(physical_device, surface)? };
         let present_modes = unsafe {
             surface_fn.get_physical_device_surface_present_modes(physical_device, surface)?
         };
@@ -61,16 +60,18 @@ impl Swapchain {
             }
         };
 
-        let image_count = (capabilities.min_image_count + 1).min(
-            if capabilities.max_image_count > 0 {
+        let image_count =
+            (capabilities.min_image_count + 1).min(if capabilities.max_image_count > 0 {
                 capabilities.max_image_count
             } else {
                 u32::MAX
-            },
-        );
+            });
 
         let (sharing_mode, queue_family_indices) = if graphics_family != present_family {
-            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
+            (
+                vk::SharingMode::CONCURRENT,
+                vec![graphics_family, present_family],
+            )
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -114,7 +115,10 @@ impl Swapchain {
 
         log::info!(
             "Swapchain created: {}x{}, {} images, {:?}",
-            extent.width, extent.height, images.len(), present_mode
+            extent.width,
+            extent.height,
+            images.len(),
+            present_mode
         );
 
         Ok(Self {

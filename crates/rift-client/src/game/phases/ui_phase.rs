@@ -193,12 +193,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         // Faint gold pulse when unspent points exist — helps the
         // player notice. Painted as a translucent rim.
         if has_unspent {
-            ui.draw_rounded_outline(
-                btn_rect,
-                6.0,
-                2.0,
-                Color::rgba(0.92, 0.78, 0.32, 0.55),
-            );
+            ui.draw_rounded_outline(btn_rect, 6.0, 2.0, Color::rgba(0.92, 0.78, 0.32, 0.55));
         }
     }
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj);
@@ -242,6 +237,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &state.loot.stash_tabs,
         &mut state.loot.pending_stash_requests,
         &state.player_state,
+        &mut state.net.pending_consume_bag_idx,
+        &mut state.talents_panel.open,
     );
 
     // Spellbook toggle (B) — open / close the loadout editor.
@@ -258,6 +255,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut ui,
         &state.player_state.loadout,
         state.player_state.experience.level,
+        &state.player_state.talents,
     ) {
         match action {
             spellbook::SpellbookAction::AssignSlot {
@@ -300,19 +298,48 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     }
     {
         let view = crate::game::talent_tree::build_talent_view(&state.player_state.talents);
-        if let Some(action) = rift_ui::talents::frame_talent_panel(
-            &mut ui,
-            &mut state.talents_panel,
-            &view,
-        ) {
+        if let Some(action) =
+            rift_ui::talents::frame_talent_panel(&mut ui, &mut state.talents_panel, &view)
+        {
             match action {
                 rift_ui_types::talents::TalentTreeAction::Invest { talent_id } => {
                     state.net.pending_talent_invests.push(talent_id);
                 }
+                rift_ui_types::talents::TalentTreeAction::Respec { talent_id } => {
+                    // While a two-step consumable is armed,
+                    // right-click on an invested talent fires
+                    // `UseItem` against that node instead of
+                    // the free dev respec. The token is
+                    // consumed server-side only on a valid
+                    // (non-orphaning) refund; rejection just
+                    // leaves the token armed for retry.
+                    if let Some(inv_idx) = state.net.pending_consume_bag_idx.take() {
+                        state.net.pending_use_item.push((inv_idx, talent_id));
+                    } else {
+                        state.net.pending_talent_respecs.push(talent_id);
+                    }
+                }
+                rift_ui_types::talents::TalentTreeAction::RespecAll => {
+                    state.net.pending_talent_respec_all = true;
+                }
                 rift_ui_types::talents::TalentTreeAction::Close => {
                     state.talents_panel.close();
+                    // Closing the panel also cancels any armed
+                    // two-step consumable so it doesn't bleed
+                    // into the next time the player opens the
+                    // tree.
+                    state.net.pending_consume_bag_idx = None;
                 }
             }
+        }
+        // Esc anywhere also cancels an armed consumable, even
+        // when the panel itself doesn't emit a Close action.
+        if state.net.pending_consume_bag_idx.is_some()
+            && ui
+                .input()
+                .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
+        {
+            state.net.pending_consume_bag_idx = None;
         }
     }
 

@@ -71,25 +71,19 @@ impl Anchor {
     /// anchor — i.e. `TopRight, (-pad, pad), w, h` produces a
     /// `w × h` rect whose right edge sits `pad` from the
     /// screen's right edge.
-    pub fn resolve_rect(
-        self,
-        screen: Rect,
-        dx: f32,
-        dy: f32,
-        width: f32,
-        height: f32,
-    ) -> Rect {
+    pub fn resolve_rect(self, screen: Rect, dx: f32, dy: f32, width: f32, height: f32) -> Rect {
         let p = self.resolve(screen, dx, dy);
         let (xshift, yshift) = match self {
             Anchor::TopLeft | Anchor::CenterLeft | Anchor::BottomLeft => (0.0, 0.0),
             Anchor::TopCenter | Anchor::Center | Anchor::BottomCenter => (-width * 0.5, 0.0),
             Anchor::TopRight | Anchor::CenterRight | Anchor::BottomRight => (-width, 0.0),
         };
-        let yshift = yshift + match self {
-            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => 0.0,
-            Anchor::CenterLeft | Anchor::Center | Anchor::CenterRight => -height * 0.5,
-            Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => -height,
-        };
+        let yshift = yshift
+            + match self {
+                Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => 0.0,
+                Anchor::CenterLeft | Anchor::Center | Anchor::CenterRight => -height * 0.5,
+                Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => -height,
+            };
         Rect::from_xywh(p.x + xshift, p.y + yshift, width, height)
     }
 }
@@ -104,14 +98,7 @@ impl<'a> Ui<'a> {
 
     /// Resolve an anchored *rect* (origin shifted so the rect
     /// itself sits flush with the chosen edge / corner).
-    pub fn anchor_rect(
-        &self,
-        anchor: Anchor,
-        dx: f32,
-        dy: f32,
-        width: f32,
-        height: f32,
-    ) -> Rect {
+    pub fn anchor_rect(&self, anchor: Anchor, dx: f32, dy: f32, width: f32, height: f32) -> Rect {
         anchor.resolve_rect(self.screen_rect(), dx, dy, width, height)
     }
 
@@ -134,12 +121,8 @@ impl<'a> Ui<'a> {
     {
         let mut y = bounds.min.y;
         for i in 0..count {
-            let child_rect = Rect::from_xywh(
-                bounds.min.x,
-                y,
-                bounds.width(),
-                (bounds.max.y - y).max(0.0),
-            );
+            let child_rect =
+                Rect::from_xywh(bounds.min.x, y, bounds.width(), (bounds.max.y - y).max(0.0));
             let consumed = child(self, child_rect, i);
             y += consumed;
             if i + 1 < count {

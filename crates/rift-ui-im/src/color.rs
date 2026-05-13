@@ -10,8 +10,8 @@ pub struct Color(pub [f32; 4]);
 
 impl Color {
     pub const TRANSPARENT: Color = Color([0.0, 0.0, 0.0, 0.0]);
-    pub const WHITE:       Color = Color([1.0, 1.0, 1.0, 1.0]);
-    pub const BLACK:       Color = Color([0.0, 0.0, 0.0, 1.0]);
+    pub const WHITE: Color = Color([1.0, 1.0, 1.0, 1.0]);
+    pub const BLACK: Color = Color([0.0, 0.0, 0.0, 1.0]);
 
     pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self([r, g, b, a])
@@ -25,7 +25,12 @@ impl Color {
         Self([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
     }
     pub const fn rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0])
+        Self([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ])
     }
 
     /// Replace the alpha channel.
@@ -63,7 +68,10 @@ pub struct Stroke {
 }
 
 impl Stroke {
-    pub const NONE: Stroke = Stroke { thickness: 0.0, color: Color::TRANSPARENT };
+    pub const NONE: Stroke = Stroke {
+        thickness: 0.0,
+        color: Color::TRANSPARENT,
+    };
     pub const fn new(thickness: f32, color: Color) -> Self {
         Self { thickness, color }
     }

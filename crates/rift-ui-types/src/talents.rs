@@ -148,6 +148,18 @@ impl TalentPanelState {
 /// and the main loop drains it to `request_invest_talent`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TalentTreeAction {
-    Invest { talent_id: u16 },
+    Invest {
+        talent_id: u16,
+    },
+    /// Lesser-respec: right-click on an invested node. Host
+    /// routes this to `request_respec_talent`. The server
+    /// rejects refunds that would orphan a downstream node
+    /// (`TALENT_TREE.md` §7).
+    Respec {
+        talent_id: u16,
+    },
+    /// Greater-respec: footer button. Wipes every invested
+    /// point. Host routes this to `request_respec_all_talents`.
+    RespecAll,
     Close,
 }

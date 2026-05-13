@@ -31,10 +31,7 @@ pub fn render_minimap(
     // Enemy pips — separate non-boss / boss so the widget can
     // size them independently.
     let mut enemies: Vec<MinimapEnemy> = Vec::new();
-    for (_id, (t, _e, boss)) in world
-        .query::<(&Transform, &Enemy, Option<&Boss>)>()
-        .iter()
-    {
+    for (_id, (t, _e, boss)) in world.query::<(&Transform, &Enemy, Option<&Boss>)>().iter() {
         enemies.push(MinimapEnemy {
             pos: (t.position.x, t.position.z),
             is_boss: boss.is_some(),
@@ -105,7 +102,10 @@ pub fn render_descend_tooltip(ui: &mut Ui<'_>, current_floor: u32) {
     let lines: [(&str, String); 4] = [
         (
             "Enemies",
-            format!("{} \u{2192} {}  (+{:.0}%)", cur_count, next_count, count_pct),
+            format!(
+                "{} \u{2192} {}  (+{:.0}%)",
+                cur_count, next_count, count_pct
+            ),
         ),
         (
             "Enemy HP",
@@ -148,10 +148,7 @@ pub fn render_descend_tooltip(ui: &mut Ui<'_>, current_floor: u32) {
     let inner_w = ui
         .measure_text(&title, title_size)
         .max(key_w_max + col_gap + val_w_max);
-    let inner_h = title_size
-        + 6.0 * s
-        + (lines.len() as f32) * (row_size + row_gap)
-        - row_gap;
+    let inner_h = title_size + 6.0 * s + (lines.len() as f32) * (row_size + row_gap) - row_gap;
     let pad = Pad::symmetric(18.0 * s, 8.0 * s);
     let outer_w = inner_w + pad.left + pad.right;
     let outer_h = inner_h + pad.top + pad.bottom;

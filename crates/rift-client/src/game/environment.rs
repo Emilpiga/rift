@@ -6,8 +6,8 @@
 //! Both textures tile seamlessly at 1 unit = 1 wall stride, matching the
 //! UV layout of `Mesh::dungeon_floor` and `Mesh::wall_colored`.
 
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use rift_engine::ash::vk;
 use rift_engine::ash::Device;
@@ -126,7 +126,9 @@ impl EnvTextures {
         if self.floor_set.is_none() {
             let pixels = generate_floor(FLOOR_SIZE);
             match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
-                width: FLOOR_SIZE, height: FLOOR_SIZE, pixels: &pixels,
+                width: FLOOR_SIZE,
+                height: FLOOR_SIZE,
+                pixels: &pixels,
             }) {
                 Ok((tex, set)) => {
                     self.textures.push(tex);
@@ -138,7 +140,9 @@ impl EnvTextures {
         if self.wall_set.is_none() {
             let pixels = generate_wall(WALL_SIZE);
             match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
-                width: WALL_SIZE, height: WALL_SIZE, pixels: &pixels,
+                width: WALL_SIZE,
+                height: WALL_SIZE,
+                pixels: &pixels,
             }) {
                 Ok((tex, set)) => {
                     self.textures.push(tex);
@@ -176,7 +180,9 @@ impl EnvTextures {
         }
         let pixels = generate_grass(FLOOR_SIZE);
         match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
-            width: FLOOR_SIZE, height: FLOOR_SIZE, pixels: &pixels,
+            width: FLOOR_SIZE,
+            height: FLOOR_SIZE,
+            pixels: &pixels,
         }) {
             Ok((tex, set)) => {
                 self.textures.push(tex);
@@ -223,7 +229,9 @@ impl EnvTextures {
         const CRIMSON_SIZE: u32 = 512;
         let pixels = generate_crimson_stone(CRIMSON_SIZE);
         match renderer.upload_shared_texture(rift_engine::TextureSource::Rgba {
-            width: CRIMSON_SIZE, height: CRIMSON_SIZE, pixels: &pixels,
+            width: CRIMSON_SIZE,
+            height: CRIMSON_SIZE,
+            pixels: &pixels,
         }) {
             Ok((tex, set)) => {
                 self.textures.push(tex);
@@ -248,11 +256,21 @@ impl EnvTextures {
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
             basecolor: Path::new("assets/textures/bricks_wall/bricks_wall_07_baseColor_2k.png"),
-            normal: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png")),
-            metallic: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png")),
-            roughness: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png")),
-            height: Some(Path::new("assets/textures/bricks_wall/bricks_wall_07_height_2k.png")),
+            normal: Some(Path::new(
+                "assets/textures/bricks_wall/bricks_wall_07_normal_gl_2k.png",
+            )),
+            metallic: Some(Path::new(
+                "assets/textures/bricks_wall/bricks_wall_07_metallic_2k.png",
+            )),
+            roughness: Some(Path::new(
+                "assets/textures/bricks_wall/bricks_wall_07_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/bricks_wall/bricks_wall_07_ambientOcclusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/bricks_wall/bricks_wall_07_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -273,11 +291,21 @@ impl EnvTextures {
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
             basecolor: Path::new("assets/textures/ground_tiles/ground_tiles_25_basecolor_2k.png"),
-            normal: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png")),
-            metallic: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png")),
-            roughness: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png")),
-            height: Some(Path::new("assets/textures/ground_tiles/ground_tiles_25_height_2k.png")),
+            normal: Some(Path::new(
+                "assets/textures/ground_tiles/ground_tiles_25_normal_gl_2k.png",
+            )),
+            metallic: Some(Path::new(
+                "assets/textures/ground_tiles/ground_tiles_25_metallic_2k.png",
+            )),
+            roughness: Some(Path::new(
+                "assets/textures/ground_tiles/ground_tiles_25_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/ground_tiles/ground_tiles_25_ambientocclusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/ground_tiles/ground_tiles_25_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -311,7 +339,9 @@ impl EnvTextures {
             normal: Some(Path::new("assets/textures/sand/sand_04_normal_gl_2k.png")),
             metallic: None,
             roughness: Some(Path::new("assets/textures/sand/sand_04_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/sand/sand_04_ambient_occlusion_2k.png")),
+            ao: Some(Path::new(
+                "assets/textures/sand/sand_04_ambient_occlusion_2k.png",
+            )),
             height: Some(Path::new("assets/textures/sand/sand_04_height_2k.png")),
         });
         match result {
@@ -337,11 +367,21 @@ impl EnvTextures {
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
             basecolor: Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_color_2k.png"),
-            normal: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png")),
-            metallic: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png")),
-            roughness: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png")),
-            height: Some(Path::new("assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png")),
+            normal: Some(Path::new(
+                "assets/textures/sandy_cliff_rocks/cliff_rocks_01_normal_gl_2k.png",
+            )),
+            metallic: Some(Path::new(
+                "assets/textures/sandy_cliff_rocks/cliff_rocks_01_metallic_2k.png",
+            )),
+            roughness: Some(Path::new(
+                "assets/textures/sandy_cliff_rocks/cliff_rocks_01_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/sandy_cliff_rocks/cliff_rocks_01_ambient_occlusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/sandy_cliff_rocks/cliff_rocks_01_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -361,12 +401,22 @@ impl EnvTextures {
         }
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
-            basecolor: Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_color_2k.png"),
-            normal: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_normal_gl_2k.png")),
+            basecolor: Path::new(
+                "assets/textures/white_bricks_wall/white_bricks_wall_01_color_2k.png",
+            ),
+            normal: Some(Path::new(
+                "assets/textures/white_bricks_wall/white_bricks_wall_01_normal_gl_2k.png",
+            )),
             metallic: None,
-            roughness: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_ambient_occlusion_2k.png")),
-            height: Some(Path::new("assets/textures/white_bricks_wall/white_bricks_wall_01_height_2k.png")),
+            roughness: Some(Path::new(
+                "assets/textures/white_bricks_wall/white_bricks_wall_01_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/white_bricks_wall/white_bricks_wall_01_ambient_occlusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/white_bricks_wall/white_bricks_wall_01_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -385,12 +435,24 @@ impl EnvTextures {
         }
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
-            basecolor: Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Base_Color_2k.png"),
-            normal: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Normal_gl_2k.png")),
-            metallic: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Metallic_2k.png")),
-            roughness: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Ambient_Occlusion_2k.png")),
-            height: Some(Path::new("assets/textures/blue_gold_floor_tiles/floor_tiles_03_Height_2k.png")),
+            basecolor: Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Base_Color_2k.png",
+            ),
+            normal: Some(Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Normal_gl_2k.png",
+            )),
+            metallic: Some(Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Metallic_2k.png",
+            )),
+            roughness: Some(Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Ambient_Occlusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/blue_gold_floor_tiles/floor_tiles_03_Height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -410,11 +472,19 @@ impl EnvTextures {
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
             basecolor: Path::new("assets/textures/wood_planks/wood_planks_07_color_2k.png"),
-            normal: Some(Path::new("assets/textures/wood_planks/wood_planks_07_normal_gl_2k.png")),
+            normal: Some(Path::new(
+                "assets/textures/wood_planks/wood_planks_07_normal_gl_2k.png",
+            )),
             metallic: None,
-            roughness: Some(Path::new("assets/textures/wood_planks/wood_planks_07_roughness_2k.png")),
-            ao: Some(Path::new("assets/textures/wood_planks/wood_planks_07_ambient_occlusion_2k.png")),
-            height: Some(Path::new("assets/textures/wood_planks/wood_planks_07_height_2k.png")),
+            roughness: Some(Path::new(
+                "assets/textures/wood_planks/wood_planks_07_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/wood_planks/wood_planks_07_ambient_occlusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/wood_planks/wood_planks_07_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
@@ -457,20 +527,20 @@ impl EnvTextures {
             match done {
                 DecodeOutput::DesertRocks(pack) => {
                     if self.desert_rocks_set.is_none() {
-                        match renderer.upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack)) {
+                        match renderer
+                            .upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
+                        {
                             Ok((mut texs, set)) => {
                                 self.textures.append(&mut texs);
                                 self.desert_rocks_set = Some(set);
                                 log::info!("env: bound sand PBR pack (worker)");
                             }
-                            Err(e) => log::warn!(
-                                "env sand PBR decoded upload failed: {}",
-                                e
-                            ),
+                            Err(e) => log::warn!("env sand PBR decoded upload failed: {}", e),
                         }
                     }
                 }
-                DecodeOutput::Pbr(name, pack) => match renderer.upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
+                DecodeOutput::Pbr(name, pack) => match renderer
+                    .upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
                 {
                     Ok((mut texs, set)) => {
                         self.textures.append(&mut texs);
@@ -505,16 +575,11 @@ impl EnvTextures {
                                     self.wood_planks_set = Some(set);
                                 }
                             }
-                            other => log::warn!(
-                                "env: unknown PBR pack name from worker: {other}"
-                            ),
+                            other => log::warn!("env: unknown PBR pack name from worker: {other}"),
                         }
                         log::info!("env: bound PBR pack `{name}` (worker)");
                     }
-                    Err(e) => log::warn!(
-                        "env PBR pack `{name}` decoded upload failed: {}",
-                        e
-                    ),
+                    Err(e) => log::warn!("env PBR pack `{name}` decoded upload failed: {}", e),
                 },
                 DecodeOutput::Failed(name, err) => {
                     log::warn!("env: worker failed to decode `{name}`: {err}");
@@ -680,14 +745,13 @@ fn decode_pbr_pack(name: &'static str, paths: &PbrPackPaths) -> DecodeOutput {
         Ok(d) => d,
         Err(e) => return DecodeOutput::Failed(name.into(), e.to_string()),
     };
-    let opt_linear = |p: Option<&'static str>| -> std::result::Result<Option<DecodedTexture>, String> {
-        match p {
-            None => Ok(None),
-            Some(s) => decode_linear(pb(s))
-                .map(Some)
-                .map_err(|e| e.to_string()),
-        }
-    };
+    let opt_linear =
+        |p: Option<&'static str>| -> std::result::Result<Option<DecodedTexture>, String> {
+            match p {
+                None => Ok(None),
+                Some(s) => decode_linear(pb(s)).map(Some).map_err(|e| e.to_string()),
+            }
+        };
     let normal = match opt_linear(paths.normal) {
         Ok(v) => v,
         Err(e) => return DecodeOutput::Failed(name.into(), e),
@@ -722,8 +786,7 @@ fn decode_pbr_pack(name: &'static str, paths: &PbrPackPaths) -> DecodeOutput {
 // ---------------------------------------------------------------------
 
 fn hash2(x: i32, y: i32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x27D4_EB2D)
-        ^ (y as u32).wrapping_mul(0x9E37_79B1);
+    let mut h = (x as u32).wrapping_mul(0x27D4_EB2D) ^ (y as u32).wrapping_mul(0x9E37_79B1);
     h ^= h >> 15;
     h = h.wrapping_mul(0x85EB_CA6B);
     h ^= h >> 13;
@@ -890,9 +953,9 @@ fn generate_floor(size: u32) -> Vec<u8> {
 /// cleanly.
 fn generate_wall(size: u32) -> Vec<u8> {
     let mut out = vec![0u8; (size * size * 4) as usize];
-    const ROWS: u32 = 4;          // courses per UV repeat
-    const COLS_EVEN: u32 = 2;     // blocks across at v=0
-    const COLS_ODD: u32 = 2;      // staggered rows have same density, half-offset
+    const ROWS: u32 = 4; // courses per UV repeat
+    const COLS_EVEN: u32 = 2; // blocks across at v=0
+    const COLS_ODD: u32 = 2; // staggered rows have same density, half-offset
 
     let inv = 1.0 / size as f32;
     let mortar = [0.07, 0.06, 0.055];
@@ -911,9 +974,9 @@ fn generate_wall(size: u32) -> Vec<u8> {
             let col_frac = col_f - col as f32;
 
             // Distance to nearest mortar line in normalized brick space.
-            let dx = (col_frac - 0.5).abs() * 2.0;     // 0 center, 1 edge
+            let dx = (col_frac - 0.5).abs() * 2.0; // 0 center, 1 edge
             let dy = (row_frac - 0.5).abs() * 2.0;
-            let edge = 1.0 - dx.max(dy);              // 0 = on edge, ~1 = center
+            let edge = 1.0 - dx.max(dy); // 0 = on edge, ~1 = center
             let mortar_t = (1.0 - (edge * 14.0).min(1.0)).powf(2.0);
 
             // Per-block stone tint.
@@ -931,7 +994,11 @@ fn generate_wall(size: u32) -> Vec<u8> {
 
             // Subtle horizontal streaking inside each block (water staining).
             let streak = fbm(u * 8.0, v * 1.5, 3, 3, 0x9911_2233);
-            let stone = lerp3(stone, [stone[0] * 0.85, stone[1] * 0.84, stone[2] * 0.82], (streak - 0.5).max(0.0) * 0.6);
+            let stone = lerp3(
+                stone,
+                [stone[0] * 0.85, stone[1] * 0.84, stone[2] * 0.82],
+                (streak - 0.5).max(0.0) * 0.6,
+            );
 
             let mut color = lerp3(stone, mortar, mortar_t);
 

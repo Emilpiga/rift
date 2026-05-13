@@ -30,12 +30,7 @@ use gpu_allocator::vulkan::Allocator;
 /// Quad corners in `(cross, length)` space:
 ///   x ∈ [-0.5, 0.5] = perpendicular to the beam,
 ///   y ∈ [ 0.0, 1.0] = origin → tip.
-const QUAD_VERTICES: [[f32; 2]; 4] = [
-    [-0.5, 0.0],
-    [0.5, 0.0],
-    [0.5, 1.0],
-    [-0.5, 1.0],
-];
+const QUAD_VERTICES: [[f32; 2]; 4] = [[-0.5, 0.0], [0.5, 0.0], [0.5, 1.0], [-0.5, 1.0]];
 
 const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
@@ -80,8 +75,14 @@ impl RibbonRenderer {
             "ribbon_quad_ib",
         )?;
 
-        let (pipeline, pipeline_layout) =
-            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, translucent_set_layout, shader_dir)?;
+        let (pipeline, pipeline_layout) = Self::create_pipeline(
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layout,
+            translucent_set_layout,
+            shader_dir,
+        )?;
 
         Ok(Self {
             pipeline,
@@ -164,8 +165,14 @@ impl RibbonRenderer {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
-        let (pipeline, layout) =
-            Self::create_pipeline(device, render_pass, extent, descriptor_set_layout, translucent_set_layout, shader_dir)?;
+        let (pipeline, layout) = Self::create_pipeline(
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layout,
+            translucent_set_layout,
+            shader_dir,
+        )?;
         self.pipeline = pipeline;
         self.pipeline_layout = layout;
         Ok(())
@@ -182,8 +189,10 @@ impl RibbonRenderer {
         let vert_src = std::fs::read_to_string(shader_dir.join("ribbon.vert"))?;
         let frag_src = std::fs::read_to_string(shader_dir.join("ribbon.frag"))?;
 
-        let vert_spv = hot_reload::compile_glsl(&vert_src, "ribbon.vert", shaderc::ShaderKind::Vertex)?;
-        let frag_spv = hot_reload::compile_glsl(&frag_src, "ribbon.frag", shaderc::ShaderKind::Fragment)?;
+        let vert_spv =
+            hot_reload::compile_glsl(&vert_src, "ribbon.vert", shaderc::ShaderKind::Vertex)?;
+        let frag_spv =
+            hot_reload::compile_glsl(&frag_src, "ribbon.frag", shaderc::ShaderKind::Fragment)?;
 
         let vert_module = crate::vulkan::pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = crate::vulkan::pipeline::create_shader_module(device, &frag_spv)?;
@@ -241,10 +250,10 @@ impl RibbonRenderer {
             });
         };
 
-        push(&mut attrs, 1, 0);   // origin
-        push(&mut attrs, 2, 16);  // tip
-        push(&mut attrs, 3, 32);  // params
-        push(&mut attrs, 4, 48);  // flags
+        push(&mut attrs, 1, 0); // origin
+        push(&mut attrs, 2, 16); // tip
+        push(&mut attrs, 3, 32); // params
+        push(&mut attrs, 4, 48); // flags
         for i in 0..8u32 {
             push(&mut attrs, 5 + i, 64 + i * 16); // cross[i]
         }

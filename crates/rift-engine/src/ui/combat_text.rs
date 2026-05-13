@@ -1,5 +1,5 @@
-use glam::{Mat4, Vec3};
 use crate::ui::im::{Color, Pos2, Ui, WorldUi};
+use glam::{Mat4, Vec3};
 
 /// A floating damage number that rises and fades.
 struct FloatingText {
@@ -25,11 +25,17 @@ pub struct CombatTextSystem {
 
 impl CombatTextSystem {
     pub fn new() -> Self {
-        Self { texts: Vec::new(), rng_state: 42 }
+        Self {
+            texts: Vec::new(),
+            rng_state: 42,
+        }
     }
 
     fn rand_f32(&mut self) -> f32 {
-        self.rng_state = self.rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
         (self.rng_state >> 16) as f32 / 65535.0
     }
 
@@ -139,15 +145,13 @@ impl CombatTextSystem {
 
             // Vertical movement (world-space; rises for damage,
             // sinks for player-took-damage).
-            let vert = if t.rises {
-                t.age * 2.0
-            } else {
-                -t.age * 1.2
-            };
+            let vert = if t.rises { t.age * 2.0 } else { -t.age * 1.2 };
             let world_pos = t.world_pos + Vec3::new(0.0, vert, 0.0);
 
             // Project; bail if off-screen / behind camera.
-            let Some(anchor) = wui.world_to_screen(world_pos) else { continue };
+            let Some(anchor) = wui.world_to_screen(world_pos) else {
+                continue;
+            };
 
             // Fade out in last 40%.
             let alpha = if progress > 0.6 {

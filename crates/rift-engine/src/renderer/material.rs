@@ -29,7 +29,7 @@ use super::texture::Texture;
 const MAX_MATERIAL_SETS: u32 = 256;
 
 /// Per-binding slot ordering inside a PBR material set. Mirrored
-/// in `assets/shaders/triangle.frag` — change in lockstep.
+/// in `assets/shaders/forward/common.glsl` — change in lockstep.
 pub const BINDING_BASE_COLOR: u32 = 0;
 pub const BINDING_NORMAL: u32 = 1;
 pub const BINDING_METALLIC_ROUGHNESS: u32 = 2;
@@ -79,19 +79,16 @@ impl MaterialPool {
             sampler_binding(BINDING_AO),
             sampler_binding(BINDING_HEIGHT),
         ];
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
         // Pool large enough for `MAX_MATERIAL_SETS` PBR-bound
         // material sets, each consuming `PBR_BINDING_COUNT`
         // image-sampler descriptors.
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: MAX_MATERIAL_SETS * PBR_BINDING_COUNT,
-            },
-        ];
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: MAX_MATERIAL_SETS * PBR_BINDING_COUNT,
+        }];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(MAX_MATERIAL_SETS)
             .pool_sizes(&pool_sizes);
@@ -102,25 +99,51 @@ impl MaterialPool {
         // AO, height) stay UNORM so the sampler doesn't apply a
         // gamma curve to non-color values.
         let default_basecolor = Texture::from_rgba(
-            device, allocator, queue, command_pool, 1, 1, &[255, 255, 255, 255],
+            device,
+            allocator,
+            queue,
+            command_pool,
+            1,
+            1,
+            &[255, 255, 255, 255],
         )?;
         let default_normal = Texture::from_rgba_with_format(
-            device, allocator, queue, command_pool, 1, 1,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            1,
+            1,
             &[127, 127, 255, 255],
             vk::Format::R8G8B8A8_UNORM,
         )?;
         let default_mr = Texture::from_rgba_with_format(
-            device, allocator, queue, command_pool, 1, 1,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            1,
+            1,
             &[0, 255, 0, 255],
             vk::Format::R8G8B8A8_UNORM,
         )?;
         let default_ao = Texture::from_rgba_with_format(
-            device, allocator, queue, command_pool, 1, 1,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            1,
+            1,
             &[255, 255, 255, 255],
             vk::Format::R8G8B8A8_UNORM,
         )?;
         let default_height = Texture::from_rgba_with_format(
-            device, allocator, queue, command_pool, 1, 1,
+            device,
+            allocator,
+            queue,
+            command_pool,
+            1,
+            1,
             &[127, 127, 127, 255],
             vk::Format::R8G8B8A8_UNORM,
         )?;
@@ -131,9 +154,13 @@ impl MaterialPool {
             .set_layouts(&layouts);
         let default_set = unsafe { device.allocate_descriptor_sets(&alloc_info)?[0] };
         write_pbr_set(
-            device, default_set,
-            &default_basecolor, &default_normal, &default_mr,
-            &default_ao, &default_height,
+            device,
+            default_set,
+            &default_basecolor,
+            &default_normal,
+            &default_mr,
+            &default_ao,
+            &default_height,
         );
 
         Ok(Self {
@@ -161,7 +188,8 @@ impl MaterialPool {
             .set_layouts(&layouts);
         let set = unsafe { device.allocate_descriptor_sets(&alloc_info)?[0] };
         write_pbr_set(
-            device, set,
+            device,
+            set,
             texture,
             &self.default_normal,
             &self.default_mr,
@@ -189,7 +217,8 @@ impl MaterialPool {
             .set_layouts(&layouts);
         let set = unsafe { device.allocate_descriptor_sets(&alloc_info)?[0] };
         write_pbr_set(
-            device, set,
+            device,
+            set,
             basecolor,
             normal.unwrap_or(&self.default_normal),
             metallic_roughness.unwrap_or(&self.default_mr),
