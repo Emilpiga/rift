@@ -15,7 +15,8 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::Floor;
-use rift_game::kinematic::loco;
+use rift_game::kinematic::{loco, Kinematic};
+use rift_net::NetId;
 
 use super::{
     elite_mod, enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy, WindupKind,
@@ -116,6 +117,8 @@ pub static BOSS_MELEE_SPEC: Spec = Spec {
 /// behaviour summary.
 pub fn tick(
     en: &mut ServerEnemy,
+    kinematic: &mut Kinematic,
+    net_id: NetId,
     spec: &Spec,
     floor: &Floor,
     target: Option<(Entity, Vec3, f32)>,
@@ -125,8 +128,8 @@ pub fn tick(
     outcome: &mut AiOutcome,
 ) {
     let Some((target_entity, target_pos, d2)) = target else {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         // Drop the brute back to Idle if it was mid-windup
         // when its target died. Cancels the swing — feels
         // fairer than a phantom hit on a dead player.
@@ -143,13 +146,13 @@ pub fn tick(
     };
     let dist = d2.sqrt();
     let to_target_raw = Vec3::new(
-        target_pos.x - en.k.position.x,
+        target_pos.x - kinematic.position.x,
         0.0,
-        target_pos.z - en.k.position.z,
+        target_pos.z - kinematic.position.z,
     );
     if to_target_raw.length_squared() > 1.0e-4 {
-        en.k.yaw = to_target_raw.x.atan2(to_target_raw.z);
-        en.k.aim_yaw = en.k.yaw;
+        kinematic.yaw = to_target_raw.x.atan2(to_target_raw.z);
+        kinematic.aim_yaw = kinematic.yaw;
     }
 
     // Mid-windup: tick the central timer. On expiry resolve
@@ -164,7 +167,7 @@ pub fn tick(
             ..
         }
     ) {
-        if let Some(WindupKind::BruteMelee) = tick_windup(en, dt) {
+        if let Some(WindupKind::BruteMelee) = tick_windup(en, kinematic, dt) {
             if dist <= spec.attack_range * 1.15 {
                 outcome
                     .melee_damage
@@ -189,7 +192,7 @@ pub fn tick(
         // Pick the steering direction: A* waypoint when LOS is
         // blocked (and the spec opts in), flank offset when
         // close, bee-line when far.
-        let los_blocked = super::cached_los_blocked(en, floor, target_pos);
+        let los_blocked = super::cached_los_blocked(en, kinematic, floor, target_pos);
         let approach = if los_blocked && spec.use_path {
             // LOS blocked — consume / rebuild the cached path.
             let target_tile = world_to_tile(target_pos);
@@ -197,7 +200,7 @@ pub fn tick(
                 || en.path_target_tile != Some(target_tile)
                 || en.path_recompute_in <= 0.0;
             if need_recompute {
-                let from = world_to_tile(en.k.position);
+                let from = world_to_tile(kinematic.position);
                 en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
                 en.path_target_tile = Some(target_tile);
                 en.path_recompute_in = PATH_RECOMPUTE_INTERVAL;
@@ -206,8 +209,8 @@ pub fn tick(
             // tile of the enemy's centre).
             while let Some(&(wx, wz)) = en.path.first() {
                 let wp = Vec3::new(wx as f32, 0.0, wz as f32);
-                let dx = wp.x - en.k.position.x;
-                let dz = wp.z - en.k.position.z;
+                let dx = wp.x - kinematic.position.x;
+                let dz = wp.z - kinematic.position.z;
                 if dx * dx + dz * dz < 0.25 {
                     en.path.remove(0);
                 } else {
@@ -219,9 +222,9 @@ pub fn tick(
             // either hasn't been computed yet or A* failed.
             if let Some(&(wx, wz)) = en.path.first() {
                 Vec3::new(
-                    wx as f32 - en.k.position.x,
+                    wx as f32 - kinematic.position.x,
                     0.0,
-                    wz as f32 - en.k.position.z,
+                    wz as f32 - kinematic.position.z,
                 )
                 .normalize_or_zero()
             } else {
@@ -235,9 +238,9 @@ pub fn tick(
             if spec.flank && dist < FLANK_ENGAGE_DIST {
                 let approach_pos = flank_offset_pos(target_pos, en.flank_slot, dist);
                 let dir = Vec3::new(
-                    approach_pos.x - en.k.position.x,
+                    approach_pos.x - kinematic.position.x,
                     0.0,
-                    approach_pos.z - en.k.position.z,
+                    approach_pos.z - kinematic.position.z,
                 )
                 .normalize_or_zero();
                 if dir.length_squared() > 1.0e-4 {
@@ -249,20 +252,27 @@ pub fn tick(
                 to_target_raw.normalize_or_zero()
             }
         };
-        en.k.velocity = approach * en.speed * speed_mult;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = approach * en.speed * speed_mult;
+        kinematic.locomotion = loco::RUN;
     } else {
         // In melee range — face target, halt, kick off windup
         // when cooldown is ready.
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         if en.attack_cooldown <= 0.0 {
             en.attack_cooldown = spec.attack_cooldown;
             // attack_anim_remaining gets overwritten by
             // enter_windup; pad it post-windup to keep the
             // attack clip running through the swing follow-
             // through.
-            enter_windup(en, WindupKind::BruteMelee, spec.windup_dur, outcome);
+            enter_windup(
+                en,
+                kinematic,
+                net_id,
+                WindupKind::BruteMelee,
+                spec.windup_dur,
+                outcome,
+            );
             en.attack_anim_remaining = spec.windup_dur + ATTACK_ANIM_DUR;
         }
     }

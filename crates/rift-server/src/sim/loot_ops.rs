@@ -2,6 +2,7 @@
 //! the main `sim/mod.rs`. Pure `impl Sim` block — every method
 //! is already defined on `Sim` and migrated here verbatim.
 
+use rift_game::kinematic::Kinematic;
 use rift_net::ids::ClientId;
 use rift_net::messages::WorldEvent;
 use rift_net::{NetId, NetTick};
@@ -37,7 +38,11 @@ impl Sim {
                 .world
                 .get::<&ServerPlayer>(player_entity)
                 .map_err(|_| None)?;
-            (p.k.position, p.character_id)
+            let kinematic = self
+                .world
+                .get::<&Kinematic>(player_entity)
+                .map_err(|_| None)?;
+            (kinematic.position, p.character_id)
         };
 
         // Find the loot ECS entity by net id.

@@ -24,6 +24,25 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::{mpsc, oneshot};
 pub use uuid::Uuid;
 
+const PUNCH_WIRE_ID: i16 = 14;
+const EMPTY_LOADOUT_SLOT: i16 = 255;
+const DEFAULT_HERO_LOADOUT: [i16; 6] = [
+    PUNCH_WIRE_ID,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+];
+const LEGACY_FIREBALL_STARTER_LOADOUT: [i16; 6] = [
+    0,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+    EMPTY_LOADOUT_SLOT,
+];
+
 /// One persisted character row, decoded from the `characters` table.
 #[derive(Clone, Debug)]
 pub struct CharacterRecord {
@@ -651,10 +670,10 @@ async fn load_or_create(
     }
 
     let character_id = Uuid::new_v4();
-    // Empty bar except for Steady Shot in slot 0. Mirrors
+    // Empty bar except for Punch in slot 0. Mirrors
     // `rift_game::loadout::Loadout::default_hero()`. The 255
     // entries are the EMPTY_SLOT sentinel.
-    let default_loadout: [i16; 6] = [0, 255, 255, 255, 255, 255];
+    let default_loadout = DEFAULT_HERO_LOADOUT;
     let default_talents: Vec<i16> = Vec::new();
     let default_talent_unspent: i32 = 1;
     sqlx::query(
@@ -754,7 +773,7 @@ async fn list_account_characters(
                     gender,
                     level,
                     xp,
-                    loadout: loadout_from_vec(loadout),
+                    loadout: sanitize_loaded_loadout(loadout_from_vec(loadout), level, &talents),
                     deepest_cleared_floor,
                     shards,
                     talents,
@@ -801,7 +820,7 @@ async fn fetch_by_account_and_name(
                 gender,
                 level,
                 xp,
-                loadout: loadout_from_vec(loadout),
+                loadout: sanitize_loaded_loadout(loadout_from_vec(loadout), level, &talents),
                 deepest_cleared_floor,
                 shards,
                 talents,
@@ -839,15 +858,23 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
 /// back short or oversized so a manually-edited DB row can't
 /// crash the worker.
 fn loadout_from_vec(v: Vec<i16>) -> [i16; 6] {
-    // Mirrors `Loadout::default_hero()` — Steady Shot in slot 0,
+    // Mirrors `Loadout::default_hero()` — Punch in slot 0,
     // every other slot empty. Used as a fallback so a
     // manually-edited DB row can't crash the worker.
-    let default: [i16; 6] = [0, 255, 255, 255, 255, 255];
+    let default = DEFAULT_HERO_LOADOUT;
     let mut out = default;
     for (i, slot) in v.into_iter().take(6).enumerate() {
         out[i] = slot;
     }
     out
+}
+
+fn sanitize_loaded_loadout(loadout: [i16; 6], level: i32, talents: &[i16]) -> [i16; 6] {
+    if level <= 1 && talents.is_empty() && loadout == LEGACY_FIREBALL_STARTER_LOADOUT {
+        DEFAULT_HERO_LOADOUT
+    } else {
+        loadout
+    }
 }
 
 /// Read every `inventory_items` row belonging to `character_id`,

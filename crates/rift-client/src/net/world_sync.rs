@@ -31,9 +31,78 @@ use crate::game::floor::spawn_remote_enemy_entity;
 use crate::game::monster_assets::MonsterCache;
 
 use super::snapshot::RemoteProfile;
-use super::NetClient;
+use super::{EnemyDeathCue, NetClient};
+
+fn spawn_enemy_soul_return(renderer: &mut Renderer, net_id: NetId, pos: Vec3, reason: &str) {
+    let eid = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::enemy_soul_return(),
+        pos + Vec3::new(0.0, 0.6, 0.0),
+    );
+    log::info!("vfx: spawned enemy_soul_return {reason} net_id={net_id:?} pos={pos:?} eid={eid:?}");
+}
+
+fn enemy_arrival_scale(role: MonsterRole) -> f32 {
+    match role {
+        MonsterRole::Boss => 2.0,
+        MonsterRole::Elite => 1.35,
+        MonsterRole::Brute => 1.15,
+        MonsterRole::Stalker | MonsterRole::Caster => 1.0,
+    }
+}
+
+fn spawn_enemy_arrival(renderer: &mut Renderer, net_id: NetId, role: MonsterRole, pos: Vec3) {
+    let scale = enemy_arrival_scale(role);
+    let eid = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::enemy_summon_arrival(scale),
+        pos + Vec3::new(0.0, 0.08, 0.0),
+    );
+    log::trace!(
+        "vfx: spawned enemy_summon_arrival net_id={net_id:?} role={role:?} pos={pos:?} eid={eid:?}"
+    );
+}
 
 impl NetClient {
+    /// Authoritative visual death cleanup for replicated enemies:
+    /// spawn the soul-return poof and remove/free the enemy mesh in
+    /// the same operation. This is the exact client-side mesh despawn
+    /// point for network enemies; view-cull cleanup should not call it.
+    pub fn remove_enemy_visual_for_death(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        net_id: NetId,
+        reason: &str,
+    ) {
+        self.dead_net_ids.insert(net_id);
+
+        let entity = self.enemy_entities.remove(&net_id);
+        let pos = entity
+            .and_then(|entity| world.get::<&Transform>(entity).ok().map(|t| t.position))
+            .or_else(|| self.last_positions.get(&net_id).copied())
+            .or_else(|| self.remote.get(&net_id).map(|row| row.position));
+
+        let cue = self
+            .enemy_death_cues
+            .entry(net_id)
+            .or_insert_with(EnemyDeathCue::new);
+        if !cue.poof_spawned {
+            if let Some(pos) = pos {
+                spawn_enemy_soul_return(renderer, net_id, pos, reason);
+            }
+            cue.poof_spawned = true;
+        }
+
+        if let Some(entity) = entity {
+            if let Ok(r) = world.get::<&Renderable>(entity) {
+                let idx = r.object_index;
+                if idx < renderer.objects.len() {
+                    renderer.free_skinned_mesh(idx);
+                }
+            }
+            let _ = world.despawn(entity);
+        }
+    }
+
     /// Reconcile remote-player ECS state with the latest snapshot.
     ///
     /// For every remote `NetId` in `remote` that has a known
@@ -460,6 +529,7 @@ impl NetClient {
         world: &mut hecs::World,
         renderer: &mut Renderer,
         monsters: &mut MonsterCache,
+        _dt: f32,
     ) {
         if self.our_net_id.is_none() {
             return;
@@ -473,7 +543,7 @@ impl NetClient {
             .map(|(nid, _)| *nid)
             .collect();
         for net_id in stale {
-            if let Some(entity) = self.enemy_entities.remove(&net_id) {
+            if let Some(&entity) = self.enemy_entities.get(&net_id) {
                 // Decide whether this despawn is a *real death*
                 // or just a view-cull. The snapshot is view-
                 // culled server-side (see
@@ -484,36 +554,19 @@ impl NetClient {
                 // a soul-return puff for an enemy that's still
                 // very much alive 30m away.
                 //
-                // `dead_net_ids` is populated by the reliable
-                // `WorldEvent::Death` handler in `main.rs` the
-                // instant the kill lands, but we deliberately
-                // don't *spawn* the soul-return puff there —
-                // the server holds the corpse on snapshots for
-                // `DEATH_FADE_DUR` (~1.6s) playing the death
-                // clip, so the VFX needs to fire here, when the
-                // body actually drops, to read as "smoking back
-                // down to hell" instead of floating above a
-                // still-visible enemy.
-                let died = self.dead_net_ids.remove(&net_id);
-                let died_pos = if died {
-                    world
-                        .get::<&Transform>(entity)
-                        .ok()
-                        .map(|t| t.position)
-                        .or_else(|| self.last_positions.get(&net_id).copied())
-                } else {
-                    None
-                };
-                if let Some(pos) = died_pos {
-                    let eid = renderer.vfx_system.spawn(
-                        rift_engine::renderer::vfx::presets::enemy_soul_return(),
-                        pos + Vec3::new(0.0, 0.6, 0.0),
-                    );
-                    log::info!(
-                        "vfx: spawned enemy_soul_return at despawn \
-                         net_id={net_id:?} pos={pos:?} eid={eid:?}"
-                    );
+                // `dead_net_ids` / `enemy_death_cues` are populated
+                // by the reliable Death event or by a DEAD snapshot.
+                // If either is present, use the single visual death
+                // cleanup path: spawn soul-return and remove the mesh
+                // together. Otherwise this is just view-cull cleanup.
+                let died = self.dead_net_ids.contains(&net_id)
+                    || self.enemy_death_cues.contains_key(&net_id);
+                if died {
+                    self.remove_enemy_visual_for_death(world, renderer, net_id, "at mesh despawn");
+                    continue;
                 }
+                self.enemy_death_cues.remove(&net_id);
+                self.enemy_entities.remove(&net_id);
                 if let Ok(r) = world.get::<&Renderable>(entity) {
                     let idx = r.object_index;
                     if idx < renderer.objects.len() {
@@ -549,6 +602,11 @@ impl NetClient {
             .remote
             .iter()
             .filter(|(nid, _)| !self.enemy_entities.contains_key(nid))
+            .filter(|(nid, re)| {
+                !self.dead_net_ids.contains(nid)
+                    && !self.enemy_death_cues.contains_key(nid)
+                    && !re.dead
+            })
             .filter_map(|(nid, re)| match re.kind {
                 EntityKind::Enemy { role, .. } => Some((*nid, role, re.position, re.health_pct)),
                 _ => None,
@@ -582,6 +640,7 @@ impl NetClient {
                         h.current = hp;
                     }
                     self.enemy_entities.insert(net_id, entity);
+                    spawn_enemy_arrival(renderer, net_id, role, position);
                     log::info!(
                         "net: spawned remote enemy {net_id:?} role={role:?} at {position:?}"
                     );
@@ -594,7 +653,12 @@ impl NetClient {
 
         // ── Drive remote-enemy kinematics from snapshot ─────────
         let now = Instant::now();
-        for (&net_id, &entity) in &self.enemy_entities {
+        let active_enemies: Vec<(NetId, hecs::Entity)> = self
+            .enemy_entities
+            .iter()
+            .map(|(&net_id, &entity)| (net_id, entity))
+            .collect();
+        for (net_id, entity) in active_enemies {
             let Some(re) = self.remote.get(&net_id) else {
                 continue;
             };
@@ -625,6 +689,15 @@ impl NetClient {
                 if let Ok(mut ea) = world.get::<&mut EnemyAnim>(entity) {
                     ea.attacking = anim == 2; // server::sim::enemy_anim::ATTACK
                 }
+            }
+            let enemy_dead = re.dead
+                || matches!(
+                    re.kind,
+                    EntityKind::Enemy { anim: 3, .. } // server::sim::enemy_anim::DEATH
+                );
+            if enemy_dead {
+                self.remove_enemy_visual_for_death(world, renderer, net_id, "on dead snapshot");
+                continue;
             }
             sync_effects(world, entity, &re.effects);
         }

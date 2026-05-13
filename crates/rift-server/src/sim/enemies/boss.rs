@@ -15,28 +15,30 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_game::abilities::AbilityWireId;
-use rift_game::kinematic::loco;
+use rift_game::kinematic::{loco, Kinematic};
+use rift_net::NetId;
 
 use super::brute;
 use super::{AiOutcome, EnemyCast, ServerEnemy, ATTACK_ANIM_DUR};
+use crate::sim::actor::Vitals;
 
 // ---- Phase + enrage tuning -----------------------------------
 
 /// HP fraction at which phase 2 unlocks.
-pub const PHASE_2_HP: f32 = 0.66;
+pub const PHASE_2_HP: f32 = 0.75;
 /// HP fraction at which phase 3 (enrage) unlocks.
-pub const PHASE_3_HP: f32 = 0.33;
+pub const PHASE_3_HP: f32 = 0.40;
 
 /// Cooldown multiplier applied to every boss attack while
 /// enraged. Smaller = more frequent.
-pub const ENRAGE_CD_MULT: f32 = 0.7;
+pub const ENRAGE_CD_MULT: f32 = 0.6;
 /// Speed multiplier applied while enraged.
-pub const ENRAGE_SPEED_MULT: f32 = 1.3;
+pub const ENRAGE_SPEED_MULT: f32 = 1.45;
 /// Phase-3 slam radius is bumped by this multiplier so the
 /// player can't just stand at the slam edge once enrage hits.
 /// Applied on top of the slam ability's authored `radius` from
 /// the registry.
-pub const SLAM_RADIUS_ENRAGE_MULT: f32 = 1.5;
+pub const SLAM_RADIUS_ENRAGE_MULT: f32 = 1.35;
 
 /// Wind-up scale as a function of rift floor. Floor 1 leaves
 /// wind-ups at 1.0×; deep floors compress them so the player
@@ -80,11 +82,11 @@ pub struct BossState {
 impl BossState {
     pub fn new(floor: u32) -> Self {
         let mut cooldowns = [0.0_f32; ABILITY_COOLDOWN_SLOTS];
-        // Stagger the opening so the boss doesn't dump every
-        // attack on the first frame the player walks in.
-        cooldowns[rift_game::abilities::id::GROUND_SLAM.raw() as usize] = 1.5;
-        cooldowns[rift_game::abilities::id::ARCANE_FAN.raw() as usize] = 3.0;
-        cooldowns[rift_game::abilities::id::SUMMON_BRUTES.raw() as usize] = 6.0;
+        // Stagger the opening without letting the first several
+        // seconds play like a regular brute chase.
+        cooldowns[rift_game::abilities::id::GROUND_SLAM.raw() as usize] = 0.7;
+        cooldowns[rift_game::abilities::id::ARCANE_FAN.raw() as usize] = 1.8;
+        cooldowns[rift_game::abilities::id::SUMMON_BRUTES.raw() as usize] = 4.5;
         Self {
             floor,
             cooldowns,
@@ -121,9 +123,9 @@ pub enum BossAttack {
 
 /// Boss behaviour. Runs a 3-phase fight gated on HP fraction:
 ///
-/// * **Phase 1** (HP > 66 %): chase + melee + Slam.
-/// * **Phase 2** (HP 33-66 %): adds Fan (5-bolt arc).
-/// * **Phase 3** / enrage (HP < 33 %): adds Summons; all
+/// * **Phase 1** (HP > 75 %): chase + melee + Slam.
+/// * **Phase 2** (HP 40-75 %): adds Fan and summons.
+/// * **Phase 3** / enrage (HP < 40 %): accelerates all specials;
 ///   cooldowns multiplied by [`ENRAGE_CD_MULT`] and speed by
 ///   [`ENRAGE_SPEED_MULT`].
 ///
@@ -138,6 +140,9 @@ pub enum BossAttack {
 /// can hit the whole arena radius, not just the locked target.
 pub fn tick(
     en: &mut ServerEnemy,
+    kinematic: &mut Kinematic,
+    net_id: NetId,
+    vitals: &Vitals,
     boss: &mut BossState,
     target: Option<(Entity, Vec3, f32)>,
     _players: &[(Entity, Vec3)],
@@ -149,8 +154,8 @@ pub fn tick(
     use rift_game::abilities::{id as ab_id, lookup, AbilityKind};
 
     // Phase + per-phase modifiers.
-    let hp_frac = if en.hp_max > 0.0 {
-        en.hp / en.hp_max
+    let hp_frac = if vitals.hp_max > 0.0 {
+        vitals.hp / vitals.hp_max
     } else {
         0.0
     };
@@ -187,22 +192,22 @@ pub fn tick(
         param_a,
     } = boss.attack
     {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         // For projectile fans, lock the boss's facing to the
         // captured aim so the cone reads correctly through the
         // wind-up.
         if aim.length_squared() > 1.0e-4 {
-            en.k.yaw = aim.x.atan2(aim.z);
-            en.k.aim_yaw = en.k.yaw;
+            kinematic.yaw = aim.x.atan2(aim.z);
+            kinematic.aim_yaw = kinematic.yaw;
         }
         let next = remaining - dt;
         if next <= 0.0 {
             outcome.casts.push(EnemyCast::Resolve {
-                owner: en.net_id,
+                owner: net_id,
                 attacker_kind: en.role.to_wire_byte(),
                 ability_id,
-                origin: en.k.position,
+                origin: kinematic.position,
                 aim,
                 damage_mult,
                 crit_chance: en.crit_chance,
@@ -228,27 +233,27 @@ pub fn tick(
     // 2. No active wind-up — chase the target and decide
     //    whether to commit to a new attack this tick.
     let Some((target_entity, target_pos, d2)) = target else {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         return;
     };
     let dist = d2.sqrt();
     let to_target = Vec3::new(
-        target_pos.x - en.k.position.x,
+        target_pos.x - kinematic.position.x,
         0.0,
-        target_pos.z - en.k.position.z,
+        target_pos.z - kinematic.position.z,
     );
     if to_target.length_squared() > 1.0e-4 {
-        en.k.yaw = to_target.x.atan2(to_target.z);
-        en.k.aim_yaw = en.k.yaw;
+        kinematic.yaw = to_target.x.atan2(to_target.z);
+        kinematic.aim_yaw = kinematic.yaw;
     }
 
-    // Attack selection priority: summons (only enrage) > slam >
+    // Attack selection priority: summons (phase 2+) > slam >
     // fan (phase 2+) > melee. Tuning (cooldown, wind-up,
     // radius, projectile count) all comes from the shared
     // [`rift_game::abilities::REGISTRY`]; this body only owns
     // the *selection* logic.
-    if enraged && boss.cooldowns[ab_id::SUMMON_BRUTES.raw() as usize] <= 0.0 {
+    if phase >= 2 && boss.cooldowns[ab_id::SUMMON_BRUTES.raw() as usize] <= 0.0 {
         let summon = lookup(ab_id::SUMMON_BRUTES).expect("REGISTRY missing SUMMON_BRUTES");
         let windup = match summon.kind {
             AbilityKind::Summon { windup, .. } => windup,
@@ -270,9 +275,9 @@ pub fn tick(
             _ => (4.0, 1.0),
         };
         // Only commit to slam if the player is within
-        // `radius * 1.4` — leaves headroom for the player to
-        // dance around the edge of the danger zone.
-        if dist <= slam_radius * 1.4 {
+        // `radius * 1.65` — close enough to punish greedy melee
+        // and lazy kiting without making the arena edge unsafe.
+        if dist <= slam_radius * 1.65 {
             let windup = slam_windup_base * windup_scale;
             // Phase-3 slam radius is bumped so the player can't
             // outrange it by 0.5 m. Visual telegraph carries
@@ -298,10 +303,10 @@ pub fn tick(
             // GROUND_SLAM_WINDUP wire id; the impact event is
             // emitted by the kernel pipeline on resolve.
             outcome.casts.push(EnemyCast::Start {
-                owner: en.net_id,
+                owner: net_id,
                 ability_id: ab_id::GROUND_SLAM_WINDUP,
-                origin: en.k.position,
-                target: en.k.position,
+                origin: kinematic.position,
+                target: kinematic.position,
                 dir_x: radius,
                 dir_y: windup,
             });
@@ -334,11 +339,11 @@ pub fn tick(
     let melee = &brute::BOSS_MELEE_SPEC;
     if dist > melee.attack_range {
         let dir = to_target.normalize_or_zero();
-        en.k.velocity = dir * en.speed * speed_mult * move_mult;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = dir * en.speed * speed_mult * move_mult;
+        kinematic.locomotion = loco::RUN;
     } else {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         if en.attack_cooldown <= 0.0 {
             en.attack_cooldown = melee.attack_cooldown;
             en.attack_anim_remaining = ATTACK_ANIM_DUR;

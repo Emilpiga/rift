@@ -13,7 +13,7 @@
 //! layout math + visuals).
 
 use rift_ui_im::{
-    widgets::title, Button, Color, Frame, Id, Layer, PanZoom, PanZoomState, PanZoomTransform, Pos2,
+    Button, Color, Frame, Id, Layer, PanZoom, PanZoomState, PanZoomTransform, PanelHeader, Pos2,
     Rect, TextField, Tooltip, TooltipLine, TooltipLineDecor, Ui, Vec2,
 };
 use rift_ui_types::talents::{
@@ -116,43 +116,26 @@ pub fn frame_talent_panel(
     // top of the modal dim so the surface reads as a proper
     // window rather than HUD overlay paint.
     let panel = Rect::from_xywh(0.0, 0.0, screen.x, screen.y);
-    Frame::panel(&theme).show_only(ui, panel);
+    let stone = theme.colors.bg_stone.0;
+    let talent_fill = Color::rgba(stone[0] * 0.78, stone[1] * 0.78, stone[2] * 0.78, 1.0);
+    Frame::stone(&theme)
+        .with_fill(talent_fill)
+        .with_radius(0.0)
+        .show_only(ui, panel);
 
     let inner_pad = theme.spacing.inner_pad();
     let section_gap = theme.spacing.section_gap();
     let row_gap = theme.spacing.row_gap();
 
     // ── Header ───────────────────────────────────────────
-    title(ui, panel.min + Vec2::new(inner_pad, inner_pad), "Talents");
-
-    // Unspent-points pill (top-right). Tinted gold when the
-    // player has unspent points; dim grey otherwise so the
-    // player notices when they have a point banked.
     let pill_text = format!("{} unspent", view.unspent_points);
-    let pill_color = if view.unspent_points > 0 {
-        theme.colors.accent
-    } else {
-        theme.colors.text_dim
-    };
-    let pill_w = ui.measure_text(&pill_text, theme.fonts.size_md);
-    ui.draw_text(
-        Pos2::new(
-            panel.max.x - pill_w - inner_pad,
-            panel.min.y + inner_pad + 4.0,
-        ),
-        &pill_text,
-        theme.fonts.size_md,
-        pill_color,
-    );
-    ui.draw_text(
-        panel.min + Vec2::new(inner_pad, inner_pad + theme.fonts.size_lg + row_gap * 0.5),
-        "Left-click to spend a point. Right-click an invested node to refund it. Drag to pan, scroll to zoom.",
-        theme.fonts.size_sm,
-        theme.colors.text_dim,
-    );
+    let header_h = inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
+    PanelHeader::new("TALENTS")
+        .subtitle("Left-click to spend. Right-click to refund. Drag to pan, scroll to zoom.")
+        .right_text(&pill_text)
+        .show(ui, Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h));
 
     // ── Search field (top, below header text) ───────────
-    let header_h = inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
     let search_w = 240.0 * theme.scale;
     let search_h = 28.0 * theme.scale;
     let search_rect = Rect::from_xywh(

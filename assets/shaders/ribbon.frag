@@ -18,6 +18,7 @@ layout(location = 1) in vec4 vParams;        // brightness, noise_strength, nois
 layout(location = 2) in float vTime;
 layout(location = 3) flat in vec4 vCross[8];
 layout(location = 11) flat in vec4 vLength[4];
+layout(location = 15) flat in vec4 vFlags;
 
 layout(location = 0) out vec4 outColor;
 
@@ -97,9 +98,7 @@ void main() {
         // a proxy. Ribbons of length L produce uv.y in [0, 1] but
         // the consumer can compensate via spec.tile.
         vec2 np = vec2(u * 2.5, v / tile - vTime * scroll);
-        // Octave count packed as a float in vParams via the runtime;
-        // grab it from the same channel for now (max 4).
-        int oct = 3;
+        int oct = clamp(int(floor(vFlags.x + 0.5)), 1, 4);
         float fbm_val = fbm(np, oct);
         n = mix(1.0, fbm_val * 1.6, strength);
     }

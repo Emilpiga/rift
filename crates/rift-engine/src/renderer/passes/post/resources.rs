@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ash::vk;
-use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use gpu_allocator::MemoryLocation;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 

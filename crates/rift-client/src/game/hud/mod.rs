@@ -49,6 +49,7 @@ pub fn render_hud(
     world: &hecs::World,
     rift: &RiftState,
     player_state: &PlayerState,
+    ui_dt: f32,
     level_up_flash: f32,
     in_hub: bool,
 ) {
@@ -100,6 +101,7 @@ pub fn render_hud(
         player_state.experience.xp_to_next_level()
     );
     let vitals_view = rift_ui_types::hud::HudVitalsView {
+        dt: ui_dt,
         hp_fraction: hp_pct,
         hp_label: hp_label.as_str(),
         essence_fraction: resource_pct,

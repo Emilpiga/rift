@@ -58,11 +58,11 @@ impl CombatTextSystem {
         };
 
         let base_size = if is_crit {
-            32.0
+            38.0
         } else if damage > 50.0 {
-            26.0
+            31.0
         } else {
-            20.0
+            24.0
         };
 
         let drift = self.rand_f32() * 2.0 - 1.0; // -1..1
@@ -72,7 +72,7 @@ impl CombatTextSystem {
             text,
             color,
             age: 0.0,
-            lifetime: 1.0,
+            lifetime: 1.08,
             base_size,
             drift_x: drift * 40.0,
             rises: true,
@@ -87,8 +87,8 @@ impl CombatTextSystem {
             text: format!("{}", damage as u32),
             color: [1.0, 0.15, 0.15, 1.0],
             age: 0.0,
-            lifetime: 0.9,
-            base_size: 22.0,
+            lifetime: 1.0,
+            base_size: 27.0,
             drift_x: drift * 30.0,
             rises: false,
         });
@@ -102,8 +102,8 @@ impl CombatTextSystem {
             text: format!("+{:.0}", amount),
             color: [0.2, 1.0, 0.3, 1.0],
             age: 0.0,
-            lifetime: 0.8,
-            base_size: 18.0,
+            lifetime: 0.95,
+            base_size: 23.0,
             drift_x: drift * 20.0,
             rises: true,
         });
@@ -160,13 +160,15 @@ impl CombatTextSystem {
                 1.0
             };
 
-            // Scale: quick pop then settle.
+            // Scale: quick pop then settle. Slightly larger and
+            // slower than the old numbers so hits feel physical
+            // without turning into arcade-style splash text.
             let size = if progress < 0.08 {
-                t.base_size * (0.5 + progress * 6.25)
+                t.base_size * (0.62 + progress * 5.75)
             } else if progress < 0.15 {
-                t.base_size * (1.0 + (0.15 - progress) * 3.0)
+                t.base_size * (1.0 + (0.15 - progress) * 2.4)
             } else {
-                t.base_size * (1.0 - (progress - 0.15) * 0.15)
+                t.base_size * (1.0 - (progress - 0.15) * 0.10)
             };
 
             let color = Color::rgba(t.color[0], t.color[1], t.color[2], t.color[3] * alpha);
@@ -174,6 +176,20 @@ impl CombatTextSystem {
             let tw = inner.measure_text(&t.text, size);
             let px = anchor.x - tw * 0.5 + t.drift_x * progress;
             let py = anchor.y;
+            let shadow = Color::rgba(0.0, 0.0, 0.0, 0.72 * alpha);
+            inner.draw_text(Pos2::new(px + 2.0, py + 2.0), &t.text, size, shadow);
+            inner.draw_text(
+                Pos2::new(px - 1.0, py + 2.0),
+                &t.text,
+                size,
+                shadow.fade(0.78),
+            );
+            inner.draw_text(
+                Pos2::new(px, py - 1.0),
+                &t.text,
+                size,
+                Color::rgba(1.0, 1.0, 1.0, 0.16 * alpha),
+            );
             inner.draw_text(Pos2::new(px, py), &t.text, size, color);
         }
     }

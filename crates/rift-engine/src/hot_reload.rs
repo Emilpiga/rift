@@ -2,9 +2,9 @@ use anyhow::Result;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 pub struct HotReloader {
     _watcher: RecommendedWatcher,

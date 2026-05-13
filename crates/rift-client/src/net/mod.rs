@@ -57,6 +57,19 @@ pub struct ProjectileRender {
     pub scale: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EnemyDeathCue {
+    pub poof_spawned: bool,
+}
+
+impl EnemyDeathCue {
+    pub fn new() -> Self {
+        Self {
+            poof_spawned: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientProfile {
     pub account_name: String,
@@ -162,6 +175,13 @@ pub struct NetClient {
     /// stops shipping it (death / floor change). Skinned mesh
     /// comes from the shared `MonsterCache` on `FloorManager`.
     pub(super) enemy_entities: HashMap<NetId, hecs::Entity>,
+    /// Explicit client-side death/despawn cue per enemy. Reliable
+    /// death events and DEAD snapshots create the entry; the same
+    /// visual-removal operation spawns the soul-return poof and
+    /// frees/despawns the mesh, then this state suppresses any
+    /// server corpse rows that continue arriving during the fade
+    /// window.
+    pub(super) enemy_death_cues: HashMap<NetId, EnemyDeathCue>,
     /// Renderer object index per replicated server-spawned
     /// projectile. Lightweight — no ECS entity, no animation,
     /// just a position-driven mesh.
@@ -211,14 +231,12 @@ pub struct NetClient {
     /// can still recover direction even after the snapshot row
     /// has vanished.
     pub last_velocities: HashMap<NetId, Vec3>,
-    /// NetIds the server has confirmed dead via reliable
-    /// `WorldEvent::Death`. Populated by the event handler and
-    /// consulted by the world-sync despawn pass to distinguish
-    /// "row vanished because it died" from "row vanished
-    /// because it left the view-cull radius" — the latter
-    /// must NOT play the soul-return VFX. Entries are removed
-    /// when the entity's despawn-cleanup actually runs (or on
-    /// floor change), so the set never accumulates indefinitely.
+    /// Enemy NetIds the server has confirmed dead via reliable
+    /// `WorldEvent::Death`. This is the authoritative death marker;
+    /// `enemy_death_cues` records whether the local visual removal
+    /// has already spawned the soul poof. While a NetId is present in
+    /// this set, server corpse rows are ignored so the dead mesh does
+    /// not respawn during the server's death window.
     pub dead_net_ids: std::collections::HashSet<NetId>,
     /// Reliable world events received this tick. Drained by the
     /// binary each frame so it can spawn floating combat text /
@@ -264,6 +282,10 @@ pub struct NetClient {
     /// binary so it can replace `LootClientState::stash_tabs`
     /// whole.
     pending_stash_sync: Option<Vec<rift_net::messages::StashTabBlob>>,
+    /// Shared hub stash-chest visual state. Drained by the
+    /// binary and applied to the prop renderer; no private stash
+    /// contents are included.
+    pending_stash_chest_open: Option<bool>,
     /// Latest authoritative XP / level snapshot for the local
     /// character, drained by the binary once per frame and
     /// pushed into `PlayerState::experience`.
@@ -456,6 +478,7 @@ impl NetClient {
             avatar_entities: HashMap::new(),
             prev_action_byte: HashMap::new(),
             enemy_entities: HashMap::new(),
+            enemy_death_cues: HashMap::new(),
             projectile_objects: HashMap::new(),
             projectile_trails: HashMap::new(),
             projectile_audio: HashMap::new(),
@@ -472,6 +495,7 @@ impl NetClient {
             pending_peer_equipment_visuals: VecDeque::new(),
             peer_visuals_mirror: HashMap::new(),
             pending_stash_sync: None,
+            pending_stash_chest_open: None,
             pending_character_stats: None,
             pending_loadout: None,
             pending_talents: None,
@@ -838,6 +862,7 @@ impl NetClient {
                 // freshly spawned enemy that happens to reuse the
                 // same NetId.
                 self.dead_net_ids.clear();
+                self.enemy_death_cues.clear();
                 // Drop the snapshot mirror too. Otherwise the last
                 // pre-respawn snapshot (which still has hp=0 / DEAD
                 // for the player who died) survives the LoadFloor
@@ -917,6 +942,9 @@ impl NetClient {
             ServerMsg::StashSync { tabs } => {
                 log::info!("net: StashSync {} tab(s)", tabs.len());
                 self.pending_stash_sync = Some(tabs);
+            }
+            ServerMsg::StashChestState { open } => {
+                self.pending_stash_chest_open = Some(open);
             }
             ServerMsg::CharacterStats {
                 level,
@@ -1203,6 +1231,12 @@ impl NetClient {
         self.pending_stash_sync.take()
     }
 
+    /// Take the latest shared stash-chest visual state, if the
+    /// server broadcast one since the last frame.
+    pub fn drain_stash_chest_open(&mut self) -> Option<bool> {
+        self.pending_stash_chest_open.take()
+    }
+
     /// Take the most recent `CharacterStats` reply if one has
     /// arrived since the last call. Tuple is
     /// `(level, xp_into_level, xp_to_next)`. The binary writes
@@ -1263,6 +1297,35 @@ impl NetClient {
     /// locally for input responsiveness.
     pub fn our_net_id(&self) -> Option<NetId> {
         self.our_net_id
+    }
+
+    /// Whether a NetId belongs to a player we know about, even if
+    /// their ECS avatar has not spawned yet or has already been
+    /// hidden by a death/ghost transition.
+    pub fn is_player_net_id(&self, net_id: NetId) -> bool {
+        Some(net_id) == self.our_net_id
+            || self.avatar_entities.contains_key(&net_id)
+            || self.profiles.contains_key(&net_id)
+            || self
+                .remote
+                .get(&net_id)
+                .map(|row| matches!(row.kind, rift_net::messages::EntityKind::Player { .. }))
+                .unwrap_or(false)
+    }
+
+    /// Record that the reliable event stream confirmed an enemy
+    /// death. Snapshot/world sync owns visual removal from here.
+    pub fn mark_enemy_death(&mut self, net_id: NetId) {
+        self.dead_net_ids.insert(net_id);
+        self.enemy_death_cues
+            .entry(net_id)
+            .or_insert_with(EnemyDeathCue::new);
+    }
+
+    /// ECS entity for a replicated enemy that is currently visible
+    /// to this client.
+    pub fn enemy_entity(&self, net_id: NetId) -> Option<hecs::Entity> {
+        self.enemy_entities.get(&net_id).copied()
     }
 
     /// Latest essence pool fraction (0..=1) the server reported

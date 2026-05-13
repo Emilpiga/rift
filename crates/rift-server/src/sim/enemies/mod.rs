@@ -33,6 +33,8 @@ use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::monsters::MonsterRole;
 use rift_net::NetId;
 
+use super::actor::{NetIdentity, Vitals};
+
 pub mod boss;
 pub mod brute;
 pub mod caster;
@@ -148,11 +150,10 @@ pub const THREAT_SWITCH_HYSTERESIS: f32 = 1.4;
 /// true on the wire — clients use it to play the attack clip.
 pub const ATTACK_ANIM_DUR: f32 = 0.45;
 
-/// Sphere radius used for projectile↔enemy XZ collision.
-/// Tuned to roughly match the shrunken visual scales in
-/// [`rift_game::monsters::MonsterRole::scale`] so projectiles
-/// don't whiff visibly past small models.
-pub const ENEMY_HIT_RADIUS: f32 = 0.45;
+/// Maximum XZ hit-disc radius any enemy role advertises. Spatial
+/// queries inflate by this amount before checking each role's exact
+/// radius so large bodies cannot be missed by the broad phase.
+pub const MAX_ENEMY_HIT_RADIUS: f32 = 1.05;
 
 /// Personal-space radius used for separation steering between
 /// enemies in the same pack. Below this distance an enemy steers
@@ -273,12 +274,8 @@ impl Default for AiPhase {
 /// Component bundle for one server-driven enemy.
 #[derive(Clone, Debug)]
 pub struct ServerEnemy {
-    pub net_id: NetId,
     pub role: rift_game::monsters::MonsterRole,
-    pub k: Kinematic,
     pub speed: f32,
-    pub hp_max: f32,
-    pub hp: f32,
     pub attack_cooldown: f32,
     pub attack_anim_remaining: f32,
     /// Seconds left in the death-fade window. `0.0` for live
@@ -501,23 +498,26 @@ pub fn tick_ai(
     // swarm sizes (hundreds of mobs) this is the difference
     // between a CPU-bound 30 Hz tick and a smooth one.
     let neighbours: Vec<(NetId, Vec3)> = world
-        .query::<&ServerEnemy>()
+        .query::<(&ServerEnemy, &NetIdentity, &Kinematic)>()
         .iter()
-        .filter(|(_, en)| !en.is_dying())
-        .map(|(_, en)| (en.net_id, en.k.position))
+        .filter(|(_, (en, _identity, _kinematic))| !en.is_dying())
+        .map(|(_, (_en, identity, kinematic))| (identity.net_id, kinematic.position))
         .collect();
     let grid = rift_math::spatial::SpatialGrid::build(&neighbours, SEPARATION_RADIUS, |&(_, p)| p);
 
     let mut outcome = AiOutcome::default();
-    for (_e, (en, stack, boss_state)) in world.query_mut::<(
+    for (_e, (en, identity, vitals, kinematic, stack, boss_state)) in world.query_mut::<(
         &mut ServerEnemy,
+        &NetIdentity,
+        &Vitals,
+        &mut Kinematic,
         Option<&super::effect::EffectStack>,
         Option<&mut BossState>,
     )>() {
         // Skip dying enemies — their AI is frozen until the
         // death-fade timer expires and they're despawned.
         if en.is_dying() {
-            en.k.velocity = Vec3::ZERO;
+            kinematic.velocity = Vec3::ZERO;
             continue;
         }
         // Knockback slide. Runs *before* stagger so a punch
@@ -531,8 +531,8 @@ pub fn tick_ai(
             const KNOCKBACK_DUR: f32 = 0.18;
             en.knockback_remaining = (en.knockback_remaining - dt).max(0.0);
             let t = (en.knockback_remaining / KNOCKBACK_DUR).clamp(0.0, 1.0);
-            en.k.velocity = en.knockback_velocity * t;
-            en.k.locomotion = loco::IDLE;
+            kinematic.velocity = en.knockback_velocity * t;
+            kinematic.locomotion = loco::IDLE;
             decay_threat(en, dt);
             continue;
         }
@@ -545,8 +545,8 @@ pub fn tick_ai(
         // `apply_hits_to_enemies`.
         if en.stagger_remaining > 0.0 {
             en.stagger_remaining = (en.stagger_remaining - dt).max(0.0);
-            en.k.velocity = Vec3::ZERO;
-            en.k.locomotion = loco::IDLE;
+            kinematic.velocity = Vec3::ZERO;
+            kinematic.locomotion = loco::IDLE;
             // Decay threat too even while staggered so a
             // stagger-locked mob doesn't accumulate a stale
             // target list.
@@ -592,13 +592,15 @@ pub fn tick_ai(
         // honour an existing lock until it leaves leash range,
         // otherwise pick a fresh nearest within AGGRO_RANGE
         // gated by LOS. Threat hysteresis can re-target.
-        let target = resolve_target(en, floor, player_positions);
+        let target = resolve_target(en, kinematic, floor, player_positions);
 
         // Per-role steering + attack. Adding a new role is one
         // arm here + a new sibling module file.
         match en.role {
             MonsterRole::Stalker => stalker::tick(
                 en,
+                kinematic,
+                identity.net_id,
                 &stalker::SPEC,
                 floor,
                 target,
@@ -609,6 +611,8 @@ pub fn tick_ai(
             ),
             MonsterRole::Caster => caster::tick(
                 en,
+                kinematic,
+                identity.net_id,
                 &caster::SPEC,
                 floor,
                 target,
@@ -621,6 +625,9 @@ pub fn tick_ai(
                 if let Some(b) = boss_state {
                     boss::tick(
                         en,
+                        kinematic,
+                        identity.net_id,
+                        vitals,
                         b,
                         target,
                         player_positions,
@@ -636,6 +643,8 @@ pub fn tick_ai(
                     // component slot ever fails to attach.
                     brute::tick(
                         en,
+                        kinematic,
+                        identity.net_id,
                         &brute::BOSS_MELEE_SPEC,
                         floor,
                         target,
@@ -649,6 +658,8 @@ pub fn tick_ai(
             // Brute, Elite, and unknowns share `brute::tick`.
             _ => brute::tick(
                 en,
+                kinematic,
+                identity.net_id,
                 &brute::SPEC,
                 floor,
                 target,
@@ -665,10 +676,10 @@ pub fn tick_ai(
         // one of him and the body is huge, so neighbour pushes
         // would just jitter him off his attack mark.
         if en.role != MonsterRole::Boss {
-            let self_id = en.net_id;
+            let self_id = identity.net_id;
             let push = rift_math::spatial::separation_push(
                 &grid,
-                en.k.position,
+                kinematic.position,
                 SEPARATION_RADIUS,
                 &neighbours,
                 |&(_, p)| p,
@@ -679,7 +690,7 @@ pub fn tick_ai(
                 // across slow / fast roles. Applied additively so
                 // forward locomotion still wins when it's set; in
                 // pure-Idle states the push is what unjams the clump.
-                en.k.velocity += push * en.speed * SEPARATION_STRENGTH * speed_mult;
+                kinematic.velocity += push * en.speed * SEPARATION_STRENGTH * speed_mult;
             }
         }
     }
@@ -703,6 +714,7 @@ pub fn tick_ai(
 /// attackers.
 fn resolve_target(
     en: &mut ServerEnemy,
+    kinematic: &Kinematic,
     floor: &Floor,
     players: &[(Entity, Vec3)],
 ) -> Option<(Entity, Vec3, f32)> {
@@ -714,8 +726,8 @@ fn resolve_target(
     //    around a pillar mid-fight.
     if let Some(locked) = en.target_lock {
         if let Some(&(pe, pp)) = players.iter().find(|(e, _)| *e == locked) {
-            let dx = pp.x - en.k.position.x;
-            let dz = pp.z - en.k.position.z;
+            let dx = pp.x - kinematic.position.x;
+            let dz = pp.z - kinematic.position.z;
             let d2 = dx * dx + dz * dz;
             if d2 <= LEASH_RANGE * LEASH_RANGE {
                 // Threat steal check: any other in-leash player
@@ -728,8 +740,8 @@ fn resolve_target(
                     if *cand_e == locked {
                         continue;
                     }
-                    let cdx = cand_p.x - en.k.position.x;
-                    let cdz = cand_p.z - en.k.position.z;
+                    let cdx = cand_p.x - kinematic.position.x;
+                    let cdz = cand_p.z - kinematic.position.z;
                     let cd2 = cdx * cdx + cdz * cdz;
                     if cd2 > LEASH_RANGE * LEASH_RANGE {
                         continue;
@@ -755,7 +767,7 @@ fn resolve_target(
 
     // 2. Fresh aggro: nearest *visible* player within
     //    `AGGRO_RANGE`. LOS gate prevents aggro through walls.
-    let picked = nearest_visible_player(en.k.position, floor, players);
+    let picked = nearest_visible_player(kinematic.position, floor, players);
     if let Some((pe, _, _)) = picked {
         en.target_lock = Some(pe);
     }
@@ -830,14 +842,14 @@ fn nearest_visible_player(
 pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, attacker: Entity) {
     // 1. Force-aggro the victim onto the attacker. Bypasses the
     //    `pending_aggro` queue — the victim *knows* who hit it.
-    let victim_pos = match world.get::<&mut ServerEnemy>(victim) {
-        Ok(mut en) => {
+    let victim_pos = match world.query_one_mut::<(&mut ServerEnemy, &Kinematic)>(victim) {
+        Ok((en, kinematic)) => {
             if en.is_dying() {
                 return;
             }
             en.target_lock = Some(attacker);
             en.pending_aggro = None;
-            en.k.position
+            kinematic.position
         }
         Err(_) => return,
     };
@@ -847,7 +859,7 @@ pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, a
     //    scales linearly with distance so the closest packmates
     //    react first.
     let r2 = AGGRO_SPREAD_RADIUS * AGGRO_SPREAD_RADIUS;
-    for (e, en) in world.query_mut::<&mut ServerEnemy>() {
+    for (e, (en, kinematic)) in world.query_mut::<(&mut ServerEnemy, &Kinematic)>() {
         if e == victim || en.is_dying() || en.target_lock.is_some() {
             continue;
         }
@@ -856,8 +868,8 @@ pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, a
         if en.pending_aggro.is_some() {
             continue;
         }
-        let dx = en.k.position.x - victim_pos.x;
-        let dz = en.k.position.z - victim_pos.z;
+        let dx = kinematic.position.x - victim_pos.x;
+        let dz = kinematic.position.z - victim_pos.z;
         let d2 = dx * dx + dz * dz;
         if d2 > r2 {
             continue;
@@ -867,7 +879,7 @@ pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, a
         // they're inside the radius. Keeps adjacent-room
         // enemies asleep until the player crosses their
         // sight line.
-        if !floor.line_of_sight(victim_pos, en.k.position) {
+        if !floor.line_of_sight(victim_pos, kinematic.position) {
             continue;
         }
         let frac = (d2 / r2).sqrt(); // 0 at victim, 1 at edge
@@ -885,9 +897,14 @@ pub fn notify_attacked(world: &mut hecs::World, floor: &Floor, victim: Entity, a
 /// `Floor::line_of_sight` rate-limit so every role tick gets the
 /// same throttling for free. See [`LOS_RECHECK_INTERVAL`] for the
 /// cadence rationale.
-pub(super) fn cached_los_blocked(en: &mut ServerEnemy, floor: &Floor, target_pos: Vec3) -> bool {
+pub(super) fn cached_los_blocked(
+    en: &mut ServerEnemy,
+    kinematic: &Kinematic,
+    floor: &Floor,
+    target_pos: Vec3,
+) -> bool {
     if en.los_recheck_in <= 0.0 {
-        en.los_blocked_cached = !floor.line_of_sight(en.k.position, target_pos);
+        en.los_blocked_cached = !floor.line_of_sight(kinematic.position, target_pos);
         en.los_recheck_in = LOS_RECHECK_INTERVAL;
     }
     en.los_blocked_cached
@@ -905,6 +922,8 @@ pub(super) fn cached_los_blocked(en: &mut ServerEnemy, floor: &Floor, target_pos
 /// drifting out of sync.
 pub(crate) fn enter_windup(
     en: &mut ServerEnemy,
+    kinematic: &Kinematic,
+    net_id: NetId,
     kind: WindupKind,
     duration: f32,
     outcome: &mut AiOutcome,
@@ -916,9 +935,9 @@ pub(crate) fn enter_windup(
     };
     en.attack_anim_remaining = duration;
     outcome.events.push(WorldEvent::EnemyTelegraph {
-        source: en.net_id,
+        source: net_id,
         kind: kind.telegraph_byte(),
-        position: en.k.position.to_array(),
+        position: kinematic.position.to_array(),
     });
 }
 
@@ -932,13 +951,17 @@ pub(crate) fn enter_windup(
 /// caller may immediately swap it back into a follow-up phase
 /// (e.g. stalker enters [`AiPhase::StalkerDash`] after its
 /// wind-up) before any other code observes it.
-pub(crate) fn tick_windup(en: &mut ServerEnemy, dt: f32) -> Option<WindupKind> {
+pub(crate) fn tick_windup(
+    en: &mut ServerEnemy,
+    kinematic: &mut Kinematic,
+    dt: f32,
+) -> Option<WindupKind> {
     let AiPhase::Windup { kind, remaining } = en.ai_phase else {
         return None;
     };
     let next = remaining - dt;
-    en.k.velocity = Vec3::ZERO;
-    en.k.locomotion = loco::IDLE;
+    kinematic.velocity = Vec3::ZERO;
+    kinematic.locomotion = loco::IDLE;
     if next <= 0.0 {
         en.ai_phase = AiPhase::Idle;
         Some(kind)
@@ -976,22 +999,19 @@ pub fn spawn_summon(
     let speed = cfg.enemy_speed * role_stats.speed_mult;
     let net_id = NetId(*next_enemy_net_id);
     *next_enemy_net_id = next_enemy_net_id.wrapping_add(1).max(1);
+    let kinematic = Kinematic {
+        position: Vec3::new(pos.x, 0.0, pos.z),
+        velocity: Vec3::ZERO,
+        yaw: 0.0,
+        aim_yaw: 0.0,
+        locomotion: loco::IDLE,
+        vy: 0.0,
+        airborne: false,
+        ..Default::default()
+    };
     let enemy = ServerEnemy {
-        net_id,
         role,
-        k: Kinematic {
-            position: Vec3::new(pos.x, 0.0, pos.z),
-            velocity: Vec3::ZERO,
-            yaw: 0.0,
-            aim_yaw: 0.0,
-            locomotion: loco::IDLE,
-            vy: 0.0,
-            airborne: false,
-            ..Default::default()
-        },
         speed,
-        hp_max: hp,
-        hp,
         attack_cooldown: 0.0,
         attack_anim_remaining: 0.0,
         dying_remaining: 0.0,
@@ -1015,16 +1035,22 @@ pub fn spawn_summon(
         // tick. Spread over the recheck interval.
         los_recheck_in: ((net_id.0 % 13) as f32) * (LOS_RECHECK_INTERVAL / 13.0),
     };
-    world.spawn((enemy, super::effect::EffectStack::default()));
+    world.spawn((
+        enemy,
+        NetIdentity::new(net_id),
+        Vitals::new(hp),
+        kinematic,
+        super::effect::EffectStack::default(),
+    ));
 }
 
 /// Integrate every enemy's velocity against the floor's wall grid.
 pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
-    for (_e, en) in world.query_mut::<&mut ServerEnemy>() {
+    for (_e, (en, kinematic)) in world.query_mut::<(&ServerEnemy, &mut Kinematic)>() {
         if en.is_dying() {
             continue;
         }
-        kinematic::integrate(&mut en.k, floor, dt);
+        kinematic::integrate(kinematic, floor, dt);
     }
 }
 
@@ -1033,10 +1059,12 @@ pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
 /// needs to read enemies while it mutates them.
 pub fn snapshot_for_collision(world: &hecs::World) -> Vec<(Entity, Vec3, NetId, f32)> {
     world
-        .query::<&ServerEnemy>()
+        .query::<(&ServerEnemy, &NetIdentity, &Kinematic)>()
         .iter()
-        .filter(|(_, en)| !en.is_dying())
-        .map(|(e, en)| (e, en.k.position, en.net_id, ENEMY_HIT_RADIUS))
+        .filter(|(_, (en, _identity, _kinematic))| !en.is_dying())
+        .map(|(e, (en, identity, kinematic))| {
+            (e, kinematic.position, identity.net_id, en.role.hit_radius())
+        })
         .collect()
 }
 
@@ -1044,12 +1072,12 @@ pub fn snapshot_for_collision(world: &hecs::World) -> Vec<(Entity, Vec3, NetId, 
 /// whose timer has expired so the snapshot stops shipping them.
 pub fn tick_dying(world: &mut hecs::World, dt: f32) {
     let mut to_despawn: Vec<Entity> = Vec::new();
-    for (e, en) in world.query_mut::<&mut ServerEnemy>() {
+    for (e, (en, kinematic)) in world.query_mut::<(&mut ServerEnemy, &mut Kinematic)>() {
         if !en.is_dying() {
             continue;
         }
         en.dying_remaining -= dt;
-        en.k.velocity = Vec3::ZERO;
+        kinematic.velocity = Vec3::ZERO;
         if en.dying_remaining <= 0.0 {
             to_despawn.push(e);
         }
@@ -1162,22 +1190,19 @@ pub fn spawn_for_floor(
                 }
                 let net_id = NetId(*next_enemy_net_id);
                 *next_enemy_net_id = next_enemy_net_id.wrapping_add(1).max(1);
+                let kinematic = Kinematic {
+                    position: Vec3::new(pos.x, 0.0, pos.z),
+                    velocity: Vec3::ZERO,
+                    yaw: 0.0,
+                    aim_yaw: 0.0,
+                    locomotion: loco::IDLE,
+                    vy: 0.0,
+                    airborne: false,
+                    ..Default::default()
+                };
                 let enemy = ServerEnemy {
-                    net_id,
                     role,
-                    k: Kinematic {
-                        position: Vec3::new(pos.x, 0.0, pos.z),
-                        velocity: Vec3::ZERO,
-                        yaw: 0.0,
-                        aim_yaw: 0.0,
-                        locomotion: loco::IDLE,
-                        vy: 0.0,
-                        airborne: false,
-                        ..Default::default()
-                    },
                     speed,
-                    hp_max: hp,
-                    hp,
                     attack_cooldown: 0.0,
                     attack_anim_remaining: 0.0,
                     dying_remaining: 0.0,
@@ -1198,7 +1223,13 @@ pub fn spawn_for_floor(
                     los_blocked_cached: false,
                     los_recheck_in: ((net_id.0 % 13) as f32) * (LOS_RECHECK_INTERVAL / 13.0),
                 };
-                world.spawn((enemy, super::effect::EffectStack::default()));
+                world.spawn((
+                    enemy,
+                    NetIdentity::new(net_id),
+                    Vitals::new(hp),
+                    kinematic,
+                    super::effect::EffectStack::default(),
+                ));
                 spawned += 1;
             }
         }

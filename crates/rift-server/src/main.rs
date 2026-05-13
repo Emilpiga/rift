@@ -316,7 +316,12 @@ impl Server {
                         log::warn!("{} persistence: final-save dropped", self.client_tag(cid));
                     }
                 }
+                let stash_was_open = self.hub.any_stash_open();
                 self.hub.despawn_player(cid);
+                let stash_is_open = self.hub.any_stash_open();
+                if stash_was_open != stash_is_open {
+                    self.broadcast_stash_chest_state(stash_is_open);
+                }
                 if let Some(instance_id) = self.client_instance.remove(&cid) {
                     if let Some(inst) = self.instances.get_mut(instance_id) {
                         inst.sim.despawn_player(cid);
@@ -783,15 +788,26 @@ impl Server {
     /// if the client is somehow not in the hub or the
     /// instance has been dropped underneath us.
     pub(crate) fn move_client_to_instance(&mut self, cid: ClientId, instance: RiftInstanceId) {
-        let Some((mut player, effects)) = self.hub.extract_player(cid) else {
+        let stash_was_open = self.hub.any_stash_open();
+        let Some((mut player, identity, vitals, kinematic, effects)) = self.hub.extract_player(cid)
+        else {
             log::warn!("move_client_to_instance: {cid:?} has no hub entity");
             return;
         };
-        let Some(inst) = self.instances.get_mut(instance) else {
+        if self.instances.get(instance).is_none() {
             log::warn!("move_client_to_instance: instance {instance:?} gone");
             // Re-inject the player back into the hub so they
             // don't disappear from every snapshot.
-            let _ = self.hub.inject_player(cid, player, effects);
+            let _ = self
+                .hub
+                .inject_player(cid, player, identity, vitals, kinematic, effects);
+            return;
+        }
+        let stash_is_open = self.hub.any_stash_open();
+        if stash_was_open != stash_is_open {
+            self.broadcast_stash_chest_state(stash_is_open);
+        }
+        let Some(inst) = self.instances.get_mut(instance) else {
             return;
         };
         // Crossing the rift threshold flips every item the
@@ -847,7 +863,9 @@ impl Server {
                 log::warn!("persistence: rift-entry inventory wipe dropped for {cid:?}");
             }
         }
-        let _net_id = inst.sim.inject_player(cid, player, effects);
+        let _net_id = inst
+            .sim
+            .inject_player(cid, player, identity, vitals, kinematic, effects);
         let floor_idx = inst.sim.floor_index;
         let seed = inst.sim.floor_seed;
         let spawn = inst.sim.floor.spawn_pos;
@@ -925,7 +943,9 @@ impl Server {
         let mut maybe_dissolve = false;
         let mut stripped_unstable = false;
         if let Some(inst) = self.instances.get_mut(instance_id) {
-            if let Some((mut player, effects)) = inst.sim.extract_player(cid) {
+            if let Some((mut player, identity, mut vitals, kinematic, effects)) =
+                inst.sim.extract_player(cid)
+            {
                 // Defensive strip: shatter every unstable
                 // item still on the player. The Exit-vote
                 // path stabilises first so this loop is a
@@ -957,7 +977,7 @@ impl Server {
                     }
                 }
                 if bag_before != bag_after || equip_lost > 0 {
-                    player.recompute_stats();
+                    player.recompute_stats(&mut vitals);
                     stripped_unstable = true;
                     log::info!(
                         "rift-exit: shattered {} bag + {} equipped unstable item(s) for {cid:?}",
@@ -965,7 +985,9 @@ impl Server {
                         equip_lost,
                     );
                 }
-                let _net_id = self.hub.inject_player(cid, player, effects);
+                let _net_id = self
+                    .hub
+                    .inject_player(cid, player, identity, vitals, kinematic, effects);
             }
             if self.clients_in_instance(instance_id).is_empty() {
                 maybe_dissolve = true;
@@ -981,6 +1003,13 @@ impl Server {
             tick: self.tick,
         };
         self.send_to(cid, Channel::Control, &load);
+        self.send_to(
+            cid,
+            Channel::Control,
+            &ServerMsg::StashChestState {
+                open: self.hub.any_stash_open(),
+            },
+        );
         // Same cross-world rendezvous as `move_client_to_instance`,
         // mirrored for the hub side.
         self.catch_up_peer_equipment_visuals(cid);

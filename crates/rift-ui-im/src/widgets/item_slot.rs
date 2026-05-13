@@ -315,15 +315,17 @@ impl<'a> ItemSlot<'a> {
             // Only draw a soft hover/selected wash so the
             // panel texture behind the slot stays visible.
             if hovered || self.selected {
-                ui.draw_rounded_rect(
-                    rect,
-                    theme.spacing.corner_radius,
-                    Color::rgba(1.0, 1.0, 1.0, 0.06),
-                );
+                let wash = if self.selected {
+                    Color::rgba(0.95, 0.54, 0.18, 0.16)
+                } else {
+                    Color::rgba(0.95, 0.66, 0.30, 0.10)
+                };
+                ui.draw_rect(rect, wash);
             }
         } else {
             let bg = pick_bg(&theme, hovered, self.selected, self.enabled);
-            ui.draw_rounded_rect(rect, theme.spacing.corner_radius, bg);
+            ui.draw_rect(rect, bg);
+            draw_socket_bevel(ui, rect, hovered || self.selected);
         }
 
         // Rarity inset behind the icon (slightly inset so the
@@ -344,8 +346,33 @@ impl<'a> ItemSlot<'a> {
             inner
         };
         if let Some(tint) = self.rarity_tint {
-            let dimmed = Color::rgba(tint.0[0] * 0.55, tint.0[1] * 0.55, tint.0[2] * 0.55, 1.0);
-            ui.draw_rect(inner, dimmed);
+            let edge = Color::rgba(tint.0[0] * 0.20, tint.0[1] * 0.20, tint.0[2] * 0.20, 0.78);
+            let centre = Color::rgba(tint.0[0] * 0.58, tint.0[1] * 0.58, tint.0[2] * 0.58, 0.88);
+            let glint = Color::rgba(
+                (tint.0[0] * 0.86).min(1.0),
+                (tint.0[1] * 0.86).min(1.0),
+                (tint.0[2] * 0.86).min(1.0),
+                0.34,
+            );
+            let left = Rect::from_xywh(inner.x(), inner.y(), inner.width() * 0.5, inner.height());
+            let right = Rect::from_xywh(
+                inner.x() + inner.width() * 0.5,
+                inner.y(),
+                inner.width() * 0.5,
+                inner.height(),
+            );
+            ui.draw_grad4_rect(left, edge, centre, edge, centre);
+            ui.draw_grad4_rect(right, centre, edge, centre, edge);
+            ui.draw_gradient_rect(
+                Rect::from_xywh(
+                    inner.x() + 1.0,
+                    inner.y() + 1.0,
+                    (inner.width() - 2.0).max(0.0),
+                    (inner.height() * 0.24).clamp(2.0, 9.0),
+                ),
+                glint,
+                Color::rgba(glint.0[0], glint.0[1], glint.0[2], 0.0),
+            );
         }
 
         // Icon or fallback.
@@ -417,25 +444,15 @@ impl<'a> ItemSlot<'a> {
         // visually but the gold border remains visible at
         // rest. Width 2.0 to match the selected outline.
         if self.anchored {
-            ui.draw_rounded_outline(
-                rect,
-                theme.spacing.corner_radius,
-                2.0,
-                Color::rgba(1.00, 0.78, 0.20, 0.95),
-            );
+            ui.draw_outline(rect, 2.0, Color::rgba(1.00, 0.78, 0.20, 0.95));
         }
 
         // Selected / hover outline (drawn last so nothing
         // overlaps the highlight).
         if self.selected {
-            ui.draw_rounded_outline(rect, theme.spacing.corner_radius, 2.0, theme.colors.accent);
+            ui.draw_outline(rect, 2.0, Color::rgba(0.98, 0.58, 0.22, 0.95));
         } else if hovered {
-            ui.draw_rounded_outline(
-                rect,
-                theme.spacing.corner_radius,
-                1.0,
-                Color::rgba(0.55, 0.85, 1.0, 0.6),
-            );
+            ui.draw_outline(rect, 1.5, Color::rgba(0.92, 0.62, 0.30, 0.78));
         }
 
         // Filter dim wash. Painted absolutely last so the
@@ -444,11 +461,7 @@ impl<'a> ItemSlot<'a> {
         // player can still right-click into a filtered item.
         if self.dim_alpha < 1.0 {
             let a = (1.0 - self.dim_alpha) * 0.92;
-            ui.draw_rounded_rect(
-                rect,
-                theme.spacing.corner_radius,
-                Color::rgba(0.02, 0.02, 0.03, a),
-            );
+            ui.draw_rect(rect, Color::rgba(0.02, 0.02, 0.03, a));
         }
     }
 }
@@ -473,15 +486,56 @@ pub struct SlotInteraction<T> {
 
 fn pick_bg(theme: &Theme, hovered: bool, selected: bool, enabled: bool) -> Color {
     if !enabled {
-        return Color::rgba(0.07, 0.07, 0.10, 0.85);
+        return Color::rgba(0.055, 0.050, 0.045, 0.88);
     }
     if selected {
-        return theme.colors.bg_slot_hover;
+        return Color::rgba(0.20, 0.135, 0.075, 0.92);
     }
     if hovered {
-        return theme.colors.bg_slot_hover;
+        return Color::rgba(0.155, 0.118, 0.078, 0.90);
     }
-    theme.colors.bg_slot
+    Color::rgba(0.070, 0.060, 0.050, theme.colors.bg_slot.0[3])
+}
+
+fn draw_socket_bevel(ui: &mut Ui<'_>, rect: Rect, lit: bool) {
+    let highlight_alpha = if lit { 0.20 } else { 0.12 };
+    let shadow_alpha = if lit { 0.58 } else { 0.48 };
+    ui.draw_rect(
+        Rect::from_xywh(
+            rect.x() + 1.0,
+            rect.y() + 1.0,
+            (rect.width() - 2.0).max(0.0),
+            1.0,
+        ),
+        Color::rgba(0.0, 0.0, 0.0, shadow_alpha),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            rect.x() + 1.0,
+            rect.y() + 1.0,
+            1.0,
+            (rect.height() - 2.0).max(0.0),
+        ),
+        Color::rgba(0.0, 0.0, 0.0, shadow_alpha),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            rect.x() + 1.0,
+            rect.max.y - 2.0,
+            (rect.width() - 2.0).max(0.0),
+            1.0,
+        ),
+        Color::rgba(1.0, 0.86, 0.56, highlight_alpha),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            rect.max.x - 2.0,
+            rect.y() + 1.0,
+            1.0,
+            (rect.height() - 2.0).max(0.0),
+        ),
+        Color::rgba(1.0, 0.86, 0.56, highlight_alpha),
+    );
 }
 
 fn inner_rect(rect: Rect) -> Rect {

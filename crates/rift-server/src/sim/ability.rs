@@ -25,11 +25,13 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 use hecs::Entity;
 use rift_dungeon::Floor;
+use rift_game::kinematic::Kinematic;
 use rift_net::{messages::WorldEvent, ClientId, NetId, NetTick};
 
 pub use rift_game::abilities::id;
 pub use rift_game::abilities::{lookup, AbilityKind, AbilityWireId, TargetingMode};
 
+use super::actor::{NetIdentity, Vitals};
 use super::player::ServerPlayer;
 use super::projectile::{ServerAoeZone, ServerProjectile, Team};
 
@@ -284,8 +286,8 @@ pub fn submit(
             // Snapshot the caster's authoritative state. The
             // borrow drops at end of statement so the
             // cooldown-table mutation below is safe.
-            let body = p_ref.k.position;
-            let net_id = p_ref.net_id;
+            let body = world.get::<&Kinematic>(entity).ok()?.position;
+            let net_id = world.get::<&NetIdentity>(entity).ok()?.net_id;
             let dmg_scalar = p_ref.damage_scalar();
             let crit_chance = p_ref.stats.crit_chance;
             let crit_damage = p_ref.stats.crit_damage;
@@ -319,9 +321,12 @@ pub fn submit(
                     // alive / range / LOS gates apply
                     // uniformly.
                     let mut found: Option<(Entity, Vec3)> = None;
-                    for (e, p) in world.query::<&ServerPlayer>().iter() {
-                        if p.net_id == want && !p.is_dead_or_ghosting() {
-                            found = Some((e, p.k.position));
+                    for (e, (p, identity, vitals, kinematic)) in world
+                        .query::<(&ServerPlayer, &NetIdentity, &Vitals, &Kinematic)>()
+                        .iter()
+                    {
+                        if identity.net_id == want && !p.is_dead_or_ghosting(vitals) {
+                            found = Some((e, kinematic.position));
                             break;
                         }
                     }
@@ -505,8 +510,8 @@ pub struct DispatchSinks<'a> {
 
 /// One queued melee swing emitted by an `AbilityKind::MeleeArc`
 /// dispatch. Resolved at the top of the damage pass — every
-/// enemy within `radius` of `origin` whose bearing from `origin`
-/// is inside the half-`arc_radians` cone around `aim` takes
+/// enemy hit disc overlapping `radius` from `origin` and the
+/// half-`arc_radians` cone around `aim` takes
 /// `damage` exactly once, with the crit roll seeded from the
 /// usual `(tick, target, attacker, ability)` tuple.
 #[derive(Clone, Copy, Debug)]
@@ -1073,12 +1078,13 @@ fn apply_kinematic_side_effects(
         let AbilityEffect::SetPlayerAction { action, .. } = effect else {
             continue;
         };
-        let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, kinematic)) = world.query_one_mut::<(&mut ServerPlayer, &mut Kinematic)>(entity)
+        else {
             return;
         };
         match action {
             PlayerAction::Roll => {
-                rift_game::kinematic::start_roll(&mut p.k, accepted.aim);
+                rift_game::kinematic::start_roll(kinematic, accepted.aim);
                 // Stamp the action-start tick so snapshot
                 // pipeline can carry it to the local client.
                 // Without this the client's local timer
@@ -1089,7 +1095,7 @@ fn apply_kinematic_side_effects(
                 p.action_start = tick;
             }
             PlayerAction::Attack => {
-                rift_game::kinematic::start_attack(&mut p.k, accepted.aim);
+                rift_game::kinematic::start_attack(kinematic, accepted.aim);
                 p.action_start = tick;
             }
             // Locomotion / cast poses: animation-only state
@@ -1151,13 +1157,22 @@ pub fn dispatch_proc_cast(
         let Ok(p) = world.get::<&ServerPlayer>(caster) else {
             return;
         };
-        if p.hp <= 0.0 {
+        let Ok(kinematic) = world.get::<&Kinematic>(caster) else {
+            return;
+        };
+        let Ok(identity) = world.get::<&NetIdentity>(caster) else {
+            return;
+        };
+        let Ok(vitals) = world.get::<&Vitals>(caster) else {
+            return;
+        };
+        if vitals.is_dead() {
             return;
         }
         (
-            p.k.position,
-            p.net_id,
-            p.k.aim_yaw,
+            kinematic.position,
+            identity.net_id,
+            kinematic.aim_yaw,
             p.damage_scalar(),
             p.stats.crit_chance,
             p.stats.crit_damage,

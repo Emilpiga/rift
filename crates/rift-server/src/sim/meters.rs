@@ -18,6 +18,7 @@ use rift_net::messages::{
 };
 use rift_net::ClientId;
 
+use super::actor::NetIdentity;
 use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 
@@ -126,9 +127,9 @@ impl Meters {
         // player so we can both join with `by_client` and key
         // the threat fold by `Entity`.
         let players: Vec<(ClientId, Entity, rift_net::NetId)> = world
-            .query::<&ServerPlayer>()
+            .query::<(&ServerPlayer, &NetIdentity)>()
             .iter()
-            .map(|(e, p)| (p.client_id, e, p.net_id))
+            .map(|(e, (p, identity))| (p.client_id, e, identity.net_id))
             .collect();
 
         // Sum threat per attacker entity across alive enemies.

@@ -8,10 +8,25 @@
 //! drawn through `draw_text_shadow` so they pop against the
 //! bar fill without needing a separate stroke pass.
 
-use rift_ui_im::{hp_color, Color, Frame, Pad, Pos2, ProgressBar, Rect, Ui};
+use rift_ui_im::{Color, Frame, Pad, Pos2, ProgressBar, Rect, Ui};
 use rift_ui_types::hud::HudVitalsView;
 
 use super::ability_bar;
+
+#[derive(Clone, Copy)]
+struct ResourceAnimSnapshot {
+    displayed: f32,
+    trail: f32,
+    pulse: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ResourceBarStyle {
+    base: Color,
+    hot: Color,
+    chip: Color,
+    glow: Color,
+}
 
 /// Render the vitals stack centered horizontally, anchored
 /// `bottom_offset_px` above the screen's bottom edge (baseline
@@ -27,7 +42,9 @@ pub fn frame_vitals(ui: &mut Ui<'_>, view: &HudVitalsView<'_>, bottom_offset_px:
     let plaque_pad_x = 6.0 * s;
     let plaque_pad_y = 6.0 * s;
     let plaque_w = ability_bar::PLAQUE_W_BASE * s;
-    let bar_w = plaque_w - plaque_pad_x * 2.0;
+    let level_w = 52.0 * s;
+    let level_gap = 6.0 * s;
+    let bar_w = plaque_w - plaque_pad_x * 2.0 - level_w - level_gap;
 
     // Bigger bars: the previous 22 / 12 / 9 px heights left
     // the inline labels too small to read against a moving
@@ -50,30 +67,68 @@ pub fn frame_vitals(ui: &mut Ui<'_>, view: &HudVitalsView<'_>, bottom_offset_px:
         .show_only(ui, plaque_rect);
 
     // Inner stack origin.
-    let bar_x = plaque_x + plaque_pad_x;
+    let level_rect = Rect::from_xywh(
+        plaque_x + plaque_pad_x,
+        plaque_y + plaque_pad_y,
+        level_w,
+        body_h,
+    );
+    draw_level_badge(ui, level_rect, view.level);
+
+    let bar_x = level_rect.max.x + level_gap;
     let mut y = plaque_y + plaque_pad_y;
 
     // ── HP bar ──
     let hp_pct = view.hp_fraction.clamp(0.0, 1.0);
     let hp_rect = Rect::from_xywh(bar_x, y, bar_w, hp_h);
-    let hp_fill = ProgressBar::new(hp_pct)
-        .fill(hp_color(hp_pct))
-        .border(theme.colors.border_stone)
-        .rounded(false)
-        .show(ui, hp_rect);
-    apply_bar_gradient(ui, hp_fill);
+    let hp_anim = {
+        let anim = &mut ui.state_mut().vitals.hp;
+        anim.tick(hp_pct, view.dt);
+        ResourceAnimSnapshot {
+            displayed: anim.displayed,
+            trail: anim.trail,
+            pulse: anim.pulse,
+        }
+    };
+    draw_resource_bar(
+        ui,
+        hp_rect,
+        hp_anim,
+        ResourceBarStyle {
+            base: Color::rgba(0.16, 0.62, 0.28, 0.98),
+            hot: Color::rgba(0.48, 0.92, 0.36, 1.0),
+            chip: Color::rgba(1.0, 0.96, 0.90, 0.26),
+            glow: Color::rgba(0.74, 1.0, 0.62, 1.0),
+        },
+        theme.colors.border_stone,
+    );
     draw_text_centered_shadow(ui, view.hp_label, 16.0 * s, hp_rect, 0.95);
     y += hp_h + row_gap;
 
     // ── Essence bar ──
     let ess_pct = view.essence_fraction.clamp(0.0, 1.0);
     let ess_rect = Rect::from_xywh(bar_x, y, bar_w, ess_h);
-    let ess_fill = ProgressBar::new(ess_pct)
-        .fill(Color::rgba(0.32, 0.55, 0.95, 0.95))
-        .border(theme.colors.border_stone)
-        .rounded(false)
-        .show(ui, ess_rect);
-    apply_bar_gradient(ui, ess_fill);
+    let ess_anim = {
+        let anim = &mut ui.state_mut().vitals.essence;
+        anim.tick(ess_pct, view.dt);
+        ResourceAnimSnapshot {
+            displayed: anim.displayed,
+            trail: anim.trail,
+            pulse: anim.pulse,
+        }
+    };
+    draw_resource_bar(
+        ui,
+        ess_rect,
+        ess_anim,
+        ResourceBarStyle {
+            base: Color::rgba(0.24, 0.48, 0.96, 0.97),
+            hot: Color::rgba(0.42, 0.78, 1.0, 1.0),
+            chip: Color::rgba(0.78, 0.92, 1.0, 0.32),
+            glow: Color::rgba(0.34, 0.72, 1.0, 1.0),
+        },
+        theme.colors.border_stone,
+    );
     draw_text_centered_shadow(ui, view.essence_label, 13.0 * s, ess_rect, 0.95);
     y += ess_h + row_gap;
 
@@ -90,19 +145,199 @@ pub fn frame_vitals(ui: &mut Ui<'_>, view: &HudVitalsView<'_>, bottom_offset_px:
     // enough to host text legibly.
     draw_text_centered_shadow(ui, view.xp_label, 11.0 * s, xp_rect, 0.95);
 
-    // ── Level pip — floats just left of the plaque so the
-    //    eye groups "player identity" with the vital pools.
-    let level_text = format!("Lv.{}", view.level);
-    let level_pos = Pos2::new(plaque_x - 54.0 * s, plaque_y + plaque_pad_y + 6.0 * s);
-    draw_text_at_shadow(
-        ui,
-        &level_text,
-        level_pos,
-        17.0 * s,
-        Color::rgba(0.92, 0.92, 0.92, 1.0),
+    plaque_rect
+}
+
+fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
+    let s = ui.scale();
+    ui.draw_gradient_rect(
+        rect,
+        Color::rgba(0.18, 0.155, 0.125, 0.98),
+        Color::rgba(0.045, 0.040, 0.038, 0.99),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            rect.x() + 2.0 * s,
+            rect.y() + 2.0 * s,
+            rect.width() - 4.0 * s,
+            1.0,
+        ),
+        Color::rgba(1.0, 0.95, 0.82, 0.11),
+    );
+    ui.draw_outline(rect, 1.0 * s, Color::rgba(0.66, 0.53, 0.30, 0.82));
+    ui.draw_outline(
+        Rect::from_xywh(
+            rect.x() + 2.0 * s,
+            rect.y() + 2.0 * s,
+            rect.width() - 4.0 * s,
+            rect.height() - 4.0 * s,
+        ),
+        1.0 * s,
+        Color::rgba(1.0, 0.92, 0.70, 0.10),
+    );
+    ui.draw_gradient_rect(
+        Rect::from_xywh(
+            rect.max.x - 2.0 * s,
+            rect.y() + 3.0 * s,
+            1.0 * s,
+            rect.height() - 6.0 * s,
+        ),
+        Color::rgba(1.0, 0.86, 0.52, 0.16),
+        Color::rgba(0.0, 0.0, 0.0, 0.18),
     );
 
-    plaque_rect
+    let label = "LV";
+    let label_size = 9.0 * s;
+    let label_w = ui.measure_text(label, label_size);
+    ui.draw_text(
+        Pos2::new(
+            rect.x() + (rect.width() - label_w) * 0.5,
+            rect.y() + 8.0 * s,
+        ),
+        label,
+        label_size,
+        Color::rgba(0.70, 0.64, 0.54, 0.92),
+    );
+
+    let value = level.to_string();
+    let value_size = 20.0 * s;
+    let value_w = ui.measure_text(&value, value_size);
+    draw_text_at_shadow(
+        ui,
+        &value,
+        Pos2::new(
+            rect.x() + (rect.width() - value_w) * 0.5,
+            rect.y() + (rect.height() - value_size) * 0.5 + 7.0 * s,
+        ),
+        value_size,
+        Color::rgba(0.95, 0.88, 0.68, 1.0),
+    );
+}
+
+fn draw_resource_bar(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    anim: ResourceAnimSnapshot,
+    style: ResourceBarStyle,
+    border: Color,
+) {
+    let displayed = anim.displayed.clamp(0.0, 1.0);
+    let trail = anim.trail.clamp(displayed, 1.0);
+    let pulse = anim.pulse.clamp(0.0, 1.0);
+
+    ui.draw_gradient_rect(
+        rect,
+        Color::rgba(0.045, 0.042, 0.046, 0.96),
+        Color::rgba(0.010, 0.010, 0.013, 0.98),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(rect.x(), rect.y(), rect.width(), 1.0),
+        Color::rgba(1.0, 1.0, 1.0, 0.08),
+    );
+
+    let trail_w = rect.width() * trail;
+    let fill_w = rect.width() * displayed;
+    if trail_w > fill_w + 0.5 {
+        let chip_rect =
+            Rect::from_xywh(rect.x() + fill_w, rect.y(), trail_w - fill_w, rect.height());
+        ui.draw_grad4_rect(
+            chip_rect,
+            style.chip,
+            style.chip.fade(0.52),
+            Color::rgba(0.0, 0.0, 0.0, 0.18),
+            style.chip.fade(0.20),
+        );
+    }
+
+    if fill_w > 0.5 {
+        let fill = Rect::from_xywh(rect.x(), rect.y(), fill_w, rect.height());
+        let pulse_lift = 1.0 + pulse * 0.22;
+        ui.draw_grad4_rect(
+            fill,
+            scale_rgb(style.hot, pulse_lift),
+            scale_rgb(style.base, 1.04 + pulse * 0.16),
+            scale_rgb(style.base, 0.64),
+            scale_rgb(style.base, 0.78 + pulse * 0.10),
+        );
+        apply_bar_gradient(ui, fill);
+        draw_bar_sheen(ui, fill, pulse);
+        draw_bar_cursor(ui, rect, fill_w, style.glow, pulse);
+    }
+
+    if pulse > 0.01 {
+        let glow_w = rect.width() * displayed;
+        if glow_w > 1.0 {
+            let glow = Rect::from_xywh(
+                rect.x() - 2.0,
+                rect.y() - 2.0,
+                glow_w + 4.0,
+                rect.height() + 4.0,
+            );
+            ui.draw_grad4_rect(
+                glow,
+                style.glow.fade(0.08 * pulse),
+                style.glow.fade(0.02 * pulse),
+                style.glow.fade(0.02 * pulse),
+                style.glow.fade(0.01 * pulse),
+            );
+        }
+    }
+
+    ui.draw_outline(rect, 1.0, border);
+}
+
+fn draw_bar_sheen(ui: &mut Ui<'_>, fill: Rect, pulse: f32) {
+    let top = Rect::from_xywh(
+        fill.x(),
+        fill.y() + 1.0,
+        fill.width(),
+        (fill.height() * 0.38).max(2.0),
+    );
+    ui.draw_gradient_rect(
+        top,
+        Color::rgba(1.0, 1.0, 1.0, 0.18 + pulse * 0.08),
+        Color::rgba(1.0, 1.0, 1.0, 0.015),
+    );
+    let streak_w = (fill.height() * 1.8).clamp(14.0, 34.0).min(fill.width());
+    if streak_w > 2.0 {
+        let streak_x = (fill.max.x - streak_w * 1.08).max(fill.x());
+        ui.draw_grad4_rect(
+            Rect::from_xywh(streak_x, fill.y() + 1.0, streak_w, fill.height() - 2.0),
+            Color::rgba(1.0, 1.0, 1.0, 0.00),
+            Color::rgba(1.0, 1.0, 1.0, 0.18 + pulse * 0.12),
+            Color::rgba(1.0, 1.0, 1.0, 0.00),
+            Color::rgba(1.0, 1.0, 1.0, 0.04 + pulse * 0.04),
+        );
+    }
+}
+
+fn draw_bar_cursor(ui: &mut Ui<'_>, rect: Rect, fill_w: f32, glow: Color, pulse: f32) {
+    if fill_w <= 1.0 || fill_w >= rect.width() - 0.5 {
+        return;
+    }
+    let x = rect.x() + fill_w;
+    let halo_w = (rect.height() * 0.90).clamp(8.0, 20.0);
+    ui.draw_grad4_rect(
+        Rect::from_xywh(x - halo_w * 0.55, rect.y(), halo_w, rect.height()),
+        Color::rgba(1.0, 1.0, 1.0, 0.0),
+        glow.fade(0.20 + pulse * 0.22),
+        Color::rgba(1.0, 1.0, 1.0, 0.0),
+        glow.fade(0.05 + pulse * 0.08),
+    );
+    ui.draw_gradient_rect(
+        Rect::from_xywh(x - 1.0, rect.y() + 1.0, 2.0, rect.height() - 2.0),
+        Color::rgba(1.0, 1.0, 1.0, 0.72 + pulse * 0.18),
+        glow.fade(0.40 + pulse * 0.22),
+    );
+}
+
+fn scale_rgb(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul).clamp(0.0, 1.0),
+        (color.0[1] * mul).clamp(0.0, 1.0),
+        (color.0[2] * mul).clamp(0.0, 1.0),
+        color.0[3],
+    )
 }
 
 /// Overlay a vertical highlight → shadow gradient on the filled

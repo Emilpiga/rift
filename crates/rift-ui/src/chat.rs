@@ -16,7 +16,7 @@
 //! wording.
 
 use rift_ui_im::{
-    widgets::TextField, Button, ButtonSize, Color, Frame, Id, Pad, Pos2, Rect, Theme, Ui,
+    widgets::TextField, Button, ButtonSize, Color, Frame, Id, Pad, Pos2, Rect, Stroke, Theme, Ui,
 };
 use rift_ui_types::chat::{ChatAction, ChatView};
 
@@ -57,7 +57,8 @@ pub fn frame_chat(
     );
 
     Frame::panel(&theme)
-        .with_fill(Color::rgba(0.05, 0.06, 0.09, 0.62))
+        .with_fill(Color::TRANSPARENT)
+        .with_stroke(Stroke::NONE)
         .with_padding(Pad::all(8.0 * scale))
         .show(ui, scrollback_rect, |ui, body| {
             draw_scrollback(ui, body, view.messages, &theme);
@@ -98,9 +99,8 @@ pub fn frame_chat(
         chip_w,
         button_rect.height() - chip_inset * 2.0,
     );
-    ui.draw_rounded_rect(
+    ui.draw_rect(
         chip,
-        chip_w * 0.5,
         Color::rgba(
             view.channel_pip_color[0],
             view.channel_pip_color[1],
@@ -221,7 +221,7 @@ fn draw_picker(
             Color::rgba(0.0, 0.0, 0.0, 0.0)
         };
         if fill.0[3] > 0.0 {
-            ui.draw_rounded_rect(row_rect, 4.0, fill);
+            ui.draw_rect(row_rect, fill);
         }
         let pip = Rect::from_xywh(
             row_rect.x() + 6.0 * scale,
@@ -229,9 +229,8 @@ fn draw_picker(
             14.0 * scale,
             14.0 * scale,
         );
-        ui.draw_rounded_rect(
+        ui.draw_rect(
             pip,
-            3.0,
             Color::rgba(
                 opt.pip_color[0],
                 opt.pip_color[1],
@@ -291,6 +290,14 @@ fn draw_scrollback(
             if y < body.y() {
                 break 'outer;
             }
+            let row_w = ui.measure_text(row, line_size).min(body.width());
+            let backplate = Rect::from_xywh(
+                body.x() - 4.0 * theme.scale,
+                y - 1.0 * theme.scale,
+                row_w + 8.0 * theme.scale,
+                line_size + 3.0 * theme.scale,
+            );
+            ui.draw_rect(backplate, Color::rgba(0.0, 0.0, 0.0, 0.34));
             draw_text_shadow(ui, Pos2::new(body.x(), y), row, line_size, color);
             y -= line_pitch;
         }
@@ -301,8 +308,14 @@ fn draw_scrollback(
 /// recipe used by the vitals widget so chat / vitals text
 /// reads identically against any backdrop.
 fn draw_text_shadow(ui: &mut Ui<'_>, pos: Pos2, text: &str, size: f32, color: Color) {
-    let shadow = Color::rgba(0.0, 0.0, 0.0, 0.75);
+    let shadow = Color::rgba(0.0, 0.0, 0.0, 0.86);
     ui.draw_text(Pos2::new(pos.x + 1.0, pos.y + 1.0), text, size, shadow);
+    ui.draw_text(
+        Pos2::new(pos.x - 1.0, pos.y + 1.0),
+        text,
+        size,
+        shadow.fade(0.72),
+    );
     ui.draw_text(pos, text, size, color);
 }
 

@@ -52,7 +52,7 @@ impl Frame {
         Self {
             fill: theme.colors.bg_panel_alt,
             stroke: theme.border_stroke(),
-            corner_radius: (theme.spacing.corner_radius * 0.5).max(2.0),
+            corner_radius: theme.spacing.corner_radius * 0.5,
             padding: theme.spacing.pad_sm,
             stone_bevel: false,
         }
@@ -148,7 +148,11 @@ impl Frame {
                     super::super::rect::Pos2::new(rect.min.x - grow, rect.min.y - grow + drop),
                     super::super::rect::Pos2::new(rect.max.x + grow, rect.max.y + grow + drop),
                 );
-                ui.draw_rounded_rect(r, self.corner_radius + grow, s);
+                if self.corner_radius <= 0.0 {
+                    ui.draw_rect(r, s);
+                } else {
+                    ui.draw_rounded_rect(r, self.corner_radius + grow, s);
+                }
             }
         }
 
@@ -170,7 +174,11 @@ impl Frame {
                 let edge = Color::rgba(f[0] * 0.55, f[1] * 0.55, f[2] * 0.55, f[3]);
                 ui.draw_rounded_radial_rect_noisy(rect, self.corner_radius, edge, centre);
             } else {
-                ui.draw_rounded_rect(rect, self.corner_radius, self.fill);
+                if self.corner_radius <= 0.0 {
+                    ui.draw_rect(rect, self.fill);
+                } else {
+                    ui.draw_rounded_rect(rect, self.corner_radius, self.fill);
+                }
             }
         }
 
@@ -205,12 +213,16 @@ impl Frame {
 
         // 4. Stroke.
         if self.stroke.thickness > 0.0 && self.stroke.color.0[3] > 0.0 {
-            ui.draw_rounded_outline(
-                rect,
-                self.corner_radius,
-                self.stroke.thickness,
-                self.stroke.color,
-            );
+            if self.corner_radius <= 0.0 {
+                ui.draw_outline(rect, self.stroke.thickness, self.stroke.color);
+            } else {
+                ui.draw_rounded_outline(
+                    rect,
+                    self.corner_radius,
+                    self.stroke.thickness,
+                    self.stroke.color,
+                );
+            }
         }
 
         // 4b. Stone variants get a second hairline outline 2 px
@@ -225,8 +237,12 @@ impl Frame {
                 (rect.width() - 4.0).max(0.0),
                 (rect.height() - 4.0).max(0.0),
             );
-            let inner_r = (self.corner_radius - 2.0).max(2.0);
-            ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+            let inner_r = (self.corner_radius - 2.0).max(0.0);
+            if inner_r <= 0.0 {
+                ui.draw_outline(inner, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+            } else {
+                ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+            }
         }
 
         // 4c. Soft inset shadow — three hairline rounded
@@ -261,12 +277,20 @@ impl Frame {
                 }
                 let r = (self.corner_radius - off).max(0.0);
                 let alpha = 0.22 / (i + 1) as f32;
-                ui.draw_rounded_outline(
-                    inner,
-                    r,
-                    1.0,
-                    Color::rgba(shadow_rgb.0, shadow_rgb.1, shadow_rgb.2, alpha),
-                );
+                if r <= 0.0 {
+                    ui.draw_outline(
+                        inner,
+                        1.0,
+                        Color::rgba(shadow_rgb.0, shadow_rgb.1, shadow_rgb.2, alpha),
+                    );
+                } else {
+                    ui.draw_rounded_outline(
+                        inner,
+                        r,
+                        1.0,
+                        Color::rgba(shadow_rgb.0, shadow_rgb.1, shadow_rgb.2, alpha),
+                    );
+                }
             }
         }
 

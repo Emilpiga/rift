@@ -53,14 +53,14 @@ pub use layer::Layer;
 pub use layout::{Column, CrossAlign, Row, Sized};
 pub use rect::{Pad, Pos2, Rect, Vec2};
 pub use response::Response;
-pub use state::{DragState, Modal, TextSelection, UiState};
+pub use state::{DragState, Modal, ResourceBarAnim, TextSelection, UiState, WorldVitalsAnimState};
 pub use theme::{Colors, Fonts, Spacing, Theme, DEFAULT_THEME};
 pub use ui::{DragSourceResponse, DroppedPayload, Ui, UiOutput};
 pub use ui_input::{KeyEvent, UiInput};
 pub use widgets::{
     hp_color, item_tooltip_lines, Banner, BannerStyle, Button, ButtonSize, ButtonVariant, Frame,
     InlineEditOutcome, InlineEditState, ItemSlot, MiniButton, MiniButtonFills, MiniButtonResponse,
-    PanZoom, PanZoomState, PanZoomTransform, ProgressBar, SlotInteraction, TextField, Tooltip,
-    TooltipLine, TooltipLineDecor, TwoStageConfirm, TwoStageOutcome,
+    PanZoom, PanZoomState, PanZoomTransform, PanelHeader, ProgressBar, SlotInteraction, TextField,
+    Tooltip, TooltipLine, TooltipLineDecor, TwoStageConfirm, TwoStageOutcome,
 };
 pub use world_ui::WorldUi;

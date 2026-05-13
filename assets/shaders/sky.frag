@@ -117,6 +117,31 @@ void main() {
     sky += core   * strength * vec3(1.00, 0.95, 0.80);
     sky += corona * strength * 0.25 * vec3(1.00, 0.85, 0.65);
 
+    // Low-angle storm glow. The gameplay camera mostly exposes
+    // the horizon / below-horizon dome rather than the overhead
+    // cloud sheet, so storm presets get a broad animated ember
+    // band that sits where platform edges and distant silhouettes
+    // actually meet the sky.
+    float storm = clamp(pc.cloud_params.y, 0.0, 1.0);
+    if (storm > 0.001) {
+        float lowBand = smoothstep(-0.80, -0.12, h)
+                      * (1.0 - smoothstep(0.18, 0.55, h));
+        if (lowBand > 0.001) {
+            vec2 xz = dir.xz / max(length(dir.xz), 1e-4);
+            float theta = atan(xz.y, xz.x);
+            float t = pc.cloud_params.x;
+            vec2 smokeUV = vec2(theta * 1.8 + t * 0.035,
+                                h * 4.5 - t * 0.025);
+            float smoke = fbm2(smokeUV);
+            float ember = pow(max(0.0, smoke - 0.52), 2.0) * 3.0;
+
+            vec3 haze = pc.horizon_sun_size.rgb * (0.14 + smoke * 0.18);
+            vec3 hot = pc.horizon_sun_size.rgb * 1.70
+                     + pc.zenith_falloff.rgb * 0.25;
+            sky += (haze + hot * ember) * lowBand * storm;
+        }
+    }
+
     // ─── Procedural storm clouds ────────────────────────────────
     // Only meaningful when cloud_strength > 0. Two horizontally-
     // advected fbm layers stacked over the upper hemisphere give
@@ -129,7 +154,7 @@ void main() {
         // sitting at altitude 1. Adding a small bias to `h` keeps
         // samples well-defined as we approach the horizon (the
         // 1/h projection diverges otherwise).
-        float ph = max(h + 0.08, 1.08);
+        float ph = max(h + 0.08, 0.08);
         vec2 plane = dir.xz / ph;
 
         float t = pc.cloud_params.x;

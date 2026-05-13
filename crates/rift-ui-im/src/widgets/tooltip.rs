@@ -14,6 +14,7 @@
 //! which means callers can pass `mouse_pos + offset` blindly.
 
 use super::super::{color::Color, layer::Layer, theme::Theme, ui::Ui};
+use super::panel_header::PanelHeader;
 use crate::rect::{Pos2, Rect};
 
 /// Per-line decoration. Most lines are plain `Text`; the rest
@@ -135,7 +136,7 @@ impl<'a> Default for Tooltip<'a> {
     fn default() -> Self {
         Self {
             header: None,
-            header_color: Color::rgba(0.55, 0.65, 0.78, 1.0),
+            header_color: Color::rgba(0.95, 0.76, 0.44, 1.0),
             fill: Color::rgba(0.02, 0.03, 0.05, 0.96),
             pad: 8.0,
             min_width: 180.0,
@@ -236,7 +237,7 @@ impl<'a> Tooltip<'a> {
         // get a slightly taller slot than a normal line.
         let mut max_w = self
             .header
-            .map(|h| ui.measure_text(h, theme.fonts.size_sm))
+            .map(|h| ui.measure_text(h, theme.fonts.size_md))
             .unwrap_or(0.0);
         let mut body_h = 0.0_f32;
         for ln in lines {
@@ -278,7 +279,7 @@ impl<'a> Tooltip<'a> {
             }
         }
         let header_h = if self.header.is_some() {
-            theme.fonts.size_sm + 4.0 * theme.scale
+            30.0 * theme.scale
         } else {
             0.0
         };
@@ -335,10 +336,47 @@ impl<'a> Tooltip<'a> {
             let edge = Color::rgba(f[0] * 0.55, f[1] * 0.55, f[2] * 0.55, f[3].max(0.96));
             ui.draw_rounded_radial_rect_noisy(rect, 0.0, edge, centre);
 
-            // Heavy outer + inset hairline — the doubled rule
-            // sells the carved-stone bevel that single-color
-            // borders can't.
+            ui.draw_gradient_rect(
+                Rect::from_xywh(
+                    rect.x() + 2.0,
+                    rect.y() + 2.0,
+                    rect.width() - 4.0,
+                    11.0 * theme.scale,
+                ),
+                Color::rgba(1.0, 0.86, 0.55, 0.13),
+                Color::rgba(1.0, 0.86, 0.55, 0.0),
+            );
+            ui.draw_gradient_rect(
+                Rect::from_xywh(
+                    rect.x() + 2.0,
+                    rect.max.y - 12.0 * theme.scale,
+                    rect.width() - 4.0,
+                    10.0 * theme.scale,
+                ),
+                Color::rgba(0.0, 0.0, 0.0, 0.0),
+                Color::rgba(0.0, 0.0, 0.0, 0.34),
+            );
+
+            let mut cursor_y = rect.y() + pad;
+            if let Some(h) = self.header {
+                let header_rect = Rect::from_xywh(
+                    rect.x(),
+                    rect.y(),
+                    rect.width(),
+                    header_h.max(theme.fonts.size_md + 10.0 * theme.scale),
+                );
+                PanelHeader::new(h)
+                    .title_color(self.header_color)
+                    .font_size(theme.fonts.size_md)
+                    .show(ui, header_rect);
+                cursor_y = rect.y() + pad + header_h;
+            }
+
+            // Heavy outer + inset hairline — drawn after the
+            // full-width header so the panel still owns a crisp
+            // silhouette instead of the header overwriting it.
             ui.draw_rounded_outline(rect, 0.0, 2.0, theme.colors.border_stone);
+            ui.draw_outline(rect, 1.0, Color::rgba(0.80, 0.58, 0.28, 0.68));
             let inset = Rect::from_xywh(
                 rect.x() + 2.0,
                 rect.y() + 2.0,
@@ -346,17 +384,7 @@ impl<'a> Tooltip<'a> {
                 (rect.height() - 4.0).max(0.0),
             );
             ui.draw_rounded_outline(inset, 0.0, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
-
-            let mut cursor_y = rect.y() + pad;
-            if let Some(h) = self.header {
-                ui.draw_text(
-                    Pos2::new(rect.x() + pad, cursor_y),
-                    h,
-                    theme.fonts.size_sm,
-                    self.header_color,
-                );
-                cursor_y += theme.fonts.size_sm + 4.0 * theme.scale;
-            }
+            draw_tooltip_corner_cuts(ui, rect, theme.scale, 0.36);
 
             // Pre-scan to locate any legendary banner spans so
             // we can paint the dark inset backdrop **before**
@@ -491,13 +519,12 @@ impl<'a> Tooltip<'a> {
                         let badge_w = tail_w + pad_x * 2.0;
                         let badge_h = badge_font + pad_y * 2.0;
                         let badge_x = rect.max.x - pad - badge_w;
-                        // Centre the pill vertically against the
+                        // Centre the badge vertically against the
                         // line baseline so it sits on the same
                         // optical row as the head text.
                         let badge_y = cursor_y + (ln.size - badge_h) * 0.5;
                         let badge_rect = Rect::from_xywh(badge_x, badge_y, badge_w, badge_h);
-                        let radius = badge_h * 0.5;
-                        // Soft-tinted fill so the pill reads as
+                        // Soft-tinted fill so the badge reads as
                         // a chip without yelling. The text on
                         // top stays at the band's full saturated
                         // colour so the tier identity comes from
@@ -505,8 +532,8 @@ impl<'a> Tooltip<'a> {
                         let [r, g, b, _] = fill.0;
                         let chip_fill = Color::rgba(r, g, b, 0.18);
                         let chip_border = Color::rgba(r, g, b, 0.85);
-                        ui.draw_rounded_rect(badge_rect, radius, chip_fill);
-                        ui.draw_rounded_outline(badge_rect, radius, 1.0, chip_border);
+                        ui.draw_rect(badge_rect, chip_fill);
+                        ui.draw_outline(badge_rect, 1.0, chip_border);
                         ui.draw_text(
                             Pos2::new(badge_x + pad_x, badge_y + pad_y),
                             tail,
@@ -532,6 +559,60 @@ pub fn tooltip_at_mouse(ui: &mut Ui<'_>, header: Option<&str>, lines: &[TooltipL
         t = t.header(h);
     }
     t.show(ui, Pos2::new(mp.x + 18.0 * ui.theme().scale, mp.y), lines)
+}
+
+fn draw_tooltip_corner_cuts(ui: &mut Ui<'_>, rect: Rect, scale: f32, alpha: f32) {
+    let cut = (9.0 * scale).clamp(6.0, 11.0);
+    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
+    let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.64);
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.y() + cut),
+        Pos2::new(rect.x() + cut, rect.y() + 2.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 3.0, rect.y() + cut + 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.y() + 3.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.y() + 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.y() + cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.y() + 3.0),
+        Pos2::new(rect.max.x - 3.0, rect.y() + cut + 1.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.max.y - cut),
+        Pos2::new(rect.x() + cut, rect.max.y - 2.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 3.0, rect.max.y - cut - 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.max.y - 3.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.max.y - 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.max.y - cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.max.y - 3.0),
+        Pos2::new(rect.max.x - 3.0, rect.max.y - cut - 1.0),
+        1.0,
+        shadow,
+    );
 }
 
 /// Strip the leading roll-band glyph(s) (`▾ ▸ ▴ ▴▴ ▴▴▴`) from a

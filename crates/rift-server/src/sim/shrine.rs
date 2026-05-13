@@ -19,9 +19,11 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::Floor;
+use rift_game::kinematic::Kinematic;
 use rift_net::messages::{WorldEvent, SHRINE_CHANNEL_DURATION, SHRINE_INTERACT_RADIUS};
 use rift_net::NetId;
 
+use super::actor::{NetIdentity, Vitals};
 use super::player::ServerPlayer;
 
 /// One revive shrine sitting on the floor. Only the channel-tick
@@ -188,13 +190,13 @@ pub fn tick(world: &mut hecs::World, events: &mut Vec<WorldEvent>, dt: f32) {
         living: bool,
     }
     let players: Vec<PlayerInfo> = world
-        .query::<&ServerPlayer>()
+        .query::<(&ServerPlayer, &Vitals, &Kinematic)>()
         .iter()
-        .map(|(e, p)| PlayerInfo {
+        .map(|(e, (p, vitals, kinematic))| PlayerInfo {
             entity: e,
-            position: p.k.position,
+            position: kinematic.position,
             channeling: p.channeling_shrine,
-            living: !p.is_dead_or_ghosting(),
+            living: !p.is_dead_or_ghosting(vitals),
         })
         .collect();
 
@@ -218,13 +220,13 @@ pub fn tick(world: &mut hecs::World, events: &mut Vec<WorldEvent>, dt: f32) {
     // Re-snapshot after auto-cancel so per-shrine counts use
     // up-to-date intents.
     let players: Vec<PlayerInfo> = world
-        .query::<&ServerPlayer>()
+        .query::<(&ServerPlayer, &Vitals, &Kinematic)>()
         .iter()
-        .map(|(e, p)| PlayerInfo {
+        .map(|(e, (p, vitals, kinematic))| PlayerInfo {
             entity: e,
-            position: p.k.position,
+            position: kinematic.position,
             channeling: p.channeling_shrine,
-            living: !p.is_dead_or_ghosting(),
+            living: !p.is_dead_or_ghosting(vitals),
         })
         .collect();
 
@@ -268,24 +270,25 @@ pub fn tick(world: &mut hecs::World, events: &mut Vec<WorldEvent>, dt: f32) {
     // per completion so clients can clear ghost tint + spawn
     // VFX in one place.
     let revive_targets: Vec<NetId> = world
-        .query::<&ServerPlayer>()
+        .query::<(&ServerPlayer, &NetIdentity, &Vitals)>()
         .iter()
-        .filter(|(_, p)| p.is_dead_or_ghosting())
-        .map(|(_, p)| p.net_id)
+        .filter(|(_, (p, _identity, vitals))| p.is_dead_or_ghosting(vitals))
+        .map(|(_, (_p, identity, _vitals))| identity.net_id)
         .collect();
 
     for (_, net_id) in &completed {
         if !revive_targets.is_empty() {
             // Apply the revive: clear ghost flags + restore HP.
             let player_ents: Vec<Entity> = world
-                .query::<&ServerPlayer>()
+                .query::<(&ServerPlayer, &Vitals)>()
                 .iter()
-                .filter(|(_, p)| p.is_dead_or_ghosting())
+                .filter(|(_, (p, vitals))| p.is_dead_or_ghosting(vitals))
                 .map(|(e, _)| e)
                 .collect();
             for e in player_ents {
-                if let Ok(mut p) = world.get::<&mut ServerPlayer>(e) {
-                    p.hp = p.hp_max;
+                if let Ok((p, vitals)) = world.query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(e)
+                {
+                    vitals.fill();
                     p.is_ghost = false;
                     p.ghost_rise_timer = None;
                     p.channeling_shrine = None;

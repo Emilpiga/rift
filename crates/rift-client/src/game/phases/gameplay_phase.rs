@@ -119,7 +119,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // semantics from equip to deposit).
     crate::game::stash_system::tick(
         &state.world,
-        &state.floor_mgr,
+        &mut state.floor_mgr,
         input,
         &mut state.inventory_ui,
         &mut state.net,

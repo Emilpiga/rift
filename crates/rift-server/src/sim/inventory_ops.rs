@@ -3,8 +3,10 @@
 //! browsable. Pure `impl Sim` block — every method is already
 //! defined on `Sim` and migrated here verbatim.
 
+use rift_game::kinematic::Kinematic;
 use rift_net::ids::ClientId;
 
+use super::actor::Vitals;
 use super::player::ServerPlayer;
 use super::{
     build_bag_occupancy, footprint_fits, place_inventory_item, place_inventory_item_at,
@@ -24,7 +26,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         let Some(mut item) = p.inventory.get_mut(inventory_index).and_then(|s| s.take()) else {
@@ -89,7 +94,7 @@ impl Sim {
                 }
             }
         }
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
 
@@ -105,7 +110,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         let Some(item) = p.equipment.take(slot) else {
@@ -117,7 +125,7 @@ impl Sim {
             p.equipment.set(slot, Some(item));
             return false;
         }
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
 
@@ -271,13 +279,16 @@ impl Sim {
         inventory_index: usize,
     ) -> Option<(rift_game::loot::Item, glam::Vec3)> {
         let &entity = self.sessions.get(&client_id)?;
-        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let (p, kinematic) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &Kinematic)>(entity)
+            .ok()?;
         let item = p
             .inventory
             .get_mut(inventory_index)
             .and_then(|s| s.take())?;
         trim_trailing_none(&mut p.inventory);
-        Some((item, p.k.position))
+        Some((item, kinematic.position))
     }
 
     /// Remove the equipped item at `slot` and return it
@@ -290,10 +301,13 @@ impl Sim {
         slot: rift_game::loot::EquipSlot,
     ) -> Option<(rift_game::loot::Item, glam::Vec3)> {
         let &entity = self.sessions.get(&client_id)?;
-        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let (p, vitals, kinematic) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals, &Kinematic)>(entity)
+            .ok()?;
         let item = p.equipment.take(slot)?;
-        p.recompute_stats();
-        Some((item, p.k.position))
+        p.recompute_stats(vitals);
+        Some((item, kinematic.position))
     }
 
     /// Move whatever's currently in `slot` into the bag at
@@ -314,7 +328,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         let Some(unequipped) = p.equipment.take(slot) else {
@@ -352,7 +369,7 @@ impl Sim {
                 return false;
             }
         }
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
 
@@ -374,7 +391,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         let item_a = p.equipment.take(a);
@@ -402,7 +422,7 @@ impl Sim {
         }
         p.equipment.set(a, item_b);
         p.equipment.set(b, item_a);
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
 

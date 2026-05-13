@@ -4,9 +4,11 @@
 //! verbatim.
 
 use glam::Vec3;
+use rift_game::kinematic::Kinematic;
 use rift_net::ids::ClientId;
 use rift_net::NetId;
 
+use super::actor::{NetIdentity, Vitals};
 use super::effect;
 use super::player::ServerPlayer;
 use super::{snapshot_talents, trim_trailing_none, Sim};
@@ -41,11 +43,14 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return;
         };
-        if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) {
+        if let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        {
             p.inventory = items;
             trim_trailing_none(&mut p.inventory);
             p.equipment = equipment;
-            p.recompute_stats();
+            p.recompute_stats(vitals);
         }
     }
 
@@ -58,7 +63,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return;
         };
-        if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) {
+        if let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        {
             p.experience.level = level.max(1);
             p.experience.total_xp = total_xp;
             // Derive `current_xp` (XP into the current level)
@@ -70,8 +78,8 @@ impl Sim {
             let xp_for_levels = rift_game::experience::total_xp_for_level(p.experience.level);
             p.experience.current_xp = total_xp.saturating_sub(xp_for_levels);
             p.level = p.experience.level;
-            p.recompute_stats();
-            p.hp = p.hp_max;
+            p.recompute_stats(vitals);
+            vitals.fill();
         }
     }
 
@@ -114,8 +122,8 @@ impl Sim {
     /// of the rift sim, or vice versa).
     pub fn player_health(&self, client_id: ClientId) -> Option<(f32, f32)> {
         let &entity = self.sessions.get(&client_id)?;
-        let p = self.world.get::<&ServerPlayer>(entity).ok()?;
-        Some((p.hp, p.hp_max))
+        let vitals = self.world.get::<&Vitals>(entity).ok()?;
+        Some((vitals.hp, vitals.hp_max))
     }
 
     /// Replace the entire ability loadout for `client_id`. Used
@@ -295,15 +303,19 @@ impl Sim {
     /// from the hero config.
     pub fn spawn_player(&mut self, client_id: ClientId) -> NetId {
         if let Some(&existing) = self.sessions.get(&client_id) {
-            if let Ok(p) = self.world.get::<&ServerPlayer>(existing) {
-                return p.net_id;
+            if let Ok(identity) = self.world.get::<&NetIdentity>(existing) {
+                return identity.net_id;
             }
         }
         let net_id = NetId(self.next_player_net_id | 0x8000_0000);
         self.next_player_net_id = self.next_player_net_id.wrapping_add(1).max(1);
         let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
+        let (player, identity, vitals, kinematic) = ServerPlayer::fresh(client_id, net_id, spawn);
         let entity = self.world.spawn((
-            ServerPlayer::fresh(client_id, net_id, spawn),
+            player,
+            identity,
+            vitals,
+            kinematic,
             effect::EffectStack::default(),
         ));
         self.sessions.insert(client_id, entity);
@@ -334,14 +346,23 @@ impl Sim {
     pub fn extract_player(
         &mut self,
         client_id: ClientId,
-    ) -> Option<(ServerPlayer, effect::EffectStack)> {
+    ) -> Option<(
+        ServerPlayer,
+        NetIdentity,
+        Vitals,
+        Kinematic,
+        effect::EffectStack,
+    )> {
         let entity = self.sessions.remove(&client_id)?;
-        // `world.remove::<(A, B)>` would tear both off in one go,
+        // `world.remove::<(A, B)>` would tear multiple components off in one go,
         // but we want to be defensive about partial state
         // (EffectStack might in theory be missing): pull each
         // component independently and fall back to default for
         // the optional one.
         let player = self.world.remove_one::<ServerPlayer>(entity).ok()?;
+        let identity = self.world.remove_one::<NetIdentity>(entity).ok()?;
+        let vitals = self.world.remove_one::<Vitals>(entity).ok()?;
+        let kinematic = self.world.remove_one::<Kinematic>(entity).ok()?;
         let effects = self
             .world
             .remove_one::<effect::EffectStack>(entity)
@@ -353,7 +374,7 @@ impl Sim {
             "sim: extracted player {client_id:?} from floor {}",
             self.floor_index
         );
-        Some((player, effects))
+        Some((player, identity, vitals, kinematic, effects))
     }
 
     /// Drop a previously-extracted player into this Sim. The
@@ -366,26 +387,31 @@ impl Sim {
         &mut self,
         client_id: ClientId,
         mut player: ServerPlayer,
+        identity: NetIdentity,
+        mut vitals: Vitals,
+        mut kinematic: Kinematic,
         effects: effect::EffectStack,
     ) -> NetId {
         let spawn = Vec3::new(self.floor.spawn_pos.x, 0.0, self.floor.spawn_pos.z);
-        player.k.position = spawn;
-        player.k.velocity = Vec3::ZERO;
-        player.k.vy = 0.0;
-        player.k.airborne = false;
+        kinematic.position = spawn;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.vy = 0.0;
+        kinematic.airborne = false;
         // HP / ghost reset matches `change_floor`'s policy: hub
         // is a safe respawn point that wipes death state,
         // rift entries top up living players but leave ghosts as
         // ghosts (they joined to spectate).
         if self.floor_index == 0 {
-            player.hp = player.hp_max;
+            vitals.fill();
             player.is_ghost = false;
             player.ghost_rise_timer = None;
         } else if !player.is_ghost {
-            player.hp = player.hp_max;
+            vitals.fill();
         }
-        let net_id = player.net_id;
-        let entity = self.world.spawn((player, effects));
+        let net_id = identity.net_id;
+        let entity = self
+            .world
+            .spawn((player, identity, vitals, kinematic, effects));
         self.sessions.insert(client_id, entity);
         log::info!(
             "sim: injected player {client_id:?} ({net_id:?}) into floor {}",

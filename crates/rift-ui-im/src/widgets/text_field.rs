@@ -31,6 +31,7 @@
 //! Del moves / deletes at the OS repeat rate via
 //! `Input::key_events` and `Input::backspace_count`.
 
+use super::super::color::Color;
 use super::super::id::Id;
 use super::super::im_key::ImKey;
 use super::super::rect::{Pos2, Rect};
@@ -197,24 +198,90 @@ impl<'a> TextField<'a> {
         }
 
         // ── Draw frame ──────────────────────────────────────
-        let fill = if focused {
-            theme.colors.bg_panel_alt
+        let (edge, centre) = if focused {
+            (
+                Color::rgba(0.060, 0.044, 0.032, 0.98),
+                Color::rgba(0.215, 0.145, 0.080, 0.98),
+            )
         } else if hovered {
-            theme.colors.bg_slot_hover
+            (
+                Color::rgba(0.055, 0.048, 0.040, 0.97),
+                Color::rgba(0.175, 0.130, 0.085, 0.97),
+            )
         } else {
-            theme.colors.bg_slot
+            (
+                Color::rgba(0.045, 0.040, 0.035, 0.96),
+                Color::rgba(0.125, 0.100, 0.072, 0.96),
+            )
         };
-        let border = if focused {
-            theme.colors.border_strong
+        let mid = Color::rgba(
+            (centre.0[0] * 1.06).min(1.0),
+            (centre.0[1] * 1.06).min(1.0),
+            (centre.0[2] * 1.06).min(1.0),
+            centre.0[3],
+        );
+        let left = Rect::from_xywh(rect.x(), rect.y(), rect.width() * 0.5, rect.height());
+        let right = Rect::from_xywh(
+            rect.x() + rect.width() * 0.5,
+            rect.y(),
+            rect.width() * 0.5,
+            rect.height(),
+        );
+        ui.draw_grad4_rect(left, edge, mid, edge, centre);
+        ui.draw_grad4_rect(right, mid, edge, centre, edge);
+
+        let inset = 2.0;
+        let inner_x = rect.x() + inset;
+        let inner_w = rect.width() - inset * 2.0;
+        if inner_w > 4.0 {
+            let band_h = (rect.height() * 0.24).clamp(3.0, 10.0);
+            ui.draw_gradient_rect(
+                Rect::from_xywh(inner_x, rect.y() + 1.0, inner_w, band_h),
+                Color::rgba(1.0, 0.92, 0.72, if focused { 0.22 } else { 0.14 }),
+                Color::rgba(1.0, 0.92, 0.72, 0.01),
+            );
+
+            let shadow_h = (rect.height() * 0.28).clamp(3.0, 11.0);
+            ui.draw_gradient_rect(
+                Rect::from_xywh(inner_x, rect.max.y - shadow_h - 1.0, inner_w, shadow_h),
+                Color::rgba(0.0, 0.0, 0.0, 0.0),
+                Color::rgba(0.0, 0.0, 0.0, 0.50),
+            );
+        }
+
+        let outline_color = if focused {
+            Color::rgba(0.96, 0.62, 0.28, 0.88)
+        } else if hovered {
+            Color::rgba(0.78, 0.50, 0.25, 0.70)
         } else {
-            theme.colors.border
+            theme.colors.border_stone
         };
-        let radius = (theme.spacing.corner_radius * 0.5).max(2.0);
-        ui.draw_rounded_rect(rect, radius, fill);
-        ui.draw_rounded_outline(rect, radius, theme.spacing.border_thickness, border);
+        ui.draw_outline(rect, 1.5, outline_color);
+        ui.draw_outline(
+            Rect::from_xywh(
+                rect.x() + 1.0,
+                rect.y() + 1.0,
+                (rect.width() - 2.0).max(0.0),
+                (rect.height() - 2.0).max(0.0),
+            ),
+            1.0,
+            Color::rgba(0.94, 0.70, 0.36, if focused { 0.30 } else { 0.18 }),
+        );
+        draw_input_corner_cuts(ui, rect, if focused { 0.46 } else { 0.28 });
 
         // ── Draw text + selection + caret ───────────────────
         let inner_w = (rect.width() - pad_x * 2.0).max(0.0);
+        if focused {
+            let sel = ui.state().text_selection;
+            if sel.has_range() {
+                let (a, b) = sel.range();
+                let pre = ui.measure_text(&value[..a], text_size);
+                let mid = ui.measure_text(&value[a..b], text_size);
+                let sx = text_origin.x + pre;
+                let sel_rect = Rect::from_xywh(sx, text_origin.y - 1.0, mid, text_size + 2.0);
+                ui.draw_rect(sel_rect, Color::rgba(0.95, 0.55, 0.18, 0.34));
+            }
+        }
         if value.is_empty() {
             ui.draw_text_ellipsized(
                 text_origin,
@@ -233,15 +300,6 @@ impl<'a> TextField<'a> {
         }
         if focused {
             let sel = ui.state().text_selection;
-            // Selection highlight underneath the caret.
-            if sel.has_range() {
-                let (a, b) = sel.range();
-                let pre = ui.measure_text(&value[..a], text_size);
-                let mid = ui.measure_text(&value[a..b], text_size);
-                let sx = text_origin.x + pre;
-                let sel_rect = Rect::from_xywh(sx, text_origin.y - 1.0, mid, text_size + 2.0);
-                ui.draw_rect(sel_rect, theme.colors.accent.with_alpha(0.40));
-            }
             // Caret — solid while a selection is active so
             // the player can see the active edge clearly,
             // blinking otherwise.
@@ -270,6 +328,60 @@ impl<'a> TextField<'a> {
             focused,
         }
     }
+}
+
+fn draw_input_corner_cuts(ui: &mut Ui<'_>, rect: Rect, alpha: f32) {
+    let cut = (rect.height() * 0.23).clamp(5.0, 10.0);
+    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
+    let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.62);
+    ui.draw_line(
+        Pos2::new(rect.x() + 1.0, rect.y() + cut),
+        Pos2::new(rect.x() + cut, rect.y() + 1.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.y() + cut + 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.y() + 2.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.y() + 1.0),
+        Pos2::new(rect.max.x - 1.0, rect.y() + cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.y() + 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.y() + cut + 1.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 1.0, rect.max.y - cut),
+        Pos2::new(rect.x() + cut, rect.max.y - 1.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.max.y - cut - 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.max.y - 2.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.max.y - 1.0),
+        Pos2::new(rect.max.x - 1.0, rect.max.y - cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.max.y - 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.max.y - cut - 1.0),
+        1.0,
+        shadow,
+    );
 }
 
 // ─── Editor helpers ────────────────────────────────────────

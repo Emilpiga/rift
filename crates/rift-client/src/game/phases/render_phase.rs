@@ -260,6 +260,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
         storm.tick(renderer, dt);
     }
+    state.floor_mgr.props.tick(renderer, dt);
     // Rift-floor void embers: re-anchor every frame ~10 m
     // below the player so the field of glowing motes
     // continuously spawns under whatever room the player is

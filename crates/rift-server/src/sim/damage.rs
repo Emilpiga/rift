@@ -3,10 +3,12 @@
 //! `step()` borrow split keeps working — caller passes the
 //! disjoint mutable references in.
 
+use rift_game::kinematic::Kinematic;
 use rift_net::ids::ClientId;
 use rift_net::messages::WorldEvent;
 use rift_net::{NetId, NetTick};
 
+use super::actor::{NetIdentity, Vitals};
 use super::player::{self, ServerPlayer};
 use super::{combat_ctx, meters, procs, projectile, GHOST_RISE_DELAY};
 
@@ -71,9 +73,18 @@ pub(super) fn apply_player_damage(
             let Ok(p) = world.get::<&ServerPlayer>(player_entity) else {
                 continue;
             };
-            if p.hp <= 0.0 {
+            let Ok(vitals) = world.get::<&Vitals>(player_entity) else {
+                continue;
+            };
+            if vitals.is_dead() {
                 continue;
             }
+            let Ok(identity) = world.get::<&NetIdentity>(player_entity) else {
+                continue;
+            };
+            let Ok(kinematic) = world.get::<&Kinematic>(player_entity) else {
+                continue;
+            };
             let dodge_procs: Vec<rift_game::loot::ability_mods::Proc> =
                 p.ability_mods.procs.iter().copied().collect();
             (
@@ -81,8 +92,8 @@ pub(super) fn apply_player_damage(
                 p.stats.armor_damage_reduction(p.level),
                 p.stats.incoming_resist_mult(element),
                 dodge_procs,
-                p.k.position,
-                p.net_id,
+                kinematic.position,
+                identity.net_id,
                 p.client_id,
             )
         };
@@ -134,17 +145,19 @@ pub(super) fn apply_player_damage(
         let mitigated = amount * (1.0 - armor_dr) * resist_mult;
 
         let (was_low_hp_armed, hp_before, hp_after, died) = {
-            let Ok(mut p) = world.get::<&mut ServerPlayer>(player_entity) else {
+            let Ok((p, vitals)) =
+                world.query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(player_entity)
+            else {
                 continue;
             };
-            if p.hp <= 0.0 {
+            if vitals.is_dead() {
                 continue;
             }
-            let was_alive = p.hp > 0.0;
-            let before = p.hp;
-            p.hp = (p.hp - mitigated).max(0.0);
-            let after = p.hp;
-            let died = was_alive && p.hp <= 0.0;
+            let was_alive = !vitals.is_dead();
+            let before = vitals.hp;
+            vitals.damage(mitigated);
+            let after = vitals.hp;
+            let died = was_alive && vitals.is_dead();
             if died {
                 p.is_ghost = false;
                 p.ghost_rise_timer = Some(GHOST_RISE_DELAY);
@@ -156,9 +169,9 @@ pub(super) fn apply_player_damage(
             // `LOW_HP_PROC_REARM`.
             let was_armed = p.low_hp_proc_armed;
             if was_armed
-                && p.hp_max > 0.0
-                && before / p.hp_max >= player::LOW_HP_PROC_THRESHOLD
-                && after / p.hp_max < player::LOW_HP_PROC_THRESHOLD
+                && vitals.hp_max > 0.0
+                && before / vitals.hp_max >= player::LOW_HP_PROC_THRESHOLD
+                && after / vitals.hp_max < player::LOW_HP_PROC_THRESHOLD
             {
                 p.low_hp_proc_armed = false;
             }

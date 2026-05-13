@@ -35,13 +35,13 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // and paused effectively when the window loses focus —
     // both would lie about real frame rate.
     let now = Instant::now();
-    let smoothed_fps = FPS_LAST.with(|cell| {
+    let (smoothed_fps, ui_dt) = FPS_LAST.with(|cell| {
         let last = cell.replace(Some(now));
         match last {
             Some(prev) => {
                 let dt = now.duration_since(prev).as_secs_f32().max(1e-4);
                 let inst_fps = 1.0 / dt;
-                FPS_EMA.with(|e| {
+                let smoothed = FPS_EMA.with(|e| {
                     // Exponential moving average with ~0.5 s
                     // time constant — fast enough to react to
                     // hitches, slow enough not to flicker.
@@ -50,9 +50,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                     let new_ema = prev_ema * (1.0 - alpha) + inst_fps * alpha;
                     e.set(new_ema);
                     new_ema
-                })
+                });
+                (smoothed, dt)
             }
-            None => 60.0,
+            None => (60.0, 1.0 / 60.0),
         }
     });
 
@@ -110,7 +111,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // itself on Escape would flip `open` to false mid-frame
     // and the host would then mis-read the state as "no
     // modal open" and pop the pause menu.
-    let pre_spellbook_open = state.spellbook.open;
+    let pre_spellbook_open = state.spellbook.open();
     let pre_inventory_open = state.inventory_ui.open && !state.loot.stash_session;
     let pre_talents_open = state.talents_panel.open;
     // Clear last frame's HUD click-swallow rects before any
@@ -125,6 +126,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &state.world,
         &state.rift,
         &state.player_state,
+        ui_dt,
         state.frame.level_up_flash,
         state.floor.in_hub,
     );
@@ -196,10 +198,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
             ui.draw_rounded_outline(btn_rect, 6.0, 2.0, Color::rgba(0.92, 0.78, 0.32, 0.55));
         }
     }
-    hud::render_enemy_health_bars(&mut ui, &state.world, view_proj);
+    hud::render_enemy_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     if !state.floor.in_hub {
         hud::render_boss_arrow(&mut ui, &state.world, view_proj);
-        hud::render_remote_player_health_bars(&mut ui, &state.world, view_proj);
+        hud::render_remote_player_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     }
     // Alt-hold loot nameplates. Drawn after world HP bars so
     // labels sort on top, before the minimap / inventory so an
@@ -210,10 +212,19 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         view_proj,
         &mut state.frame.hud_consume_rects,
     );
+    let (minimap_zone_title, minimap_zone_detail) = if state.floor.in_hub {
+        ("HUB", String::from("SANCTUARY"))
+    } else {
+        ("RIFT", format!("LEVEL {}", state.rift.floor))
+    };
     hud::render_minimap(
         &mut ui,
         &state.world,
         &state.floor_mgr.nav_grid,
+        state.floor_mgr.dungeon.as_ref(),
+        &mut state.floor_mgr.minimap_seen,
+        minimap_zone_title,
+        &minimap_zone_detail,
         player_facing,
         hub_portal_pos,
     );
@@ -262,10 +273,10 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                 slot_index,
                 ability_id,
             } => {
-                state
-                    .net
-                    .pending_loadout_changes
-                    .push((slot_index, ability_id));
+                state.net.pending_loadout_changes.push((
+                    slot_index,
+                    rift_game::abilities::AbilityWireId::new(ability_id),
+                ));
             }
         }
     }

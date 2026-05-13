@@ -225,6 +225,34 @@ impl ParticleVfxRenderer {
         Ok(())
     }
 
+    pub fn reload_pipeline(
+        &mut self,
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
+        shader_dir: &std::path::Path,
+    ) -> Result<()> {
+        let (pipeline_alpha, pipeline_additive, pipeline_layout) = Self::create_pipelines(
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layout,
+            translucent_set_layout,
+            shader_dir,
+        )?;
+        unsafe {
+            device.destroy_pipeline(self.pipeline_alpha, None);
+            device.destroy_pipeline(self.pipeline_additive, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+        self.pipeline_alpha = pipeline_alpha;
+        self.pipeline_additive = pipeline_additive;
+        self.pipeline_layout = pipeline_layout;
+        Ok(())
+    }
+
     fn create_pipelines(
         device: &ash::Device,
         render_pass: vk::RenderPass,

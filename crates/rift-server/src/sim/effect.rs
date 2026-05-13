@@ -14,11 +14,13 @@
 use hecs::Entity;
 use rift_game::abilities::AbilityWireId;
 use rift_game::effects::{lookup, EffectDef, EffectKind};
+use rift_game::kinematic::Kinematic;
 use rift_net::{
     messages::{ActiveEffect, WorldEvent},
     NetId,
 };
 
+use super::actor::{NetIdentity, Vitals};
 use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 
@@ -212,12 +214,18 @@ pub fn tick(
 ) -> Vec<super::combat_ctx::PlayerHit> {
     let mut hits: Vec<DotHit> = Vec::new();
     let mut dead: Vec<(Entity, NetId, glam::Vec3)> = Vec::new();
-    for (entity, (en, stack)) in world.query_mut::<(&mut ServerEnemy, &mut EffectStack)>() {
+    for (entity, (en, identity, vitals, kinematic, stack)) in world.query_mut::<(
+        &mut ServerEnemy,
+        &NetIdentity,
+        &mut Vitals,
+        &Kinematic,
+        &mut EffectStack,
+    )>() {
         if en.is_dying() {
             continue;
         }
-        let pos = en.k.position;
-        let net_id = en.net_id;
+        let pos = kinematic.position;
+        let net_id = identity.net_id;
         // Walk in reverse so swap_remove is safe.
         let mut i = stack.active.len();
         while i > 0 {
@@ -237,7 +245,7 @@ pub fn tick(
         // helper here (the borrow extends through the loop body),
         // so just inline the simple case.
         for hit in hits.drain(..).filter(|h| h.target == entity) {
-            en.hp = (en.hp - hit.damage).max(0.0);
+            vitals.damage(hit.damage);
             ctx.events.push(WorldEvent::Damage {
                 target: hit.target_net_id,
                 amount: hit.damage,
@@ -257,7 +265,7 @@ pub fn tick(
                         amount: hit.damage,
                     });
             }
-            if en.hp <= 0.0 {
+            if vitals.is_dead() {
                 dead.push((hit.target, hit.target_net_id, glam::Vec3::ZERO));
                 break;
             }
@@ -271,12 +279,18 @@ pub fn tick(
     // respawn / party-wipe stays single-source.
     let mut player_damage: Vec<super::combat_ctx::PlayerHit> = Vec::new();
     let mut heals: Vec<HotHit> = Vec::new();
-    for (entity, (p, stack)) in world.query_mut::<(&mut ServerPlayer, &mut EffectStack)>() {
-        if p.hp <= 0.0 {
+    for (entity, (p, identity, vitals, kinematic, stack)) in world.query_mut::<(
+        &ServerPlayer,
+        &NetIdentity,
+        &mut Vitals,
+        &Kinematic,
+        &mut EffectStack,
+    )>() {
+        if vitals.is_dead() {
             continue;
         }
-        let pos = p.k.position;
-        let net_id = p.net_id;
+        let pos = kinematic.position;
+        let net_id = identity.net_id;
         let mut i = stack.active.len();
         while i > 0 {
             i -= 1;
@@ -316,9 +330,7 @@ pub fn tick(
             // the *effective* (non-overheal) portion to the
             // caster's HPS row, matching how direct heals are
             // booked in `Sim::handle_cast_request`.
-            let before = p.hp;
-            p.hp = (p.hp + amount).min(p.hp_max);
-            let effective = p.hp - before;
+            let effective = vitals.heal(amount);
             ctx.events.push(WorldEvent::Heal {
                 // No caster tracking on debuff instances yet —
                 // self-attribute the tick to the target. Visuals

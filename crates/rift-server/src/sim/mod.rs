@@ -23,6 +23,7 @@ use rift_net::{
 
 pub mod ability;
 pub mod ability_ops;
+pub mod actor;
 pub mod channel;
 pub mod combat_ctx;
 pub mod damage;
@@ -46,6 +47,7 @@ pub mod transforms;
 pub mod vote;
 pub mod voting_ops;
 
+pub use actor::{NetIdentity, Vitals};
 pub use player::ServerPlayer;
 pub use player::StashTab;
 pub use projectile::ServerAoeZone;
@@ -620,9 +622,9 @@ impl Sim {
         }
         let mut total = 0usize;
         let mut dead = 0usize;
-        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
+        for (_e, (_p, vitals)) in self.world.query::<(&ServerPlayer, &Vitals)>().iter() {
             total += 1;
-            if p.hp <= 0.0 {
+            if vitals.is_dead() {
                 dead += 1;
             }
         }
@@ -645,8 +647,8 @@ impl Sim {
     /// `EquipmentSync` and persist the new (empty) bag.
     pub fn wipe_dead_loot(&mut self) -> Vec<ClientId> {
         let mut affected: Vec<ClientId> = Vec::new();
-        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
-            if p.hp > 0.0 {
+        for (_e, (p, vitals)) in self.world.query_mut::<(&mut ServerPlayer, &mut Vitals)>() {
+            if !vitals.is_dead() {
                 continue;
             }
             // Anchored items survive every wipe path. Filter
@@ -684,7 +686,7 @@ impl Sim {
                     }
                 }
             }
-            p.recompute_stats();
+            p.recompute_stats(vitals);
             affected.push(p.client_id);
         }
         if !affected.is_empty() {
@@ -713,8 +715,8 @@ impl Sim {
     /// now-stable bag once they're back on the hub sim.
     pub fn stabilize_inventory(&mut self) -> Vec<ClientId> {
         let mut affected: Vec<ClientId> = Vec::new();
-        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
-            if p.hp <= 0.0 {
+        for (_e, (p, vitals)) in self.world.query_mut::<(&mut ServerPlayer, &Vitals)>() {
+            if vitals.is_dead() {
                 continue;
             }
             let mut touched = false;
@@ -763,7 +765,7 @@ impl Sim {
     #[allow(dead_code)]
     pub fn strip_unstable_loot(&mut self) -> Vec<ClientId> {
         let mut affected: Vec<ClientId> = Vec::new();
-        for (_e, p) in self.world.query_mut::<&mut ServerPlayer>() {
+        for (_e, (p, vitals)) in self.world.query_mut::<(&mut ServerPlayer, &mut Vitals)>() {
             let before_bag = p.inventory.iter().filter(|s| s.is_some()).count();
             let mut kept: Vec<Option<rift_game::loot::Item>> = Vec::new();
             for slot in p.inventory.drain(..) {
@@ -792,7 +794,7 @@ impl Sim {
                 }
             }
             if before_bag != after_bag || equip_lost > 0 {
-                p.recompute_stats();
+                p.recompute_stats(vitals);
                 affected.push(p.client_id);
             }
         }

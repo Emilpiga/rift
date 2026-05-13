@@ -601,6 +601,12 @@ pub enum SpriteShape {
     /// the beam must read as a sharp HD highlight at close
     /// range while still feeling ethereal at distance.
     SilkStrand = 7,
+    /// Ground-aligned fractured disc — a procedural impact decal
+    /// drawn flat on the XZ plane instead of camera-facing. The
+    /// fragment mask combines broken radial fissures, chipped ring
+    /// fragments, and noisy scorched fill so large slam/meteor
+    /// impacts read as damage in the world rather than UI rings.
+    GroundCrack = 8,
 }
 
 impl Default for SpriteShape {

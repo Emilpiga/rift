@@ -9,6 +9,7 @@ use rift_net::ids::ClientId;
 use rift_net::messages::VoteChoice;
 use rift_net::NetId;
 
+use super::actor::{NetIdentity, Vitals};
 use super::player::ServerPlayer;
 use super::{vote, ExitVoteRequest, Sim};
 
@@ -51,11 +52,13 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return ExitVoteRequest::Refused;
         };
-        let initiator_alive = self
-            .world
-            .get::<&ServerPlayer>(entity)
-            .map(|p| p.hp > 0.0 && !p.is_ghost)
-            .unwrap_or(false);
+        let initiator_alive = match (
+            self.world.get::<&ServerPlayer>(entity),
+            self.world.get::<&Vitals>(entity),
+        ) {
+            (Ok(p), Ok(vitals)) => !vitals.is_dead() && !p.is_ghost,
+            _ => false,
+        };
         // Down-pose (dead pre-rise) and ghosts are both refused.
         // Only living teammates can open or cast on a vote.
         if !initiator_alive {
@@ -65,13 +68,17 @@ impl Sim {
         // we're solo or party. Ghosts are never voters.
         let mut roll: HashMap<NetId, VoteChoice> = HashMap::new();
         let mut initiator_net_id: Option<NetId> = None;
-        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
-            if p.hp <= 0.0 {
+        for (_e, (p, identity, vitals)) in self
+            .world
+            .query::<(&ServerPlayer, &NetIdentity, &Vitals)>()
+            .iter()
+        {
+            if vitals.is_dead() {
                 continue;
             }
-            roll.insert(p.net_id, VoteChoice::Pending);
+            roll.insert(identity.net_id, VoteChoice::Pending);
             if p.client_id == client_id {
-                initiator_net_id = Some(p.net_id);
+                initiator_net_id = Some(identity.net_id);
             }
         }
         // Solo: alive caller is the only living player.
@@ -117,23 +124,29 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return ExitVoteRequest::Refused;
         };
-        let initiator_alive = self
-            .world
-            .get::<&ServerPlayer>(entity)
-            .map(|p| p.hp > 0.0 && !p.is_ghost)
-            .unwrap_or(false);
+        let initiator_alive = match (
+            self.world.get::<&ServerPlayer>(entity),
+            self.world.get::<&Vitals>(entity),
+        ) {
+            (Ok(p), Ok(vitals)) => !vitals.is_dead() && !p.is_ghost,
+            _ => false,
+        };
         if !initiator_alive {
             return ExitVoteRequest::Refused;
         }
         let mut roll: HashMap<NetId, VoteChoice> = HashMap::new();
         let mut initiator_net_id: Option<NetId> = None;
-        for (_e, p) in self.world.query::<&ServerPlayer>().iter() {
-            if p.hp <= 0.0 {
+        for (_e, (p, identity, vitals)) in self
+            .world
+            .query::<(&ServerPlayer, &NetIdentity, &Vitals)>()
+            .iter()
+        {
+            if vitals.is_dead() {
                 continue;
             }
-            roll.insert(p.net_id, VoteChoice::Pending);
+            roll.insert(identity.net_id, VoteChoice::Pending);
             if p.client_id == client_id {
-                initiator_net_id = Some(p.net_id);
+                initiator_net_id = Some(identity.net_id);
             }
         }
         if roll.len() <= 1 {
@@ -171,9 +184,9 @@ impl Sim {
         };
         let Some(net_id) = self
             .world
-            .get::<&ServerPlayer>(entity)
+            .get::<&NetIdentity>(entity)
             .ok()
-            .map(|p| p.net_id)
+            .map(|identity| identity.net_id)
         else {
             return;
         };

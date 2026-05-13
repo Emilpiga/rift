@@ -32,7 +32,7 @@ pub const INTERACT_RADIUS: f32 = 1.8;
 #[allow(clippy::too_many_arguments)]
 pub fn tick(
     world: &hecs::World,
-    floor_mgr: &FloorManager,
+    floor_mgr: &mut FloorManager,
     input: &Input,
     mp_inventory_ui: &mut InventoryUiState,
     net: &mut NetState,
@@ -50,6 +50,7 @@ pub fn tick(
         if loot.stash_session {
             loot.stash_session = false;
             mp_inventory_ui.open = false;
+            floor_mgr.props.set_stash_chest_local_open(false);
             net.stash_session_requests.push(false);
         }
         let _ = audio;
@@ -74,6 +75,9 @@ pub fn tick(
         if input.key_just_pressed(KeyCode::KeyF) {
             loot.stash_session = !loot.stash_session;
             mp_inventory_ui.open = loot.stash_session;
+            floor_mgr
+                .props
+                .set_stash_chest_local_open(loot.stash_session);
             net.stash_session_requests.push(loot.stash_session);
             if loot.stash_session {
                 log::info!("stash: opening");
@@ -95,6 +99,7 @@ pub fn tick(
         log::info!("stash: out of range, auto-closing");
         loot.stash_session = false;
         mp_inventory_ui.open = false;
+        floor_mgr.props.set_stash_chest_local_open(false);
         loot.stash_tabs.clear();
         net.stash_session_requests.push(false);
         if let Some(audio) = audio {

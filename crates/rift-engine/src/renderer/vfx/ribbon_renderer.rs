@@ -344,6 +344,32 @@ impl RibbonRenderer {
         Ok((pipeline, pipeline_layout))
     }
 
+    pub fn reload_pipeline(
+        &mut self,
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        translucent_set_layout: vk::DescriptorSetLayout,
+        shader_dir: &std::path::Path,
+    ) -> Result<()> {
+        let (pipeline, pipeline_layout) = Self::create_pipeline(
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layout,
+            translucent_set_layout,
+            shader_dir,
+        )?;
+        unsafe {
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+        self.pipeline = pipeline;
+        self.pipeline_layout = pipeline_layout;
+        Ok(())
+    }
+
     pub fn cleanup(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
         for slot in self.instance_buffers.iter_mut() {
             if let Some(mut buf) = slot.take() {

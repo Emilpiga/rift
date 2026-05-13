@@ -7,6 +7,7 @@
 //! (pickup or equip); player drops preserve / self-bind
 //! provenance.
 use super::*;
+use rift_game::kinematic::Kinematic;
 use rift_game::loot::{Item, LootProvenance, LootRng, Rarity, BASE_ITEMS};
 use rift_net::messages::PickupRejectReason;
 
@@ -37,12 +38,15 @@ fn setup_party(n: u64, level: u32, tick: u32) -> (Sim, Vec<rift_net::ids::Client
         let c = cid(raw);
         let _ = sim.spawn_player(c);
         let entity = *sim.sessions.get(&c).expect("session registered");
-        let mut p = sim.world.get::<&mut ServerPlayer>(entity).unwrap();
+        let (p, kinematic) = sim
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Kinematic)>(entity)
+            .unwrap();
         p.level = level;
         p.character_id = Some(char_uuid(raw));
         // Stack everyone on the floor's spawn so PICKUP_RANGE
         // is satisfied for every test pickup.
-        p.k.position = sim.floor.spawn_pos;
+        kinematic.position = sim.floor.spawn_pos;
         clients.push(c);
     }
     (sim, clients)
@@ -182,10 +186,13 @@ fn ineligible_peer_blocked_during_window() {
     let _ = sim.spawn_player(latecomer);
     {
         let entity = *sim.sessions.get(&latecomer).unwrap();
-        let mut p = sim.world.get::<&mut ServerPlayer>(entity).unwrap();
+        let (p, kinematic) = sim
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Kinematic)>(entity)
+            .unwrap();
         p.level = 50;
         p.character_id = Some(char_uuid(99));
-        p.k.position = sim.floor.spawn_pos;
+        kinematic.position = sim.floor.spawn_pos;
     }
 
     let result = sim.try_pickup_loot(latecomer, net_id);
@@ -211,10 +218,13 @@ fn ineligible_peer_can_pick_up_after_window_expires() {
     let _ = sim.spawn_player(latecomer);
     {
         let entity = *sim.sessions.get(&latecomer).unwrap();
-        let mut p = sim.world.get::<&mut ServerPlayer>(entity).unwrap();
+        let (p, kinematic) = sim
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Kinematic)>(entity)
+            .unwrap();
         p.level = 50;
         p.character_id = Some(char_uuid(99));
-        p.k.position = sim.floor.spawn_pos;
+        kinematic.position = sim.floor.spawn_pos;
     }
 
     sim.current_tick = NetTick(SHARE_WINDOW_TICKS + 1);

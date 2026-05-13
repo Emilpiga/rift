@@ -828,10 +828,9 @@ pub enum AbilityKind {
         windup: f32,
     },
     /// Player melee swing — a short forward arc resolved server-side
-    /// on the cast tick. Every enemy whose XZ position lies within
-    /// `radius` of the caster AND whose bearing from the caster is
-    /// inside the half-`arc_radians` cone around the aim direction
-    /// takes the ability's scaled damage exactly once. There is no
+    /// on the cast tick. Every enemy whose XZ hit disc overlaps the
+    /// `radius` reach and half-`arc_radians` cone around the aim
+    /// direction takes the ability's scaled damage exactly once. There is no
     /// projectile or persistent zone; the caster is locked into the
     /// `Attack` action for the registry-authored duration so the
     /// swing animation can play. Authored on Sword / Dagger LMB.
@@ -914,7 +913,7 @@ pub static REGISTRY: &[Ability] = &[
         description: "Launch a fiery projectile at the target.",
         icon: Some("FireMage_12"),
         cooldown: 0.5,
-        resource_cost: 0.0,
+        resource_cost: 12.0,
         channel_cost_per_sec: 0.0,
         base_damage: 8.0,
         damage_mult: 1.0,
@@ -941,7 +940,9 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        effects: &[AbilityEffect::SpawnProjectiles {
+            spawn_offset: SpawnOffset::HAND,
+        }],
         audio: AbilityAudio {
             cast: Some("vfx/abilities/fireball/fireball_cast.mp3"),
             travel: Some("vfx/abilities/fireball/fireball_travel.mp3"),
@@ -982,7 +983,9 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        effects: &[AbilityEffect::SpawnProjectiles {
+            spawn_offset: SpawnOffset::HAND,
+        }],
         audio: AbilityAudio::SILENT,
     },
     Ability {
@@ -1019,7 +1022,9 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.6,
             },
         },
-        effects: &[AbilityEffect::SpawnProjectiles { spawn_offset: SpawnOffset::HAND }],
+        effects: &[AbilityEffect::SpawnProjectiles {
+            spawn_offset: SpawnOffset::HAND,
+        }],
         audio: AbilityAudio::SILENT,
     },
     Ability {
@@ -1052,7 +1057,10 @@ pub static REGISTRY: &[Ability] = &[
                 visual_y: 5.0,
             },
         },
-        effects: &[AbilityEffect::SpawnAoeZone { visual: Some(VfxKind::RainOfFire), visual_y: 5.0 }],
+        effects: &[AbilityEffect::SpawnAoeZone {
+            visual: Some(VfxKind::RainOfFire),
+            visual_y: 5.0,
+        }],
         audio: AbilityAudio::SILENT,
     },
     Ability {
@@ -1272,13 +1280,13 @@ pub static REGISTRY: &[Ability] = &[
         wire_id: id::PUNCH,
         name: "Punch",
         description: "A quick bare-handed jab. Always available.",
-        icon: None,
-        cooldown: 0.35,
+        icon: Some("Barbarian_3"),
+        cooldown: 0.75,
         resource_cost: 0.0,
         channel_cost_per_sec: 0.0,
         base_damage: 4.0,
         damage_mult: 1.0,
-        range: 1.8,
+        range: 2.05,
         // `unlock_level: 0` flags this as never-gated. Loadout
         // slot 0 unlocks at level 1 so the player can use
         // Punch from frame one.
@@ -1288,10 +1296,12 @@ pub static REGISTRY: &[Ability] = &[
         scaling: Scaling::Weapon,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::MeleeArc {
-            radius: 1.8,
-            // Narrower than Sword Slash — a fist has less reach
-            // and less arc. ~90°.
-            arc_radians: 1.571,
+            radius: 2.05,
+            // Still tighter than Sword Slash, but forgiving
+            // enough that a bare-handed starter hit can clip
+            // visible enemy bodies instead of demanding a
+            // centre-point aim. ~108°.
+            arc_radians: 1.885,
         },
         visuals: AbilityVisuals::NONE,
         effects: &[],
@@ -1420,7 +1430,9 @@ pub static REGISTRY: &[Ability] = &[
             cancel_on_move: false,
         },
         visuals: AbilityVisuals {
-            cast_spark: Some(VfxKind::CastSpark { rgb: [3.5, 1.4, 0.4] }),
+            cast_spark: Some(VfxKind::CastSpark {
+                rgb: [3.5, 1.4, 0.4],
+            }),
             shape: ShapeVisuals::Aura {
                 effect: VfxKind::FireWave,
             },
@@ -1462,7 +1474,9 @@ pub static REGISTRY: &[Ability] = &[
         targeting: TargetingMode::TargetEntity,
         kind: AbilityKind::HealTarget { amount: 40.0 },
         visuals: AbilityVisuals {
-            cast_spark: Some(VfxKind::CastSpark { rgb: [1.6, 2.4, 1.2] }),
+            cast_spark: Some(VfxKind::CastSpark {
+                rgb: [1.6, 2.4, 1.2],
+            }),
             shape: ShapeVisuals::None,
         },
         // Heal cast emits a one-shot HealBurst on the target;
@@ -1491,7 +1505,9 @@ pub static REGISTRY: &[Ability] = &[
             apply_buff: crate::effects::id::REJUVENATION,
         },
         visuals: AbilityVisuals {
-            cast_spark: Some(VfxKind::CastSpark { rgb: [1.4, 2.6, 1.6] }),
+            cast_spark: Some(VfxKind::CastSpark {
+                rgb: [1.4, 2.6, 1.6],
+            }),
             shape: ShapeVisuals::None,
         },
         effects: &[],
@@ -1558,10 +1574,10 @@ pub static REGISTRY: &[Ability] = &[
         name: "Arcane Fan",
         description: "",
         icon: None,
-        cooldown: 5.0,
+        cooldown: 4.0,
         resource_cost: 0.0,
         channel_cost_per_sec: 0.0,
-        base_damage: 9.0,
+        base_damage: 10.0,
         damage_mult: 1.0,
         range: 14.0 * 1.5,
         unlock_level: 0,
@@ -1570,11 +1586,11 @@ pub static REGISTRY: &[Ability] = &[
         scaling: Scaling::None,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::EnemyProjectiles {
-            count: 5,
-            spread: 0.7,
-            speed: 14.0,
-            ttl: 1.5,
-            windup: 0.8,
+            count: 7,
+            spread: 0.95,
+            speed: 16.0,
+            ttl: 1.8,
+            windup: 0.7,
             size: 0.45,
             apply_debuff: None,
         },
@@ -1601,20 +1617,20 @@ pub static REGISTRY: &[Ability] = &[
         name: "Ground Slam",
         description: "",
         icon: None,
-        cooldown: 4.0,
+        cooldown: 3.2,
         resource_cost: 0.0,
         channel_cost_per_sec: 0.0,
-        base_damage: 28.0,
+        base_damage: 32.0,
         damage_mult: 1.0,
-        range: 4.0,
+        range: 4.6,
         unlock_level: 0,
         element: Element::Physical,
         archetype: Archetype::Aoe,
         scaling: Scaling::None,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::DelayedAoe {
-            radius: 4.0,
-            windup: 1.0,
+            radius: 4.6,
+            windup: 0.85,
         },
         visuals: AbilityVisuals {
             cast_spark: None,
@@ -1631,7 +1647,7 @@ pub static REGISTRY: &[Ability] = &[
         name: "Summon Brutes",
         description: "",
         icon: None,
-        cooldown: 12.0,
+        cooldown: 10.0,
         resource_cost: 0.0,
         channel_cost_per_sec: 0.0,
         base_damage: 0.0,
@@ -1643,11 +1659,11 @@ pub static REGISTRY: &[Ability] = &[
         scaling: Scaling::None,
         targeting: TargetingMode::Instant,
         kind: AbilityKind::Summon {
-            count: 3,
+            count: 4,
             role: crate::monsters::MonsterRole::Brute,
-            hp_mult: 1.5,
-            ring_radius: 3.0,
-            windup: 1.2,
+            hp_mult: 1.2,
+            ring_radius: 4.2,
+            windup: 1.0,
         },
         visuals: AbilityVisuals {
             cast_spark: None,

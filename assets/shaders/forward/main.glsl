@@ -131,9 +131,11 @@ void main() {
     // the rift retains presence in the haze rather than
     // dissolving into the fog colour.
     float dist = length(ubo.fogOrigin.xyz - fragWorldPos);
-    float fogFactor = clamp((dist - ubo.fogParams.x) / (ubo.fogParams.y - ubo.fogParams.x), 0.0, 1.0);
+    float fogRaw = clamp((dist - ubo.fogParams.x) / (ubo.fogParams.y - ubo.fogParams.x), 0.0, 1.0);
+    float fogFactor = fogRaw;
     fogFactor = fogFactor * fogFactor;
     if (useRift) fogFactor *= 0.35;
+
     vec3 finalColor = mix(lighting, ubo.fogColor.rgb, fogFactor);
 
     outColor = vec4(finalColor * push.tint.rgb, push.tint.a);

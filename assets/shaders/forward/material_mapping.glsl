@@ -90,8 +90,29 @@ vec2 parallaxOffset(vec2 uv, vec3 viewTS, float scale) {
     vec2 prevUV = currentUV + deltaUV;
     float afterDepth = currentSampled - currentDepth;
     float beforeDepth = (1.0 - texture(heightMap, prevUV).r) - currentDepth + layerDepth;
-    float weight = afterDepth / (afterDepth - beforeDepth);
+    float denom = afterDepth - beforeDepth;
+    float weight = abs(denom) > 1e-5 ? clamp(afterDepth / denom, 0.0, 1.0) : 0.0;
     return mix(currentUV, prevUV, weight);
+}
+
+void applyHeightMaterialDetail(
+    vec2 uv,
+    float scale,
+    inout vec3 albedo,
+    inout float roughness,
+    inout float ao
+) {
+    float relief = smoothstep(0.004, 0.025, max(scale, 0.0));
+    float h = texture(heightMap, uv).r;
+
+    float cavity = (1.0 - smoothstep(0.22, 0.50, h)) * relief;
+    float ridge = smoothstep(0.56, 0.88, h) * relief;
+    float edge = smoothstep(0.015, 0.070, length(vec2(dFdx(h), dFdy(h)))) * relief;
+    float crevice = clamp(cavity + edge * 0.35, 0.0, 1.0);
+
+    albedo *= mix(1.0, 0.86, crevice);
+    ao *= mix(1.0, 0.78, crevice);
+    roughness = clamp(roughness + crevice * 0.10 - ridge * 0.025, 0.045, 1.0);
 }
 
 // Parallax self-shadowing was removed: the visual gain from

@@ -89,50 +89,32 @@ impl Theme {
 }
 
 impl Theme {
-    /// Default dark palette. Modern dark-slate aesthetic with a
-    /// cool blue-violet undertone and an indigo accent — same
-    /// family as Linear / Vercel / modern Discord redesigns.
-    /// Hairline borders + larger corner radius so panels read
-    /// as soft "cards" rather than boxy gray rectangles.
+    /// Default dark palette. Warm carved-stone surfaces with
+    /// bronze focus/hover chrome. Shared widgets should read
+    /// as forged ARPG UI, not modern rounded slate cards.
     pub const DARK: Theme = Theme {
         colors: Colors {
-            // Surface stack: each step is a small lift in
-            // luminance, all sharing the same cool tint so
-            // nesting reads as depth instead of "different
-            // colour". Alphas stay high (panels are opaque)
-            // because the drop-shadow now carries the floating
-            // feel.
-            bg_panel: Color::rgba8(15, 17, 23, 245), // base card
-            bg_panel_alt: Color::rgba8(22, 25, 33, 245), // raised section / sub-panel
-            bg_slot: Color::rgba8(30, 34, 44, 235),  // recessed (input, slot)
-            bg_slot_hover: Color::rgba8(46, 52, 70, 240), // recessed + hover
-            // Hairline borders — low-alpha cool gray so they
-            // separate surfaces without screaming. Strong
-            // variant uses the accent so focus / hover rings
-            // read clearly against the muted base.
-            border: Color::rgba8(70, 78, 100, 90),
-            border_strong: Color::rgba8(140, 130, 255, 200),
+            // Surface stack: warm near-black stone with a
+            // bronze lift for recessed/hovered controls.
+            bg_panel: Color::rgba8(24, 22, 20, 245),
+            bg_panel_alt: Color::rgba8(34, 30, 25, 245),
+            bg_slot: Color::rgba8(18, 15, 12, 235),
+            bg_slot_hover: Color::rgba8(46, 34, 22, 240),
+            border: Color::rgba8(88, 68, 42, 120),
+            border_strong: Color::rgba8(230, 148, 62, 210),
             text: Color::rgba8(232, 234, 245, 255),
-            text_dim: Color::rgba8(168, 172, 190, 255),
-            text_muted: Color::rgba8(112, 118, 138, 255),
-            // Indigo accent — modern, distinct from "system
-            // blue", reads as deliberate brand colour rather
-            // than default-Windows.
-            accent: Color::rgba8(140, 130, 255, 255),
+            text_dim: Color::rgba8(186, 174, 150, 255),
+            text_muted: Color::rgba8(132, 118, 94, 255),
+            accent: Color::rgba8(218, 145, 64, 255),
             success: Color::rgba8(86, 211, 146, 255),
             warning: Color::rgba8(245, 184, 92, 255),
             danger: Color::rgba8(244, 96, 108, 255),
-            // Soft, slightly cool shadow. Frame::show layers
-            // 3 expanding copies of this for a believable
-            // ambient drop-shadow.
-            shadow: Color::rgba8(0, 0, 8, 90),
+            shadow: Color::rgba8(0, 0, 0, 100),
 
             // ── Stone palette ────────────────────────────
             // Floating panels that should read as carved
-            // stone (character-select roster, hub kiosks).
-            // Same cool tint as `bg_panel` but warmer and a
-            // touch lighter so a stone panel pops against a
-            // dark scene.
+            // stone (character-select roster, hub kiosks,
+            // inventory drawers).
             bg_stone: Color::rgba8(46, 44, 42, 245),
             bg_stone_alt: Color::rgba8(58, 55, 52, 245),
             border_stone: Color::rgba8(28, 26, 24, 255),
@@ -156,9 +138,7 @@ impl Theme {
             gap_md: 8.0,
             gap_lg: 14.0,
             border_thickness: 1.0,
-            // Larger radius for the modern soft-card look.
-            // Inset frames halve this (see `Frame::inset`).
-            corner_radius: 8.0,
+            corner_radius: 0.0,
         },
         fonts: Fonts {
             size_sm: 12.0,

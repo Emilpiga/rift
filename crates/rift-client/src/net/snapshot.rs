@@ -33,6 +33,8 @@ pub struct RemoteEntity {
     /// for everyone else. HUD reads it via
     /// `NetClient::take_resource_pct` once the local row arrives.
     pub resource_pct: f32,
+    /// Snapshot row carried `entity_flags::DEAD` this frame.
+    pub dead: bool,
     pub airborne: bool,
     /// Latest full-body action id from the snapshot
     /// (`rift_game::kinematic::action`). Drives the dodge-roll
@@ -189,6 +191,7 @@ impl NetClient {
                     velocity: Vec3::from_array(e.velocity),
                     health_pct: e.health_pct,
                     resource_pct: e.resource_pct,
+                    dead: e.flags & rift_net::messages::entity_flags::DEAD != 0,
                     airborne: e.flags & rift_net::messages::entity_flags::AIRBORNE != 0,
                     action,
                     effects: e.effects,

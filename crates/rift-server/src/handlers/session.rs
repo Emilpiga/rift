@@ -475,6 +475,13 @@ impl Server {
             tick: self.tick,
         };
         self.send_to(from, Channel::Control, &welcome);
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::StashChestState {
+                open: self.hub.any_stash_open(),
+            },
+        );
 
         // Replicate the persisted bag to the picker so their
         // local mirror matches the server bag the moment they

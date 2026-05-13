@@ -6,11 +6,13 @@
 //! unreliable channel buffer with hundreds of irrelevant entities.
 
 use glam::Vec3;
+use rift_game::kinematic::Kinematic;
 use rift_net::{
     messages::{entity_flags, EntityKind, EntitySnapshot, Snapshot},
     ClientId, NetTick,
 };
 
+use super::actor::{NetIdentity, Vitals};
 use super::enemies::{enemy_anim, ServerEnemy};
 use super::loot::ServerLoot;
 use super::player::ServerPlayer;
@@ -33,15 +35,18 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     // isn't them. Living teammates therefore see no avatar /
     // nameplate / health bar for the ghost, which is what we
     // want for distraction-free spectating.
-    for (e, p) in world.query::<&ServerPlayer>().iter() {
+    for (e, (p, identity, vitals, kinematic)) in world
+        .query::<(&ServerPlayer, &NetIdentity, &Vitals, &Kinematic)>()
+        .iter()
+    {
         if p.is_ghost && p.client_id != ack_for {
             continue;
         }
         let mut flags: u8 = 0;
-        if p.k.airborne {
+        if kinematic.airborne {
             flags |= entity_flags::AIRBORNE;
         }
-        if p.hp <= 0.0 {
+        if vitals.is_dead() {
             flags |= entity_flags::DEAD;
         }
         if p.is_ghost {
@@ -52,18 +57,18 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             .map(|s| s.to_snapshot())
             .unwrap_or_default();
         entities.push(EntitySnapshot {
-            net_id: p.net_id,
+            net_id: identity.net_id,
             kind: EntityKind::Player {
                 client_id: p.client_id,
-                aim_yaw: p.k.aim_yaw,
-                locomotion: p.k.locomotion,
-                action: p.k.action,
+                aim_yaw: kinematic.aim_yaw,
+                locomotion: kinematic.locomotion,
+                action: kinematic.action,
                 action_start: p.action_start,
             },
-            position: p.k.position.to_array(),
-            yaw: p.k.yaw,
-            velocity: p.k.velocity.to_array(),
-            health_pct: (p.hp / p.hp_max).clamp(0.0, 1.0),
+            position: kinematic.position.to_array(),
+            yaw: kinematic.yaw,
+            velocity: kinematic.velocity.to_array(),
+            health_pct: vitals.health_pct(),
             resource_pct: if p.stats.max_resource > 0.0 {
                 (p.resource / p.stats.max_resource).clamp(0.0, 1.0)
             } else {
@@ -74,7 +79,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         });
         if p.client_id == ack_for {
             ack_seq = p.last_input_seq;
-            viewer_pos = Some(p.k.position);
+            viewer_pos = Some(kinematic.position);
         }
     }
 
@@ -82,8 +87,11 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     // window is active, `WALK` while moving, `IDLE` otherwise. The
     // debuff bitmask comes from any `EffectStack` component the
     // enemy carries (every enemy gets one at spawn).
-    for (e, en) in world.query::<&ServerEnemy>().iter() {
-        if !in_view(viewer_pos, en.k.position) {
+    for (e, (en, identity, vitals, kinematic)) in world
+        .query::<(&ServerEnemy, &NetIdentity, &Vitals, &Kinematic)>()
+        .iter()
+    {
+        if !in_view(viewer_pos, kinematic.position) {
             continue;
         }
         let dying = en.dying_remaining > 0.0;
@@ -91,7 +99,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             enemy_anim::DEATH
         } else if en.attack_anim_remaining > 0.0 {
             enemy_anim::ATTACK
-        } else if en.k.velocity.length_squared() > 0.01 {
+        } else if kinematic.velocity.length_squared() > 0.01 {
             enemy_anim::WALK
         } else {
             enemy_anim::IDLE
@@ -105,15 +113,15 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             flags |= entity_flags::DEAD;
         }
         entities.push(EntitySnapshot {
-            net_id: en.net_id,
+            net_id: identity.net_id,
             kind: EntityKind::Enemy {
                 role: en.role.to_wire_byte(),
                 anim,
             },
-            position: en.k.position.to_array(),
-            yaw: en.k.yaw,
-            velocity: en.k.velocity.to_array(),
-            health_pct: (en.hp / en.hp_max.max(0.001)).clamp(0.0, 1.0),
+            position: kinematic.position.to_array(),
+            yaw: kinematic.yaw,
+            velocity: kinematic.velocity.to_array(),
+            health_pct: vitals.health_pct(),
             resource_pct: 1.0,
             flags,
             effects,

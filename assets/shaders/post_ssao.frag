@@ -61,7 +61,7 @@ float compute_ssao(vec2 uv, float depth) {
         float dist = length(v);
         if (abs(sample_pos.z - origin.z) > WORLD_RADIUS * 1.5) continue;
 
-        float range = smoothstep(WORLD_RADIUS * 1.4, WORLD_RADIUS * 0.05, dist);
+        float range = 1.0 - smoothstep(WORLD_RADIUS * 0.05, WORLD_RADIUS * 1.4, dist);
         float ndotv = max(dot(nrm, v / max(dist, 0.0001)), 0.0);
         const float BIAS = 0.015;
         occlusion += step(BIAS, ndotv) * ndotv * range;

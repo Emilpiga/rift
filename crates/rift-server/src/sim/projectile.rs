@@ -11,11 +11,12 @@ use rift_dungeon::{Floor, Tile};
 use rift_game::abilities::AbilityWireId;
 use rift_net::{messages::WorldEvent, NetId};
 
+use super::actor::{NetIdentity, Vitals};
 use super::enemies::ServerEnemy;
 
 /// Cell size (m) for the per-tick enemy spatial grid built by
-/// [`tick`] and [`tick_aoe`]. Picked at roughly twice the
-/// `ENEMY_HIT_RADIUS` (0.45 m) so a typical projectile
+/// [`tick`] and [`tick_aoe`]. Picked at roughly twice a regular
+/// enemy hit radius so a typical projectile
 /// `query_radius` of `proj.size/2 + enemy_radius` covers a 3×3
 /// cell window and an AoE radius of 6 m still only touches a
 /// 7×7 window. Larger cells mean fewer hashmap probes per
@@ -24,14 +25,14 @@ use super::enemies::ServerEnemy;
 /// for the floor-40 mob density we care about.
 const ENEMY_GRID_CELL: f32 = 1.0;
 
-/// Maximum hit radius any enemy advertises — every row in the
-/// `enemies` slice is built with [`super::enemies::ENEMY_HIT_RADIUS`],
-/// so this is a compile-time bound on how far an enemy's hit
+/// Maximum hit radius any enemy advertises. Every row in the
+/// `enemies` slice carries an exact role radius; this is the
+/// compile-time broad-phase bound on how far an enemy's hit
 /// disc can reach beyond its centre. The projectile query uses
 /// it to inflate the grid lookup radius so we don't miss an
 /// enemy whose centre is just outside the projectile's own disc
 /// but whose hit-radius still overlaps.
-const MAX_ENEMY_HIT_RADIUS: f32 = super::enemies::ENEMY_HIT_RADIUS;
+const MAX_ENEMY_HIT_RADIUS: f32 = super::enemies::MAX_ENEMY_HIT_RADIUS;
 
 /// Which side a projectile belongs to. Drives target-list
 /// filtering in [`tick`]: `Player`-team bolts collide with
@@ -551,9 +552,9 @@ pub(super) fn apply_hits_to_enemies(
     // inline (cheap; player count is small) so callers don't
     // have to thread it through.
     let attacker_lookup: Vec<(NetId, Entity)> = world
-        .query::<&super::player::ServerPlayer>()
+        .query::<(&super::player::ServerPlayer, &NetIdentity)>()
         .iter()
-        .map(|(e, p)| (p.net_id, e))
+        .map(|(e, (_p, identity))| (identity.net_id, e))
         .collect();
 
     let mut dead: Vec<(Entity, NetId, Vec3)> = Vec::new();
@@ -578,14 +579,15 @@ pub(super) fn apply_hits_to_enemies(
             .iter()
             .find(|(nid, _)| *nid == hit.attacker)
             .map(|(_, e)| *e);
-        if let Ok(mut en) = world.get::<&mut ServerEnemy>(hit.enemy) {
+        if let Ok((en, vitals)) = world.query_one_mut::<(&mut ServerEnemy, &mut Vitals)>(hit.enemy)
+        {
             // Already dying \u2014 ignore further hits so we don't
             // double-emit Damage events on the same corpse.
             if en.is_dying() {
                 continue;
             }
-            en.hp = (en.hp - scaled).max(0.0);
-            let died = en.hp <= 0.0;
+            vitals.damage(scaled);
+            let died = vitals.is_dead();
             // Punch knockback. Sets a short-lived knockback
             // velocity that the AI tick reads each frame and
             // fades to zero across the window, so the enemy
@@ -612,7 +614,7 @@ pub(super) fn apply_hits_to_enemies(
             let juggernaut = (en.elite_mods & super::enemies::elite_mod::JUGGERNAUT) != 0;
             let stagger_eligible = !died
                 && !juggernaut
-                && (crit || scaled > en.hp_max * super::enemies::STAGGER_THRESHOLD);
+                && (crit || scaled > vitals.hp_max * super::enemies::STAGGER_THRESHOLD);
             if stagger_eligible {
                 en.stagger_remaining = en.stagger_remaining.max(super::enemies::STAGGER_DUR);
             }
@@ -637,7 +639,7 @@ pub(super) fn apply_hits_to_enemies(
                     });
             }
             let thorns = (en.elite_mods & super::enemies::elite_mod::THORNS) != 0;
-            drop(en);
+            let _ = en;
             ctx.events.push(WorldEvent::Damage {
                 target: hit.enemy_net_id,
                 amount: scaled,

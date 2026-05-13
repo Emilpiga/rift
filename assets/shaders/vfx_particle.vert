@@ -23,6 +23,10 @@
 //      screen-space velocity and length encodes stretch
 //      amount; the fragment shader uses this for direction-
 //      dependent SDFs (Spark cross / Streak line).
+//
+// Sprite id 8 is a special ground decal path: it draws the quad
+// flat on the XZ plane, using `spin` as a stable yaw, so impact
+// cracks sit in the world instead of billboarding toward camera.
 
 layout(binding = 0) uniform UniformData {
     mat4 view;
@@ -187,6 +191,39 @@ void main() {
         // it samples vUv in. Length encodes the stretch the
         // fragment uses to decide along/across geometry.
         vStretchDir = vec2(0.0, 1.0) * stretch;
+        return;
+    }
+
+    // ---- GroundCrack: flat XZ decal ----
+    if (spriteId == 8u) {
+        float yaw = inVelSpin.w;
+        float cy = cos(yaw);
+        float sy = sin(yaw);
+        vec2 rotated = vec2(
+            inCorner.x * cy - inCorner.y * sy,
+            inCorner.x * sy + inCorner.y * cy
+        );
+
+        vec3 worldPos = worldCentre
+            + vec3(rotated.x * size, 0.0, rotated.y * size);
+
+        gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+
+        float fogStart = ubo.fogParams.x;
+        float fogEnd   = ubo.fogParams.y;
+        float fogDist  = length(ubo.fogOrigin.xyz - worldCentre);
+        float fogRaw   = clamp((fogDist - fogStart) / max(fogEnd - fogStart, 1e-3),
+                               0.0, 1.0);
+        vFogFactor = fogRaw * fogRaw;
+
+        float camDist = length(ubo.cameraPos.xyz - worldCentre);
+        vDistDim = mix(0.55, 1.0, smoothstep(0.4, 1.5, camDist));
+
+        vColor      = inColor;
+        vUv         = inCorner + 0.5;
+        vSprite     = spriteId;
+        vSeed       = inMisc.x;
+        vStretchDir = vec2(0.0);
         return;
     }
 

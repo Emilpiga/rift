@@ -483,10 +483,8 @@ void applyBloodField(
     // rim — coagulated blood is a deeper purple-black than the
     // wet body.
     float rimMask = isFloor
-        ? smoothstep(0.55, 0.95, covRaw) * (1.0 - smoothstep(0.95, 1.0, covRaw))
+        ? smoothstep(0.10, 0.45, covRaw) * (1.0 - smoothstep(0.55, 0.95, covRaw))
         : 0.0;
-    rimMask = 1.0 - rimMask; // 1 at the rim band, 0 in body
-    rimMask *= smoothstep(0.10, 0.45, covRaw);
     bloodRoughness = mix(bloodRoughness, mix(0.55, 0.80, dry), rimMask * 0.7);
     bloodAlbedo = mix(bloodAlbedo, bloodAlbedo * 0.55, rimMask * 0.5);
 

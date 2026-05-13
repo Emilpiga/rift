@@ -130,13 +130,12 @@ fn volume_slider(ui: &mut Ui<'_>, id: Id, rect: Rect, value: f32) -> Option<f32>
     } else {
         Color::rgba(0.75, 0.55, 0.20, 1.0)
     };
-    let radius = rect.size().y * 0.5;
-    ui.draw_rounded_rect(rect, radius, track_color);
+    ui.draw_rect(rect, track_color);
 
     let fill_w = rect.size().x * v;
     if fill_w > 0.5 {
         let fill_rect = Rect::from_xywh(rect.min.x, rect.min.y, fill_w, rect.size().y);
-        ui.draw_rounded_rect(fill_rect, radius, fill_color);
+        ui.draw_rect(fill_rect, fill_color);
     }
 
     // Thumb.
@@ -150,7 +149,7 @@ fn volume_slider(ui: &mut Ui<'_>, id: Id, rect: Rect, value: f32) -> Option<f32>
     } else {
         Color::rgba(0.95, 0.90, 0.80, 0.95)
     };
-    ui.draw_rounded_rect(thumb_rect, thumb_w * 0.25, thumb_color);
+    ui.draw_rect(thumb_rect, thumb_color);
 
     if dragging || (hover && ui.input().left_just_pressed()) {
         let w = rect.size().x.max(1.0);

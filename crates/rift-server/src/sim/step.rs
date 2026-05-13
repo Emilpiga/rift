@@ -53,16 +53,21 @@ impl Sim {
             if amount <= 0.0 {
                 continue;
             }
-            if let Ok(mut en) = self.world.get::<&mut enemies::ServerEnemy>(entity) {
+            if let Ok((en, identity, vitals, kinematic)) = self.world.query_one_mut::<(
+                &mut enemies::ServerEnemy,
+                &NetIdentity,
+                &mut Vitals,
+                &rift_game::kinematic::Kinematic,
+            )>(entity)
+            {
                 if en.is_dying() {
                     continue;
                 }
-                let healed = (en.hp + amount).min(en.hp_max) - en.hp;
+                let healed = vitals.heal(amount);
                 if healed > 0.0 {
-                    en.hp += healed;
-                    let pos = en.k.position;
-                    let nid = en.net_id;
-                    drop(en);
+                    let pos = kinematic.position;
+                    let nid = identity.net_id;
+                    let _ = en;
                     self.pending_events
                         .push(rift_net::messages::WorldEvent::Heal {
                             caster: nid,
@@ -219,9 +224,12 @@ impl Sim {
         //     channels / casts have already drained for the
         //     frame so the post-spend pause is honoured before
         //     any regen happens.
-        for (_e, p) in self.world.query_mut::<&mut player::ServerPlayer>() {
-            p.tick_resource(dt);
-            p.tick_health_regen(dt);
+        for (_e, (p, vitals)) in self
+            .world
+            .query_mut::<(&mut player::ServerPlayer, &mut Vitals)>()
+        {
+            p.tick_resource(vitals, dt);
+            p.tick_health_regen(vitals, dt);
         }
 
         // 5. Snapshot enemies for collision queries, then run
@@ -266,28 +274,33 @@ impl Sim {
         if !self.pending_melee_swings.is_empty() {
             let mut swing_hits: Vec<projectile::Hit> = Vec::new();
             for swing in self.pending_melee_swings.drain(..) {
-                let r2 = swing.radius * swing.radius;
                 let aim_xz = glam::Vec2::new(swing.aim.x, swing.aim.z);
                 let aim_len2 = aim_xz.length_squared();
                 if aim_len2 < 1.0e-6 {
                     continue;
                 }
                 let aim_n = aim_xz / aim_len2.sqrt();
-                let half_arc_cos = (swing.arc_radians * 0.5).cos();
-                for (en_entity, en_pos, en_net_id, _en_radius) in &enemies {
+                let half_arc = swing.arc_radians * 0.5;
+                for (en_entity, en_pos, en_net_id, en_radius) in &enemies {
                     let dx = en_pos.x - swing.origin.x;
                     let dz = en_pos.z - swing.origin.z;
                     let d2 = dx * dx + dz * dz;
-                    if d2 > r2 || d2 < 1.0e-6 {
-                        // Out of range, or the caster's own
-                        // tile — the latter shouldn't happen
-                        // for enemies vs players but guards
-                        // against a divide-by-zero on the
+                    if d2 < 1.0e-6 {
+                        // Enemy centre is effectively on the
+                        // caster's own tile. That shouldn't
+                        // happen for enemies vs players, but it
+                        // guards against a divide-by-zero on the
                         // bearing check below.
                         continue;
                     }
-                    let inv = 1.0 / d2.sqrt();
+                    let dist = d2.sqrt();
+                    if dist > swing.radius + *en_radius {
+                        continue;
+                    }
+                    let inv = 1.0 / dist;
                     let dot = (dx * aim_n.x + dz * aim_n.y) * inv;
+                    let angular_slack = (*en_radius / dist).clamp(0.0, 1.0).asin().min(0.45);
+                    let half_arc_cos = (half_arc + angular_slack).cos();
                     if dot < half_arc_cos {
                         continue;
                     }
@@ -537,7 +550,11 @@ impl Sim {
         //     a poof VFX at the body's last position instead of
         //     watching the avatar pop out of existence.
         let mut risen: Vec<(NetId, [f32; 3])> = Vec::new();
-        for (_e, p) in self.world.query_mut::<&mut player::ServerPlayer>() {
+        for (_e, (p, identity, kinematic)) in self.world.query_mut::<(
+            &mut player::ServerPlayer,
+            &NetIdentity,
+            &rift_game::kinematic::Kinematic,
+        )>() {
             // Tick legendary-transform internal cooldowns
             // (e.g. `FrostRayShatter`). Cheap fixed-size pass.
             p.transform_cds.tick(dt);
@@ -546,7 +563,7 @@ impl Sim {
                 if *t <= 0.0 {
                     p.ghost_rise_timer = None;
                     p.is_ghost = true;
-                    risen.push((p.net_id, p.k.position.to_array()));
+                    risen.push((identity.net_id, kinematic.position.to_array()));
                 }
             }
         }
@@ -597,14 +614,17 @@ impl Sim {
         let player_entities: Vec<(ClientId, Entity)> =
             self.sessions.iter().map(|(c, e)| (*c, *e)).collect();
         for (cid, entity) in player_entities {
-            let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+            let Ok((p, vitals)) = self
+                .world
+                .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+            else {
                 continue;
             };
             // Skip dead players, ghosts, and players in the
             // down-pose waiting to rise. Awarding XP here would
             // also trigger a level-up heal that resurrects a
             // player who died on the same tick.
-            if p.is_dead_or_ghosting() {
+            if p.is_dead_or_ghosting(vitals) {
                 continue;
             }
             let mut total = 0u64;
@@ -631,7 +651,7 @@ impl Sim {
             if total == 0 {
                 continue;
             }
-            let rewards = p.grant_xp(total);
+            let rewards = p.grant_xp(vitals, total);
             self.pending_stat_updates.push(StatsUpdate {
                 client_id: cid,
                 level: p.experience.level,
@@ -660,27 +680,24 @@ impl Sim {
             self.floor.boss_room_center.z,
         );
         let cfg = FloorConfig::for_floor(self.floor_index);
-        let hp = cfg.enemy_health * 8.0 + self.floor_index as f32 * 30.0;
-        let speed = cfg.enemy_speed * 0.7;
+        let hp = cfg.enemy_health * 10.0 + self.floor_index as f32 * 40.0;
+        let speed = cfg.enemy_speed * 0.85;
         let net_id = NetId(self.next_enemy_net_id);
         self.next_enemy_net_id = self.next_enemy_net_id.wrapping_add(1).max(1);
+        let kinematic = rift_game::kinematic::Kinematic {
+            position: boss_pos,
+            velocity: Vec3::ZERO,
+            yaw: 0.0,
+            aim_yaw: 0.0,
+            locomotion: rift_game::kinematic::loco::IDLE,
+            vy: 0.0,
+            airborne: false,
+            ..Default::default()
+        };
         let enemy = enemies::ServerEnemy {
-            net_id,
             role: rift_game::monsters::MonsterRole::Boss,
-            k: rift_game::kinematic::Kinematic {
-                position: boss_pos,
-                velocity: Vec3::ZERO,
-                yaw: 0.0,
-                aim_yaw: 0.0,
-                locomotion: rift_game::kinematic::loco::IDLE,
-                vy: 0.0,
-                airborne: false,
-                ..Default::default()
-            },
             target_lock: None,
             speed,
-            hp_max: hp,
-            hp,
             attack_cooldown: 0.0,
             attack_anim_remaining: 0.0,
             dying_remaining: 0.0,
@@ -702,6 +719,9 @@ impl Sim {
         };
         self.world.spawn((
             enemy,
+            NetIdentity::new(net_id),
+            Vitals::new(hp),
+            kinematic,
             effect::EffectStack::default(),
             enemies::BossState::new(self.floor_index),
         ));

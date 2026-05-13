@@ -61,7 +61,8 @@ pub struct VfxParticleInstance {
     /// no two particles look identical even at the same age.
     pub seed: f32,
     /// `0` = soft glow, `1` = spark, `2` = smoke, `3` = shard,
-    /// `4` = ring, `5` = streak. Cast from [`SpriteShape`]
+    /// `4` = ring, `5` = streak, `6` = wisp, `7` = silk strand,
+    /// `8` = ground crack. Cast from [`SpriteShape`]
     /// discriminant.
     pub sprite: u32,
     /// `0` = alpha, `1` = additive, `2` = premultiplied. The
@@ -1118,6 +1119,7 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         SpriteShape::Streak => 5,
         SpriteShape::Wisp => 6,
         SpriteShape::SilkStrand => 7,
+        SpriteShape::GroundCrack => 8,
     };
     for q in &p.pool {
         if !q.alive() {
@@ -1136,13 +1138,15 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         // the `Smoke` / `Shard` / `Ring` shapes where uniform
         // rotation would be obvious.
         //
-        // `Wisp` and `SilkStrand` are the exception: they
-        // rely on the vertex shader projecting world-up into
-        // screen space to orient their capsules. Any spin
-        // would tilt the strand off vertical and ruin the
-        // beam alignment, so we hard-zero spin for both.
+        // `Wisp`, `SilkStrand`, and `GroundCrack` are the
+        // exception: they rely on the vertex shader projecting
+        // world-up into screen space / aligning to world XZ.
+        // Any animated spin would tilt or rotate them visibly
+        // after spawn, so keep their orientation stable.
         let spin = if matches!(p.spec.sprite, SpriteShape::Wisp | SpriteShape::SilkStrand) {
             0.0
+        } else if matches!(p.spec.sprite, SpriteShape::GroundCrack) {
+            q.seed * std::f32::consts::TAU
         } else {
             q.seed * std::f32::consts::TAU + q.age * (0.4 + q.seed * 1.6)
         };

@@ -26,9 +26,9 @@ use rift_game::loot::{
 use rift_game::stats::Stat;
 use rift_ui::inventory::frame_inventory;
 use rift_ui_types::inventory::{
-    next_stash_tab_color, BulkSalvageView, CompareDeltaRow, InventoryAction, InventoryUiState,
-    InventoryView, ItemView, RollBand, StashTabView, StashView, StatRow, StatSection, StatsView,
-    TooltipLineKind, TooltipLineView,
+    BulkSalvageView, CompareDeltaRow, InventoryAction, InventoryUiState, InventoryView, ItemView,
+    RollBand, StashTabView, StashView, StatRow, StatSection, StatsView, TooltipLineKind,
+    TooltipLineView,
 };
 
 use crate::game::sub_state::{EquipRequest, StashRequest, StashTabClient};
@@ -587,11 +587,8 @@ pub fn frame(
             InventoryAction::RenameTab { tab_index, name } => {
                 stash_pending.push(StashRequest::RenameTab { tab_index, name });
             }
-            InventoryAction::RecolorTab { tab_index } => {
-                if let Some(tab) = stash_tabs.get(tab_index as usize) {
-                    let color = next_stash_tab_color(tab.color);
-                    stash_pending.push(StashRequest::RecolorTab { tab_index, color });
-                }
+            InventoryAction::RecolorTab { tab_index, color } => {
+                stash_pending.push(StashRequest::RecolorTab { tab_index, color });
             }
             InventoryAction::BuyTab => {
                 stash_pending.push(StashRequest::BuyTab);

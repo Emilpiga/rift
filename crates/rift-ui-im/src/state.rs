@@ -9,6 +9,7 @@
 
 use super::id::Id;
 use super::rect::{Pos2, Rect};
+use std::collections::HashMap;
 
 /// Tracks active drag-and-drop. The payload is type-erased so
 /// the destination widget can downcast to whatever the source
@@ -125,6 +126,12 @@ pub struct UiState {
     pub pressed_button: Option<Id>,
     /// Modal stack; topmost intercepts input.
     pub modals: Vec<Modal>,
+    /// Visual-only animation state for the bottom HUD vitals.
+    pub vitals: VitalsAnimState,
+    /// Visual-only animation state for health / essence bars
+    /// anchored to world entities. Keys are supplied by the
+    /// caller so this crate stays independent of the ECS type.
+    pub world_vitals: HashMap<u64, WorldVitalsAnimState>,
     /// Set this frame by any widget that consumed the mouse
     /// (button press absorbed, drag started, hover inside a
     /// panel rect). Game code reads this via `Ui::end()` to
@@ -134,6 +141,75 @@ pub struct UiState {
     /// Same idea for keyboard: a focused text field claims
     /// keystrokes so WASD movement doesn't fire while typing.
     pub(super) keyboard_claimed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VitalsAnimState {
+    pub hp: ResourceBarAnim,
+    pub essence: ResourceBarAnim,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorldVitalsAnimState {
+    pub hp: ResourceBarAnim,
+    pub essence: ResourceBarAnim,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceBarAnim {
+    pub displayed: f32,
+    pub trail: f32,
+    pub last_target: f32,
+    pub pulse: f32,
+    pub initialized: bool,
+}
+
+impl Default for ResourceBarAnim {
+    fn default() -> Self {
+        Self {
+            displayed: 1.0,
+            trail: 1.0,
+            last_target: 1.0,
+            pulse: 0.0,
+            initialized: false,
+        }
+    }
+}
+
+impl ResourceBarAnim {
+    pub fn tick(&mut self, target: f32, dt: f32) {
+        let target = target.clamp(0.0, 1.0);
+        if !self.initialized {
+            self.displayed = target;
+            self.trail = target;
+            self.last_target = target;
+            self.initialized = true;
+            return;
+        }
+
+        let dt = dt.clamp(1.0 / 240.0, 1.0 / 20.0);
+        let lost = target < self.last_target - 0.002;
+        let gained = target > self.last_target + 0.002;
+        if lost {
+            self.trail = self.trail.max(self.displayed).max(self.last_target);
+            self.pulse = 1.0;
+        } else if gained {
+            self.trail = self.trail.max(target);
+            self.pulse = self.pulse.max(0.35);
+        }
+
+        let fill_rate = if target < self.displayed { 16.0 } else { 22.0 };
+        let trail_rate = if target < self.trail { 5.5 } else { 18.0 };
+        self.displayed = approach_exp(self.displayed, target, fill_rate, dt);
+        self.trail = approach_exp(self.trail, target.max(self.displayed), trail_rate, dt);
+        self.pulse = approach_exp(self.pulse, 0.0, 4.8, dt);
+        self.last_target = target;
+    }
+}
+
+fn approach_exp(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
+    let alpha = 1.0 - (-rate * dt).exp();
+    current + (target - current) * alpha
 }
 
 impl UiState {

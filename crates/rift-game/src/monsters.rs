@@ -47,6 +47,20 @@ impl MonsterRole {
         }
     }
 
+    /// Authoritative XZ hit-disc radius used by server collision.
+    /// Values intentionally track visual footprint rather than raw
+    /// mesh height: regular monsters stay compact, while elite and
+    /// boss silhouettes get the broader body players can see.
+    pub fn hit_radius(self) -> f32 {
+        match self {
+            MonsterRole::Brute => 0.50,
+            MonsterRole::Stalker => 0.45,
+            MonsterRole::Caster => 0.50,
+            MonsterRole::Elite => 0.70,
+            MonsterRole::Boss => 1.05,
+        }
+    }
+
     /// Encode the role as the byte we send on the wire.
     pub fn to_wire_byte(self) -> u8 {
         match self {

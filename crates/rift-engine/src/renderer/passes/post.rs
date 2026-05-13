@@ -89,8 +89,8 @@ use passes::{
     create_bloom_pass, create_composite_pass, create_scene_pass, create_translucent_pass,
 };
 use resources::{
-    OffscreenImage, build_post_pipeline, create_fbs, create_fbs_single, write_combined,
-    write_combined_with_layout,
+    build_post_pipeline, create_fbs, create_fbs_single, write_combined, write_combined_with_layout,
+    OffscreenImage,
 };
 
 /// HDR colour format. Half-float is enough range for our

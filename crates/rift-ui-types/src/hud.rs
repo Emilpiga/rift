@@ -29,6 +29,9 @@ pub struct VitalsRow {
 /// shown in the inventory header, not here.
 #[derive(Clone, Copy, Debug)]
 pub struct HudVitalsView<'a> {
+    /// Seconds since the previous UI frame, used only for
+    /// visual interpolation in the widget layer.
+    pub dt: f32,
     pub hp_fraction: f32,
     pub hp_label: &'a str,
     pub essence_fraction: f32,
@@ -131,6 +134,69 @@ pub enum HudAction {
 }
 
 // ─── Minimap ──────────────────────────────────────────────────
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MinimapTileKind {
+    Wall,
+    Floor,
+    Stair,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MinimapSurface {
+    Sand,
+    Stone,
+    Wood,
+    Metal,
+    Grass,
+    Bone,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MinimapRoomKind {
+    None,
+    Arena,
+    Boss,
+    Portal,
+    Corridor,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MinimapStairDir {
+    PosX,
+    NegX,
+    PosZ,
+    NegZ,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MinimapCell {
+    pub kind: MinimapTileKind,
+    pub surface: MinimapSurface,
+    pub room: MinimapRoomKind,
+    pub elevation: i8,
+    pub stair_dir: Option<MinimapStairDir>,
+    /// Has this tile ever been revealed on the minimap for the
+    /// current hub/floor?
+    pub explored: bool,
+    /// Is this tile currently inside a live reveal radius?
+    pub visible: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MinimapPropKind {
+    Chest,
+    Light,
+    LargeSolid,
+    SmallSolid,
+    Decoration,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MinimapProp {
+    pub pos: (f32, f32),
+    pub kind: MinimapPropKind,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct MinimapEnemy {
     /// Position in nav-grid coords (x, z). The widget maps
@@ -140,6 +206,11 @@ pub struct MinimapEnemy {
     /// Drawn as a fat orange pip instead of the regular red
     /// when `true`.
     pub is_boss: bool,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MinimapPartyMember {
+    pub pos: (f32, f32),
 }
 
 /// Local player marker on the minimap.
@@ -157,6 +228,11 @@ pub struct MinimapPlayer {
 /// `rift_engine` / `rift_dungeon`.
 #[derive(Copy, Clone, Debug)]
 pub struct MinimapView<'a> {
+    /// Header label describing the current area, e.g. `HUB` or
+    /// `RIFT`.
+    pub zone_title: &'a str,
+    /// Header detail line, e.g. `SANCTUARY` or `LEVEL 12`.
+    pub zone_detail: &'a str,
     /// Nav-grid dimensions in cells.
     pub grid_width: u32,
     pub grid_depth: u32,
@@ -164,10 +240,21 @@ pub struct MinimapView<'a> {
     /// `walkable[z * grid_width + x]` is `true` when the cell
     /// at `(x, z)` should be drawn as floor.
     pub walkable: &'a [bool],
+    /// Optional richer row-major cell data. When present, the
+    /// widget draws room/surface/elevation/stair detail from this
+    /// instead of falling back to the simple walkable mask.
+    pub cells: &'a [MinimapCell],
+    /// Static world props that should read on the map: chests,
+    /// torches, large blockers, and a few decorative anchors.
+    pub props: &'a [MinimapProp],
+    /// Grid-space centre for the zoomed minimap viewport.
+    pub focus: Option<(f32, f32)>,
     /// Optional rift / hub portal pip (grid coords).
     pub portal: Option<(f32, f32)>,
     /// Enemy / boss pips drawn over the floor.
     pub enemies: &'a [MinimapEnemy],
+    /// Remote party members drawn separately from hostile pips.
+    pub party: &'a [MinimapPartyMember],
     /// Local player marker. `None` while no player exists
     /// (loading, post-death respawn flicker, …).
     pub player: Option<MinimapPlayer>,

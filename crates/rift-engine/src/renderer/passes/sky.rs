@@ -386,6 +386,22 @@ impl SkyRenderer {
         })
     }
 
+    pub fn reload_pipeline(
+        &mut self,
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        shader_dir: &Path,
+    ) -> Result<()> {
+        let next = Self::new(device, render_pass, shader_dir)?;
+        unsafe {
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+        self.pipeline = next.pipeline;
+        self.pipeline_layout = next.pipeline_layout;
+        Ok(())
+    }
+
     /// Draw the sky. Caller has already begun the main render pass.
     /// `view` and `proj` are the current camera matrices; we strip
     /// the translation from `view` so the dome appears anchored at

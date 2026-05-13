@@ -85,5 +85,6 @@ pub mod hud;
 pub mod inventory;
 pub mod pause_menu;
 pub mod settings;
+pub mod spellbook;
 pub mod talents;
 // pub mod theme;

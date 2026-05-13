@@ -9,7 +9,8 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::Floor;
-use rift_game::kinematic::loco;
+use rift_game::kinematic::{loco, Kinematic};
+use rift_net::NetId;
 
 use super::{brute, enter_windup, tick_windup, AiOutcome, AiPhase, ServerEnemy, WindupKind};
 
@@ -65,6 +66,8 @@ pub static SPEC: Spec = Spec {
 
 pub fn tick(
     en: &mut ServerEnemy,
+    kinematic: &mut Kinematic,
+    net_id: NetId,
     spec: &Spec,
     floor: &Floor,
     target: Option<(Entity, Vec3, f32)>,
@@ -74,21 +77,21 @@ pub fn tick(
     outcome: &mut AiOutcome,
 ) {
     let Some((target_entity, target_pos, d2)) = target else {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         en.ai_phase = AiPhase::StalkerApproach;
         return;
     };
     let dist = d2.sqrt();
     let to_target = Vec3::new(
-        target_pos.x - en.k.position.x,
+        target_pos.x - kinematic.position.x,
         0.0,
-        target_pos.z - en.k.position.z,
+        target_pos.z - kinematic.position.z,
     );
     // Faces the target unless we're mid-dash with a locked dir.
     if to_target.length_squared() > 1.0e-4 {
-        en.k.yaw = to_target.x.atan2(to_target.z);
-        en.k.aim_yaw = en.k.yaw;
+        kinematic.yaw = to_target.x.atan2(to_target.z);
+        kinematic.aim_yaw = kinematic.yaw;
     }
 
     // Promote `Idle` to `Approach` so brand-new stalkers don't
@@ -107,7 +110,7 @@ pub fn tick(
             ..
         }
     ) {
-        if let Some(WindupKind::StalkerDash) = tick_windup(en, dt) {
+        if let Some(WindupKind::StalkerDash) = tick_windup(en, kinematic, dt) {
             let dir = to_target.normalize_or_zero();
             en.ai_phase = AiPhase::StalkerDash {
                 remaining: spec.dash_dur,
@@ -125,7 +128,7 @@ pub fn tick(
             // bee-lining into the geometry. Also gate the
             // dash commit on LOS — dashing into a wall is
             // useless and looks broken.
-            let los_blocked = super::cached_los_blocked(en, floor, target_pos);
+            let los_blocked = super::cached_los_blocked(en, kinematic, floor, target_pos);
             if !los_blocked && dist <= spec.trigger_range {
                 // Lock in the approach by entering the wind-up.
                 // Pad attack_anim_remaining post-windup so the
@@ -133,7 +136,14 @@ pub fn tick(
                 // windup+dash window.
                 en.path.clear();
                 en.path_target_tile = None;
-                enter_windup(en, WindupKind::StalkerDash, spec.windup_dur, outcome);
+                enter_windup(
+                    en,
+                    kinematic,
+                    net_id,
+                    WindupKind::StalkerDash,
+                    spec.windup_dur,
+                    outcome,
+                );
                 en.attack_anim_remaining = spec.windup_dur + spec.dash_dur;
                 return;
             }
@@ -147,14 +157,14 @@ pub fn tick(
                     || en.path_target_tile != Some(target_tile)
                     || en.path_recompute_in <= 0.0;
                 if need_recompute {
-                    let from = brute::world_to_tile(en.k.position);
+                    let from = brute::world_to_tile(kinematic.position);
                     en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
                     en.path_target_tile = Some(target_tile);
                     en.path_recompute_in = brute::PATH_RECOMPUTE_INTERVAL;
                 }
                 while let Some(&(wx, wz)) = en.path.first() {
-                    let dx = wx as f32 - en.k.position.x;
-                    let dz = wz as f32 - en.k.position.z;
+                    let dx = wx as f32 - kinematic.position.x;
+                    let dz = wz as f32 - kinematic.position.z;
                     if dx * dx + dz * dz < 0.25 {
                         en.path.remove(0);
                     } else {
@@ -163,9 +173,9 @@ pub fn tick(
                 }
                 if let Some(&(wx, wz)) = en.path.first() {
                     Vec3::new(
-                        wx as f32 - en.k.position.x,
+                        wx as f32 - kinematic.position.x,
                         0.0,
-                        wz as f32 - en.k.position.z,
+                        wz as f32 - kinematic.position.z,
                     )
                     .normalize_or_zero()
                 } else {
@@ -178,8 +188,8 @@ pub fn tick(
                 en.path_target_tile = None;
                 to_target.normalize_or_zero()
             };
-            en.k.velocity = dir * en.speed * speed_mult;
-            en.k.locomotion = loco::RUN;
+            kinematic.velocity = dir * en.speed * speed_mult;
+            kinematic.locomotion = loco::RUN;
         }
         AiPhase::StalkerDash {
             remaining,
@@ -191,8 +201,8 @@ pub fn tick(
             // dash velocity is uniform — no separation easing,
             // no slowdown near target — so the lunge feels
             // committal.
-            en.k.velocity = dir * en.speed * spec.dash_speed_mult * speed_mult;
-            en.k.locomotion = loco::RUN;
+            kinematic.velocity = dir * en.speed * spec.dash_speed_mult * speed_mult;
+            kinematic.locomotion = loco::RUN;
             // One-shot damage: applied the first frame the
             // dash crosses inside `attack_range_for_hit` of
             // the target.
@@ -223,8 +233,8 @@ pub fn tick(
             // Drift backward at a fraction of base speed so the
             // stalker reads as winded after the lunge.
             let away = -to_target.normalize_or_zero();
-            en.k.velocity = away * en.speed * spec.recover_speed_mult * speed_mult;
-            en.k.locomotion = loco::RUN;
+            kinematic.velocity = away * en.speed * spec.recover_speed_mult * speed_mult;
+            kinematic.locomotion = loco::RUN;
             if next <= 0.0 {
                 en.ai_phase = AiPhase::StalkerApproach;
             } else {

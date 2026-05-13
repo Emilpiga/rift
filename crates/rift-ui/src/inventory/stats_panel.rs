@@ -12,26 +12,13 @@ pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit
     let theme = *ui.theme();
 
     // No internal background — the outer drawer paints stone
-    // chrome. Title sits at the top with a divider, mirroring
-    // the inventory header.
+    // chrome and the caller paints the shared panel header.
     let _ = view.name;
     let _ = view.level;
     let _ = view.class_name;
     let body = rect;
 
-    ui.draw_text(
-        Pos2::new(body.x(), body.y()),
-        "STATS",
-        theme.fonts.size_lg,
-        theme.colors.text,
-    );
-    let div_y = body.y() + theme.fonts.size_lg + 6.0 * fit;
-    ui.draw_rect(
-        Rect::from_xywh(body.x(), div_y, body.width(), 1.0),
-        theme.colors.border_stone,
-    );
-
-    let mut y = div_y + 10.0 * fit;
+    let mut y = body.y();
     let text_size = theme.fonts.size_md;
     let row_h = text_size + 6.0 * fit;
     let header_col = Color::rgba(0.95, 0.85, 0.55, 1.0);

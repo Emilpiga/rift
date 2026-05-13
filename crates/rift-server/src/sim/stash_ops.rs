@@ -5,6 +5,7 @@
 
 use rift_net::ids::ClientId;
 
+use super::actor::Vitals;
 use super::player::{ServerPlayer, StashTab};
 use super::{
     build_stash_occupancy, footprint_fits_stash, place_inventory_item, place_inventory_item_at,
@@ -219,6 +220,20 @@ impl Sim {
             .unwrap_or(false)
     }
 
+    /// Shared hub chest visual state: `true` while one or more
+    /// players have their private stash session open. This is
+    /// intentionally aggregate-only so clients can animate the
+    /// world prop without learning whose stash is open or seeing
+    /// private contents.
+    pub fn any_stash_open(&self) -> bool {
+        self.sessions.values().any(|&entity| {
+            self.world
+                .get::<&ServerPlayer>(entity)
+                .map(|p| p.stash_open)
+                .unwrap_or(false)
+        })
+    }
+
     /// Move the bag item at `inventory_index` into the first
     /// free anchor of stash tab `tab_index` whose footprint
     /// fits. Returns `true` on success; `false` if either index
@@ -309,7 +324,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         if tab_index >= p.stash.len() {
@@ -381,7 +399,7 @@ impl Sim {
                 }
             }
         }
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
 
@@ -406,7 +424,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return false;
         };
         if tab_index >= p.stash.len() {
@@ -454,7 +475,7 @@ impl Sim {
                 }
             }
         }
-        p.recompute_stats();
+        p.recompute_stats(vitals);
         true
     }
     /// swap; multi-item overlaps reject. Mirrors the bag's

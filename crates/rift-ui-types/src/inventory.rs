@@ -444,6 +444,9 @@ pub struct InventoryUiState {
     /// rename can't commit before the user has had a chance
     /// to focus it.
     pub rename_has_focused: bool,
+    /// Stash tab whose color picker is currently open.
+    /// `None` when no tab color palette is visible.
+    pub color_picker_tab: Option<u8>,
     /// Bag-panel rect from the last rendered frame, used by
     /// the host's `consumes_mouse` check. `[x, y, w, h]` in
     /// screen pixels.
@@ -648,8 +651,9 @@ pub enum InventoryAction {
     SwitchStashTab { tab_index: u8 },
     /// Rename the given stash tab.
     RenameTab { tab_index: u8, name: String },
-    /// Cycle the given stash tab's color through the palette.
-    RecolorTab { tab_index: u8 },
+    /// Set the given stash tab's color. `color` is packed
+    /// `0xRRGGBB`.
+    RecolorTab { tab_index: u8, color: u32 },
     /// Purchase a new stash tab.
     BuyTab,
     /// Auto-sort the bag: server compacts by rarity desc,
@@ -659,12 +663,7 @@ pub enum InventoryAction {
     SortStashTab { tab_index: u8 },
 }
 
-/// `0xRRGGBB` palette cycled by `InventoryAction::RecolorTab`.
-/// Exposed here (rather than buried in `rift-ui`) so the host
-/// can resolve the next color without round-tripping the click
-/// through the widget. The host owns the cycle: the UI just
-/// emits "cycle this tab"; the host picks the next palette
-/// entry and forwards it on the wire.
+/// `0xRRGGBB` palette offered by the stash tab color picker.
 pub const STASH_TAB_PALETTE: &[u32] = &[
     0x6E6E78, // neutral grey (default)
     0xB95151, // muted red
@@ -675,13 +674,3 @@ pub const STASH_TAB_PALETTE: &[u32] = &[
     0x4E78C8, // blue
     0x9165B2, // violet
 ];
-
-/// Next `0xRRGGBB` in [`STASH_TAB_PALETTE`] after `current`.
-pub fn next_stash_tab_color(current: u32) -> u32 {
-    let masked = current & 0x00FF_FFFF;
-    let i = STASH_TAB_PALETTE
-        .iter()
-        .position(|c| *c == masked)
-        .unwrap_or(0);
-    STASH_TAB_PALETTE[(i + 1) % STASH_TAB_PALETTE.len()]
-}

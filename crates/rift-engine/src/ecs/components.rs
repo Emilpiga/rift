@@ -200,10 +200,9 @@ pub struct SpellCast {
     /// when the system spins up a fresh `layer_animator`. Reset
     /// to `1.0` whenever the one-shot ends so subsequent
     /// vanilla one-shots play at natural speed. Used by rapid-
-    /// fire melee (Punch) to scale a longer wind-up / impact /
-    /// recovery clip into the cooldown window so the swing
-    /// actually reaches its forward-extension frames before
-    /// the next click preempts it.
+    /// fire melee (Punch) to keep a longer wind-up / impact /
+    /// recovery clip near the cooldown window while preserving
+    /// enough anticipation for the swing to read.
     pub pending_oneshot_speed: f32,
     /// Real-time seconds until a scheduled cast-layer freeze
     /// (hit-stop) engages. While `> 0` it counts down each
@@ -327,9 +326,8 @@ impl SpellCast {
 
     /// Same as [`Self::play_oneshot_preempt`] but with an explicit
     /// playback `speed` (1.0 = natural). Used by rapid-fire melee
-    /// to compress a 0.7 s swing clip into a 0.35 s cooldown so
-    /// the full wind-up / impact / recovery actually plays before
-    /// the next click restarts the layer.
+    /// to keep a longer swing clip responsive without erasing its
+    /// wind-up.
     pub fn play_oneshot_preempt_scaled(
         &mut self,
         clip: std::sync::Arc<crate::animation::BoundClip>,

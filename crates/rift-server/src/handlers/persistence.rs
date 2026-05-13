@@ -128,9 +128,11 @@ impl Server {
             gender: gender_id,
             level: 1,
             xp: 0,
-            // Mirrors `Loadout::default_hero()` — only Steady
-            // Shot is unlocked at level 1.
-            loadout: [0, 255, 255, 255, 255, 255],
+            // Mirrors `Loadout::default_hero()` — only Punch is
+            // available at level 1.
+            loadout: rift_game::loadout::Loadout::default_hero()
+                .to_wire_bytes()
+                .map(i16::from),
             deepest_cleared_floor: 0,
             shards: 0,
             talents: Vec::new(),

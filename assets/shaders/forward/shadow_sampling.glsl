@@ -167,6 +167,11 @@ float sampleShadow(vec3 N, vec3 L) {
     return sampleShadowAt(fragWorldPos, N, L);
 }
 
+float pointShadowCompare(int lightIdx, vec3 sampleDir, float receiver, float bias, float softness) {
+    float stored = texture(pointShadowAtlas, vec4(sampleDir, float(lightIdx))).r;
+    return smoothstep(receiver - bias - softness, receiver - bias + softness, stored);
+}
+
 // ---------------------------------------------------------------------------
 // Sample the omnidirectional point-light shadow atlas for the given light.
 // `lightIdx` selects which 6-face cube in the atlas (matching the layout
@@ -201,70 +206,44 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     // are scaled in normalised-distance space so the kernel
     // covers ~1–2 atlas texels at our 512² per face.
     //
-    // Why 8 taps on a Poisson disk with a per-pixel rotation?
-    // The previous implementation used 5 hard `step()` taps on
-    // a fixed cross pattern, which can only produce 6 discrete
-    // output values {0, 0.2, ..., 1.0}. Every neighbouring
-    // pixel sampled the same offsets, so those discrete levels
-    // lined up across the screen as 4–5 visible concentric
-    // "softer outline" rings around every shadow — the exact
-    // artefact we kept chasing in the wrong shaders. Rotating
-    // the tap basis by a per-pixel screen-space hash turns
-    // each ring into spatial noise that the eye averages into
-    // a clean penumbra. Doubling the tap count to 8 brings
-    // the level count up to 9 so the residual noise is finer.
+    // A 12-tap disk plus a tiny smooth compare gives enough
+    // levels that torch shadows read as a continuous penumbra
+    // instead of stacked rings. The rotation is world-stable
+    // below, so any residual grain sticks to the receiver
+    // surface instead of crawling over the screen when the
+    // camera pans.
     vec3 up = abs(dir.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
     vec3 tuRaw = normalize(cross(up, dir));
     vec3 tvRaw = cross(dir, tuRaw);
-    // Per-pixel rotation angle from gl_FragCoord. The constants
-    // are the standard sin-fract noise basis; multiplying by
-    // 2π turns the [0,1) hash into a full rotation.
-    float rotHash = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    // World-stable rotation angle. Screen-space rotation made
+    // the PCF grain crawl as the camera panned; anchoring it
+    // to receiver position keeps the dither attached to the
+    // lit surface instead.
+    float rotHash = fract(sin(dot(fragWorld.xz + vec2(fragWorld.y, float(lightIdx) * 7.13),
+                                  vec2(12.9898, 78.233))) * 43758.5453);
     float rotAng = rotHash * 6.2831853;
     float rcs = cos(rotAng);
     float rsn = sin(rotAng);
     vec3 tu = tuRaw * rcs + tvRaw * rsn;
     vec3 tv = -tuRaw * rsn + tvRaw * rcs;
-    // Kernel half-width in normalised-distance units. Sized
-    // so the disk straddles ~2 atlas texels: deep-shadow and
-    // fully-lit fragments still resolve as a uniform value
-    // (taps land on equivalent depths) while silhouette
-    // fragments get a graded penumbra.
-    float k = 0.008;
 
-    // 8-tap Poisson disk PCF. The earlier single-tap fast path
-    // (P0 = (0,0)) collapsed every fragment to a hard binary
-    // `step()` because rotating a zero offset still gave zero,
-    // and the per-pixel basis rotation contributed nothing —
-    // result was the chunky one-bit shadow the player sees on
-    // their own body and on the ground under torches.
-    //
-    // 8 taps gives 9 discrete output levels which, combined
-    // with the per-pixel rotation, dither into a continuous
-    // penumbra perceptually. Cost is 8 cubemap-array fetches
-    // per shadow-casting torch per fragment; with a hard cap
-    // of `pointShadowMeta.x ≤ 4` casters the worst-case bill
-    // is 32 cube fetches per fragment — well within the
-    // dungeon's per-frame texture budget on every target GPU.
-    const vec2 P0 = vec2( 0.0000,  0.0000);
-    const vec2 P1 = vec2( 0.7071,  0.0000);
-    const vec2 P2 = vec2(-0.7071,  0.0000);
-    const vec2 P3 = vec2( 0.0000,  0.7071);
-    const vec2 P4 = vec2( 0.0000, -0.7071);
-    const vec2 P5 = vec2( 0.5000,  0.5000);
-    const vec2 P6 = vec2(-0.5000,  0.5000);
-    const vec2 P7 = vec2( 0.5000, -0.5000);
+    float distFade = smoothstep(0.24, 0.90, normFrag);
+    float grazing = 1.0 - clamp(NdotL, 0.0, 1.0);
+    // Keep nearby contacts tight, then broaden the angular
+    // kernel as the receiver approaches the light's range.
+    float k = mix(0.0025, 0.0065, distFade) * (1.0 + grazing * 0.20);
+    // Manual compare softness turns the binary R32 distance
+    // test into a narrow transition. It removes the 9-level
+    // banding without making fully-shadowed interiors glow.
+    float softness = mix(0.00025, 0.00140, distFade) * (1.0 + grazing * 0.25);
 
-    float occ = 0.0;
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P0.x + tv * P0.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P1.x + tv * P1.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P2.x + tv * P2.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P3.x + tv * P3.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P4.x + tv * P4.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P5.x + tv * P5.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P6.x + tv * P6.y) * k, float(lightIdx))).r);
-    occ += step(normFrag - bias, texture(pointShadowAtlas, vec4(dir + (tu * P7.x + tv * P7.y) * k, float(lightIdx))).r);
-    occ *= (1.0 / 8.0);
+    float occ = pointShadowCompare(lightIdx, dir, normFrag, bias, softness) * 2.0;
+    for (int i = 0; i < 12; i++) {
+        vec2 p = POISSON_DISK[i];
+        occ += pointShadowCompare(lightIdx, dir + (tu * p.x + tv * p.y) * k,
+                                  normFrag, bias, softness);
+    }
+    occ *= (1.0 / 14.0);
     return occ;
 }
 

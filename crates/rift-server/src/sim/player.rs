@@ -21,6 +21,8 @@ use rift_net::{
     ClientId, NetId, NetTick,
 };
 
+use super::actor::{NetIdentity, Vitals};
+
 /// Default per-player level until the persisted level field is
 /// wired through. Drives `CharacterStats::compute`.
 pub const DEFAULT_LEVEL: u32 = 1;
@@ -58,10 +60,6 @@ impl StashTab {
 #[derive(Clone, Debug)]
 pub struct ServerPlayer {
     pub client_id: ClientId,
-    pub net_id: NetId,
-    pub k: Kinematic,
-    pub hp_max: f32,
-    pub hp: f32,
     /// Current essence pool (universal ability resource).
     /// Server-authoritative. Drained at cast time
     /// (`Ability::resource_cost`) and per-tick during channels
@@ -208,7 +206,11 @@ impl ServerPlayer {
     /// Build a fresh player record. Stats are computed from the
     /// hero config + default attributes + empty equipment, so a
     /// freshly-spawned character matches `CharacterStats::baseline`.
-    pub fn fresh(client_id: ClientId, net_id: NetId, spawn: glam::Vec3) -> Self {
+    pub fn fresh(
+        client_id: ClientId,
+        net_id: NetId,
+        spawn: glam::Vec3,
+    ) -> (Self, NetIdentity, Vitals, Kinematic) {
         let attrs = Attributes::for_class(HERO.primary_attribute);
         let equipment = rift_game::loot::Equipment::new();
         let stats = CharacterStats::compute(
@@ -220,21 +222,18 @@ impl ServerPlayer {
         let ability_mods = equipment.ability_mods();
         let hp_max = stats.max_hp;
         let max_resource = stats.max_resource;
-        Self {
+        let kinematic = Kinematic {
+            position: spawn,
+            velocity: glam::Vec3::ZERO,
+            yaw: 0.0,
+            aim_yaw: 0.0,
+            locomotion: loco::IDLE,
+            vy: 0.0,
+            airborne: false,
+            ..Default::default()
+        };
+        let player = Self {
             client_id,
-            net_id,
-            k: Kinematic {
-                position: spawn,
-                velocity: glam::Vec3::ZERO,
-                yaw: 0.0,
-                aim_yaw: 0.0,
-                locomotion: loco::IDLE,
-                vy: 0.0,
-                airborne: false,
-                ..Default::default()
-            },
-            hp_max,
-            hp: hp_max,
             resource: max_resource,
             resource_regen_pause: 0.0,
             low_hp_proc_armed: true,
@@ -268,7 +267,13 @@ impl ServerPlayer {
                 t.unspent_points = 1;
                 t
             },
-        }
+        };
+        (
+            player,
+            NetIdentity::new(net_id),
+            Vitals::new(hp_max),
+            kinematic,
+        )
     }
 
     /// Recompute [`Self::stats`] from the current equipment /
@@ -279,20 +284,14 @@ impl ServerPlayer {
     ///
     /// Call after any mutation that changes a `compute` input:
     /// equip / unequip, attribute respec (TBD), level up (TBD).
-    pub fn recompute_stats(&mut self) {
+    pub fn recompute_stats(&mut self, vitals: &mut Vitals) {
         let new_stats = CharacterStats::compute(
             &self.attrs,
             self.level,
             &self.equipment.active_affix_sum(),
             &rift_game::stats::StatModifiers::new(),
         );
-        let hp_pct = if self.hp_max > 0.0 {
-            (self.hp / self.hp_max).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        self.hp_max = new_stats.max_hp;
-        self.hp = new_stats.max_hp * hp_pct;
+        vitals.rescale_max(new_stats.max_hp);
         // Mirror the HP-rescale on essence so equipping a
         // `+Max Essence` item heals the pool to the same
         // fraction it was at before the resize — no surprise
@@ -336,8 +335,8 @@ impl ServerPlayer {
     /// the rise delay elapses, so we can't gate purely on that
     /// flag. Treating any of {hp<=0, is_ghost, ghost timer
     /// armed} as "not earning XP this tick" closes the window.
-    pub fn grant_xp(&mut self, amount: u64) -> Vec<LevelUpReward> {
-        if self.is_dead_or_ghosting() {
+    pub fn grant_xp(&mut self, vitals: &mut Vitals, amount: u64) -> Vec<LevelUpReward> {
+        if self.is_dead_or_ghosting(vitals) {
             return Vec::new();
         }
         let rewards = self.experience.grant_xp(amount);
@@ -353,8 +352,8 @@ impl ServerPlayer {
             // top off the gained HP. We just call recompute and
             // then refill so a fresh-level character isn't stuck
             // at the pre-level-up HP fraction.
-            self.recompute_stats();
-            self.hp = self.hp_max;
+            self.recompute_stats(vitals);
+            vitals.fill();
         }
         rewards
     }
@@ -364,8 +363,8 @@ impl ServerPlayer {
     /// waiting to rise. Used to gate XP / heal / vote-init paths
     /// that would otherwise have inconsistent behaviour during
     /// the death→ghost transition window.
-    pub fn is_dead_or_ghosting(&self) -> bool {
-        self.hp <= 0.0 || self.is_ghost || self.ghost_rise_timer.is_some()
+    pub fn is_dead_or_ghosting(&self, vitals: &Vitals) -> bool {
+        vitals.is_dead() || self.is_ghost || self.ghost_rise_timer.is_some()
     }
 
     /// Universal essence-cost gate. Returns `true` and deducts
@@ -406,8 +405,8 @@ impl ServerPlayer {
     /// second up to `stats.max_resource`. Dead / ghost players
     /// don't regen so a downed player can't sneak a cast off the
     /// instant they rise.
-    pub fn tick_resource(&mut self, dt: f32) {
-        if self.is_dead_or_ghosting() {
+    pub fn tick_resource(&mut self, vitals: &Vitals, dt: f32) {
+        if self.is_dead_or_ghosting(vitals) {
             return;
         }
         if self.resource_regen_pause > 0.0 {
@@ -426,16 +425,16 @@ impl ServerPlayer {
     /// for dead / ghosting players. Re-arms the
     /// [`Self::low_hp_proc_armed`] latch when HP rises back above
     /// the OnLowHealth threshold.
-    pub fn tick_health_regen(&mut self, dt: f32) {
-        if self.is_dead_or_ghosting() {
+    pub fn tick_health_regen(&mut self, vitals: &mut Vitals, dt: f32) {
+        if self.is_dead_or_ghosting(vitals) {
             return;
         }
-        if self.stats.health_regen > 0.0 && self.hp < self.hp_max {
-            self.hp = (self.hp + self.stats.health_regen * dt).min(self.hp_max);
+        if self.stats.health_regen > 0.0 && vitals.hp < vitals.hp_max {
+            vitals.hp = (vitals.hp + self.stats.health_regen * dt).min(vitals.hp_max);
         }
         // Re-arm the low-HP proc once we climb back above 30 %.
-        if !self.low_hp_proc_armed && self.hp_max > 0.0 {
-            if self.hp / self.hp_max >= LOW_HP_PROC_REARM {
+        if !self.low_hp_proc_armed && vitals.hp_max > 0.0 {
+            if vitals.hp / vitals.hp_max >= LOW_HP_PROC_REARM {
                 self.low_hp_proc_armed = true;
             }
         }
@@ -501,22 +500,28 @@ pub fn apply_inputs(
     let inputs: Vec<(ClientId, InputCmd)> = pending.drain().collect();
     for (client_id, cmd) in inputs {
         if let Some(&entity) = sessions.get(&client_id) {
-            if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
+            let is_dead = world
+                .get::<&Vitals>(entity)
+                .map(|vitals| vitals.is_dead())
+                .unwrap_or(false);
+            if let Ok((p, kinematic)) =
+                world.query_one_mut::<(&mut ServerPlayer, &mut Kinematic)>(entity)
+            {
                 p.last_input_seq = cmd.seq;
                 // Dead-but-not-yet-risen players are pinned in
                 // the down pose: zero velocity, drop input. Once
                 // they've risen as a ghost they regain movement
                 // (but `cast_ability` still rejects them, so the
                 // attack/ability button bits below are harmless).
-                if p.hp <= 0.0 && !p.is_ghost {
-                    p.k.velocity = glam::Vec3::ZERO;
+                if is_dead && !p.is_ghost {
+                    kinematic.velocity = glam::Vec3::ZERO;
                     continue;
                 }
                 // Snapshot the authoritative move speed before
-                // taking the mutable `p.k` borrow below.
+                // taking the mutable `Kinematic` borrow below.
                 let move_speed = p.stats.move_speed;
                 kinematic::apply_input(
-                    &mut p.k,
+                    kinematic,
                     cmd.move_dir,
                     cmd.aim_dir,
                     cmd.buttons,
@@ -529,8 +534,8 @@ pub fn apply_inputs(
 
 /// Integrate every player's velocity against the floor's wall grid.
 pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
-    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
-        kinematic::integrate(&mut p.k, floor, dt);
+    for (_e, (_p, kinematic)) in world.query_mut::<(&ServerPlayer, &mut Kinematic)>() {
+        kinematic::integrate(kinematic, floor, dt);
     }
 }
 
@@ -540,10 +545,10 @@ pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
 /// out so AI / enemy projectiles don't aim at corpses.
 pub fn target_positions(world: &hecs::World) -> Vec<(Entity, glam::Vec3)> {
     world
-        .query::<&ServerPlayer>()
+        .query::<(&ServerPlayer, &Vitals, &Kinematic)>()
         .iter()
-        .filter(|(_, p)| p.hp > 0.0)
-        .map(|(e, p)| (e, p.k.position))
+        .filter(|(_, (_p, vitals, _kinematic))| !vitals.is_dead())
+        .map(|(e, (_p, _vitals, kinematic))| (e, kinematic.position))
         .collect()
 }
 
@@ -551,12 +556,12 @@ pub fn target_positions(world: &hecs::World) -> Vec<(Entity, glam::Vec3)> {
 /// Called from the floor-change path so a held key doesn't slide
 /// the freshly-loaded floor's start position.
 pub fn snap_all_to(world: &mut hecs::World, spawn: glam::Vec3) {
-    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
-        p.k.position = spawn;
-        p.k.velocity = glam::Vec3::ZERO;
-        p.k.vy = 0.0;
-        p.k.airborne = false;
-        p.k.locomotion = loco::IDLE;
+    for (_e, (_p, kinematic)) in world.query_mut::<(&ServerPlayer, &mut Kinematic)>() {
+        kinematic.position = spawn;
+        kinematic.velocity = glam::Vec3::ZERO;
+        kinematic.vy = 0.0;
+        kinematic.airborne = false;
+        kinematic.locomotion = loco::IDLE;
     }
 }
 
@@ -565,8 +570,8 @@ pub fn snap_all_to(world: &mut hecs::World, spawn: glam::Vec3) {
 /// wipe respawn, login) where the team is back in the safe
 /// zone and should arrive alive.
 pub fn heal_all(world: &mut hecs::World) {
-    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
-        p.hp = p.hp_max;
+    for (_e, (p, vitals)) in world.query_mut::<(&mut ServerPlayer, &mut Vitals)>() {
+        vitals.fill();
         p.is_ghost = false;
         p.ghost_rise_timer = None;
     }
@@ -580,10 +585,10 @@ pub fn heal_all(world: &mut hecs::World) {
 /// (post-death, pre-rise) keep their armed `ghost_rise_timer`
 /// so the rise still triggers on the new floor.
 pub fn heal_living(world: &mut hecs::World) {
-    for (_e, p) in world.query_mut::<&mut ServerPlayer>() {
-        if p.is_dead_or_ghosting() {
+    for (_e, (p, vitals)) in world.query_mut::<(&mut ServerPlayer, &mut Vitals)>() {
+        if p.is_dead_or_ghosting(vitals) {
             continue;
         }
-        p.hp = p.hp_max;
+        vitals.fill();
     }
 }

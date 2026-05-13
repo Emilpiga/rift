@@ -18,8 +18,10 @@
 use glam::Vec3;
 use hecs::Entity;
 use rift_game::abilities::{AbilityWireId, ChannelEffect};
+use rift_game::kinematic::Kinematic;
 use rift_net::{messages::WorldEvent, NetId, NetTick};
 
+use super::actor::{NetIdentity, Vitals};
 use super::enemies::ServerEnemy;
 use super::player::ServerPlayer;
 use super::projectile::{apply_hits_to_enemies, mix64, Hit, Team, PLAYER_HIT_RADIUS};
@@ -132,8 +134,13 @@ pub fn tick(
     let mut pulses: Vec<ChannelEndSnapshot> = Vec::new();
 
     // 1. Player-attached channels.
-    for (entity, (player, channel)) in world.query_mut::<(&mut ServerPlayer, &mut ServerChannel)>()
-    {
+    for (entity, (player, identity, vitals, kinematic, channel)) in world.query_mut::<(
+        &mut ServerPlayer,
+        &NetIdentity,
+        &Vitals,
+        &Kinematic,
+        &mut ServerChannel,
+    )>() {
         // Death / ghost transition ends the channel
         // immediately. Without this the channel keeps ticking
         // (and emitting `ChannelTick` events) on a corpse —
@@ -142,11 +149,11 @@ pub fn tick(
         // transform first so death doesn't fire a "free"
         // finisher (e.g. a `FrostRayShatter` burst on the
         // tick the player was killed).
-        if player.is_dead_or_ghosting() {
+        if player.is_dead_or_ghosting(vitals) {
             channel.transform = None;
             channel.remaining = 0.0;
         }
-        if channel.cancel_on_move && player.k.velocity.length_squared() > 0.05 * 0.05 {
+        if channel.cancel_on_move && kinematic.velocity.length_squared() > 0.05 * 0.05 {
             channel.remaining = 0.0;
         }
         // Per-frame essence drain for held channels (e.g.
@@ -168,10 +175,10 @@ pub fn tick(
         channel.remaining -= dt;
         channel.elapsed += dt;
         channel.tick_acc += dt;
-        let yaw = player.k.aim_yaw;
+        let yaw = kinematic.aim_yaw;
         channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-        let caster_pos = player.k.position;
-        let caster_net_id = player.net_id;
+        let caster_pos = kinematic.position;
+        let caster_net_id = identity.net_id;
         while channel.tick_acc >= channel.tick_interval && channel.remaining > -dt {
             channel.tick_acc -= channel.tick_interval;
             ctx.events.push(WorldEvent::ChannelTick {
@@ -246,22 +253,24 @@ pub fn tick(
     //    pass — refresh aim from the caster's `aim_yaw`,
     //    cancel-on-move from the caster's velocity, queue
     //    visual events + hits, mark expired channels.
-    for (entity, (en, channel)) in world.query_mut::<(&ServerEnemy, &mut ServerChannel)>() {
+    for (entity, (en, identity, kinematic, channel)) in
+        world.query_mut::<(&ServerEnemy, &NetIdentity, &Kinematic, &mut ServerChannel)>()
+    {
         if en.is_dying() {
             // Treat death as channel cancel so the visual
             // doesn't trail off a corpse.
             channel.remaining = 0.0;
         }
-        if channel.cancel_on_move && en.k.velocity.length_squared() > 0.05 * 0.05 {
+        if channel.cancel_on_move && kinematic.velocity.length_squared() > 0.05 * 0.05 {
             channel.remaining = 0.0;
         }
         channel.remaining -= dt;
         channel.elapsed += dt;
         channel.tick_acc += dt;
-        let yaw = en.k.aim_yaw;
+        let yaw = kinematic.aim_yaw;
         channel.aim = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-        let caster_pos = en.k.position;
-        let caster_net_id = en.net_id;
+        let caster_pos = kinematic.position;
+        let caster_net_id = identity.net_id;
         while channel.tick_acc >= channel.tick_interval && channel.remaining > -dt {
             channel.tick_acc -= channel.tick_interval;
             ctx.events.push(WorldEvent::ChannelTick {
@@ -583,9 +592,14 @@ pub fn cancel(
             return;
         }
         let (caster_pos, caster_net_id) = world
-            .get::<&ServerPlayer>(entity)
+            .get::<&Kinematic>(entity)
             .ok()
-            .map(|p| (p.k.position, p.net_id))
+            .and_then(|kinematic| {
+                world
+                    .get::<&NetIdentity>(entity)
+                    .ok()
+                    .map(|identity| (kinematic.position, identity.net_id))
+            })
             .unwrap_or((Vec3::ZERO, NetId(0)));
         ChannelEndSnapshot::from_channel(&*c, entity, caster_pos, caster_net_id)
     };

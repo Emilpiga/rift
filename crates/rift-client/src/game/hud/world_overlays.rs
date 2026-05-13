@@ -8,7 +8,7 @@ use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{
     Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Resource, Transform,
 };
-use rift_engine::ui::im::{Color, Pos2, Rect, Ui};
+use rift_engine::ui::im::{Color, Pos2, Rect, ResourceBarAnim, Ui};
 
 use super::draw_effect_pip_strip;
 
@@ -157,7 +157,7 @@ pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) 
 }
 
 /// Render thin health bars above enemies that have taken damage.
-pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
+pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4, dt: f32) {
     use rift_engine::ui::im::WorldUi;
 
     const BAR_W: f32 = 52.0;
@@ -182,12 +182,23 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
 
         let bar_rect = if damaged {
             let hp_pct = (health.current / health.max).clamp(0.0, 1.0);
-            let color = if hp_pct > 0.5 {
-                Color::rgba(0.8, 0.1, 0.1, 0.9)
+            let style = if hp_pct > 0.5 {
+                WorldBarStyle::enemy_healthy()
             } else {
-                Color::rgba(0.9, 0.3, 0.0, 0.9)
+                WorldBarStyle::enemy_wounded()
             };
-            wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color)
+            draw_animated_world_bar(
+                &mut wui,
+                entity_bar_key(entity, 0),
+                WorldBarLane::Hp,
+                world_pos,
+                Y_OFFSET,
+                BAR_W,
+                BAR_H,
+                hp_pct,
+                dt,
+                style,
+            )
         } else {
             wui.world_to_screen(world_pos).map(|anchor| {
                 Rect::from_xywh(anchor.x - BAR_W * 0.5, anchor.y + Y_OFFSET, BAR_W, BAR_H)
@@ -214,7 +225,12 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
 /// The fraction comes from the avatar's [`Resource`] component,
 /// which `world_sync` mirrors from the snapshot's `resource_pct`
 /// each tick (same pattern as the HP mirror above).
-pub fn render_remote_player_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
+pub fn render_remote_player_health_bars(
+    ui: &mut Ui<'_>,
+    world: &hecs::World,
+    view_proj: Mat4,
+    dt: f32,
+) {
     use rift_engine::ui::im::WorldUi;
 
     const BAR_W: f32 = 56.0;
@@ -234,14 +250,23 @@ pub fn render_remote_player_health_bars(ui: &mut Ui<'_>, world: &hecs::World, vi
     {
         let hp_pct = (health.current / health.max).clamp(0.0, 1.0);
         let world_pos = transform.position + Vec3::new(0.0, 1.6, 0.0);
-        let color = if hp_pct > 0.5 {
-            Color::rgba(0.25, 0.75, 0.25, 0.9)
-        } else if hp_pct > 0.25 {
-            Color::rgba(0.85, 0.7, 0.1, 0.9)
+        let style = if hp_pct > 0.25 {
+            WorldBarStyle::ally_health()
         } else {
-            Color::rgba(0.9, 0.25, 0.15, 0.9)
+            WorldBarStyle::ally_critical()
         };
-        let bar_rect = wui.bar_above_world(world_pos, Y_OFFSET, BAR_W, BAR_H, hp_pct, color);
+        let bar_rect = draw_animated_world_bar(
+            &mut wui,
+            entity_bar_key(entity, 1),
+            WorldBarLane::Hp,
+            world_pos,
+            Y_OFFSET,
+            BAR_W,
+            BAR_H,
+            hp_pct,
+            dt,
+            style,
+        );
 
         // Essence bar — same width as HP, slimmer, anchored
         // `BAR_H + RESOURCE_GAP` pixels under the HP bar's top
@@ -254,13 +279,17 @@ pub fn render_remote_player_health_bars(ui: &mut Ui<'_>, world: &hecs::World, vi
             } else {
                 0.0
             };
-            wui.bar_above_world(
+            draw_animated_world_bar(
+                &mut wui,
+                entity_bar_key(entity, 1),
+                WorldBarLane::Essence,
                 world_pos,
                 Y_OFFSET + BAR_H + RESOURCE_GAP,
                 BAR_W,
                 RESOURCE_BAR_H,
                 res_pct,
-                Color::rgba(0.30, 0.55, 0.95, 0.9),
+                dt,
+                WorldBarStyle::ally_essence(),
             );
         }
 
@@ -272,6 +301,219 @@ pub fn render_remote_player_health_bars(ui: &mut Ui<'_>, world: &hecs::World, vi
             draw_effect_pips(&mut wui, rect, &effects);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum WorldBarLane {
+    Hp,
+    Essence,
+}
+
+#[derive(Clone, Copy)]
+struct WorldBarStyle {
+    base: Color,
+    hot: Color,
+    chip: Color,
+    glow: Color,
+    border: Color,
+}
+
+impl WorldBarStyle {
+    fn enemy_healthy() -> Self {
+        Self {
+            base: Color::rgba(0.68, 0.08, 0.08, 0.95),
+            hot: Color::rgba(1.0, 0.24, 0.16, 1.0),
+            chip: Color::rgba(1.0, 0.72, 0.50, 0.30),
+            glow: Color::rgba(1.0, 0.16, 0.08, 1.0),
+            border: Color::rgba(0.04, 0.02, 0.02, 0.92),
+        }
+    }
+
+    fn enemy_wounded() -> Self {
+        Self {
+            base: Color::rgba(0.82, 0.22, 0.02, 0.96),
+            hot: Color::rgba(1.0, 0.55, 0.16, 1.0),
+            chip: Color::rgba(1.0, 0.88, 0.56, 0.34),
+            glow: Color::rgba(1.0, 0.42, 0.08, 1.0),
+            border: Color::rgba(0.05, 0.025, 0.01, 0.92),
+        }
+    }
+
+    fn ally_health() -> Self {
+        Self {
+            base: Color::rgba(0.14, 0.58, 0.25, 0.96),
+            hot: Color::rgba(0.42, 0.94, 0.34, 1.0),
+            chip: Color::rgba(0.88, 1.0, 0.78, 0.30),
+            glow: Color::rgba(0.58, 1.0, 0.44, 1.0),
+            border: Color::rgba(0.025, 0.045, 0.025, 0.92),
+        }
+    }
+
+    fn ally_critical() -> Self {
+        Self {
+            base: Color::rgba(0.58, 0.10, 0.08, 0.96),
+            hot: Color::rgba(1.0, 0.30, 0.22, 1.0),
+            chip: Color::rgba(1.0, 0.82, 0.74, 0.34),
+            glow: Color::rgba(1.0, 0.22, 0.16, 1.0),
+            border: Color::rgba(0.05, 0.02, 0.02, 0.92),
+        }
+    }
+
+    fn ally_essence() -> Self {
+        Self {
+            base: Color::rgba(0.22, 0.46, 0.92, 0.96),
+            hot: Color::rgba(0.40, 0.78, 1.0, 1.0),
+            chip: Color::rgba(0.78, 0.92, 1.0, 0.34),
+            glow: Color::rgba(0.30, 0.70, 1.0, 1.0),
+            border: Color::rgba(0.02, 0.03, 0.06, 0.92),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WorldBarAnimSnapshot {
+    displayed: f32,
+    trail: f32,
+    pulse: f32,
+}
+
+fn entity_bar_key(entity: hecs::Entity, group: u64) -> u64 {
+    u64::from(entity.to_bits()) ^ (group << 60)
+}
+
+fn draw_animated_world_bar(
+    wui: &mut rift_engine::ui::im::WorldUi<'_, '_>,
+    key: u64,
+    lane: WorldBarLane,
+    world_pos: Vec3,
+    y_offset_px: f32,
+    width: f32,
+    height: f32,
+    target: f32,
+    dt: f32,
+    style: WorldBarStyle,
+) -> Option<Rect> {
+    let anchor = wui.world_to_screen(world_pos)?;
+    let rect = Rect::from_xywh(
+        anchor.x - width * 0.5,
+        anchor.y + y_offset_px,
+        width,
+        height,
+    );
+    let snapshot = {
+        let state = wui.ui().state_mut();
+        let anims = state.world_vitals.entry(key).or_default();
+        let anim: &mut ResourceBarAnim = match lane {
+            WorldBarLane::Hp => &mut anims.hp,
+            WorldBarLane::Essence => &mut anims.essence,
+        };
+        anim.tick(target, dt);
+        WorldBarAnimSnapshot {
+            displayed: anim.displayed,
+            trail: anim.trail,
+            pulse: anim.pulse,
+        }
+    };
+    draw_world_resource_bar(wui.ui(), rect, snapshot, style);
+    Some(rect)
+}
+
+fn draw_world_resource_bar(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    anim: WorldBarAnimSnapshot,
+    style: WorldBarStyle,
+) {
+    let displayed = anim.displayed.clamp(0.0, 1.0);
+    let trail = anim.trail.clamp(displayed, 1.0);
+    let pulse = anim.pulse.clamp(0.0, 1.0);
+
+    ui.draw_gradient_rect(
+        rect,
+        Color::rgba(0.025, 0.022, 0.024, 0.92),
+        Color::rgba(0.006, 0.006, 0.008, 0.96),
+    );
+
+    let trail_w = rect.width() * trail;
+    let fill_w = rect.width() * displayed;
+    if trail_w > fill_w + 0.5 {
+        ui.draw_grad4_rect(
+            Rect::from_xywh(rect.x() + fill_w, rect.y(), trail_w - fill_w, rect.height()),
+            style.chip,
+            style.chip.fade(0.50),
+            Color::rgba(0.0, 0.0, 0.0, 0.22),
+            style.chip.fade(0.22),
+        );
+    }
+
+    if fill_w > 0.5 {
+        let fill = Rect::from_xywh(rect.x(), rect.y(), fill_w, rect.height());
+        let lift = 1.0 + pulse * 0.18;
+        ui.draw_grad4_rect(
+            fill,
+            scale_world_rgb(style.hot, lift),
+            scale_world_rgb(style.base, 1.04 + pulse * 0.12),
+            scale_world_rgb(style.base, 0.58),
+            scale_world_rgb(style.base, 0.76 + pulse * 0.08),
+        );
+        ui.draw_gradient_rect(
+            fill,
+            Color::rgba(1.0, 1.0, 1.0, 0.20),
+            Color::rgba(0.0, 0.0, 0.0, 0.22),
+        );
+        draw_world_bar_cursor(ui, rect, fill_w, style.glow, pulse);
+    }
+
+    if pulse > 0.01 && fill_w > 1.0 {
+        ui.draw_grad4_rect(
+            Rect::from_xywh(
+                rect.x() - 1.0,
+                rect.y() - 1.0,
+                fill_w + 2.0,
+                rect.height() + 2.0,
+            ),
+            style.glow.fade(0.08 * pulse),
+            style.glow.fade(0.03 * pulse),
+            style.glow.fade(0.02 * pulse),
+            style.glow.fade(0.01 * pulse),
+        );
+    }
+
+    ui.draw_outline(rect, 1.0, style.border);
+}
+
+fn draw_world_bar_cursor(ui: &mut Ui<'_>, rect: Rect, fill_w: f32, glow: Color, pulse: f32) {
+    if fill_w <= 1.0 || fill_w >= rect.width() - 0.5 {
+        return;
+    }
+    let x = rect.x() + fill_w;
+    let halo_w = (rect.height() * 1.6).clamp(5.0, 12.0);
+    ui.draw_grad4_rect(
+        Rect::from_xywh(x - halo_w * 0.55, rect.y(), halo_w, rect.height()),
+        Color::rgba(1.0, 1.0, 1.0, 0.0),
+        glow.fade(0.16 + pulse * 0.18),
+        Color::rgba(1.0, 1.0, 1.0, 0.0),
+        glow.fade(0.04 + pulse * 0.06),
+    );
+    ui.draw_gradient_rect(
+        Rect::from_xywh(
+            x - 0.75,
+            rect.y() + 1.0,
+            1.5,
+            (rect.height() - 2.0).max(1.0),
+        ),
+        Color::rgba(1.0, 1.0, 1.0, 0.66 + pulse * 0.14),
+        glow.fade(0.34 + pulse * 0.18),
+    );
+}
+
+fn scale_world_rgb(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul).clamp(0.0, 1.0),
+        (color.0[1] * mul).clamp(0.0, 1.0),
+        (color.0[2] * mul).clamp(0.0, 1.0),
+        color.0[3],
+    )
 }
 
 /// Draw a horizontal strip of buff / debuff icon pips just above

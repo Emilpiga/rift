@@ -18,7 +18,7 @@ mod stash_panel;
 mod stats_panel;
 mod tooltips;
 
-use rift_ui_im::{Button, ButtonSize, Color, Frame, Id, ImKey, Pad, Pos2, Rect, Ui};
+use rift_ui_im::{Button, ButtonSize, Color, Frame, Id, ImKey, Pad, PanelHeader, Pos2, Rect, Ui};
 use rift_ui_types::inventory::{
     DragSource, InventoryAction, InventoryUiState, InventoryView, ItemView,
 };
@@ -76,6 +76,7 @@ pub fn frame_inventory(
         state.rename_target_tab = None;
         state.rename_buffer.clear();
         state.rename_has_focused = false;
+        state.color_picker_tab = None;
         state.salvage_armed_at = None;
         state.salvage_armed_bag_idx = None;
         return (false, actions);
@@ -118,10 +119,16 @@ pub fn frame_inventory(
                 state.rename_has_focused = false;
             }
         }
+        if let Some(idx) = state.color_picker_tab {
+            if (idx as usize) >= stash.tabs.len() {
+                state.color_picker_tab = None;
+            }
+        }
     } else {
         state.rename_target_tab = None;
         state.rename_buffer.clear();
         state.rename_has_focused = false;
+        state.color_picker_tab = None;
     }
 
     // ── Drawer chrome ───────────────────────────────
@@ -131,21 +138,13 @@ pub fn frame_inventory(
         .show_only(ui, layout.drawer);
 
     // ── Header ──────────────────────────────────────
-    ui.draw_text(
-        Pos2::new(layout.header.x(), layout.header.y()),
-        "INVENTORY",
-        theme.fonts.size_lg,
-        theme.colors.text,
+    let main_header = Rect::from_xywh(
+        layout.drawer.x(),
+        layout.drawer.y(),
+        layout.drawer.width(),
+        HEADER_H * layout.fit,
     );
-    ui.draw_rect(
-        Rect::from_xywh(
-            layout.header.x(),
-            layout.header.max.y,
-            layout.header.width(),
-            1.0,
-        ),
-        theme.colors.border_stone,
-    );
+    PanelHeader::new("INVENTORY").show(ui, main_header);
 
     let active_tab_u8 = state.active_stash_tab;
     let stash_active_items: &[Option<ItemView<'_>>] = view
@@ -240,10 +239,24 @@ pub fn frame_inventory(
         Frame::stone(&theme)
             .with_padding(Pad::all(0.0))
             .show_only(ui, layout.stats_drawer);
-        let inner = layout.stats_drawer.shrink2(Pad::symmetric(
+        let header_h = HEADER_H * layout.fit;
+        let stats_header = Rect::from_xywh(
+            layout.stats_drawer.x(),
+            layout.stats_drawer.y(),
+            layout.stats_drawer.width(),
+            header_h,
+        );
+        PanelHeader::new("STATS").show(ui, stats_header);
+        let padded = layout.stats_drawer.shrink2(Pad::symmetric(
             PANEL_PAD_X * layout.fit,
             PANEL_PAD_Y * layout.fit,
         ));
+        let inner = Rect::from_xywh(
+            padded.x(),
+            stats_header.max.y + 10.0 * layout.fit,
+            padded.width(),
+            (padded.max.y - (stats_header.max.y + 10.0 * layout.fit)).max(0.0),
+        );
         render_stats_panel(ui, inner, &view.stats, layout.fit);
     }
 
@@ -257,24 +270,14 @@ pub fn frame_inventory(
                 PANEL_PAD_X * layout.fit,
                 PANEL_PAD_Y * layout.fit,
             ));
-            // STASH header, mirroring the INVENTORY header chrome.
             let header_h = HEADER_H * layout.fit;
-            let stash_header = Rect::from_xywh(content.x(), content.y(), content.width(), header_h);
-            ui.draw_text(
-                Pos2::new(stash_header.x(), stash_header.y()),
-                "STASH",
-                theme.fonts.size_lg,
-                theme.colors.text,
+            let stash_header = Rect::from_xywh(
+                layout.stash_drawer.x(),
+                layout.stash_drawer.y(),
+                layout.stash_drawer.width(),
+                header_h,
             );
-            ui.draw_rect(
-                Rect::from_xywh(
-                    stash_header.x(),
-                    stash_header.max.y,
-                    stash_header.width(),
-                    1.0,
-                ),
-                theme.colors.border_stone,
-            );
+            PanelHeader::new("STASH").show(ui, stash_header);
             let inner = Rect::from_xywh(
                 content.x(),
                 stash_header.max.y + 6.0 * layout.fit,
@@ -299,6 +302,7 @@ pub fn frame_inventory(
                     buffer: &mut state.rename_buffer,
                     has_focused: &mut state.rename_has_focused,
                 },
+                &mut state.color_picker_tab,
                 FilterStateRef {
                     rarity_mask: &mut state.stash_filter_rarity_mask,
                     stat_keys: &mut state.stash_filter_stats,
@@ -312,6 +316,7 @@ pub fn frame_inventory(
                     state.rename_target_tab = None;
                     state.rename_buffer.clear();
                     state.rename_has_focused = false;
+                    state.color_picker_tab = None;
                 }
             }
             if let Some(src) = out.in_transit_from_drop {
@@ -633,20 +638,19 @@ fn render_currency_bar(ui: &mut Ui<'_>, rect: Rect, shards: u32, fit: f32) {
         return;
     }
     let theme = *ui.theme();
-    // Compact "badge" look: pill-rounded, noticeably darker
+    // Compact badge: square, noticeably darker
     // than the bag section behind it, with a thin warm-gold
     // outline so it reads as a currency tag rather than a
     // generic toolbar row.
-    let radius = (rect.height() * 0.5).min(14.0 * fit);
-    ui.draw_rounded_rect(rect, radius, Color::rgba(0.05, 0.06, 0.08, 0.92));
-    ui.draw_rounded_outline(rect, radius, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.65));
+    ui.draw_rect(rect, Color::rgba(0.07, 0.055, 0.040, 0.92));
+    ui.draw_outline(rect, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.65));
 
     let pad = 10.0 * fit;
     let glyph = "\u{25C6}";
     let glyph_size = theme.fonts.size_md;
     let amount = format_amount(shards);
     let amount_size = theme.fonts.size_md;
-    let glyph_color = Color::rgba(0.60, 0.85, 1.00, 1.0);
+    let glyph_color = Color::rgba(0.96, 0.70, 0.28, 1.0);
 
     ui.draw_text(
         Pos2::new(

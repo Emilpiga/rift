@@ -23,7 +23,8 @@ use glam::Vec3;
 use hecs::Entity;
 use rift_dungeon::Floor;
 use rift_game::abilities::AbilityWireId;
-use rift_game::kinematic::loco;
+use rift_game::kinematic::{loco, Kinematic};
+use rift_net::NetId;
 
 use super::{enter_windup, tick_windup, AiOutcome, AiPhase, EnemyCast, ServerEnemy, WindupKind};
 
@@ -63,6 +64,8 @@ pub static SPEC: Spec = Spec {
 
 pub fn tick(
     en: &mut ServerEnemy,
+    kinematic: &mut Kinematic,
+    net_id: NetId,
     spec: &Spec,
     floor: &Floor,
     target: Option<(Entity, Vec3, f32)>,
@@ -87,21 +90,21 @@ pub fn tick(
     let bolt_cooldown = bolt.cooldown;
 
     let Some((_target_entity, target_pos, d2)) = target else {
-        en.k.velocity = Vec3::ZERO;
-        en.k.locomotion = loco::IDLE;
+        kinematic.velocity = Vec3::ZERO;
+        kinematic.locomotion = loco::IDLE;
         en.ai_phase = AiPhase::Idle;
         return;
     };
     let dist = d2.sqrt();
     let to_target = Vec3::new(
-        target_pos.x - en.k.position.x,
+        target_pos.x - kinematic.position.x,
         0.0,
-        target_pos.z - en.k.position.z,
+        target_pos.z - kinematic.position.z,
     );
     let dir_to = to_target.normalize_or_zero();
     if to_target.length_squared() > 1.0e-4 {
-        en.k.yaw = to_target.x.atan2(to_target.z);
-        en.k.aim_yaw = en.k.yaw;
+        kinematic.yaw = to_target.x.atan2(to_target.z);
+        kinematic.aim_yaw = kinematic.yaw;
     }
 
     // Mid-windup: tick the central timer. On expiry fire the
@@ -114,12 +117,12 @@ pub fn tick(
             ..
         }
     ) {
-        if let Some(WindupKind::CasterBolt) = tick_windup(en, dt) {
+        if let Some(WindupKind::CasterBolt) = tick_windup(en, kinematic, dt) {
             outcome.casts.push(EnemyCast::Resolve {
-                owner: en.net_id,
+                owner: net_id,
                 attacker_kind: en.role.to_wire_byte(),
                 ability_id: spec.ability_id,
-                origin: en.k.position,
+                origin: kinematic.position,
                 aim: dir_to,
                 damage_mult,
                 crit_chance: en.crit_chance,
@@ -131,7 +134,7 @@ pub fn tick(
         return;
     }
 
-    let los_blocked = super::cached_los_blocked(en, floor, target_pos);
+    let los_blocked = super::cached_los_blocked(en, kinematic, floor, target_pos);
 
     if los_blocked {
         // Wall in the way — the kite ring is meaningless here
@@ -146,7 +149,7 @@ pub fn tick(
             || en.path_target_tile != Some(target_tile)
             || en.path_recompute_in <= 0.0;
         if need_recompute {
-            let from = super::brute::world_to_tile(en.k.position);
+            let from = super::brute::world_to_tile(kinematic.position);
             en.path = floor.path(from, target_tile, 1024).unwrap_or_default();
             en.path_target_tile = Some(target_tile);
             en.path_recompute_in = super::brute::PATH_RECOMPUTE_INTERVAL;
@@ -154,8 +157,8 @@ pub fn tick(
         // Drop already-reached waypoints (within half a tile of
         // the caster's centre).
         while let Some(&(wx, wz)) = en.path.first() {
-            let dx = wx as f32 - en.k.position.x;
-            let dz = wz as f32 - en.k.position.z;
+            let dx = wx as f32 - kinematic.position.x;
+            let dz = wz as f32 - kinematic.position.z;
             if dx * dx + dz * dz < 0.25 {
                 en.path.remove(0);
             } else {
@@ -164,9 +167,9 @@ pub fn tick(
         }
         let approach = if let Some(&(wx, wz)) = en.path.first() {
             Vec3::new(
-                wx as f32 - en.k.position.x,
+                wx as f32 - kinematic.position.x,
                 0.0,
-                wz as f32 - en.k.position.z,
+                wz as f32 - kinematic.position.z,
             )
             .normalize_or_zero()
         } else {
@@ -175,8 +178,8 @@ pub fn tick(
             // to escape the wall corner.
             dir_to
         };
-        en.k.velocity = approach * en.speed * speed_mult;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = approach * en.speed * speed_mult;
+        kinematic.locomotion = loco::RUN;
         // Don't attempt to cast — LOS is blocked. Re-evaluate
         // next tick once we've moved.
         return;
@@ -197,24 +200,31 @@ pub fn tick(
 
     // Distance-based kiting movement.
     if dist > spec.max_range {
-        en.k.velocity = dir_to * en.speed * speed_mult + strafe * 0.5;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = dir_to * en.speed * speed_mult + strafe * 0.5;
+        kinematic.locomotion = loco::RUN;
     } else if dist < spec.min_range {
-        en.k.velocity = -dir_to * en.speed * speed_mult + strafe * 0.5;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = -dir_to * en.speed * speed_mult + strafe * 0.5;
+        kinematic.locomotion = loco::RUN;
     } else {
         // In the kite ring — strafe sideways while drifting
         // gently toward `kite_distance`. The strafe component
         // is what reads as "actively positioning"; the drift
         // keeps the caster from drifting out of the ring.
         let drift = (dist - spec.kite_distance) * 0.3;
-        en.k.velocity = dir_to * drift * speed_mult + strafe;
-        en.k.locomotion = loco::RUN;
+        kinematic.velocity = dir_to * drift * speed_mult + strafe;
+        kinematic.locomotion = loco::RUN;
     }
 
     // LOS-gated cast: only commit to the wind-up if the bolt
     // would actually have a clear flight path.
     if en.attack_cooldown <= 0.0 && dist <= spec.max_range {
-        enter_windup(en, WindupKind::CasterBolt, bolt_windup, outcome);
+        enter_windup(
+            en,
+            kinematic,
+            net_id,
+            WindupKind::CasterBolt,
+            bolt_windup,
+            outcome,
+        );
     }
 }

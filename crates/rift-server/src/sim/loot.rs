@@ -14,6 +14,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
+use rift_game::kinematic::Kinematic;
 use rift_game::loot::{drops, CharacterIdBytes, Item, LootProvenance, LootRng};
 use rift_game::monsters::MonsterRole;
 use rift_net::{
@@ -45,9 +46,9 @@ pub fn finalise_kills(
         // too so the death-effect pass can read EXPLODER without
         // re-borrowing the row.
         let info = world
-            .get::<&ServerEnemy>(entity)
+            .query_one_mut::<(&ServerEnemy, &Kinematic)>(entity)
             .ok()
-            .map(|en| (en.role, en.k.position, en.elite_mods));
+            .map(|(en, kinematic)| (en.role, kinematic.position, en.elite_mods));
         ctx.events.push(WorldEvent::Death {
             entity: net_id,
             killer: None,
@@ -95,9 +96,11 @@ pub fn finalise_kills(
                 });
             }
         }
-        if let Ok(mut en) = world.get::<&mut ServerEnemy>(entity) {
+        if let Ok((en, kinematic)) =
+            world.query_one_mut::<(&mut ServerEnemy, &mut Kinematic)>(entity)
+        {
             en.dying_remaining = super::enemies::DEATH_FADE_DUR;
-            en.k.velocity = glam::Vec3::ZERO;
+            kinematic.velocity = glam::Vec3::ZERO;
             en.attack_anim_remaining = 0.0;
         }
     }

@@ -203,21 +203,13 @@ impl<'a> Button<'a> {
             ui.state_mut().pressed_button = None;
         }
 
-        // Every enabled button uses the same surface recipe:
-        //   1. Radial-elliptical fill (dark edge → bright
-        //      centre, smoothstep falloff) — gives the
-        //      "polished oval hotspot" look in one primitive.
-        //      The hotspot is inscribed inside the rounded
-        //      rect (see `rounded_rect_px_radial`) so every
-        //      perimeter sample evaluates to the edge colour
-        //      and the rounded corners blend cleanly into
-        //      the long edges instead of forming visible
-        //      wedges.
-        //   2. Top-bevel sheen that fades to transparent at
-        //      the horizontal edges (4-corner gradients).
-        //   3. Bottom inner shadow, also fading at the edges.
-        //   4. Dark outer border + lighter hairline 1 px in
-        //      → forged-bevel framing.
+        // Every enabled button uses the same ARPG surface recipe:
+        //   1. Sharp rectangular forged-metal fill with a
+        //      horizontal centre lift, so rows of buttons read
+        //      as carved controls instead of soft pills.
+        //   2. Top bevel + bottom shadow bands.
+        //   3. Heavy dark outer line, gold inner hairline, and
+        //      clipped corner ticks for a more crafted border.
         // Disabled buttons stay flat so the affordance reads
         // immediately as "not interactable".
         if self.enabled {
@@ -266,9 +258,9 @@ impl<'a> Button<'a> {
                     )
                 }
                 ButtonVariant::Normal => (
-                    theme.colors.bg_panel,
-                    theme.colors.bg_panel_alt,
-                    theme.colors.bg_slot_hover,
+                    Color::rgba(0.075, 0.062, 0.052, 0.96),
+                    Color::rgba(0.20, 0.165, 0.125, 0.96),
+                    Color::rgba(0.30, 0.225, 0.140, 0.98),
                 ),
             };
             let (edge, centre) = if pressed {
@@ -295,7 +287,21 @@ impl<'a> Button<'a> {
             } else {
                 (base_edge, base_centre)
             };
-            ui.draw_rounded_radial_rect_noisy(rect, theme.spacing.corner_radius, edge, centre);
+            let mid = Color::rgba(
+                (centre.0[0] * 1.08).min(1.0),
+                (centre.0[1] * 1.08).min(1.0),
+                (centre.0[2] * 1.08).min(1.0),
+                centre.0[3],
+            );
+            let left = Rect::from_xywh(rect.x(), rect.y(), rect.width() * 0.5, rect.height());
+            let right = Rect::from_xywh(
+                rect.x() + rect.width() * 0.5,
+                rect.y(),
+                rect.width() * 0.5,
+                rect.height(),
+            );
+            ui.draw_grad4_rect(left, edge, mid, edge, centre);
+            ui.draw_grad4_rect(right, mid, edge, centre, edge);
 
             // Top + bottom bevel bands. Pressed keeps a
             // softer version of both (alpha halved) so the
@@ -303,52 +309,25 @@ impl<'a> Button<'a> {
             // a flat plate, but the bands clearly recede.
             let pressed_dim = if pressed { 0.45 } else { 1.0 };
             {
-                let r = theme.spacing.corner_radius;
-                let inset = r.max(2.0);
+                let inset = 2.0;
                 let inner_x = rect.x() + inset;
                 let inner_w = rect.width() - inset * 2.0;
                 if inner_w > 4.0 {
-                    let band_h = (rect.height() * 0.35).clamp(4.0, 14.0);
+                    let band_h = (rect.height() * 0.28).clamp(3.0, 12.0);
                     let band_y = rect.y() + 1.0;
-                    let half_w = inner_w * 0.5;
-                    let opaque_mid = Color::rgba(1.0, 0.96, 0.90, 0.32 * pressed_dim);
-                    let transparent = Color::rgba(1.0, 0.96, 0.90, 0.0);
-                    ui.draw_grad4_rect(
-                        Rect::from_xywh(inner_x, band_y, half_w, band_h),
-                        transparent,
-                        opaque_mid,
-                        transparent,
-                        transparent,
-                    );
-                    ui.draw_grad4_rect(
-                        Rect::from_xywh(inner_x + half_w, band_y, half_w, band_h),
-                        opaque_mid,
-                        transparent,
-                        transparent,
-                        transparent,
+                    ui.draw_gradient_rect(
+                        Rect::from_xywh(inner_x, band_y, inner_w, band_h),
+                        Color::rgba(1.0, 0.96, 0.88, 0.28 * pressed_dim),
+                        Color::rgba(1.0, 0.96, 0.88, 0.02 * pressed_dim),
                     );
 
-                    let shadow_h = (rect.height() * 0.30).clamp(3.0, 12.0);
+                    let shadow_h = (rect.height() * 0.26).clamp(3.0, 11.0);
                     let shadow_y = rect.max.y - shadow_h - 1.0;
-                    // Pressed gets a *stronger* bottom
-                    // shadow band so the recess reads even
-                    // though the top sheen is muted.
                     let bottom_alpha = if pressed { 0.55 } else { 0.45 };
-                    let opaque_dark = Color::rgba(0.0, 0.0, 0.0, bottom_alpha);
-                    let trans_dark = Color::rgba(0.0, 0.0, 0.0, 0.0);
-                    ui.draw_grad4_rect(
-                        Rect::from_xywh(inner_x, shadow_y, half_w, shadow_h),
-                        trans_dark,
-                        trans_dark,
-                        trans_dark,
-                        opaque_dark,
-                    );
-                    ui.draw_grad4_rect(
-                        Rect::from_xywh(inner_x + half_w, shadow_y, half_w, shadow_h),
-                        trans_dark,
-                        trans_dark,
-                        opaque_dark,
-                        trans_dark,
+                    ui.draw_gradient_rect(
+                        Rect::from_xywh(inner_x, shadow_y, inner_w, shadow_h),
+                        Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        Color::rgba(0.0, 0.0, 0.0, bottom_alpha),
                     );
                 }
             }
@@ -356,13 +335,12 @@ impl<'a> Button<'a> {
             // Disabled: flat, muted, noticeably darker than
             // any active state so the affordance reads as
             // "not interactable" against any panel colour.
-            // Pulls from `bg_panel` (warm stone) instead of
-            // `bg_slot` (cool slate) so disabled buttons
-            // don't pop as a bright chip on the carved-stone
-            // surfaces the inventory + character-select use.
-            let p = theme.colors.bg_panel.0;
+            // Pulls from `bg_stone` instead of the cool slate
+            // panel tokens so disabled buttons stay inside the
+            // carved-stone material family.
+            let p = theme.colors.bg_stone.0;
             let disabled_fill = Color::rgba(p[0] * 0.60, p[1] * 0.60, p[2] * 0.60, p[3]);
-            ui.draw_rounded_rect(rect, theme.spacing.corner_radius, disabled_fill);
+            ui.draw_rect(rect, disabled_fill);
         }
 
         // Outline. Every enabled button gets the dark stone
@@ -371,16 +349,23 @@ impl<'a> Button<'a> {
         // border to telegraph state.
         let (outline_color, outline_thickness) = match (self.enabled, hovered, self.variant) {
             (false, _, _) => (theme.colors.border, theme.spacing.border_thickness),
-            (true, _, ButtonVariant::Active) => (theme.colors.border_strong, 1.5),
-            (true, true, _) => (theme.colors.border_strong, 1.5),
+            (true, _, ButtonVariant::Active) => (Color::rgba(0.96, 0.52, 0.22, 0.82), 1.5),
+            (true, true, _) => (Color::rgba(0.90, 0.62, 0.30, 0.84), 1.5),
             (true, false, _) => (theme.colors.border_stone, 1.5),
         };
-        ui.draw_rounded_outline(
-            rect,
-            theme.spacing.corner_radius,
-            outline_thickness,
-            outline_color,
-        );
+        ui.draw_outline(rect, outline_thickness, outline_color);
+        if self.enabled {
+            ui.draw_outline(
+                Rect::from_xywh(
+                    rect.x() + 1.0,
+                    rect.y() + 1.0,
+                    (rect.width() - 2.0).max(0.0),
+                    (rect.height() - 2.0).max(0.0),
+                ),
+                1.0,
+                Color::rgba(0.94, 0.70, 0.36, if pressed { 0.18 } else { 0.34 }),
+            );
+        }
 
         // Inner hairline 1 px inside the outer border. Reads
         // as a forged-bevel framing line. Stays on for
@@ -393,17 +378,9 @@ impl<'a> Button<'a> {
                 (rect.width() - 4.0).max(0.0),
                 (rect.height() - 4.0).max(0.0),
             );
-            // Keep the inner radius positive so the corner
-            // arcs are visible — going to 0 would degrade
-            // to a sharp inset rectangle.
-            let inner_r = (theme.spacing.corner_radius - 2.0).max(2.0);
             let hairline_a = if pressed { 0.09 } else { 0.18 };
-            ui.draw_rounded_outline(
-                inner,
-                inner_r,
-                1.0,
-                Color::rgba(1.0, 0.92, 0.84, hairline_a),
-            );
+            ui.draw_outline(inner, 1.0, Color::rgba(1.0, 0.92, 0.84, hairline_a));
+            draw_corner_cuts(ui, rect, if pressed { 0.34 } else { 0.58 });
         }
 
         // Centred label. Two-stage overflow guard so a button
@@ -474,4 +451,58 @@ impl<'a> Button<'a> {
             focused: ui.state().focus == Some(id),
         }
     }
+}
+
+fn draw_corner_cuts(ui: &mut Ui<'_>, rect: Rect, alpha: f32) {
+    let cut = (rect.height() * 0.23).clamp(5.0, 10.0);
+    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
+    let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.62);
+    ui.draw_line(
+        Pos2::new(rect.x() + 1.0, rect.y() + cut),
+        Pos2::new(rect.x() + cut, rect.y() + 1.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.y() + cut + 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.y() + 2.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.y() + 1.0),
+        Pos2::new(rect.max.x - 1.0, rect.y() + cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.y() + 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.y() + cut + 1.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 1.0, rect.max.y - cut),
+        Pos2::new(rect.x() + cut, rect.max.y - 1.0),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.x() + 2.0, rect.max.y - cut - 1.0),
+        Pos2::new(rect.x() + cut + 1.0, rect.max.y - 2.0),
+        1.0,
+        shadow,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut, rect.max.y - 1.0),
+        Pos2::new(rect.max.x - 1.0, rect.max.y - cut),
+        1.0,
+        col,
+    );
+    ui.draw_line(
+        Pos2::new(rect.max.x - cut - 1.0, rect.max.y - 2.0),
+        Pos2::new(rect.max.x - 2.0, rect.max.y - cut - 1.0),
+        1.0,
+        shadow,
+    );
 }

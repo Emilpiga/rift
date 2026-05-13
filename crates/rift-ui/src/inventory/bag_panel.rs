@@ -86,7 +86,6 @@ const SECTION_INNER_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.42);
 /// edges so the niche reads as recessed at every viewing
 /// distance.
 const SECTION_INNER_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.06);
-
 /// Empty equipment-slot fill. The equipment container has a
 /// stone texture; each slot gets a darker overlay so the
 /// slot grid pops against the slab without losing the

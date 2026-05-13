@@ -35,7 +35,7 @@ void main() {
     vec4 worldPos = push.model * vec4(inPosition, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
     fragWorldPos = worldPos.xyz;
-    fragNormal = mat3(push.model) * inNormal;
+    fragNormal = transpose(inverse(mat3(push.model))) * inNormal;
     fragColor = inColor;
     // Per-object UV scale lets the same texture cover larger
     // floor / wall meshes without re-authoring per-tile UVs.

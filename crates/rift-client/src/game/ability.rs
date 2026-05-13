@@ -35,13 +35,34 @@
 //! touch `SpellCast` or channel state.
 
 use glam::Vec3;
-use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
+use rift_engine::animation::BoundClip;
+use rift_engine::ecs::components::{LocalPlayer, Player, SpellCast, SpellPhase, Transform};
 use rift_engine::Renderer;
 use rift_game::abilities::Ability;
+use std::sync::Arc;
 
 use super::player_state::{PlayerState, PUNCH_RESET_AFTER};
 use super::state::GameState;
 use super::sub_state::ChannelVisual;
+
+const PUNCH_EXTRA_VISUAL_TIME: f32 = 0.12;
+const PUNCH_MIN_VISUAL_DURATION: f32 = 0.46;
+const PUNCH_MAX_PLAYBACK_SPEED: f32 = 3.25;
+const PUNCH_IMPACT_HOLD_DELAY: f32 = 0.18;
+const PUNCH_IMPACT_HOLD_DURATION: f32 = 0.045;
+
+fn play_punch_oneshot(cast: &mut SpellCast, clip: Arc<BoundClip>, cooldown: f32) {
+    if !matches!(cast.phase, SpellPhase::Idle | SpellPhase::OneShot) {
+        return;
+    }
+
+    let target_dur = (cooldown.max(0.05) + PUNCH_EXTRA_VISUAL_TIME).max(PUNCH_MIN_VISUAL_DURATION);
+    let speed = (clip.duration / target_dur).clamp(0.5, PUNCH_MAX_PLAYBACK_SPEED);
+
+    cast.play_oneshot_preempt_scaled(clip, speed);
+    cast.oneshot_freeze_in = PUNCH_IMPACT_HOLD_DELAY;
+    cast.oneshot_freeze_for = PUNCH_IMPACT_HOLD_DURATION;
+}
 
 /// Local cast feedback. The server still owns damage / projectile
 /// spawn — this just plays the cast animation + any client-side
@@ -71,7 +92,7 @@ pub fn trigger_local_cast(
     renderer: &mut Renderer,
     player_state: &mut PlayerState,
 ) {
-    use rift_engine::ecs::components::{AnimationSet, SpellCast};
+    use rift_engine::ecs::components::AnimationSet;
 
     let talents = &player_state.talents;
 
@@ -154,23 +175,12 @@ pub fn trigger_local_cast(
                     // layer cleanly so every click reads as a
                     // fresh swing.
                     //
-                    // Compress the clip into the cooldown
-                    // window so the full wind-up → impact →
-                    // recovery actually plays before the next
-                    // click restarts the layer. At natural
-                    // playback the next click would preempt
-                    // mid-wind-up, so the player only ever
-                    // saw the hand cocking back / sideways —
-                    // never reaching the forward-extension
-                    // frames — which reads as "punching
-                    // outward" instead of in front. Target a
-                    // duration slightly *longer* than the
-                    // cooldown so a held click still gets the
-                    // impact frame before being interrupted.
-                    let cd = ability.cooldown.max(0.05);
-                    let target_dur = cd * 1.10;
-                    let speed = (clip.duration / target_dur).clamp(0.5, 4.0);
-                    cast.play_oneshot_preempt_scaled(clip, speed);
+                    // Give the fist a readable anticipation beat
+                    // instead of cramming the whole authored clip
+                    // into the cooldown. A rapid follow-up can still
+                    // preempt the tail, but the wind-up and contact
+                    // frame get enough screen time to read.
+                    play_punch_oneshot(&mut cast, clip, ability.cooldown);
                 }
             }
         }
@@ -330,7 +340,7 @@ pub fn on_remote_ability_cast(
             .and_then(|set| set.find_any(clip_names));
         if let Some(clip) = clip {
             if let Ok(mut cast) = state.world.get::<&mut SpellCast>(entity) {
-                cast.play_oneshot(clip);
+                play_punch_oneshot(&mut cast, clip, ability.cooldown);
             }
         }
         return;

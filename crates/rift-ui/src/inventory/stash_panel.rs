@@ -3,10 +3,12 @@
 //! Tab strip + "+ Buy" + slot grid + inline rename overlay.
 
 use rift_ui_im::{
-    widgets::text_field, Button, ButtonSize, Color, Id, ImKey, ItemSlot, Pos2, Rect, Tooltip,
-    TooltipLine, Ui,
+    widgets::text_field, Button, ButtonSize, Color, Id, ImKey, ItemSlot, Layer, Pos2, Rect,
+    Tooltip, TooltipLine, Ui,
 };
-use rift_ui_types::inventory::{DragSource, InventoryAction, ItemView, StashView};
+use rift_ui_types::inventory::{
+    DragSource, InventoryAction, ItemView, StashView, STASH_TAB_PALETTE,
+};
 
 use super::drag::{build_item_slot, route_slot_capture, DropTarget};
 use super::grid_drop::{snap_preview_and_resolve, GridSpec};
@@ -68,6 +70,7 @@ pub fn render_stash_panel(
     panel_rect: Rect,
     stash_in: StashPanelIn<'_>,
     rename: RenameStateRef<'_>,
+    color_picker_tab: &mut Option<u8>,
     filter: FilterStateRef<'_>,
     time: f32,
     out_actions: &mut Vec<InventoryAction>,
@@ -99,7 +102,6 @@ pub fn render_stash_panel(
 
     let pressed_buy_tab = std::cell::Cell::new(false);
     let pressed_rename = std::cell::Cell::new(false);
-    let recolor_request: std::cell::Cell<Option<u8>> = std::cell::Cell::new(None);
     let switch_to: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let commit_rename: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
     let cancel_rename = std::cell::Cell::new(false);
@@ -116,41 +118,43 @@ pub fn render_stash_panel(
     let tab_w = ((avail_w - tab_gap * (owned_tabs as f32 - 1.0).max(0.0))
         / owned_tabs.max(1) as f32)
         .max(48.0 * fit);
+    let mut picker_anchor: Option<Rect> = None;
+    let mut color_button_clicked = false;
     for (i, tab) in view.tabs.iter().enumerate() {
         let tx = body.x() + i as f32 * (tab_w + tab_gap);
         let trect = Rect::from_xywh(tx, body.y(), tab_w, tab_h);
         let id = Id::root("inv").child(("stash_tab", i));
         let active = i == active_idx;
-        let btn = if active {
-            Button::active(tab.name)
-        } else {
-            Button::new(tab.name)
-        }
-        .size(ButtonSize::Small);
-        let resp = btn.show_with_id(ui, id, trect);
-        // Color stripe along the bottom edge to keep the
-        // per-tab color cue from the previous design.
-        let r = ((tab.color >> 16) & 0xFF) as f32 / 255.0;
-        let g = ((tab.color >> 8) & 0xFF) as f32 / 255.0;
-        let b = (tab.color & 0xFF) as f32 / 255.0;
-        ui.draw_rect(
-            Rect::from_xywh(trect.x(), trect.max.y - 2.0 * fit, trect.width(), 2.0 * fit),
-            Color::rgba(r, g, b, 1.0),
+        let (tab_clicked, color_clicked) = draw_stash_tab_button(
+            ui,
+            id,
+            trect,
+            tab.name,
+            tab.color,
+            active,
+            *color_picker_tab == Some(i as u8),
+            fit,
         );
-        if resp.clicked {
+        if tab_clicked {
             switch_to.set(Some(i));
         }
-        // Right-click anywhere on the tab triggers the
-        // recolor flow (kept from the original design).
-        if ui.interact_hover(id, trect) && ui.input().right_clicked() {
-            recolor_request.set(Some(i as u8));
+        if color_clicked {
+            color_button_clicked = true;
+            *color_picker_tab = if *color_picker_tab == Some(i as u8) {
+                None
+            } else {
+                Some(i as u8)
+            };
+        }
+        if *color_picker_tab == Some(i as u8) {
+            picker_anchor = Some(trect);
         }
     }
     if owned_tabs < view.max_tabs {
         let bx = body.x() + owned_tabs as f32 * (tab_w + tab_gap);
         let brect = Rect::from_xywh(bx, body.y(), plus_w, tab_h);
         let buy_id = Id::root("inv").child(("stash_tab_buy", owned_tabs));
-        let resp = Button::primary("+")
+        let resp = Button::new("+")
             .size(ButtonSize::Small)
             .enabled(can_buy_tab)
             .show_with_id(ui, buy_id, brect);
@@ -191,6 +195,15 @@ pub fn render_stash_panel(
                 .min_width(160.0)
                 .anchor_to(brect)
                 .show(ui, Pos2::new(brect.max.x, brect.y()), &lines);
+        }
+    }
+
+    if let Some(anchor) = picker_anchor {
+        let dropdown_hovered = ui.with_layer(Layer::Tooltip, |ui| {
+            draw_stash_color_dropdown(ui, body, anchor, color_picker_tab, view, fit, out_actions)
+        });
+        if !color_button_clicked && ui.input().left_clicked() && !dropdown_hovered {
+            *color_picker_tab = None;
         }
     }
 
@@ -628,14 +641,212 @@ pub fn render_stash_panel(
     if let Some(t) = switch_to.get() {
         out_actions.push(InventoryAction::SwitchStashTab { tab_index: t as u8 });
     }
-    if let Some(t) = recolor_request.get() {
-        out_actions.push(InventoryAction::RecolorTab { tab_index: t });
-    }
     if pressed_buy_tab.get() {
         out_actions.push(InventoryAction::BuyTab);
     }
 
     out
+}
+
+fn draw_stash_tab_button(
+    ui: &mut Ui<'_>,
+    id: Id,
+    rect: Rect,
+    label: &str,
+    packed_color: u32,
+    active: bool,
+    picker_open: bool,
+    fit: f32,
+) -> (bool, bool) {
+    let theme = *ui.theme();
+    let color_id = id.child("color");
+    let swatch_size = (rect.height() - 10.0 * fit).max(10.0 * fit);
+    let swatch = Rect::from_xywh(
+        rect.x() + 5.0 * fit,
+        rect.y() + (rect.height() - swatch_size) * 0.5,
+        swatch_size,
+        swatch_size,
+    );
+    let swatch_hover = ui.interact_hover(color_id, swatch);
+    let color_clicked = swatch_hover && ui.input().left_clicked();
+    let hovered = ui.interact_hover(id, rect);
+    let tab_clicked = hovered && !color_clicked && ui.input().left_clicked();
+
+    let tab_color = packed_to_color(packed_color, 1.0);
+    let active_lift = if active { 1.22 } else { 0.92 };
+    let hover_lift = if hovered { 1.12 } else { 1.0 };
+    let edge = scale_color(tab_color, 0.20 * active_lift);
+    let centre = scale_color(tab_color, 0.46 * active_lift * hover_lift);
+    let mid = scale_color(tab_color, 0.58 * active_lift * hover_lift);
+    let left = Rect::from_xywh(rect.x(), rect.y(), rect.width() * 0.5, rect.height());
+    let right = Rect::from_xywh(
+        rect.x() + rect.width() * 0.5,
+        rect.y(),
+        rect.width() * 0.5,
+        rect.height(),
+    );
+    ui.draw_grad4_rect(left, edge, mid, edge, centre);
+    ui.draw_grad4_rect(right, mid, edge, centre, edge);
+    ui.draw_gradient_rect(
+        Rect::from_xywh(
+            rect.x() + 1.0,
+            rect.y() + 1.0,
+            rect.width() - 2.0,
+            rect.height() * 0.30,
+        ),
+        Color::rgba(1.0, 0.92, 0.72, if active { 0.22 } else { 0.12 }),
+        Color::rgba(1.0, 0.92, 0.72, 0.0),
+    );
+
+    let outline = if active || picker_open {
+        Color::rgba(1.0, 0.74, 0.32, 0.90)
+    } else if hovered {
+        Color::rgba(0.90, 0.62, 0.30, 0.78)
+    } else {
+        theme.colors.border_stone
+    };
+    ui.draw_outline(rect, if active { 1.5 } else { 1.0 }, outline);
+    ui.draw_outline(
+        Rect::from_xywh(
+            rect.x() + 1.0,
+            rect.y() + 1.0,
+            rect.width() - 2.0,
+            rect.height() - 2.0,
+        ),
+        1.0,
+        Color::rgba(1.0, 0.92, 0.70, if active { 0.22 } else { 0.12 }),
+    );
+
+    ui.draw_rect(swatch, tab_color);
+    ui.draw_outline(
+        swatch,
+        1.0,
+        if swatch_hover || picker_open {
+            Color::rgba(1.0, 0.86, 0.46, 0.95)
+        } else {
+            Color::rgba(0.0, 0.0, 0.0, 0.82)
+        },
+    );
+
+    let text_size = theme.fonts.size_sm;
+    let text_x = swatch.max.x + 6.0 * fit;
+    let max_w = (rect.max.x - text_x - 5.0 * fit).max(1.0);
+    let text_y = rect.y() + (rect.height() - text_size) * 0.5;
+    ui.draw_text_ellipsized(
+        Pos2::new(text_x + 1.0, text_y + 1.0),
+        label,
+        text_size,
+        max_w,
+        Color::rgba(0.0, 0.0, 0.0, 0.55),
+    );
+    ui.draw_text_ellipsized(
+        Pos2::new(text_x, text_y),
+        label,
+        text_size,
+        max_w,
+        theme.colors.text,
+    );
+
+    (tab_clicked, color_clicked)
+}
+
+fn draw_stash_color_dropdown(
+    ui: &mut Ui<'_>,
+    body: Rect,
+    anchor: Rect,
+    target_tab: &mut Option<u8>,
+    view: &StashView<'_>,
+    fit: f32,
+    out_actions: &mut Vec<InventoryAction>,
+) -> bool {
+    let Some(tab_index) = *target_tab else {
+        return false;
+    };
+    if view.tabs.get(tab_index as usize).is_none() {
+        return false;
+    }
+    let swatch = 18.0 * fit;
+    let gap = 5.0 * fit;
+    let pad = 7.0 * fit;
+    let cols = 4usize;
+    let rows = (STASH_TAB_PALETTE.len() + cols - 1) / cols;
+    let w = cols as f32 * swatch + (cols.saturating_sub(1)) as f32 * gap + pad * 2.0;
+    let h = rows as f32 * swatch + (rows.saturating_sub(1)) as f32 * gap + pad * 2.0;
+    let x = (anchor.x()).clamp(body.x(), (body.max.x - w).max(body.x()));
+    let y = anchor.max.y + 4.0 * fit;
+    let rect = Rect::from_xywh(x, y, w, h);
+    let hovered_panel = rect.contains(ui.mouse_pos());
+
+    ui.draw_rect(rect, Color::rgba(0.045, 0.036, 0.028, 0.97));
+    ui.draw_grad4_rect(
+        Rect::from_xywh(rect.x(), rect.y(), rect.width(), rect.height() * 0.42),
+        Color::rgba(0.23, 0.15, 0.07, 0.34),
+        Color::rgba(0.11, 0.07, 0.04, 0.10),
+        Color::rgba(0.0, 0.0, 0.0, 0.0),
+        Color::rgba(0.0, 0.0, 0.0, 0.0),
+    );
+    ui.draw_outline(rect, 1.5, Color::rgba(0.78, 0.62, 0.30, 0.78));
+    ui.draw_outline(
+        Rect::from_xywh(
+            rect.x() + 2.0,
+            rect.y() + 2.0,
+            rect.width() - 4.0,
+            rect.height() - 4.0,
+        ),
+        1.0,
+        Color::rgba(1.0, 0.90, 0.62, 0.12),
+    );
+
+    let current = view
+        .tabs
+        .get(tab_index as usize)
+        .map(|tab| tab.color & 0x00FF_FFFF)
+        .unwrap_or(0);
+    for (i, color) in STASH_TAB_PALETTE.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+        let srect = Rect::from_xywh(
+            rect.x() + pad + col as f32 * (swatch + gap),
+            rect.y() + pad + row as f32 * (swatch + gap),
+            swatch,
+            swatch,
+        );
+        let id = Id::root("inv").child(("stash_color_pick", tab_index, i as u8));
+        let hovered = ui.interact_hover(id, srect);
+        if hovered && ui.input().left_clicked() {
+            out_actions.push(InventoryAction::RecolorTab {
+                tab_index,
+                color: *color,
+            });
+            *target_tab = None;
+        }
+        ui.draw_rect(srect, packed_to_color(*color, 1.0));
+        let border = if current == *color {
+            Color::rgba(1.0, 0.92, 0.58, 1.0)
+        } else if hovered {
+            Color::rgba(1.0, 0.76, 0.36, 0.92)
+        } else {
+            Color::rgba(0.0, 0.0, 0.0, 0.82)
+        };
+        ui.draw_outline(srect, if current == *color { 2.0 } else { 1.0 }, border);
+    }
+    hovered_panel
+}
+
+fn packed_to_color(packed: u32, alpha: f32) -> Color {
+    let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
+    let b = (packed & 0xFF) as f32 / 255.0;
+    Color::rgba(r, g, b, alpha)
+}
+
+fn scale_color(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul).clamp(0.0, 1.0),
+        (color.0[1] * mul).clamp(0.0, 1.0),
+        (color.0[2] * mul).clamp(0.0, 1.0),
+        color.0[3],
+    )
 }
 
 /// Look up the dragged item's cell footprint from whichever

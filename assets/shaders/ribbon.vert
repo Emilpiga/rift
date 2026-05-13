@@ -61,6 +61,7 @@ layout(location = 2) out float vTime;
 // avoids the vertex shader cost of touching them.
 layout(location = 3)  flat out vec4 vCross[8];
 layout(location = 11) flat out vec4 vLength[4];
+layout(location = 15) flat out vec4 vFlags;
 
 void main() {
     vec3 origin = inOrigin.xyz;
@@ -100,4 +101,5 @@ void main() {
 
     vLength[0] = inLen0; vLength[1] = inLen1;
     vLength[2] = inLen2; vLength[3] = inLen3;
+    vFlags = inFlags;
 }

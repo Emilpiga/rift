@@ -52,7 +52,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     // a slot, dismissing). Without this gate the combat tick
     // sees the LMB press first and fires the currently-slotted
     // basic attack into the world behind the panel.
-    let spellbook_open = state.spellbook.open;
+    let spellbook_open = state.spellbook.open();
     let talents_open = state.talents_panel.open;
 
     // Ability-based combat (sends cast requests to the server).

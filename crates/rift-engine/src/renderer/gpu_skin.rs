@@ -3,9 +3,9 @@
 //! For each skinned mesh we keep three immutable device-local buffers
 //! (rest-pose vertices, per-vertex skin weights, the output vertex
 //! buffer the graphics pipelines bind) plus one small host-visible
-//! bone-palette UBO per in-flight frame. Each frame the ECS skinning
+//! bone-palette SSBO per in-flight frame. Each frame the ECS skinning
 //! system writes the freshly evaluated bone palette into the current
-//! frame's UBO and we dispatch `skin.comp` once per visible skinned
+//! frame's palette buffer and we dispatch `skin.comp` once per visible skinned
 //! object before the shadow pass. The compute shader fills the
 //! output VB with fully transformed vertices that the existing
 //! shadow + forward + point-shadow pipelines consume completely
@@ -33,8 +33,7 @@ use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
 
 /// Hard cap on bones per skeleton. Sized large enough for the meanest
 /// rig in the asset pack with comfortable headroom; bumping this just
-/// changes the palette UBO size (16 KiB ÷ 64 B per mat4 = 256, so we
-/// stay well under any UBO size limit even at 128).
+/// changes the per-frame palette SSBO size (128 mat4s = 8 KiB).
 pub const MAX_PALETTE_JOINTS: usize = 128;
 
 const PALETTE_BYTES: vk::DeviceSize =
@@ -44,8 +43,8 @@ const COMPUTE_LOCAL_X: u32 = 64;
 
 /// Opaque handle returned by `register_mesh`. The `Renderer` stores
 /// one of these on each skinned `RenderObject` and uses
-/// `output_vertex_buffer(handle)` at draw time + `update_palette` /
-/// `mark_active` per frame.
+/// `output_vertex_buffer(handle)` at draw time and `update_palette`
+/// per frame.
 #[derive(Clone, Copy, Debug)]
 pub struct SkinHandle(pub usize);
 
@@ -63,8 +62,8 @@ struct SkinnedMeshResources {
     /// compute set 0 binding 1. The on-GPU layout matches the host
     /// `repr(C)` `VertexSkin`: 8 bytes joints + 16 bytes weights.
     skin_buf: GpuBuffer,
-    /// Per-frame palette UBOs, host-visible. Index by `current_frame`.
-    palette_ubos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT],
+    /// Per-frame palette SSBOs, host-visible. Index by `current_frame`.
+    palette_ssbos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT],
     /// Output vertex buffer — device-local, written by `skin.comp`,
     /// then bound as a regular `VERTEX_BUFFER` by the graphics
     /// passes. We allocate a single output buffer (not one per
@@ -76,11 +75,6 @@ struct SkinnedMeshResources {
     /// the old `skin_to_inflated` behaviour for outfit pieces so
     /// they sit just outside the body and don't z-fight.
     inflate: f32,
-    /// Set true when the ECS marks this mesh as needing a re-skin
-    /// for the upcoming frame. Cleared after the dispatch is
-    /// recorded. Lets distant / culled monsters skip the dispatch
-    /// entirely without losing their last good output VB.
-    active_this_frame: bool,
 }
 
 /// One slot in the `SkinningSystem`. Descriptor sets live with
@@ -102,6 +96,10 @@ struct SkinSlot {
     /// allocated for the slot's whole lifetime even across
     /// recycle; rewired in-place when a new mesh moves in.
     descriptor_sets: [vk::DescriptorSet; MAX_FRAMES_IN_FLIGHT],
+    /// True after `update_palette` has queued this slot for the
+    /// next compute dispatch drain. Prevents repeated pose writers
+    /// from growing `dispatch_slots` with duplicate indices.
+    queued_this_frame: bool,
 }
 
 /// A mesh that's been logically freed but whose GPU buffers may
@@ -112,7 +110,7 @@ struct SkinSlot {
 struct PendingFree {
     rest_vb: GpuBuffer,
     skin_buf: GpuBuffer,
-    palette_ubos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT],
+    palette_ssbos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT],
     output_vb: GpuBuffer,
     frames_remaining: u32,
 }
@@ -141,6 +139,10 @@ pub struct SkinningSystem {
     /// `record_dispatches` once their `frames_remaining` countdown
     /// hits zero, guaranteeing the GPU is no longer reading them.
     pending_free: Vec<PendingFree>,
+    /// Slot indices whose palettes were updated for the frame being
+    /// recorded. Each `SkinSlot` owns the duplicate-suppression flag;
+    /// this list stays bounded to one entry per updated slot.
+    dispatch_slots: Vec<usize>,
 }
 
 /// How many skinned-mesh slots each descriptor pool covers.
@@ -161,17 +163,16 @@ struct PushConsts {
 
 impl SkinningSystem {
     pub fn new(device: &ash::Device, shader_dir: &Path) -> Result<Self> {
-        // ---- Descriptor set layout: 4 storage + 1 uniform binding ------
+        // ---- Descriptor set layout: 4 storage bindings -----------------
         // Slots match `assets/shaders/skin.comp`:
         //   binding 0 : rest vertices  (storage, read-only)
         //   binding 1 : skin influences (storage, read-only)
-        //   binding 2 : bone palette    (storage, read-only)  -- see note
+        //   binding 2 : bone palette    (storage, read-only)
         //   binding 3 : output vertices (storage, write-only)
         //
         // The palette is declared as a storage buffer in the shader
-        // (not a UBO) to keep the descriptor set homogeneous and so
-        // we never have to worry about the 16 KiB UBO limit if the
-        // joint cap ever grows past 256.
+        // to keep the descriptor set homogeneous and leave room for
+        // a future larger joint cap without changing descriptor type.
         let bindings = [
             descriptor_binding(0, vk::DescriptorType::STORAGE_BUFFER),
             descriptor_binding(1, vk::DescriptorType::STORAGE_BUFFER),
@@ -207,11 +208,12 @@ impl SkinningSystem {
             slots: Vec::with_capacity(POOL_CHUNK),
             free_slots: Vec::new(),
             pending_free: Vec::new(),
+            dispatch_slots: Vec::new(),
         })
     }
 
     /// Upload a skinned mesh's immutable data and allocate its
-    /// per-frame palette UBOs + output VB. Returns a `SkinHandle`
+    /// per-frame palette SSBOs + output VB. Returns a `SkinHandle`
     /// the caller stores on the corresponding `RenderObject`.
     ///
     /// `inflate` is applied along the post-skin normal in the
@@ -286,20 +288,19 @@ impl SkinningSystem {
             rest_vertices,
         )?;
 
-        // Per-frame palette UBOs (held in a STORAGE buffer for binding
-        // simplicity — see set-layout note above). Initialise with
+        // Per-frame palette SSBOs. Initialise with
         // identity matrices so a never-updated palette still skins to
         // bind pose instead of producing NaNs.
         let identity_palette = vec![Mat4::IDENTITY; MAX_PALETTE_JOINTS];
-        let palette_ubos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|i| {
+        let palette_ssbos: [GpuBuffer; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|i| {
             buffer::create_host_buffer(
                 device,
                 allocator,
                 &identity_palette,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
-                &format!("skinned_palette_ubo[{}]", i),
+                &format!("skinned_palette_ssbo[{}]", i),
             )
-            .expect("alloc skinned palette ubo")
+            .expect("alloc skinned palette ssbo")
         });
 
         // Pick a slot: reuse a freed one if available (avoids
@@ -322,6 +323,7 @@ impl SkinningSystem {
             self.slots.push(SkinSlot {
                 resources: None,
                 descriptor_sets: sets,
+                queued_this_frame: false,
             });
             (idx, sets)
         };
@@ -337,19 +339,19 @@ impl SkinningSystem {
                 *set,
                 &rest_vb,
                 &skin_buf,
-                &palette_ubos[frame],
+                &palette_ssbos[frame],
                 &output_vb,
             );
         }
 
+        self.slots[slot_idx].queued_this_frame = false;
         self.slots[slot_idx].resources = Some(SkinnedMeshResources {
             vertex_count,
             rest_vb,
             skin_buf,
-            palette_ubos,
+            palette_ssbos,
             output_vb,
             inflate,
-            active_this_frame: false,
         });
         Ok(SkinHandle(slot_idx))
     }
@@ -370,6 +372,10 @@ impl SkinningSystem {
             Some(r) => r,
             None => return, // already freed
         };
+        if slot.queued_this_frame {
+            slot.queued_this_frame = false;
+            self.dispatch_slots.retain(|&idx| idx != handle.0);
+        }
         // Defer destruction by exactly the in-flight frame depth.
         // `record_dispatches` decrements once per frame, so after
         // MAX_FRAMES_IN_FLIGHT ticks every queued frame that could
@@ -377,7 +383,7 @@ impl SkinningSystem {
         self.pending_free.push(PendingFree {
             rest_vb: res.rest_vb,
             skin_buf: res.skin_buf,
-            palette_ubos: res.palette_ubos,
+            palette_ssbos: res.palette_ssbos,
             output_vb: res.output_vb,
             frames_remaining: MAX_FRAMES_IN_FLIGHT as u32 + 1,
         });
@@ -386,19 +392,17 @@ impl SkinningSystem {
 
     /// Update the bone palette for `handle` for the frame currently
     /// being prepared. Pads / truncates to `MAX_PALETTE_JOINTS`.
-    /// Marks the mesh active so its compute dispatch will be
-    /// recorded by the next `record_dispatches`. No-op for stale
-    /// or freed handles.
+    /// Queues the mesh for the next `record_dispatches`. No-op for
+    /// stale or freed handles.
     pub fn update_palette(&mut self, current_frame: usize, handle: SkinHandle, palette: &[Mat4]) {
-        let mesh = match self
-            .slots
-            .get_mut(handle.0)
-            .and_then(|s| s.resources.as_mut())
-        {
-            Some(m) => m,
+        let slot = match self.slots.get_mut(handle.0) {
+            Some(s) => s,
             None => return,
         };
-        let buf = &mut mesh.palette_ubos[current_frame];
+        let Some(mesh) = slot.resources.as_mut() else {
+            return;
+        };
+        let buf = &mut mesh.palette_ssbos[current_frame];
         let n = palette.len().min(MAX_PALETTE_JOINTS);
         // Write the first `n` matrices; trailing slots keep whatever
         // was there before (irrelevant — the compute shader only
@@ -407,7 +411,10 @@ impl SkinningSystem {
         if n > 0 {
             buf.write(&palette[..n]);
         }
-        mesh.active_this_frame = true;
+        if !slot.queued_this_frame {
+            slot.queued_this_frame = true;
+            self.dispatch_slots.push(handle.0);
+        }
     }
 
     /// Returns the GPU buffer the graphics pipelines should bind for
@@ -422,9 +429,12 @@ impl SkinningSystem {
     }
 
     /// Record a compute dispatch for every mesh whose palette was
-    /// updated this frame, followed by a single barrier publishing
-    /// the writes to subsequent vertex-input reads. Call once near
-    /// the top of `draw_frame`, before the shadow pass begins.
+    /// updated this frame, followed by buffer-specific barriers
+    /// publishing those output-VB writes to subsequent vertex-input
+    /// reads. Call once near the top of `draw_frame`, before the
+    /// shadow pass begins. This assumes skinning compute and the
+    /// graphics passes are recorded to the same queue in-order;
+    /// async compute would need an explicit inter-queue dependency.
     pub fn record_dispatches(
         &mut self,
         device: &ash::Device,
@@ -442,7 +452,7 @@ impl SkinningSystem {
                 p.rest_vb.cleanup(device, allocator);
                 p.skin_buf.cleanup(device, allocator);
                 p.output_vb.cleanup(device, allocator);
-                for buf in p.palette_ubos.iter_mut() {
+                for buf in p.palette_ssbos.iter_mut() {
                     buf.cleanup(device, allocator);
                 }
                 false
@@ -452,18 +462,21 @@ impl SkinningSystem {
             }
         });
 
-        // Collect indices of active meshes first so we know whether
-        // we need to issue the post-dispatch barrier at all.
-        let mut any = false;
+        let dispatch_slots = std::mem::take(&mut self.dispatch_slots);
+
         unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-            for slot in self.slots.iter_mut() {
-                let mesh = match slot.resources.as_mut() {
-                    Some(m) if m.active_this_frame => m,
-                    _ => continue,
+            let mut barriers = Vec::with_capacity(dispatch_slots.len());
+            if !dispatch_slots.is_empty() {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            }
+            for slot_idx in dispatch_slots {
+                let Some(slot) = self.slots.get_mut(slot_idx) else {
+                    continue;
                 };
-                mesh.active_this_frame = false;
-                any = true;
+                slot.queued_this_frame = false;
+                let Some(mesh) = slot.resources.as_mut() else {
+                    continue;
+                };
 
                 let set = slot.descriptor_sets[current_frame];
                 device.cmd_bind_descriptor_sets(
@@ -493,23 +506,26 @@ impl SkinningSystem {
                 );
                 let groups = (mesh.vertex_count + COMPUTE_LOCAL_X - 1) / COMPUTE_LOCAL_X;
                 device.cmd_dispatch(cmd, groups, 1, 1);
+                barriers.push(
+                    vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .buffer(mesh.output_vb.buffer)
+                        .offset(0)
+                        .size(mesh.output_vb.size),
+                );
             }
 
-            if any {
-                // One global barrier covers every output VB —
-                // cheaper than per-buffer barriers and just as
-                // correct because the shadow pass that follows will
-                // sample any of them.
-                let barrier = vk::MemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ);
+            if !barriers.is_empty() {
                 device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::PipelineStageFlags::VERTEX_INPUT,
                     vk::DependencyFlags::empty(),
-                    std::slice::from_ref(&barrier),
                     &[],
+                    &barriers,
                     &[],
                 );
             }
@@ -557,18 +573,19 @@ impl SkinningSystem {
                     mut rest_vb,
                     mut skin_buf,
                     mut output_vb,
-                    mut palette_ubos,
+                    mut palette_ssbos,
                     ..
                 } = res;
                 rest_vb.cleanup(device, allocator);
                 skin_buf.cleanup(device, allocator);
                 output_vb.cleanup(device, allocator);
-                for buf in palette_ubos.iter_mut() {
+                for buf in palette_ssbos.iter_mut() {
                     buf.cleanup(device, allocator);
                 }
             }
         }
         self.free_slots.clear();
+        self.dispatch_slots.clear();
         // Drain any deferred frees too. `clear` is only called
         // after a `device_wait_idle`, so it's safe to skip the
         // frame countdown and destroy them right now.
@@ -576,7 +593,7 @@ impl SkinningSystem {
             p.rest_vb.cleanup(device, allocator);
             p.skin_buf.cleanup(device, allocator);
             p.output_vb.cleanup(device, allocator);
-            for buf in p.palette_ubos.iter_mut() {
+            for buf in p.palette_ssbos.iter_mut() {
                 buf.cleanup(device, allocator);
             }
         }

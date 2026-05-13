@@ -224,8 +224,6 @@ fn draw_one_slot(
     slot_size: f32,
     id: Id,
 ) -> (bool, bool) {
-    let theme = *ui.theme();
-    let s = theme.scale;
     let cell_rect = Rect::from_xywh(pos.x, pos.y, slot_size, slot_size);
     draw_slot_chrome(ui, cell_rect);
 
@@ -240,7 +238,7 @@ fn draw_one_slot(
         sb = sb
             .enabled(false)
             .fallback_glyph('\u{1F512}')
-            .fallback_color(Color::rgba(0.55, 0.25, 0.25, 0.9));
+            .fallback_color(Color::rgba(0.74, 0.66, 0.48, 0.82));
     } else {
         if slot.cooldown_remaining > 0.001 {
             sb = sb.cooldown(slot.cooldown_remaining);
@@ -259,16 +257,96 @@ fn draw_one_slot(
 
     let resp = sb.show(ui, pos, id);
     if !slot.unlocked {
-        ui.draw_text(
-            Pos2::new(pos.x, pos.y + slot_size + 2.0 * s),
-            format!("Lv {}", slot.unlock_level).as_str(),
-            theme.fonts.size_sm,
-            Color::rgba(0.65, 0.30, 0.30, 0.9),
-        );
+        draw_locked_slot_badge(ui, cell_rect, slot.unlock_level);
+    } else if slot.cooldown_remaining > 0.001 {
+        draw_cooldown_accent(ui, cell_rect, slot.cooldown_remaining);
     }
     let hovered = resp.hovered && slot.tooltip.is_some() && slot.unlocked;
     let clicked = resp.clicked && slot.unlocked;
     (hovered, clicked)
+}
+
+fn draw_locked_slot_badge(ui: &mut Ui<'_>, rect: Rect, unlock_level: u32) {
+    let s = ui.scale();
+    ui.draw_grad4_rect(
+        Rect::from_xywh(
+            rect.x() + 2.0 * s,
+            rect.y() + 2.0 * s,
+            rect.width() - 4.0 * s,
+            rect.height() - 4.0 * s,
+        ),
+        Color::rgba(0.03, 0.025, 0.020, 0.34),
+        Color::rgba(0.06, 0.050, 0.040, 0.44),
+        Color::rgba(0.00, 0.00, 0.00, 0.62),
+        Color::rgba(0.00, 0.00, 0.00, 0.48),
+    );
+
+    let label = format!("Lv {unlock_level}");
+    let font = 11.0 * s;
+    let tw = ui.measure_text(&label, font);
+    let chip_w = (tw + 10.0 * s).min(rect.width() - 8.0 * s);
+    let chip_h = 16.0 * s;
+    let chip = Rect::from_xywh(
+        rect.x() + (rect.width() - chip_w) * 0.5,
+        rect.max.y - chip_h - 5.0 * s,
+        chip_w,
+        chip_h,
+    );
+    ui.draw_gradient_rect(
+        chip,
+        Color::rgba(0.18, 0.145, 0.095, 0.94),
+        Color::rgba(0.060, 0.050, 0.040, 0.96),
+    );
+    ui.draw_outline(chip, 1.0 * s, Color::rgba(0.72, 0.58, 0.32, 0.72));
+    let text_pos = Pos2::new(
+        chip.x() + (chip.width() - tw) * 0.5,
+        chip.y() + (chip.height() - font) * 0.5,
+    );
+    ui.draw_text(
+        Pos2::new(text_pos.x + 1.0 * s, text_pos.y + 1.0 * s),
+        &label,
+        font,
+        Color::rgba(0.0, 0.0, 0.0, 0.72),
+    );
+    ui.draw_text(text_pos, &label, font, Color::rgba(0.92, 0.80, 0.56, 0.96));
+}
+
+fn draw_cooldown_accent(ui: &mut Ui<'_>, rect: Rect, remaining: f32) {
+    let remaining = remaining.clamp(0.0, 1.0);
+    let s = ui.scale();
+    let inset = Rect::from_xywh(
+        rect.x() + 2.0 * s,
+        rect.y() + 2.0 * s,
+        rect.width() - 4.0 * s,
+        rect.height() - 4.0 * s,
+    );
+    let drain_h = inset.height() * remaining;
+    if drain_h <= 0.5 {
+        return;
+    }
+    let drain = Rect::from_xywh(inset.x(), inset.y(), inset.width(), drain_h);
+    ui.draw_grad4_rect(
+        drain,
+        Color::rgba(0.02, 0.03, 0.05, 0.28),
+        Color::rgba(0.03, 0.04, 0.06, 0.36),
+        Color::rgba(0.0, 0.0, 0.0, 0.18),
+        Color::rgba(0.0, 0.0, 0.0, 0.24),
+    );
+
+    let edge_y = (inset.y() + drain_h).min(inset.max.y - 1.0 * s);
+    ui.draw_gradient_rect(
+        Rect::from_xywh(inset.x(), edge_y - 1.0 * s, inset.width(), 2.0 * s),
+        Color::rgba(1.0, 0.76, 0.34, 0.86),
+        Color::rgba(0.70, 0.32, 0.10, 0.66),
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(inset.x(), inset.y(), inset.width(), inset.height()),
+        Color::rgba(0.95, 0.55, 0.18, 0.10),
+        Color::rgba(0.95, 0.55, 0.18, 0.04),
+        Color::rgba(0.0, 0.0, 0.0, 0.00),
+        Color::rgba(0.0, 0.0, 0.0, 0.00),
+    );
+    ui.draw_outline(rect, 1.5 * s, Color::rgba(0.90, 0.56, 0.24, 0.62));
 }
 
 /// Inventory-style cell chrome shared by every ability slot,

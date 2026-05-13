@@ -28,8 +28,8 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use rift_engine::ui::im::{
-    widgets::{title, Button, ProgressBar},
-    Color, Frame, Pos2, Rect, Ui,
+    widgets::{Button, ProgressBar},
+    Color, Frame, Id, Layer, Pad, Pos2, Rect, Stroke, Ui,
 };
 use rift_net::messages::{party_mode, ClientMsg, PartyMember, MAX_PARTY};
 
@@ -479,109 +479,167 @@ impl PartyUi {
         let theme = *ui.theme();
         let s = theme.scale;
         let screen = ui.screen_size();
-        let w = 360.0 * s;
-        let h = 240.0 * s;
+        let w = 520.0 * s;
+        let h = 352.0 * s;
         let rect = Rect::from_xywh((screen.x - w) * 0.5, (screen.y - h) * 0.5, w, h);
 
         let cap = self.deepest_floor.saturating_add(1).max(1);
         let mut new_modal = modal.clone();
         self.cached_consume_rects.push(rect);
 
-        Frame::panel(&theme).show(ui, rect, |ui, body| {
-            let pad = 12.0 * s;
-            title(
-                ui,
-                Pos2::new(body.x() + pad, body.y() + pad),
-                "Enter the Rift",
+        let mut close = false;
+        let mut confirm_entry = false;
+        ui.with_layer(Layer::Modal, |ui| {
+            ui.draw_rect(
+                Rect::from_xywh(0.0, 0.0, screen.x, screen.y),
+                Color::rgba(0.0, 0.0, 0.0, 0.58),
             );
 
-            let cur_y = body.y() + pad + 36.0 * s;
-            // Floor stepper row.
-            let _ = ui.draw_text(
-                Pos2::new(body.x() + pad, cur_y),
-                &format!("Start Floor: {}  (max {cap})", new_modal.start_floor),
-                theme.fonts.size_md,
-                theme.colors.text,
-            );
-            let btn_y = cur_y + 22.0 * s;
-            let bw = 32.0 * s;
-            let bh = 24.0 * s;
-            let minus = Rect::from_xywh(body.x() + pad, btn_y, bw, bh);
-            let plus = Rect::from_xywh(body.x() + pad + bw + 4.0 * s, btn_y, bw, bh);
-            if Button::new("-").show(ui, minus).clicked {
-                new_modal.start_floor = new_modal.start_floor.saturating_sub(1).max(1);
-            }
-            if Button::new("+").show(ui, plus).clicked {
-                new_modal.start_floor = (new_modal.start_floor + 1).min(cap);
-            }
+            Frame::stone(&theme)
+                .with_radius(6.0 * s)
+                .with_padding(Pad::all(0.0))
+                .with_stroke(Stroke::new(2.0 * s, Color::rgba(0.78, 0.44, 0.24, 0.92)))
+                .show(ui, rect, |ui, body| {
+                    draw_rift_modal_backdrop(ui, body);
 
-            // Mode radios.
-            let mode_y = btn_y + bh + 16.0 * s;
-            let _ = ui.draw_text(
-                Pos2::new(body.x() + pad, mode_y),
-                "Mode:",
-                theme.fonts.size_md,
-                theme.colors.text,
-            );
-            let row_y = mode_y + 22.0 * s;
-            let mw = 92.0 * s;
-            let mh = 26.0 * s;
-            let solo = Rect::from_xywh(body.x() + pad, row_y, mw, mh);
-            let party = Rect::from_xywh(body.x() + pad + mw + 6.0 * s, row_y, mw, mh);
-            let mm = Rect::from_xywh(body.x() + pad + (mw + 6.0 * s) * 2.0, row_y, mw, mh);
-            let solo_btn = if new_modal.mode == party_mode::SOLO {
-                Button::active("Solo")
-            } else {
-                Button::new("Solo")
-            };
-            if solo_btn.show(ui, solo).clicked {
-                new_modal.mode = party_mode::SOLO;
-            }
-            // Party / Matchmade gated on having a party (>= 1
-            // other member). When solo we keep them visible
-            // but disabled so the surface is discoverable.
-            let in_party = !self.members.is_empty();
-            let party_btn = if new_modal.mode == party_mode::PARTY {
-                Button::active("Party")
-            } else {
-                Button::new("Party")
-            }
-            .enabled(in_party);
-            if party_btn.show(ui, party).clicked {
-                new_modal.mode = party_mode::PARTY;
-            }
-            let mm_btn = if new_modal.mode == party_mode::MATCHMAKE {
-                Button::active("Matchmake")
-            } else {
-                Button::new("Matchmake")
-            };
-            if mm_btn.show(ui, mm).clicked {
-                new_modal.mode = party_mode::MATCHMAKE;
-            }
+                    let pad = 18.0 * s;
+                    let header_h = 72.0 * s;
+                    let header = Rect::from_xywh(body.x(), body.y(), body.width(), header_h);
+                    ui.draw_grad4_rect(
+                        header,
+                        Color::rgba(0.22, 0.050, 0.040, 0.54),
+                        Color::rgba(0.08, 0.025, 0.035, 0.26),
+                        Color::rgba(0.04, 0.030, 0.030, 0.00),
+                        Color::rgba(0.04, 0.030, 0.030, 0.00),
+                    );
+                    ui.draw_rect(
+                        Rect::from_xywh(
+                            header.x() + pad,
+                            header.max.y - 1.0,
+                            header.width() - pad * 2.0,
+                            1.0,
+                        ),
+                        Color::rgba(0.86, 0.55, 0.30, 0.42),
+                    );
 
-            // Action row.
-            let action_y = body.y() + body.height() - pad - 32.0 * s;
-            let aw = 110.0 * s;
-            let ah = 32.0 * s;
-            let cancel = Rect::from_xywh(
-                body.x() + body.width() * 0.5 - aw - 8.0 * s,
-                action_y,
-                aw,
-                ah,
-            );
-            let confirm =
-                Rect::from_xywh(body.x() + body.width() * 0.5 + 8.0 * s, action_y, aw, ah);
-            if Button::new("Cancel").show(ui, cancel).clicked {
-                self.portal_modal = None;
-                return;
-            }
-            if Button::primary("Enter").show(ui, confirm).clicked {
-                net.pending_propose_rift_entry = Some((new_modal.start_floor, new_modal.mode));
-                self.portal_modal = None;
-                return;
-            }
-            self.portal_modal = Some(new_modal.clone());
+                    ui.draw_text(
+                        Pos2::new(body.x() + pad, body.y() + 13.0 * s),
+                        "RIFT GATE",
+                        12.0 * s,
+                        Color::rgba(0.94, 0.72, 0.46, 0.92),
+                    );
+                    ui.draw_text(
+                        Pos2::new(body.x() + pad, body.y() + 28.0 * s),
+                        "Enter the Rift",
+                        27.0 * s,
+                        Color::rgba(0.98, 0.91, 0.78, 1.0),
+                    );
+                    ui.draw_text(
+                        Pos2::new(body.x() + pad, body.y() + 55.0 * s),
+                        "Choose your depth and formation before the gate tears open.",
+                        12.0 * s,
+                        Color::rgba(0.78, 0.72, 0.66, 0.86),
+                    );
+
+                    let sigil_c = Pos2::new(body.max.x - 60.0 * s, body.y() + 37.0 * s);
+                    draw_rift_sigil(ui, sigil_c, 34.0 * s);
+
+                    let floor_panel = Rect::from_xywh(
+                        body.x() + pad,
+                        body.y() + header_h + 18.0 * s,
+                        190.0 * s,
+                        146.0 * s,
+                    );
+                    draw_floor_selector(ui, floor_panel, cap, &mut new_modal.start_floor);
+
+                    let modes_x = floor_panel.max.x + 14.0 * s;
+                    let mode_y = floor_panel.y();
+                    let mode_w = body.max.x - pad - modes_x;
+                    ui.draw_text(
+                        Pos2::new(modes_x, mode_y - 3.0 * s),
+                        "FORMATION",
+                        11.0 * s,
+                        Color::rgba(0.76, 0.64, 0.48, 0.88),
+                    );
+                    let card_h = 38.0 * s;
+                    let gap = 8.0 * s;
+                    let in_party = !self.members.is_empty();
+                    let solo = Rect::from_xywh(modes_x, mode_y + 17.0 * s, mode_w, card_h);
+                    let party = Rect::from_xywh(modes_x, solo.max.y + gap, mode_w, card_h);
+                    let mm = Rect::from_xywh(modes_x, party.max.y + gap, mode_w, card_h);
+                    if draw_mode_card(
+                        ui,
+                        solo,
+                        Id::root("portal_modal").child("solo"),
+                        "SOLO",
+                        "Private rift instance",
+                        new_modal.mode == party_mode::SOLO,
+                        true,
+                    ) {
+                        new_modal.mode = party_mode::SOLO;
+                    }
+                    if draw_mode_card(
+                        ui,
+                        party,
+                        Id::root("portal_modal").child("party"),
+                        "PARTY",
+                        "Bring your current party",
+                        new_modal.mode == party_mode::PARTY,
+                        in_party,
+                    ) {
+                        new_modal.mode = party_mode::PARTY;
+                    }
+                    if draw_mode_card(
+                        ui,
+                        mm,
+                        Id::root("portal_modal").child("matchmake"),
+                        "MATCHMAKE",
+                        "Open a public queue",
+                        new_modal.mode == party_mode::MATCHMAKE,
+                        true,
+                    ) {
+                        new_modal.mode = party_mode::MATCHMAKE;
+                    }
+
+                    let summary = Rect::from_xywh(
+                        body.x() + pad,
+                        floor_panel.max.y + 14.0 * s,
+                        body.width() - pad * 2.0,
+                        42.0 * s,
+                    );
+                    draw_entry_summary(ui, summary, new_modal.start_floor, new_modal.mode, cap);
+
+                    let action_y = body.max.y - pad - 36.0 * s;
+                    let cancel = Rect::from_xywh(
+                        body.max.x - pad - 238.0 * s,
+                        action_y,
+                        104.0 * s,
+                        36.0 * s,
+                    );
+                    let confirm = Rect::from_xywh(
+                        body.max.x - pad - 124.0 * s,
+                        action_y,
+                        124.0 * s,
+                        36.0 * s,
+                    );
+                    if Button::new("Cancel").show(ui, cancel).clicked {
+                        close = true;
+                    }
+                    if Button::red("Enter Rift").show(ui, confirm).clicked {
+                        confirm_entry = true;
+                    }
+                });
         });
+
+        if close {
+            self.portal_modal = None;
+            return;
+        }
+        if confirm_entry {
+            net.pending_propose_rift_entry = Some((new_modal.start_floor, new_modal.mode));
+            self.portal_modal = None;
+            return;
+        }
 
         // The closure above moves `new_modal` only on the
         // confirm/cancel paths; the trailing assign keeps the
@@ -733,6 +791,219 @@ impl PartyUi {
             self.context_menu = None;
         }
     }
+}
+
+fn draw_rift_modal_backdrop(ui: &mut Ui<'_>, body: Rect) {
+    let s = ui.scale();
+    ui.draw_rounded_radial_rect_noisy(
+        body,
+        6.0 * s,
+        Color::rgba(0.20, 0.045, 0.045, 0.78),
+        Color::rgba(0.018, 0.016, 0.018, 0.98),
+    );
+    ui.draw_grad4_rect(
+        body,
+        Color::rgba(0.55, 0.18, 0.08, 0.16),
+        Color::rgba(0.14, 0.05, 0.10, 0.10),
+        Color::rgba(0.0, 0.0, 0.0, 0.18),
+        Color::rgba(0.0, 0.0, 0.0, 0.26),
+    );
+    ui.draw_rounded_outline(body, 6.0 * s, 1.0 * s, Color::rgba(1.0, 0.78, 0.42, 0.20));
+}
+
+fn draw_rift_sigil(ui: &mut Ui<'_>, centre: Pos2, radius: f32) {
+    let hot = Color::rgba(1.0, 0.42, 0.16, 0.90);
+    let ember = Color::rgba(0.95, 0.18, 0.10, 0.42);
+    ui.draw_circle(centre, radius, Color::rgba(0.80, 0.12, 0.08, 0.10));
+    ui.draw_circle(centre, radius * 0.72, Color::rgba(0.95, 0.24, 0.10, 0.12));
+    ui.draw_circle(centre, radius * 0.38, Color::rgba(1.0, 0.60, 0.18, 0.16));
+    for i in 0..10 {
+        let a = i as f32 * std::f32::consts::TAU / 10.0;
+        let inner = radius * if i % 2 == 0 { 0.28 } else { 0.43 };
+        let outer = radius * if i % 2 == 0 { 0.95 } else { 0.78 };
+        let (sin, cos) = a.sin_cos();
+        ui.draw_line(
+            Pos2::new(centre.x + cos * inner, centre.y + sin * inner),
+            Pos2::new(centre.x + cos * outer, centre.y + sin * outer),
+            1.0,
+            if i % 2 == 0 { hot } else { ember },
+        );
+    }
+    ui.draw_rounded_outline(
+        Rect::from_xywh(
+            centre.x - radius * 0.74,
+            centre.y - radius * 0.74,
+            radius * 1.48,
+            radius * 1.48,
+        ),
+        radius,
+        1.0,
+        Color::rgba(1.0, 0.68, 0.28, 0.42),
+    );
+}
+
+fn draw_floor_selector(ui: &mut Ui<'_>, rect: Rect, cap: u32, floor: &mut u32) {
+    let theme = *ui.theme();
+    let s = theme.scale;
+    draw_inset_plate(ui, rect, Color::rgba(0.18, 0.09, 0.065, 0.78));
+    ui.draw_text(
+        Pos2::new(rect.x() + 12.0 * s, rect.y() + 10.0 * s),
+        "START FLOOR",
+        11.0 * s,
+        Color::rgba(0.76, 0.64, 0.48, 0.90),
+    );
+
+    let value = floor.to_string();
+    let value_size = 48.0 * s;
+    let value_w = ui.measure_text(&value, value_size);
+    ui.draw_text(
+        Pos2::new(
+            rect.x() + (rect.width() - value_w) * 0.5,
+            rect.y() + 36.0 * s,
+        ),
+        &value,
+        value_size,
+        Color::rgba(1.0, 0.82, 0.48, 1.0),
+    );
+
+    let cap_text = format!("DEEPEST UNLOCKED: {cap}");
+    let cap_w = ui.measure_text(&cap_text, 10.0 * s);
+    ui.draw_text(
+        Pos2::new(rect.x() + (rect.width() - cap_w) * 0.5, rect.y() + 91.0 * s),
+        &cap_text,
+        10.0 * s,
+        Color::rgba(0.68, 0.63, 0.58, 0.86),
+    );
+
+    let button_y = rect.max.y - 34.0 * s;
+    let minus = Rect::from_xywh(rect.x() + 18.0 * s, button_y, 52.0 * s, 26.0 * s);
+    let plus = Rect::from_xywh(rect.max.x - 70.0 * s, button_y, 52.0 * s, 26.0 * s);
+    if Button::red("-").show(ui, minus).clicked {
+        *floor = floor.saturating_sub(1).max(1);
+    }
+    if Button::red("+").show(ui, plus).clicked {
+        *floor = (*floor + 1).min(cap);
+    }
+}
+
+fn draw_mode_card(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    id: Id,
+    label: &str,
+    detail: &str,
+    selected: bool,
+    enabled: bool,
+) -> bool {
+    let s = ui.scale();
+    let hovered = enabled && ui.interact_hover(id, rect);
+    let clicked = hovered && ui.input().left_just_pressed();
+    let fill = if selected {
+        Color::rgba(0.24, 0.11, 0.06, 0.92)
+    } else if hovered {
+        Color::rgba(0.14, 0.09, 0.075, 0.92)
+    } else {
+        Color::rgba(0.075, 0.065, 0.060, 0.86)
+    };
+    draw_inset_plate(ui, rect, fill);
+    if selected {
+        ui.draw_grad4_rect(
+            rect,
+            Color::rgba(1.0, 0.48, 0.16, 0.16),
+            Color::rgba(1.0, 0.32, 0.12, 0.08),
+            Color::rgba(0.0, 0.0, 0.0, 0.0),
+            Color::rgba(0.0, 0.0, 0.0, 0.0),
+        );
+        ui.draw_outline(rect, 1.5 * s, Color::rgba(1.0, 0.62, 0.24, 0.76));
+    }
+    let text_alpha = if enabled { 1.0 } else { 0.42 };
+    ui.draw_text(
+        Pos2::new(rect.x() + 12.0 * s, rect.y() + 6.0 * s),
+        label,
+        13.0 * s,
+        Color::rgba(0.95, 0.84, 0.64, text_alpha),
+    );
+    ui.draw_text(
+        Pos2::new(rect.x() + 12.0 * s, rect.y() + 22.0 * s),
+        detail,
+        10.5 * s,
+        Color::rgba(0.70, 0.66, 0.60, text_alpha * 0.82),
+    );
+    let pip = Pos2::new(rect.max.x - 17.0 * s, rect.y() + rect.height() * 0.5);
+    ui.draw_circle(
+        pip,
+        5.0 * s,
+        if selected {
+            Color::rgba(1.0, 0.54, 0.18, 0.90)
+        } else {
+            Color::rgba(0.24, 0.22, 0.20, if enabled { 0.82 } else { 0.42 })
+        },
+    );
+    clicked
+}
+
+fn draw_entry_summary(ui: &mut Ui<'_>, rect: Rect, floor: u32, mode: u8, cap: u32) {
+    let s = ui.scale();
+    draw_inset_plate(ui, rect, Color::rgba(0.055, 0.050, 0.050, 0.74));
+    let label = format!("Floor {floor} / {cap}");
+    ui.draw_text(
+        Pos2::new(rect.x() + 12.0 * s, rect.y() + 7.0 * s),
+        &label,
+        12.0 * s,
+        Color::rgba(0.92, 0.82, 0.64, 0.96),
+    );
+    ui.draw_text(
+        Pos2::new(rect.x() + 12.0 * s, rect.y() + 23.0 * s),
+        mode_label(mode),
+        11.0 * s,
+        Color::rgba(0.70, 0.66, 0.60, 0.88),
+    );
+    let gate = Rect::from_xywh(
+        rect.max.x - 74.0 * s,
+        rect.y() + 9.0 * s,
+        52.0 * s,
+        24.0 * s,
+    );
+    ui.draw_gradient_rect(
+        gate,
+        Color::rgba(0.48, 0.12, 0.06, 0.72),
+        Color::rgba(0.13, 0.040, 0.035, 0.88),
+    );
+    ui.draw_outline(gate, 1.0, Color::rgba(0.95, 0.48, 0.20, 0.48));
+}
+
+fn draw_inset_plate(ui: &mut Ui<'_>, rect: Rect, fill: Color) {
+    let s = ui.scale();
+    ui.draw_gradient_rect(rect, scale_rgb(fill, 1.20), scale_rgb(fill, 0.62));
+    ui.draw_outline(rect, 1.0 * s, Color::rgba(0.72, 0.52, 0.30, 0.38));
+    ui.draw_outline(
+        Rect::from_xywh(
+            rect.x() + 2.0 * s,
+            rect.y() + 2.0 * s,
+            rect.width() - 4.0 * s,
+            rect.height() - 4.0 * s,
+        ),
+        1.0,
+        Color::rgba(1.0, 0.92, 0.72, 0.07),
+    );
+}
+
+fn mode_label(mode: u8) -> &'static str {
+    match mode {
+        party_mode::SOLO => "Solo expedition",
+        party_mode::PARTY => "Party expedition",
+        party_mode::MATCHMAKE => "Matchmade expedition",
+        _ => "Unknown expedition",
+    }
+}
+
+fn scale_rgb(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul).clamp(0.0, 1.0),
+        (color.0[1] * mul).clamp(0.0, 1.0),
+        (color.0[2] * mul).clamp(0.0, 1.0),
+        color.0[3],
+    )
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -233,7 +233,12 @@ impl RiftApp {
             &mut state.anim_cache,
             &mut state.avatar_cosmetics_cache,
         );
-        net.sync_enemies(&mut state.world, renderer, &mut state.floor_mgr.monsters);
+        net.sync_enemies(
+            &mut state.world,
+            renderer,
+            &mut state.floor_mgr.monsters,
+            dt,
+        );
         net.sync_projectiles(renderer, state.audio.as_mut(), dt);
 
         // Spawn loot-pillar visuals from snapshot rows. The
@@ -473,18 +478,30 @@ impl RiftApp {
         renderer: &mut Renderer,
     ) {
         let Self { state, net } = self;
-        let pos_opt = net.last_positions.get(&entity).copied();
+        let enemy_entity = net.enemy_entity(entity);
+        let enemy_pos = enemy_entity.and_then(|enemy| {
+            state
+                .world
+                .get::<&rift_engine::ecs::components::Transform>(enemy)
+                .ok()
+                .map(|t| t.position)
+        });
+        let pos_opt = enemy_pos.or_else(|| net.last_positions.get(&entity).copied());
+        let is_player_death = net.is_player_net_id(entity);
+        let is_enemy_death = !is_player_death;
         log::info!(
             "net: Death entity={entity:?} have_pos={} ({:?})",
             pos_opt.is_some(),
             pos_opt
         );
-        // Record the death authoritatively. The snapshot is
-        // view-culled, so the row may already have vanished from
-        // `self.remote` for cull reasons rather than death — the
-        // world-sync despawn pass needs this set to know which
-        // case it's in (and whether to spawn `enemy_soul_return`).
-        net.dead_net_ids.insert(entity);
+        // Network enemies have one visual death cleanup path:
+        // spawn enemy_soul_return and remove/free the mesh in the
+        // same operation. Server corpse rows may keep arriving for
+        // the death window, but `sync_enemies` suppresses them once
+        // this marker/cleanup has happened.
+        if is_enemy_death {
+            net.mark_enemy_death(entity);
+        }
         if let Some(pos) = pos_opt {
             // Reconstruct the impact direction. The server
             // attaches the killing-blow impulse to the Death
@@ -543,16 +560,6 @@ impl RiftApp {
                  at {:?} eid={eid:?}",
                 pos
             );
-            // The `enemy_soul_return` puff is intentionally NOT
-            // spawned here — it's spawned in the world-sync
-            // despawn pass (see `crates/rift-client/src/net/
-            // world_sync.rs`) at the moment the corpse actually
-            // drops out of snapshots (`DEATH_FADE_DUR` ≈ 1.6s
-            // after the kill). Firing it on the Death event
-            // would float the puff above a still-visible body
-            // and lose the "sucked back to hell as they vanish"
-            // read; deferring to despawn lines up the smoke
-            // with the actual disappearance.
         } else {
             // Diagnostic path: we missed a death-VFX because we
             // never saw a snapshot row for `entity`. Most likely
@@ -568,6 +575,9 @@ impl RiftApp {
                  last_positions has {} entries; skipping VFX",
                 net.last_positions.len()
             );
+        }
+        if is_enemy_death {
+            net.remove_enemy_visual_for_death(&mut state.world, renderer, entity, "on death event");
         }
         // Remote player death: play the death clip on their
         // avatar so observers see them topple instead of just
@@ -698,7 +708,7 @@ impl RiftApp {
             rift_game::abilities::id::GROUND_SLAM_IMPACT => {
                 let centre = target_pos.unwrap_or(cast_origin);
                 let radius = dir[0].max(0.5);
-                renderer.vfx_system.spawn(
+                renderer.vfx_system.spawn_bundle(
                     rift_engine::renderer::vfx::presets::ground_slam_impact(radius),
                     centre + Vec3::new(0.0, 0.05, 0.0),
                 );
@@ -1358,6 +1368,9 @@ impl RiftApp {
                 tabs.len(),
             );
             state.loot.stash_tabs = tabs;
+        }
+        if let Some(open) = net.drain_stash_chest_open() {
+            state.floor_mgr.props.set_stash_chest_remote_open(open);
         }
 
         // Authoritative XP / level snapshots.

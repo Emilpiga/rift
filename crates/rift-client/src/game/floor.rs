@@ -256,6 +256,11 @@ pub struct FloorManager {
     /// floor that has no portal room.
     pub portal_anchors: Option<(Vec3, Vec3)>,
     pub nav_grid: NavGrid,
+    /// Persistent minimap exploration mask for the active hub or
+    /// rift floor. Row-major, same dimensions as `nav_grid` and
+    /// `dungeon.tiles`. Updated from local/party positions by the
+    /// HUD pass so explored rooms remain visible but dimmed.
+    pub minimap_seen: Vec<bool>,
     /// Live dungeon tile grid for the current floor. Owned
     /// here so client-side systems that need per-tile
     /// elevation (terrain-pitch animation, future foot IK)
@@ -326,6 +331,7 @@ impl FloorManager {
             boss_room_center: Vec3::ZERO,
             portal_anchors: None,
             nav_grid: NavGrid::from_floor(&floor),
+            minimap_seen: vec![false; floor.width * floor.depth],
             dungeon: None,
             monsters: MonsterCache::default(),
             props: Props::new(),
@@ -404,6 +410,7 @@ impl FloorManager {
         self.boss_room_center = floor.boss_room_center;
         self.portal_anchors = floor.portal_anchors;
         self.nav_grid = NavGrid::from_floor(&floor);
+        self.minimap_seen = vec![false; floor.width * floor.depth];
 
         // Set floor theme clear color — cave-dark Diablo ambience.
         // Torches carry the warm punctuation, so the unlit base
@@ -414,11 +421,10 @@ impl FloorManager {
             2 => [0.014, 0.004, 0.003, 1.0], // infernal red tint
             _ => [0.003, 0.005, 0.010, 1.0], // icy depths
         };
-        // Fog color: near-black so the wall reads as smoke, not
-        // distance haze. The sky horizon is tinted to match
-        // (oxblood at the very edge, not crimson) so the seam
-        // between fog wall and sky dome blends instead of banding.
-        renderer.fog_color = [0.020, 0.008, 0.010];
+        // Fog color matches `SkyConfig::rift`'s dim oxblood horizon,
+        // so distant geometry dissolves into the dome instead of
+        // reading as a separate visibility wall around the player.
+        renderer.fog_color = [0.060, 0.012, 0.012];
         // Tighter fog for damp, claustrophobic rift floors. The
         // player still has line-of-sight to the room they're in,
         // but anything past the next doorway dissolves into the
@@ -1124,6 +1130,7 @@ impl FloorManager {
         self.boss_room_center = Vec3::ZERO;
         self.portal_anchors = None;
         self.nav_grid = NavGrid::from_floor(&floor);
+        self.minimap_seen = vec![false; floor.width * floor.depth];
 
         // Brooding "floating obsidian platform in a sandstorm"
         // ambience. The platform is dark stone, the sky is a

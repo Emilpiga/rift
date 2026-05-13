@@ -616,7 +616,7 @@ impl Mesh {
         floor_num: u32,
         accept: impl Fn((usize, usize), (usize, usize)) -> bool,
     ) -> Self {
-        use rift_dungeon::{ELEVATION_STEP, StairDir, Tile};
+        use rift_dungeon::{StairDir, Tile, ELEVATION_STEP};
 
         // Same palette as `dungeon_floor` but slightly darker
         // so the vertical face reads as receding into shadow,
@@ -864,7 +864,11 @@ impl Mesh {
                     StairDir::PosZ => sz > 0.0,
                     StairDir::NegZ => sz < 0.0,
                 };
-                if on_rise { step_y } else { 0.0 }
+                if on_rise {
+                    step_y
+                } else {
+                    0.0
+                }
             };
 
             // Slope normal: cross product of along-slope and
@@ -1205,7 +1209,7 @@ impl Mesh {
 
         let segments = 64u32;
         let y = 0.08; // safely above floor (y=0) to avoid z-fighting
-        // Boost color far above 1.0 so it survives texture multiplication and lighting.
+                      // Boost color far above 1.0 so it survives texture multiplication and lighting.
         let bright = Vec3::new(color[0] * 8.0, color[1] * 8.0, color[2] * 8.0);
         let dim = Vec3::new(color[0] * 4.0, color[1] * 4.0, color[2] * 4.0);
 
@@ -1996,6 +2000,23 @@ impl Mesh {
         path: P,
         assets: &crate::assets::AssetServer,
     ) -> anyhow::Result<Self> {
+        Self::from_gltf_with_assets_filtered(path, assets, |_, _| true)
+    }
+
+    /// Same as [`Self::from_gltf_with_assets`], but only includes
+    /// primitives whose owning glTF node + mesh names pass
+    /// `mesh_name_filter`. Useful for rigid multi-part props
+    /// authored as one glTF where a caller needs to animate a
+    /// single node independently.
+    pub fn from_gltf_with_assets_filtered<P, F>(
+        path: P,
+        assets: &crate::assets::AssetServer,
+        mut mesh_name_filter: F,
+    ) -> anyhow::Result<Self>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(&str, &str) -> bool,
+    {
         let original = path.as_ref().to_path_buf();
         let candidates = [
             original.clone(),
@@ -2041,6 +2062,7 @@ impl Mesh {
                 &buffers,
                 base_dir,
                 assets,
+                &mut mesh_name_filter,
                 &mut mesh,
             );
         }
@@ -2112,6 +2134,7 @@ fn visit_node_inner(
     buffers: &[gltf::buffer::Data],
     base_dir: &std::path::Path,
     assets: &crate::assets::AssetServer,
+    mesh_name_filter: &mut dyn FnMut(&str, &str) -> bool,
     out: &mut Mesh,
 ) {
     let local = glam::Mat4::from_cols_array_2d(&node.transform().matrix());
@@ -2119,7 +2142,10 @@ fn visit_node_inner(
     let normal_mat = glam::Mat3::from_mat4(world).inverse().transpose();
 
     if let Some(gmesh) = node.mesh() {
-        for prim in gmesh.primitives() {
+        let node_name = node.name().unwrap_or("");
+        let mesh_name = gmesh.name().unwrap_or("");
+        if mesh_name_filter(node_name, mesh_name) {
+            for prim in gmesh.primitives() {
             let reader = prim.reader(|b| Some(&buffers[b.index()]));
             let positions: Vec<[f32; 3]> = match reader.read_positions() {
                 Some(it) => it.collect(),
@@ -2226,10 +2252,19 @@ fn visit_node_inner(
                 }
             }
         }
+        }
     }
 
     for child in node.children() {
-        visit_node_inner(&child, world, buffers, base_dir, assets, out);
+        visit_node_inner(
+            &child,
+            world,
+            buffers,
+            base_dir,
+            assets,
+            mesh_name_filter,
+            out,
+        );
     }
 }
 
@@ -2784,7 +2819,11 @@ impl SkinnedMesh {
                 || n.contains(".l")
                 || n.contains("_l_")
                 || n.contains("lhand");
-            if is_hand && is_left { Some(i) } else { None }
+            if is_hand && is_left {
+                Some(i)
+            } else {
+                None
+            }
         })
     }
 
@@ -2811,7 +2850,11 @@ impl SkinnedMesh {
                 || n.contains(".r")
                 || n.contains("_r_")
                 || n.contains("rhand");
-            if is_hand && is_right { Some(i) } else { None }
+            if is_hand && is_right {
+                Some(i)
+            } else {
+                None
+            }
         })
     }
 

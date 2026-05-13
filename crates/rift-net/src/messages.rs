@@ -857,6 +857,13 @@ pub enum ServerMsg {
     /// the dense `[0..n)` list the player owns.
     StashSync { tabs: Vec<StashTabBlob> },
 
+    /// Shared hub stash-chest visual state. Unlike [`StashSync`],
+    /// this carries no private inventory data; it only tells hub
+    /// clients whether at least one player currently has the stash
+    /// session open so the chest lid can stay open until the final
+    /// user closes it.
+    StashChestState { open: bool },
+
     /// Authoritative shard balance for this client. Sent at
     /// hello time (post-hydration) and after every salvage /
     /// stash-tab purchase. Reliable on `Channel::Control`.

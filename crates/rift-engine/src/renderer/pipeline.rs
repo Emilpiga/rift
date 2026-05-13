@@ -14,7 +14,7 @@ use crate::renderer::forward::Renderer;
 use crate::renderer::material::MaterialPool;
 use crate::renderer::texture::Texture;
 use crate::renderer::uniform::UniformBuffers;
-use crate::vulkan::{VulkanDevice, commands, pipeline};
+use crate::vulkan::{commands, pipeline, VulkanDevice};
 
 impl Renderer {
     /// Materialise the four placeholder/default GPU resources the
@@ -162,6 +162,51 @@ impl Renderer {
                 );
             } else {
                 log::info!("Post pipelines hot-reloaded successfully!");
+            }
+
+            if let Err(e) = self.sky_renderer.reload_pipeline(
+                &self.device.device,
+                self.post.scene_pass,
+                &self.shader_dir,
+            ) {
+                log::error!(
+                    "Sky pipeline hot-reload failed (keeping old pipeline): {}",
+                    e
+                );
+            } else {
+                log::info!("Sky pipeline hot-reloaded successfully!");
+            }
+
+            if let Err(e) = self.vfx_ribbon_renderer.reload_pipeline(
+                &self.device.device,
+                self.post.translucent_pass,
+                self.swapchain.extent,
+                self.uniforms.descriptor_set_layout,
+                self.post.translucent_set_layout,
+                &self.shader_dir,
+            ) {
+                log::error!(
+                    "Ribbon VFX pipeline hot-reload failed (keeping old pipeline): {}",
+                    e
+                );
+            } else {
+                log::info!("Ribbon VFX pipeline hot-reloaded successfully!");
+            }
+
+            if let Err(e) = self.vfx_particle_renderer.reload_pipeline(
+                &self.device.device,
+                self.post.translucent_pass,
+                self.swapchain.extent,
+                self.uniforms.descriptor_set_layout,
+                self.post.translucent_set_layout,
+                &self.shader_dir,
+            ) {
+                log::error!(
+                    "Particle VFX pipeline hot-reload failed (keeping old pipelines): {}",
+                    e
+                );
+            } else {
+                log::info!("Particle VFX pipelines hot-reloaded successfully!");
             }
         }
     }

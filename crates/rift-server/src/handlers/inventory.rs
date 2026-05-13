@@ -289,9 +289,14 @@ impl Server {
             log::debug!("stash: open rejected for {from:?} not in hub");
             return;
         }
+        let was_open = self.hub.any_stash_open();
         // Stash lives only on the hub sim; players in the rift
         // can't reach the chest at all.
         self.hub.set_stash_open(from, true);
+        let is_open = self.hub.any_stash_open();
+        if was_open != is_open {
+            self.broadcast_stash_chest_state(is_open);
+        }
         self.send_stash_state(from);
     }
 
@@ -299,7 +304,16 @@ impl Server {
     /// deposit / withdraw requests are rejected until a fresh
     /// `OpenStash` arrives.
     pub(crate) fn handle_close_stash(&mut self, from: ClientId) {
+        let was_open = self.hub.any_stash_open();
         self.hub.set_stash_open(from, false);
+        let is_open = self.hub.any_stash_open();
+        if was_open != is_open {
+            self.broadcast_stash_chest_state(is_open);
+        }
+    }
+
+    pub(crate) fn broadcast_stash_chest_state(&mut self, open: bool) {
+        self.broadcast_to_hub(Channel::Control, &ServerMsg::StashChestState { open });
     }
 
     /// Move the bag item at `inventory_index` into stash tab

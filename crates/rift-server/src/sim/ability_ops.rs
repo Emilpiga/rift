@@ -4,10 +4,12 @@
 
 use glam::Vec3;
 use hecs::Entity;
+use rift_game::kinematic::Kinematic;
 use rift_net::ids::ClientId;
 use rift_net::messages::{InputCmd, WorldEvent};
 use rift_net::{NetId, NetTick};
 
+use super::actor::Vitals;
 use super::player::ServerPlayer;
 use super::{ability, channel, combat_ctx, effect, player, shrine, Sim};
 
@@ -21,25 +23,34 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
-            return;
-        };
         match shrine {
             None => {
+                let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+                    return;
+                };
                 p.channeling_shrine = None;
             }
             Some(id) => {
-                if p.is_dead_or_ghosting() {
+                let is_dead_or_ghosting = match (
+                    self.world.get::<&ServerPlayer>(entity),
+                    self.world.get::<&Vitals>(entity),
+                ) {
+                    (Ok(p), Ok(vitals)) => p.is_dead_or_ghosting(&vitals),
+                    _ => return,
+                };
+                if is_dead_or_ghosting {
                     return;
                 }
-                drop(p);
                 let Some((_, shrine_pos)) = shrine::find(&self.world, id) else {
                     return;
                 };
                 let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
                     return;
                 };
-                let dist_sq = (p.k.position - shrine_pos).length_squared();
+                let Ok(kinematic) = self.world.get::<&Kinematic>(entity) else {
+                    return;
+                };
+                let dist_sq = (kinematic.position - shrine_pos).length_squared();
                 if dist_sq > SHRINE_INTERACT_RADIUS * SHRINE_INTERACT_RADIUS {
                     return;
                 }
@@ -206,11 +217,12 @@ impl Sim {
             // inflate healer rankings without reflecting any
             // real impact on survivability.
             let mut effective = 0.0_f32;
-            if let Ok(mut p) = self.world.get::<&mut player::ServerPlayer>(target) {
-                if !p.is_dead_or_ghosting() {
-                    let before = p.hp;
-                    p.hp = (p.hp + scaled).min(p.hp_max);
-                    effective = p.hp - before;
+            if let Ok((p, vitals)) = self
+                .world
+                .query_one_mut::<(&player::ServerPlayer, &mut Vitals)>(target)
+            {
+                if !p.is_dead_or_ghosting(vitals) {
+                    effective = vitals.heal(scaled);
                 }
             }
             if effective > 0.0 {

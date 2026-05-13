@@ -765,8 +765,8 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                     let mut la = Animator::new(target_clip.clone());
                     la.looping = false;
                     // Honour the per-cast speed scale stashed by
-                    // `play_oneshot_preempt_scaled` (Punch compresses
-                    // a long swing clip into a short cooldown).
+                    // `play_oneshot_preempt_scaled` (Punch tunes the
+                    // swing clip for a readable but responsive beat).
                     la.speed = cast.pending_oneshot_speed.max(0.01);
                     cast.layer_animator = Some(la);
                 }

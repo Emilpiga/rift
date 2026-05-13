@@ -22,6 +22,8 @@ vec3 shadePbr() {
     float roughness = clamp(mr.g, 0.045, 1.0);
     float ao        = texture(aoMap, uv).r;
 
+    applyHeightMaterialDetail(uv, push.materialParams.y, albedo, roughness, ao);
+
     // Blood field composite (per-floor wet/dry pools). Mutates the
     // PBR inputs in place before the BRDF math so the lighting picks
     // up the puddle's specular highlight naturally — wet blood

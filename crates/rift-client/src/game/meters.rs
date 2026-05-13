@@ -26,7 +26,7 @@
 //! panel only renders while the player is inside a rift — the
 //! hub gets no meter (no fight to score).
 
-use rift_engine::ui::im::{Color, Pos2, Rect, Ui};
+use rift_engine::ui::im::{Color, Frame, Pad, Pos2, Rect, Ui};
 use rift_game::abilities;
 use rift_game::monsters::MonsterRole;
 use rift_net::messages::{MeterAbilityBreakdown, MeterEntry, MeterTakenAttackerBreakdown};
@@ -208,15 +208,10 @@ impl MeterUi {
         let inset = 12.0 * s;
         let rect = Rect::from_xywh(screen.x - w - inset, screen.y - h - inset, w, h);
 
-        // Background. Drawn directly rather than via `Frame`
-        // because we want a subtle dark tint, not a panel-style
-        // bordered card.
-        ui.draw_rounded_rect(
-            rect,
-            theme.spacing.corner_radius,
-            Color::rgba(0.05, 0.05, 0.07, 0.78),
-        );
-        ui.draw_rounded_outline(rect, theme.spacing.corner_radius, 1.0, theme.colors.border);
+        Frame::stone(&theme)
+            .with_padding(Pad::all(0.0))
+            .with_radius(4.0 * s)
+            .show_only(ui, rect);
         // Whole-panel hit rect: lets the gameplay layer skip
         // basic-attack clicks under us.
         self.cached_consume_rects.push(rect);
@@ -227,9 +222,9 @@ impl MeterUi {
         let title_y = rect.y() + pad;
         let _ = ui.draw_text(
             Pos2::new(rect.x() + pad, title_y),
-            "Combat",
-            theme.fonts.size_sm,
-            theme.colors.text_dim,
+            "COMBAT",
+            theme.fonts.size_md,
+            theme.colors.text,
         );
         let secs = self.elapsed;
         let mm = (secs / 60.0) as u32;
@@ -247,6 +242,10 @@ impl MeterUi {
             &elapsed_text,
             theme.fonts.size_sm,
             theme.colors.text_dim,
+        );
+        ui.draw_rect(
+            Rect::from_xywh(rect.x() + pad, title_y + title_h, w - pad * 2.0, 1.0),
+            theme.colors.border_stone,
         );
 
         // ---- Tab row ------------------------------------------------------
@@ -269,14 +268,31 @@ impl MeterUi {
             // Active tab: brighter fill so the selected metric
             // pops without needing extra chrome.
             let fill = if active {
-                theme.colors.accent
+                Color::rgba(0.30, 0.22, 0.14, 0.92)
+            } else if hovered_tab == Some(*tab) {
+                Color::rgba(0.16, 0.15, 0.13, 0.88)
             } else {
-                Color::rgba(0.12, 0.12, 0.16, 0.85)
+                Color::rgba(0.055, 0.052, 0.050, 0.72)
             };
-            ui.draw_rounded_rect(tab_rect, 2.0 * s, fill);
+            ui.draw_rounded_radial_rect_noisy(
+                tab_rect,
+                2.0 * s,
+                Color::rgba(0.025, 0.023, 0.022, fill.0[3]),
+                fill,
+            );
+            ui.draw_rounded_outline(
+                tab_rect,
+                2.0 * s,
+                1.0,
+                if active {
+                    theme.colors.border_stone
+                } else {
+                    Color::rgba(0.22, 0.19, 0.15, 0.78)
+                },
+            );
             let label = tab.label();
             let text_color = if active {
-                theme.colors.text
+                Color::rgba(0.96, 0.86, 0.64, 1.0)
             } else {
                 theme.colors.text_dim
             };
@@ -597,9 +613,13 @@ fn attacker_name(kind: u8) -> &'static str {
 /// pill rather than nothing).
 fn draw_meter_bar(ui: &mut Ui<'_>, rect: Rect, frac: f32, fill: Color, alpha: f32) {
     let theme = *ui.theme();
-    let radius = theme.spacing.corner_radius;
-    let track = Color::rgba(0.10, 0.10, 0.13, 0.85);
-    ui.draw_rounded_rect(rect, radius, track);
+    let radius = (theme.spacing.corner_radius * 0.55).max(2.0);
+    ui.draw_rounded_radial_rect_noisy(
+        rect,
+        radius,
+        Color::rgba(0.018, 0.016, 0.015, 0.92),
+        Color::rgba(0.070, 0.062, 0.054, 0.88),
+    );
     let frac = frac.clamp(0.0, 1.0);
     if frac > 0.0 {
         // Cap the fill at the row width and floor it at one
@@ -613,13 +633,29 @@ fn draw_meter_bar(ui: &mut Ui<'_>, rect: Rect, frac: f32, fill: Color, alpha: f3
         } else {
             fill.with_alpha(alpha)
         };
-        ui.draw_rounded_rect(fill_rect, radius, c);
+        ui.draw_grad4_rect(
+            fill_rect,
+            brighten(c, 1.18),
+            c,
+            darken(c, 0.64),
+            darken(c, 0.78),
+        );
+        ui.draw_gradient_rect(
+            Rect::from_xywh(
+                fill_rect.x(),
+                fill_rect.y(),
+                fill_rect.width(),
+                (fill_rect.height() * 0.38).max(2.0),
+            ),
+            Color::rgba(1.0, 0.94, 0.82, 0.14),
+            Color::rgba(1.0, 1.0, 1.0, 0.0),
+        );
     }
     ui.draw_rounded_outline(
         rect,
         radius,
         theme.spacing.border_thickness,
-        theme.colors.border,
+        Color::rgba(0.30, 0.25, 0.19, 0.88),
     );
 }
 
@@ -627,15 +663,29 @@ fn draw_meter_bar(ui: &mut Ui<'_>, rect: Rect, frac: f32, fill: Color, alpha: f3
 /// without looking at the active tab label.
 fn bar_color(tab: MeterTab) -> Color {
     match tab {
-        // Red-ish: the universal "damage" colour.
-        MeterTab::Dmg => Color::rgba(0.78, 0.22, 0.22, 0.92),
-        // Green-ish: healing.
-        MeterTab::Hps => Color::rgba(0.28, 0.72, 0.34, 0.92),
-        // Orange-ish: damage taken (warning, not heal).
-        MeterTab::Taken => Color::rgba(0.85, 0.55, 0.18, 0.92),
-        // Purple-ish: threat / aggro.
-        MeterTab::Threat => Color::rgba(0.62, 0.36, 0.82, 0.92),
+        MeterTab::Dmg => Color::rgba(0.72, 0.24, 0.18, 0.90),
+        MeterTab::Hps => Color::rgba(0.24, 0.58, 0.28, 0.90),
+        MeterTab::Taken => Color::rgba(0.72, 0.44, 0.16, 0.90),
+        MeterTab::Threat => Color::rgba(0.48, 0.34, 0.66, 0.90),
     }
+}
+
+fn brighten(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul + 0.025).clamp(0.0, 1.0),
+        (color.0[1] * mul + 0.020).clamp(0.0, 1.0),
+        (color.0[2] * mul + 0.015).clamp(0.0, 1.0),
+        color.0[3],
+    )
+}
+
+fn darken(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        color.0[0] * mul,
+        color.0[1] * mul,
+        color.0[2] * mul,
+        color.0[3],
+    )
 }
 
 /// Compact numeric formatting: 1234 → "1.2k", 1_234_567 →

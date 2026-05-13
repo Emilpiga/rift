@@ -4,10 +4,13 @@
 //! caller passes in.
 
 use glam::Vec3;
-use rift_dungeon::NavGrid;
-use rift_engine::ecs::components::{Boss, Enemy, LocalPlayer, Player, Transform};
+use rift_dungeon::{Floor, NavGrid, RoomType, StairDir, SurfaceKind, Tile};
+use rift_engine::ecs::components::{Boss, Enemy, LocalPlayer, Player, RemotePlayer, Transform};
 use rift_engine::ui::im::{Banner, Color, Pos2, Rect, Ui};
-use rift_ui_types::hud::{MinimapEnemy, MinimapPlayer, MinimapView};
+use rift_ui_types::hud::{
+    MinimapCell, MinimapEnemy, MinimapPartyMember, MinimapPlayer, MinimapProp, MinimapPropKind,
+    MinimapRoomKind, MinimapStairDir, MinimapSurface, MinimapTileKind, MinimapView,
+};
 
 /// Top-right minimap. Walks the hecs world to build a flat
 /// [`MinimapView`], then delegates to the pure widget in
@@ -17,6 +20,10 @@ pub fn render_minimap(
     ui: &mut Ui<'_>,
     world: &hecs::World,
     nav: &NavGrid,
+    floor: Option<&Floor>,
+    seen: &mut Vec<bool>,
+    zone_title: &str,
+    zone_detail: &str,
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
 ) {
@@ -38,6 +45,13 @@ pub fn render_minimap(
         });
     }
 
+    let mut party: Vec<MinimapPartyMember> = Vec::new();
+    for (_id, (t, _rp)) in world.query::<(&Transform, &RemotePlayer)>().iter() {
+        party.push(MinimapPartyMember {
+            pos: (t.position.x, t.position.z),
+        });
+    }
+
     // Local player + facing flattened to 2D nav-grid space.
     let player = world
         .query::<(&Transform, &Player, &LocalPlayer)>()
@@ -48,15 +62,170 @@ pub fn render_minimap(
         })
         .next();
 
+    let mut revealers: Vec<(f32, f32, f32)> = Vec::new();
+    if let Some(player) = player {
+        revealers.push((player.pos.0, player.pos.1, 12.0));
+    }
+    for member in &party {
+        revealers.push((member.pos.0, member.pos.1, 10.0));
+    }
+
+    let mut cells: Vec<MinimapCell> = Vec::new();
+    let mut props: Vec<MinimapProp> = Vec::new();
+    if let Some(floor) = floor {
+        let needed = floor.width * floor.depth;
+        if seen.len() != needed {
+            seen.clear();
+            seen.resize(needed, false);
+        }
+        let mut visible = vec![false; needed];
+        update_minimap_visibility(floor, seen, &mut visible, &revealers);
+
+        cells.reserve(needed);
+        for z in 0..floor.depth {
+            for x in 0..floor.width {
+                let idx = z * floor.width + x;
+                let tile = floor.tiles[idx];
+                cells.push(MinimapCell {
+                    kind: minimap_tile_kind(tile),
+                    surface: minimap_surface(floor.surface_at(x as f32, z as f32)),
+                    room: minimap_room_kind_at(floor, x, z),
+                    elevation: floor.elevation.get(idx).copied().unwrap_or_default(),
+                    stair_dir: match tile {
+                        Tile::Stair { dir } => Some(minimap_stair_dir(dir)),
+                        _ => None,
+                    },
+                    explored: seen.get(idx).copied().unwrap_or(false),
+                    visible: visible.get(idx).copied().unwrap_or(false),
+                });
+            }
+        }
+
+        props.reserve(floor.props.len());
+        for prop in &floor.props {
+            props.push(MinimapProp {
+                pos: (prop.pos.x, prop.pos.z),
+                kind: minimap_prop_kind(prop),
+            });
+        }
+    }
+
     let view = MinimapView {
+        zone_title,
+        zone_detail,
         grid_width: nav.width as u32,
         grid_depth: nav.depth as u32,
         walkable: &walkable,
+        cells: &cells,
+        props: &props,
+        focus: player.map(|p| p.pos),
         portal: portal_pos.map(|p| (p.x, p.z)),
         enemies: &enemies,
+        party: &party,
         player,
     };
     rift_ui::hud::frame_minimap(ui, &view);
+}
+
+fn update_minimap_visibility(
+    floor: &Floor,
+    seen: &mut [bool],
+    visible: &mut [bool],
+    revealers: &[(f32, f32, f32)],
+) {
+    for &(cx, cz, radius) in revealers {
+        let min_x = (cx - radius).floor().max(0.0) as usize;
+        let max_x = (cx + radius)
+            .ceil()
+            .min((floor.width.saturating_sub(1)) as f32) as usize;
+        let min_z = (cz - radius).floor().max(0.0) as usize;
+        let max_z = (cz + radius)
+            .ceil()
+            .min((floor.depth.saturating_sub(1)) as f32) as usize;
+        let radius_sq = radius * radius;
+        for z in min_z..=max_z {
+            for x in min_x..=max_x {
+                let dx = x as f32 - cx;
+                let dz = z as f32 - cz;
+                if dx * dx + dz * dz > radius_sq {
+                    continue;
+                }
+                let idx = z * floor.width + x;
+                if let Some(v) = visible.get_mut(idx) {
+                    *v = true;
+                }
+                if let Some(s) = seen.get_mut(idx) {
+                    *s = true;
+                }
+            }
+        }
+    }
+}
+
+fn minimap_tile_kind(tile: Tile) -> MinimapTileKind {
+    match tile {
+        Tile::Wall => MinimapTileKind::Wall,
+        Tile::Floor => MinimapTileKind::Floor,
+        Tile::Stair { .. } => MinimapTileKind::Stair,
+    }
+}
+
+fn minimap_surface(surface: SurfaceKind) -> MinimapSurface {
+    match surface {
+        SurfaceKind::Sand => MinimapSurface::Sand,
+        SurfaceKind::Stone => MinimapSurface::Stone,
+        SurfaceKind::Wood => MinimapSurface::Wood,
+        SurfaceKind::Metal => MinimapSurface::Metal,
+        SurfaceKind::Grass => MinimapSurface::Grass,
+        SurfaceKind::Bone => MinimapSurface::Bone,
+    }
+}
+
+fn minimap_stair_dir(dir: StairDir) -> MinimapStairDir {
+    match dir {
+        StairDir::PosX => MinimapStairDir::PosX,
+        StairDir::NegX => MinimapStairDir::NegX,
+        StairDir::PosZ => MinimapStairDir::PosZ,
+        StairDir::NegZ => MinimapStairDir::NegZ,
+    }
+}
+
+fn minimap_room_kind(room_type: RoomType) -> MinimapRoomKind {
+    match room_type {
+        RoomType::Arena => MinimapRoomKind::Arena,
+        RoomType::BossRoom => MinimapRoomKind::Boss,
+        RoomType::PortalRoom => MinimapRoomKind::Portal,
+        RoomType::Corridor => MinimapRoomKind::Corridor,
+    }
+}
+
+fn minimap_room_kind_at(floor: &Floor, x: usize, z: usize) -> MinimapRoomKind {
+    floor
+        .rooms
+        .iter()
+        .find(|room| {
+            x >= room.x && x < room.x + room.width && z >= room.z && z < room.z + room.depth
+        })
+        .map(|room| minimap_room_kind(room.room_type))
+        .unwrap_or(MinimapRoomKind::None)
+}
+
+fn minimap_prop_kind(prop: &rift_dungeon::PlacedProp) -> MinimapPropKind {
+    if prop.id == rift_dungeon::props::PropId::StashChest {
+        return MinimapPropKind::Chest;
+    }
+    if prop.light {
+        return MinimapPropKind::Light;
+    }
+    let Some((min, max)) = prop.collider_aabb() else {
+        return MinimapPropKind::Decoration;
+    };
+    let area = (max.x - min.x).abs() * (max.z - min.z).abs();
+    if area >= 0.75 {
+        MinimapPropKind::LargeSolid
+    } else {
+        MinimapPropKind::SmallSolid
+    }
 }
 /// Generic interaction prompt centred just below mid-screen, used by
 /// the rift / hub portals. `text` is the message body (e.g.
