@@ -60,7 +60,7 @@ pub use ui_input::{KeyEvent, UiInput};
 pub use widgets::{
     hp_color, item_tooltip_lines, Banner, BannerStyle, Button, ButtonSize, ButtonVariant, Frame,
     InlineEditOutcome, InlineEditState, ItemSlot, MiniButton, MiniButtonFills, MiniButtonResponse,
-    ProgressBar, SlotInteraction, TextField, Tooltip, TooltipLine, TooltipLineDecor,
-    TwoStageConfirm, TwoStageOutcome,
+    PanZoom, PanZoomState, PanZoomTransform, ProgressBar, SlotInteraction, TextField, Tooltip,
+    TooltipLine, TooltipLineDecor, TwoStageConfirm, TwoStageOutcome,
 };
 pub use world_ui::WorldUi;

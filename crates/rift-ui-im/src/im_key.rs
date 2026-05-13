@@ -35,6 +35,7 @@ pub enum ImKey {
     KeyA,
     KeyB,
     KeyC,
+    KeyN,
     KeyR,
     KeyT,
     KeyV,

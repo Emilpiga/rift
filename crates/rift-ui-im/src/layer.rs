@@ -15,7 +15,7 @@
 //! widgets in L2/L3 lower themselves to these three commands.
 
 use super::color::Color;
-use super::rect::Rect;
+use super::rect::{Pos2, Rect};
 use crate::draw_list::DrawList;
 
 /// Z-ordering buckets. Lower variants render first (i.e. behind).
@@ -116,6 +116,34 @@ pub(super) enum DrawCmd {
         name: String,
         rect: Rect,
         tint: Color,
+    },
+    /// Straight line segment with butt caps, rendered as a
+    /// rotated quad. Used for graph edges in panels like the
+    /// talent tree.
+    Line {
+        p0: Pos2,
+        p1: Pos2,
+        thickness: f32,
+        color: Color,
+    },
+    /// Bevelled glow-disc. Used for talent-tree nodes and any
+    /// other "stamped emissive chip" affordance — see
+    /// [`super::ui::Ui::draw_glow_disc`].
+    GlowDisc {
+        centre: Pos2,
+        radius: f32,
+        halo: f32,
+        color: Color,
+    },
+    /// Glowing line — emissive strand with an exponential
+    /// halo across the perpendicular axis. Used for talent
+    /// edges. See [`super::ui::Ui::draw_glow_line`].
+    GlowLine {
+        p0: Pos2,
+        p1: Pos2,
+        core_thickness: f32,
+        halo_extent: f32,
+        color: Color,
     },
 }
 
@@ -289,6 +317,58 @@ impl LayerBuf {
                             rect.width(),
                             rect.height(),
                             tint.to_array(),
+                            screen_w,
+                            screen_h,
+                        );
+                    }
+                    DrawCmd::Line {
+                        p0,
+                        p1,
+                        thickness,
+                        color,
+                    } => {
+                        batch.line_px(
+                            p0.x,
+                            p0.y,
+                            p1.x,
+                            p1.y,
+                            thickness,
+                            color.to_array(),
+                            screen_w,
+                            screen_h,
+                        );
+                    }
+                    DrawCmd::GlowDisc {
+                        centre,
+                        radius,
+                        halo,
+                        color,
+                    } => {
+                        batch.glow_disc(
+                            centre.x,
+                            centre.y,
+                            radius,
+                            halo,
+                            color.to_array(),
+                            screen_w,
+                            screen_h,
+                        );
+                    }
+                    DrawCmd::GlowLine {
+                        p0,
+                        p1,
+                        core_thickness,
+                        halo_extent,
+                        color,
+                    } => {
+                        batch.glow_line(
+                            p0.x,
+                            p0.y,
+                            p1.x,
+                            p1.y,
+                            core_thickness,
+                            halo_extent,
+                            color.to_array(),
                             screen_w,
                             screen_h,
                         );

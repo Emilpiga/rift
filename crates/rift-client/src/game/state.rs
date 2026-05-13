@@ -75,6 +75,11 @@ pub struct GameState {
     /// `request_set_loadout_slot` and waits for the server to
     /// echo the new bar back through `ServerMsg::Loadout`.
     pub spellbook: spellbook::SpellbookUi,
+    /// Talent-tree overlay state (open/closed + pan/zoom +
+    /// search). Toggled with `N`; spends points via
+    /// `request_invest_talent` and waits for the server to
+    /// echo the new tree back through `ServerMsg::TalentsSync`.
+    pub talents_panel: rift_ui_types::talents::TalentPanelState,
     /// In-game chat HUD: scrollback panel + input field +
     /// per-player mute list. Inbound lines flow in from the
     /// binary draining `NetClient::take_pending_chats`;
@@ -181,6 +186,7 @@ impl GameState {
             loot_model_cache: super::loot_models::LootModelCache::new(),
             weapon_visual_cache: super::weapon_visuals::WeaponMeshCache::new(),
             spellbook: spellbook::SpellbookUi::new(),
+            talents_panel: rift_ui_types::talents::TalentPanelState::default(),
             chat: super::chat::ChatUi::new(),
             party: super::party::PartyUi::new(),
             meters: super::meters::MeterUi::new(),
@@ -316,6 +322,18 @@ impl GameState {
         // enter_just_pressed), which the flag intentionally
         // leaves alone.
         input.set_text_capture(self.chat.is_typing() || self.inventory_ui.wants_text_input());
+        // Fullscreen modals (currently just the talent panel)
+        // own the screen — gameplay keys, camera yaw drag and
+        // scroll-zoom all need to step out of the way while
+        // they're open. Text capture also gets set so WASD /
+        // hotbar polling is muted, and mouse-camera capture
+        // mutes right-drag yaw and wheel-zoom (the raw scroll
+        // delta still surfaces for the panel's pan-zoom).
+        let fullscreen_modal_open = self.talents_panel.open;
+        if fullscreen_modal_open {
+            input.set_text_capture(true);
+        }
+        input.set_mouse_camera_capture(fullscreen_modal_open);
         match self.app_state.clone() {
             AppState::CharacterSelect => {
                 crate::game::transition::update_character_select(self, renderer, input, dt);

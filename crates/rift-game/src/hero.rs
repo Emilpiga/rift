@@ -30,6 +30,13 @@ pub struct HeroConfig {
     /// every cast / channel tick (see
     /// `ServerPlayer::resource_regen_pause`).
     pub base_resource_regen: f32,
+    /// Baseline passive HP regen per second before any
+    /// gear / talents. Intentionally tiny — enough that an
+    /// out-of-combat player slowly tops off rather than being
+    /// stuck at low HP forever, but never a substitute for
+    /// healing skills or potions. Gear / talents stack on top
+    /// via `Stat::HealthRegen`.
+    pub base_health_regen: f32,
     /// Base damage (before weapon/attributes).
     pub base_damage: f32,
     /// Base attack speed (attacks per second).
@@ -51,6 +58,11 @@ pub const HERO: HeroConfig = HeroConfig {
     base_resource: 100.0,
     resource_per_level: 5.0,
     base_resource_regen: 8.0,
+    // ~0.5 HP/s on an 80 HP baseline — roughly a full bar in
+    // ~160 s of standing still. Slow enough that combat
+    // healing still matters, fast enough that exploration
+    // between rooms doesn't feel like an HP penalty.
+    base_health_regen: 0.5,
     base_damage: 8.0,
     base_attack_speed: 1.4,
     base_crit_chance: 0.05,

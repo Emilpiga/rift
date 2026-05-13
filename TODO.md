@@ -1,4 +1,3 @@
-- Roll always activated on space. (Make room on HUD for CD display).
 - More ambient scenery outside of the dungeon, it's a little barren.
 - Character creation - customization.
 - Damage meter options, overall or current combat

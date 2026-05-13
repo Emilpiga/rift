@@ -131,8 +131,6 @@ pub enum HudAction {
 }
 
 // ─── Minimap ──────────────────────────────────────────────────
-
-/// One non-boss / boss enemy pip on the minimap.
 #[derive(Copy, Clone, Debug)]
 pub struct MinimapEnemy {
     /// Position in nav-grid coords (x, z). The widget maps

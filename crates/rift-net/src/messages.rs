@@ -458,6 +458,17 @@ pub enum ClientMsg {
     /// Reliable on `Channel::Control`.
     SetLoadoutSlot { slot_index: u8, ability_id: u8 },
 
+    /// Spend one talent point on the node identified by
+    /// [`crate::messages::TalentNodeId`]. Server validates the
+    /// invest is legal — node exists, current rank < max rank,
+    /// every prerequisite has rank ≥ 1, and the player has at
+    /// least one unspent point — then mutates the
+    /// authoritative `ServerPlayer.talents`, persists, and
+    /// replies with a fresh [`ServerMsg::TalentsSync`] snapshot.
+    /// Silent no-op on a rejected invest.
+    /// Reliable on `Channel::Control`.
+    InvestTalent { talent_id: u16 },
+
     /// Open the rift exit vote. Sent when a living player
     /// presses F at the rift-spawn portal. Server validates the
     /// caster is alive and on a non-hub floor, with no vote
@@ -873,6 +884,21 @@ pub enum ServerMsg {
     /// client can resync after a partial-message drop.
     /// Reliable on `Channel::Control`.
     Loadout { slots: [u8; 6] },
+
+    /// Authoritative talent-tree snapshot for the local
+    /// character. Sent once at Welcome and again after every
+    /// [`ClientMsg::InvestTalent`] the server accepts (and
+    /// after every level-up that grants a talent point).
+    ///
+    /// `invested` is a list of `(talent_id, rank)` pairs for
+    /// nodes with `rank ≥ 1`. Nodes absent from the list are
+    /// implicitly rank 0. `unspent` is the player's available
+    /// point pool — granted by levels and (eventually) quest /
+    /// boss rewards. Reliable on `Channel::Control`.
+    TalentsSync {
+        invested: Vec<(u16, u8)>,
+        unspent: u32,
+    },
 
     /// Authoritative XP / level snapshot for the local character.
     /// Sent once at Welcome and again whenever the server's

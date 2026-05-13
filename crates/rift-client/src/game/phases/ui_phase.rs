@@ -112,6 +112,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // modal open" and pop the pause menu.
     let pre_spellbook_open = state.spellbook.open;
     let pre_inventory_open = state.inventory_ui.open && !state.loot.stash_session;
+    let pre_talents_open = state.talents_panel.open;
     // Clear last frame's HUD click-swallow rects before any
     // HUD widget repopulates them. `combat_phase` already read
     // them earlier this frame, so the slate is safe to wipe.
@@ -148,6 +149,57 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         // slot pre-targeted; the next pool click assigns directly
         // without the two-step picker.
         state.spellbook.open_for_slot(slot_idx as u8);
+    }
+    // Small HUD button next to the ability bar that opens the
+    // talent panel. Sits to the LEFT of the plaque so it doesn't
+    // compete with the standard 1..6 / Space layout. Tinted
+    // gold when the player has unspent points so the affordance
+    // is visible without an explicit notification.
+    {
+        use rift_engine::ui::im::{Button, Color, Id, Rect};
+        let theme = *ui.theme();
+        let s = theme.scale;
+        let screen = ui.screen_size();
+        let plaque_w = rift_ui::hud::PLAQUE_W_BASE * s;
+        let plaque_h = rift_ui::hud::PLAQUE_H_BASE * s;
+        let plaque_x = (screen.x - plaque_w) * 0.5;
+        let plaque_y = screen.y - plaque_h - rift_ui::hud::BOTTOM_GAP_BASE * s;
+        let btn_w = 96.0 * s;
+        let btn_h = 32.0 * s;
+        let btn_rect = Rect::from_xywh(
+            plaque_x - btn_w - 8.0 * s,
+            plaque_y + (plaque_h - btn_h) * 0.5,
+            btn_w,
+            btn_h,
+        );
+        let has_unspent = state.player_state.talents.unspent_points > 0;
+        let label = if has_unspent {
+            format!("Talents ({})", state.player_state.talents.unspent_points)
+        } else {
+            "Talents".to_string()
+        };
+        let resp = if has_unspent {
+            Button::primary(&label)
+        } else {
+            Button::new(&label)
+        }
+        .show_with_id(&mut ui, Id::root("rift::hud::talents_btn"), btn_rect);
+        if resp.clicked {
+            state.talents_panel.toggle();
+        }
+        // Suppress the next-frame basic-attack cast when the
+        // cursor sits on the button.
+        state.frame.hud_consume_rects.push(btn_rect);
+        // Faint gold pulse when unspent points exist — helps the
+        // player notice. Painted as a translucent rim.
+        if has_unspent {
+            ui.draw_rounded_outline(
+                btn_rect,
+                6.0,
+                2.0,
+                Color::rgba(0.92, 0.78, 0.32, 0.55),
+            );
+        }
     }
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj);
     if !state.floor.in_hub {
@@ -216,6 +268,50 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                     .net
                     .pending_loadout_changes
                     .push((slot_index, ability_id));
+            }
+        }
+    }
+
+    // Talents panel toggle (N) — open / close the talent tree.
+    // Suppressed while a stash session is active for the same
+    // reason as the spellbook bind, and while an exit vote is
+    // active (N doubles as the "No" vote in that flow).
+    //
+    // Open path uses the host's text-capture-gated polling so
+    // typing "n" in chat / inventory rename can't open the
+    // panel. Close path uses *raw* polling because the panel,
+    // once open, sets text-capture itself (to silence WASD /
+    // hotbar polling for the whole modal) — without the raw
+    // read, the close N would be swallowed by the very flag
+    // the panel set on its own behalf.
+    let exit_vote_active = state.exit_vote.as_ref().map(|v| v.active).unwrap_or(false);
+    if !state.loot.stash_session && !exit_vote_active {
+        let n_open = !pre_talents_open
+            && ui
+                .input()
+                .key_just_pressed(rift_engine::ui::im::ImKey::KeyN);
+        let n_close = pre_talents_open
+            && ui
+                .input()
+                .key_just_pressed_raw(rift_engine::ui::im::ImKey::KeyN);
+        if n_open || n_close {
+            state.talents_panel.toggle();
+        }
+    }
+    {
+        let view = crate::game::talent_tree::build_talent_view(&state.player_state.talents);
+        if let Some(action) = rift_ui::talents::frame_talent_panel(
+            &mut ui,
+            &mut state.talents_panel,
+            &view,
+        ) {
+            match action {
+                rift_ui_types::talents::TalentTreeAction::Invest { talent_id } => {
+                    state.net.pending_talent_invests.push(talent_id);
+                }
+                rift_ui_types::talents::TalentTreeAction::Close => {
+                    state.talents_panel.close();
+                }
             }
         }
     }
@@ -310,9 +406,18 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // helper signature would conflict on the second borrow.
     {
         let escape_busy = state.chat.is_typing() || state.inventory_ui.wants_text_input();
+        // The talents panel sets text-capture for itself
+        // (silences WASD / hotbar polling for the modal), so
+        // its close-Escape has to come from the raw read.
+        // Other sub-modals don't flip text-capture, so the
+        // standard gated read still hits them.
         let escape_pressed = ui
             .input()
-            .key_just_pressed(rift_engine::ui::im::ImKey::Escape);
+            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
+            || (pre_talents_open
+                && ui
+                    .input()
+                    .key_just_pressed_raw(rift_engine::ui::im::ImKey::Escape));
 
         // Escape is a single state-transition this frame —
         // *either* it opens the menu, *or* it closes one of
@@ -334,6 +439,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                 state.pause.menu_open = true;
             } else if state.pause.menu_open {
                 state.pause.menu_open = false;
+            } else if pre_talents_open {
+                state.talents_panel.close();
             } else if pre_spellbook_open {
                 state.spellbook.close();
             } else if pre_inventory_open {

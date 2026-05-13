@@ -32,6 +32,30 @@ const ANIM_LIBRARY_PATHS: &[&str] = &[
     "assets/models/animation-library-two/Unreal-Godot/UAL2_Standard.glb",
 ];
 
+/// Lower-cased clip names whose baked root translation should be
+/// stripped at bind time so gameplay code owns forward motion.
+///
+/// We follow the ARPG convention (Diablo IV, Lost Ark, Last
+/// Epoch): attack animations are conceptually in-place, with the
+/// character's lunge driven by an authored `forward_step`
+/// constant in
+/// [`rift_game::kinematic::ActionProfile`]. Many of the source
+/// clips (Mixamo-style sword swings) have an animator-authored
+/// forward translation on the root joint, which fights the
+/// kinematic when the swing is direction-locked and produces the
+/// "she lunges then snaps back" feel.
+///
+/// We list explicit clip names rather than pattern-matching so
+/// it's easy to audit which clips have their root translation
+/// neutralised, and so accidentally adding a new clip starting
+/// with `Sword_` doesn't silently change motion behaviour.
+fn in_place_clip_names() -> &'static [&'static str] {
+    // Mirror the melee combo's clip_names entries, lowercased.
+    // If the combo table grows, add the new clip's lowercase
+    // name here too.
+    &["sword_attack", "punch_jab", "punch_cross"]
+}
+
 /// Caller-owned cache for the rigged animation library. Kept by
 /// gender since the bind-to-skeleton step is gender-specific (the
 /// male and female base meshes have different joint counts /
@@ -161,16 +185,47 @@ pub fn spawn_character_entity(
         } else {
             let mut set = AnimationSet::default();
             let mut loaded_any = false;
+            // Set of clip names (lowercased) that should be
+            // stripped of baked root translation at bind time
+            // — see [`in_place_clip_names`] below.
+            let in_place = in_place_clip_names();
+            // Root joint of the bound skeleton, used by the
+            // strip pass. Joint with no parent in the rig.
+            let root_joint_idx: Option<u16> = skinned
+                .mesh
+                .joints
+                .iter()
+                .position(|j| j.parent.is_none())
+                .map(|i| i as u16);
             for path in ANIM_LIBRARY_PATHS {
                 match rift_engine::animation::Clip::load_all(path) {
                     Ok(clips) => {
                         for clip in &clips {
-                            let bound = clip.bind_to_skeleton(
+                            let mut bound = clip.bind_to_skeleton(
                                 &skinned.mesh.joint_index_by_name,
                                 skinned.mesh.joints.len(),
                             );
-                            set.clips
-                                .insert(clip.name.to_ascii_lowercase(), Arc::new(bound));
+                            // ARPG motion-ownership rule:
+                            // attack clips are in-place, the
+                            // kinematic owns forward lunge via
+                            // [`rift_game::kinematic::ActionProfile::forward_step`].
+                            // Strip baked translation so a
+                            // clip authored with root motion
+                            // (Mixamo / Synty default) doesn't
+                            // double up with the code-side
+                            // step or fight the locked
+                            // `attack_dir`.
+                            let lowered = clip.name.to_ascii_lowercase();
+                            if let Some(root) = root_joint_idx {
+                                if in_place.iter().any(|n| *n == lowered.as_str()) {
+                                    bound.strip_root_translation(root);
+                                    log::debug!(
+                                        "stripped root motion from in-place clip '{}'",
+                                        clip.name,
+                                    );
+                                }
+                            }
+                            set.clips.insert(lowered, Arc::new(bound));
                         }
                         loaded_any = true;
                     }
@@ -188,6 +243,7 @@ pub fn spawn_character_entity(
                 let mut names: Vec<&String> = set.clips.keys().collect();
                 names.sort();
                 log::debug!("Animation clips: {:?}", names);
+
                 *cache.slot_for(cfg.gender) = Some(set.clone());
                 Some(set)
             } else {
@@ -217,18 +273,24 @@ pub fn spawn_character_entity(
 
     // Read mask + spine joint back from the now-inserted Skinned
     // component so we don't have to thread it through.
-    let (mask_opt, spine_idx, hand_idx): (Option<Vec<f32>>, Option<usize>, Option<usize>) =
-        match world.get::<&Skinned>(entity) {
-            Ok(s) => (
-                Some(s.mesh.upper_body_mask()),
-                s.mesh.spine_root_joint(),
-                s.mesh.left_hand_joint(),
-            ),
-            Err(_) => (None, None, None),
-        };
-    if let Some(mask) = mask_opt {
+    let (mask_opt, spine_idx, hand_idx): (
+        Option<(Vec<f32>, Vec<f32>)>,
+        Option<usize>,
+        Option<usize>,
+    ) = match world.get::<&Skinned>(entity) {
+        Ok(s) => (
+            Some(s.mesh.upper_body_mask_with_axis()),
+            s.mesh.spine_root_joint(),
+            s.mesh.left_hand_joint(),
+        ),
+        Err(_) => (None, None, None),
+    };
+    if let Some((mask, yaw_only)) = mask_opt {
         world
-            .insert_one(entity, rift_engine::ecs::components::SpellCast::new(mask))
+            .insert_one(
+                entity,
+                rift_engine::ecs::components::SpellCast::new_with_axis(mask, yaw_only),
+            )
             .ok();
     }
     if let Some(idx) = spine_idx {

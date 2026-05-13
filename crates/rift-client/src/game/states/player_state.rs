@@ -48,24 +48,30 @@ pub struct PlayerState {
     /// `resource_pct` each frame in `world_sync`. The HUD reads
     /// this directly; the canonical scalar is server-side.
     pub resource_pct: f32,
-    /// Seconds elapsed since the most recent local melee swing.
-    /// Ticked up each frame in `combat_system::tick`; reset to
-    /// `0.0` whenever a fresh swing fires. Paired with
-    /// [`melee_combo_step`] to decide whether the next swing
-    /// chains the combo (within
-    /// `rift_game::kinematic::ATTACK_COMBO_WINDOW`) or
-    /// restarts it. Starts at `f32::MAX` so the very first
-    /// swing always begins the chain at step 0.
-    pub melee_time_since_last: f32,
-    /// 0..=3 combo index for the next melee swing.
-    pub melee_combo_step: u8,
     /// Last server-reported salvage currency balance. Mirrored
     /// from [`rift_net::ServerMsg::ShardsSync`] in `main.rs`.
     /// The HUD reads this for the shard counter; the canonical
     /// value is the server's `ServerPlayer.shards` (persisted
     /// in the `characters.shards` column).
     pub shards: u32,
+    /// Auto-alternating Punch state. `true` ⇒ next Punch swing
+    /// is a Jab; `false` ⇒ next is a Cross. Flipped on every
+    /// successful Punch cast. Reset to `true` (Jab) when more
+    /// than `PUNCH_RESET_AFTER` seconds have elapsed since the
+    /// last Punch so that the next opening swing of a fresh
+    /// combat is always a Jab. Cosmetic-only — the server
+    /// doesn't care which clip the client picked.
+    pub punch_jab_next: bool,
+    /// Wall-clock time of the last Punch cast, used to decide
+    /// whether to reset [`Self::punch_jab_next`] to Jab on the
+    /// next swing.
+    pub last_punch_at: Option<std::time::Instant>,
 }
+
+/// After this much idle time between Punch swings, the next
+/// Punch resets to Jab so that the opening hit of a fresh combat
+/// is always a Jab.
+pub const PUNCH_RESET_AFTER: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl PlayerState {
     pub fn new() -> Self {
@@ -77,7 +83,7 @@ impl PlayerState {
         let attributes = Attributes::for_class(config.primary_attribute);
 
         let abilities = loadout.materialize();
-        let talents = talents::hunter_tree();
+        let talents = talents::fresh_character_tree();
 
         let experience = Experience::new();
         let default_equipment = rift_game::loot::Equipment::default();
@@ -101,9 +107,9 @@ impl PlayerState {
             cached_stats,
             cached_ability_mods,
             resource_pct: 1.0,
-            melee_time_since_last: f32::MAX,
-            melee_combo_step: 0,
             shards: 0,
+            punch_jab_next: true,
+            last_punch_at: None,
         }
     }
 
@@ -111,7 +117,11 @@ impl PlayerState {
     /// Re-materializes the runtime `AbilitySlot` so cooldowns
     /// reset for the swapped slot. No-op when `slot_index` is
     /// out of range.
-    pub fn set_loadout_slot(&mut self, slot_index: usize, wire_id: rift_game::abilities::AbilityWireId) {
+    pub fn set_loadout_slot(
+        &mut self,
+        slot_index: usize,
+        wire_id: rift_game::abilities::AbilityWireId,
+    ) {
         self.loadout.set_slot(slot_index, wire_id);
         self.abilities = self.loadout.materialize();
     }

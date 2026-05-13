@@ -157,6 +157,65 @@ pub trait DrawList {
         screen_h: f32,
     );
 
+    /// Filled line segment from `(x0, y0)` to `(x1, y1)`,
+    /// rendered as a rotated quad of the given pixel
+    /// `thickness` (butt caps, no antialias). Use for
+    /// diagrammatic edges in graph-shaped UIs (talent trees,
+    /// quest maps, debug overlays). Degenerate inputs (zero
+    /// length, non-positive thickness) MUST be dropped
+    /// silently so callers can pass through computed coords
+    /// without guarding.
+    #[allow(clippy::too_many_arguments)]
+    fn line_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    );
+
+    /// Bevelled stone-coloured disc with an indented dark→tint
+    /// radial gradient core and a shader-rasterised glow halo
+    /// outside the solid disc. One draw call per node; the
+    /// fragment shader does the SDF / bevel / glow math.
+    ///
+    /// `radius` is the solid-disc radius; `halo` extends the
+    /// glow falloff outward in pixels. `color.a` is the master
+    /// alpha (drives gating dimming).
+    #[allow(clippy::too_many_arguments)]
+    fn glow_disc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        halo: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    );
+
+    /// Glowing line from `(x0,y0)` to `(x1,y1)`. The shader
+    /// rasterises a bright core surrounded by an exponential
+    /// tinted halo across the perpendicular axis. Total quad
+    /// width is `core_thickness + 2 * halo_extent`.
+    #[allow(clippy::too_many_arguments)]
+    fn glow_line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        core_thickness: f32,
+        halo_extent: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    );
+
     /// Rasterise `text` at pixel position `(x, y)` (top-left
     /// anchor of the first glyph's bbox), in `size`-pixel cap
     /// height. Returns the advance width consumed.

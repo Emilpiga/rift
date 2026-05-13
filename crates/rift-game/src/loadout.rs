@@ -19,7 +19,6 @@
 //! the loadout editor.
 
 use crate::abilities::{lookup, Ability, AbilitySlot, AbilityState, AbilityWireId, REGISTRY};
-use crate::loot::{EquipSlot, Equipment, ItemSlot, WeaponKind};
 
 /// Number of action-bar slots. Mirrors `AbilitySlot::slots.len()`.
 pub const SLOT_COUNT: usize = 6;
@@ -89,14 +88,18 @@ impl Loadout {
         ]
     }
 
-    /// Default starter loadout — only Fireball in slot 0,
-    /// every other bar slot empty. Players unlock more slots
-    /// (and more abilities) as they level up.
+    /// Default starter loadout — [`crate::abilities::id::PUNCH`]
+    /// in slot 0, every other bar slot empty. Fresh characters
+    /// have no abilities unlocked via the talent tree at level
+    /// 1, so Punch is the always-available neutral attack they
+    /// can fight with from frame one. The player can swap it
+    /// out like any other ability once they've unlocked
+    /// something via talents. See `TALENT_TREE.md` §2.1.
     pub const fn default_hero() -> Self {
         use crate::abilities::id;
         Self {
             slots: [
-                id::FIRE_BALL,
+                id::PUNCH,
                 EMPTY_SLOT,
                 EMPTY_SLOT,
                 EMPTY_SLOT,
@@ -148,18 +151,6 @@ impl Loadout {
                 bar.slots[i] = Some(AbilityState::new(ab.clone()));
             }
         }
-        bar
-    }
-
-    /// Like [`Self::materialize`] but synthesises slot 0 (the LMB
-    /// slot) from the equipped weapon via [`weapon_lmb_ability`].
-    /// The persisted slot-0 entry in [`Self::slots`] is ignored —
-    /// LMB is locked to the weapon for MVP. Other slots (1..N)
-    /// materialise from the persisted loadout exactly as before.
-    pub fn materialize_with_weapon(&self, equipment: &Equipment) -> AbilitySlot {
-        let mut bar = self.materialize();
-        let lmb_id = weapon_lmb_ability(equipment);
-        bar.slots[0] = lookup(lmb_id).map(|ab| AbilityState::new(ab.clone()));
         bar
     }
 
@@ -238,13 +229,6 @@ pub fn is_player_ability(wire_id: AbilityWireId) -> bool {
     if wire_id == crate::abilities::id::EVASIVE_ROLL {
         return false;
     }
-    // Melee attack is a weapon-locked LMB ability — not slottable
-    // from the spellbook (it lives in slot 0 only when the
-    // player has a Sword / Dagger equipped, via
-    // [`weapon_lmb_ability`]).
-    if wire_id == crate::abilities::id::MELEE_ATTACK {
-        return false;
-    }
     lookup(wire_id).is_some()
 }
 
@@ -264,47 +248,26 @@ pub fn is_ability_unlocked(wire_id: AbilityWireId, player_level: u32) -> bool {
 /// (Evasive Roll on Space) — those have a dedicated HUD slot
 /// and are not part of the action-bar loadout.
 pub fn player_abilities() -> impl Iterator<Item = &'static Ability> {
-    REGISTRY.iter().filter(|a| {
-        a.wire_id.raw() < 64
-            && a.wire_id != crate::abilities::id::EVASIVE_ROLL
-            && a.wire_id != crate::abilities::id::MELEE_ATTACK
-    })
-}
-
-/// Wire id of the ability that should occupy the LMB slot for a
-/// player wearing `equipment`. LMB is locked to the weapon for
-/// MVP: melee weapons (Sword / Dagger) get
-/// [`crate::abilities::id::MELEE_ATTACK`]; caster weapons (Staff
-/// / Wand) and an empty weapon slot both fall back to
-/// [`crate::abilities::id::FIRE_BALL`].
-pub fn weapon_lmb_ability(equipment: &Equipment) -> AbilityWireId {
-    use crate::abilities::id;
-    let weapon = equipment.get(EquipSlot::Weapon);
-    match weapon.map(|it| it.base.slot) {
-        Some(ItemSlot::Weapon(WeaponKind::Sword | WeaponKind::Dagger)) => id::MELEE_ATTACK,
-        _ => id::FIRE_BALL,
-    }
+    REGISTRY
+        .iter()
+        .filter(|a| a.wire_id.raw() < 64 && a.wire_id != crate::abilities::id::EVASIVE_ROLL)
 }
 
 /// Authoritative check used by the server to gate a player cast.
-/// Accepts the always-available passive (Evasive Roll), every
-/// ability the player has slotted in their persisted loadout,
-/// and — for the MVP — the weapon-derived LMB ability even when
-/// the persisted loadout slot 0 holds a different (or empty)
-/// id. Mirrors [`Loadout::materialize_with_weapon`] so the
-/// client and server agree on which ids count as castable.
-pub fn can_player_cast(
-    loadout: &Loadout,
-    equipment: &Equipment,
-    ability_id: AbilityWireId,
-) -> bool {
+/// Accepts the always-available passive (Evasive Roll), the
+/// always-available bare-handed [`crate::abilities::id::PUNCH`]
+/// (per `TALENT_TREE.md` §2.1), and every ability the player has
+/// slotted in their persisted loadout. Weapons are stat-sticks
+/// and have no effect on which abilities are castable — slot 0
+/// is an ordinary action-bar slot the player rebinds freely.
+pub fn can_player_cast(loadout: &Loadout, ability_id: AbilityWireId) -> bool {
     if ability_id == crate::abilities::id::EVASIVE_ROLL {
         return true;
     }
-    if loadout.contains(ability_id) {
+    if ability_id == crate::abilities::id::PUNCH {
         return true;
     }
-    ability_id == weapon_lmb_ability(equipment)
+    loadout.contains(ability_id)
 }
 
 #[cfg(test)]

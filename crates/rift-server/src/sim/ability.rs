@@ -260,7 +260,25 @@ pub fn submit(
             // bound to Space on the client and never sits in
             // a loadout slot.
             let p_ref = world.get::<&ServerPlayer>(entity).ok()?;
-            if !rift_game::loadout::can_player_cast(&p_ref.loadout, &p_ref.equipment, ability_id) {
+            if !rift_game::loadout::can_player_cast(&p_ref.loadout, ability_id) {
+                return None;
+            }
+            // Talent-tree gate. Every ability except the
+            // always-on neutrals (`PUNCH` per `TALENT_TREE.md`
+            // §2.1, and `EVASIVE_ROLL` which is bound to
+            // Space and unlocks via the Hub tier-1 dodge
+            // node §11.1 — the client treats it as a free
+            // passive that ignores the unlock check, so the
+            // server must mirror that or rolls silently
+            // drop) must have its `UnlockAbility` talent node
+            // invested before the player can fire it. Mirrors
+            // the client-side gate in `trigger_local_cast` so
+            // a misbehaving / desynced client can't bypass the
+            // tree by hand-crafting a `Cast` message.
+            if ability_id != rift_game::abilities::id::PUNCH
+                && ability_id != rift_game::abilities::id::EVASIVE_ROLL
+                && !p_ref.talents.is_ability_unlocked(ability.id)
+            {
                 return None;
             }
             // Snapshot the caster's authoritative state. The
@@ -843,67 +861,38 @@ pub fn dispatch(
             radius,
             arc_radians,
         } => {
-            // Advance the combo step on the caster, then stamp
-            // the corresponding `ATTACK_*` byte onto the
-            // kinematic so the snapshot pipeline broadcasts
-            // which swing clip remote clients should play.
-            // Movement is *not* locked \u2014 see
-            // `kinematic::ATTACK_DURATION`. A fresh swing
-            // beyond `ATTACK_COMBO_WINDOW` from the previous
-            // one restarts the chain at step 0; otherwise we
-            // cycle 0\u21921\u21922\u21923\u21920.
-            if let Some(entity) = accepted.caster_entity {
-                let mut step: u8 = 0;
-                if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
-                    let elapsed_ticks = tick.diff(p.last_melee_tick).max(0) as f32;
-                    let elapsed_s = elapsed_ticks / rift_net::TICK_HZ as f32;
-                    step = if elapsed_s <= rift_game::kinematic::ATTACK_COMBO_WINDOW {
-                        (p.melee_combo_step + 1) & 0b11
-                    } else {
-                        0
-                    };
-                    p.melee_combo_step = step;
-                    p.last_melee_tick = tick;
-                    rift_game::kinematic::start_attack(&mut p.k, accepted.aim, step);
-                    p.action_start = tick;
-                }
-                sinks.melee_swings.push(PendingMeleeSwing {
-                    caster_net_id: accepted.caster,
-                    ability_id: accepted.ability_id,
-                    origin: accepted.origin,
-                    aim: accepted.aim,
-                    radius,
-                    arc_radians,
-                    damage: scaled_damage,
-                    crit_chance: accepted.crit_chance,
-                    crit_damage: accepted.crit_damage,
-                });
-            }
+            // Pure damage primitive: queue the cone hit for
+            // the resolver. The pose lock + locked lunge
+            // direction are stamped on the caster's
+            // kinematic by the generic `SetPlayerAction`
+            // pass below, which runs after this match for
+            // any ability that declares a server-driven
+            // pose. Mirrors how every other damage kind
+            // (`Projectiles`, `AoeZone`, `Channel`) restricts
+            // its arm to the damage shape and lets shared
+            // passes handle motion / animation side-effects.
+            sinks.melee_swings.push(PendingMeleeSwing {
+                caster_net_id: accepted.caster,
+                ability_id: accepted.ability_id,
+                origin: accepted.origin,
+                aim: accepted.aim,
+                radius,
+                arc_radians,
+                damage: scaled_damage,
+                crit_chance: accepted.crit_chance,
+                crit_damage: accepted.crit_damage,
+            });
         }
         AbilityKind::ClientOnly => {
-            // A handful of "client-only" abilities still have
-            // a kinematic side-effect on the caster. Evasive
-            // Roll is the canonical example: pure visual on
-            // most clients, but the server has to drive the
-            // actual translation so prediction stays
-            // consistent and other players see the dodge
-            // happen authoritatively.
-            if accepted.ability_id == id::EVASIVE_ROLL {
-                if let Some(entity) = accepted.caster_entity {
-                    if let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) {
-                        rift_game::kinematic::start_roll(&mut p.k, accepted.aim);
-                        // Stamp the roll-start tick so the
-                        // snapshot can carry it to the local
-                        // client. Without this the client's
-                        // local `roll_remaining` clock drifts
-                        // ~RTT/2 ahead of the server's and
-                        // every subsequent snapshot snaps the
-                        // predicted position back into the
-                        // still-rolling server pose.
-                        p.action_start = tick;
-                    }
-                }
-            }
+            // No server side-effect on its own. Abilities of
+            // this kind that *do* need a caster pose lock
+            // (e.g. Evasive Roll) declare it via
+            // `AbilityEffect::SetPlayerAction`; the generic
+            // pass below picks it up and stamps the
+            // caster's kinematic. Keeping the arm empty
+            // means a new ClientOnly ability with a pose
+            // requirement doesn't need any server code
+            // changes — it just authors the effect entry.
         }
         // ── AI-shaped kinds ─────────────────────────────────────
         AbilityKind::EnemyProjectiles {
@@ -1036,6 +1025,77 @@ pub fn dispatch(
                     super::meters::ATTACKER_KIND_OTHER,
                 );
             }
+        }
+    }
+
+    // ── Generic kinematic side-effect pass ────────────────────
+    //
+    // Any ability that authors an `AbilityEffect::SetPlayerAction`
+    // entry whose `action` is server-driven (Roll, Attack)
+    // stamps the matching kinematic state on the caster here.
+    // This is the server's counterpart to the client-side
+    // `ability_runtime::execute_ability` walk: same data
+    // (`ability.effects`), same selectors (`SetPlayerAction`),
+    // each side runs the parts of the effect it owns. Adding a
+    // new pose-locking ability (heavy attack, parry, leap…)
+    // means authoring a `SetPlayerAction` entry in the registry
+    // — no per-ability dispatch arm or id-equality check.
+    //
+    // Locomotion / cast-flavoured `PlayerAction` variants
+    // (None, Walk, Run, JumpAir, JumpLand, Cast) are not
+    // server-kinematic actions: the kinematic enum
+    // (`kinematic::action::*`) only encodes Roll and Attack,
+    // because those are the actions where the server *drives*
+    // motion. Everything else is animation state owned by the
+    // client's locomotion picker. We deliberately ignore them
+    // here.
+    apply_kinematic_side_effects(world, ability, &accepted, tick);
+}
+
+/// Walk `ability.effects` and apply any kinematic side-effect
+/// declared by a `SetPlayerAction` entry to the caster's
+/// `ServerPlayer.k`. Keeps the dispatch arms focused on damage
+/// primitives by lifting "lock the caster's pose for N seconds"
+/// out into a single shared pass.
+fn apply_kinematic_side_effects(
+    world: &mut hecs::World,
+    ability: &rift_game::abilities::Ability,
+    accepted: &AcceptedCast,
+    tick: NetTick,
+) {
+    use rift_game::abilities::AbilityEffect;
+    use rift_game::components::PlayerAction;
+
+    let Some(entity) = accepted.caster_entity else {
+        return;
+    };
+    for effect in ability.effects {
+        let AbilityEffect::SetPlayerAction { action, .. } = effect else {
+            continue;
+        };
+        let Ok(mut p) = world.get::<&mut ServerPlayer>(entity) else {
+            return;
+        };
+        match action {
+            PlayerAction::Roll => {
+                rift_game::kinematic::start_roll(&mut p.k, accepted.aim);
+                // Stamp the action-start tick so snapshot
+                // pipeline can carry it to the local client.
+                // Without this the client's local timer
+                // drifts ~RTT/2 ahead of the server's and
+                // every subsequent snapshot snaps the
+                // predicted position back into the still-
+                // rolling server pose.
+                p.action_start = tick;
+            }
+            PlayerAction::Attack => {
+                rift_game::kinematic::start_attack(&mut p.k, accepted.aim);
+                p.action_start = tick;
+            }
+            // Locomotion / cast poses: animation-only state
+            // owned by the client. The server doesn't drive
+            // motion for these, so there's nothing to stamp.
+            _ => {}
         }
     }
 }

@@ -406,7 +406,11 @@ impl CharacterStats {
                 + flat(Stat::MaxResource))
                 * pct(Stat::MaxResource),
             resource_regen: class.base_resource_regen * (1.0 + flat(Stat::ResourceRegen)),
-            health_regen: flat(Stat::HealthRegen).max(0.0),
+            // Baseline class regen + any flat bonus from gear /
+            // talents. Clamped at zero so a hypothetical
+            // negative aura can't drive regen below zero (HP
+            // drain is its own debuff path).
+            health_regen: (class.base_health_regen + flat(Stat::HealthRegen)).max(0.0),
             healing_received: flat(Stat::HealingReceived),
             elemental_resist: flat(Stat::ElementalResist).clamp(0.0, 0.75),
             armor: flat(Stat::Armor) * pct(Stat::Armor) * strength_armor_mult,

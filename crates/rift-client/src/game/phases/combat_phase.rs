@@ -53,6 +53,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     // sees the LMB press first and fires the currently-slotted
     // basic attack into the world behind the panel.
     let spellbook_open = state.spellbook.open;
+    let talents_open = state.talents_panel.open;
 
     // Ability-based combat (sends cast requests to the server).
     // Two gates beyond the obvious "alive" check:
@@ -74,7 +75,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
             || pointer_in_chat
             || pointer_in_meters
             || pointer_in_hud
-            || spellbook_open;
+            || spellbook_open
+            || talents_open;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
     } else if is_ghost

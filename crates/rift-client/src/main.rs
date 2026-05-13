@@ -333,9 +333,11 @@ impl RiftApp {
                 dir,
                 target,
                 origin,
-                ..
+                start_tick,
             } => {
-                self.handle_ability_cast_event(caster, ability, dir, target, origin, renderer);
+                self.handle_ability_cast_event(
+                    caster, ability, dir, target, origin, start_tick, renderer,
+                );
             }
             WorldEvent::Hit { target, .. } => {
                 log::debug!("net: Hit target={target:?}");
@@ -669,6 +671,7 @@ impl RiftApp {
         dir: [f32; 2],
         target: Option<[f32; 3]>,
         origin: [f32; 3],
+        start_tick: rift_net::NetTick,
         renderer: &mut Renderer,
     ) {
         log::debug!("net: AbilityCast caster={caster:?} ability={ability}");
@@ -723,6 +726,7 @@ impl RiftApp {
             cast_origin,
             target_pos,
             caster_avatar,
+            start_tick,
         );
     }
 
@@ -957,6 +961,19 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             net.request_set_loadout_slot(slot_index, ability_id);
+        }
+
+        // Talent investments. Pushed by the talents panel; the
+        // server validates `can_invest` and replies with a
+        // fresh `ServerMsg::TalentsSync` so the local tree is
+        // never mutated optimistically.
+        for talent_id in state
+            .net
+            .pending_talent_invests
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            net.request_invest_talent(talent_id);
         }
 
         // Rift exit-vote requests: F-press on the rift-spawn
@@ -1230,16 +1247,10 @@ impl RiftApp {
             log::info!("client: hydrated equipment with {} slot(s)", equip.count());
             state.loot.equipment = equip;
             state.player_state.recompute_stats(&state.loot.equipment);
-            // Re-derive the LMB slot from the freshly-equipped
-            // weapon so the action bar stays in sync with the
-            // server. `materialize_with_weapon` overrides slot
-            // 0 with the weapon-derived ability id (melee for
-            // Sword / Dagger, Fireball otherwise) on top of
-            // the persisted loadout.
-            state.player_state.abilities = state
-                .player_state
-                .loadout
-                .materialize_with_weapon(&state.loot.equipment);
+            // Equipment changed — weapons are stat-sticks only and
+            // don't affect ability bindings, so just re-materialize
+            // the action bar from the persisted loadout.
+            state.player_state.abilities = state.player_state.loadout.materialize();
 
             // Refresh the local player's modular outfit attachments
             // so anything with a `BaseItem::model_path` shows up
@@ -1335,10 +1346,29 @@ impl RiftApp {
         // re-materialize the runtime `AbilitySlot`.
         if let Some(slots) = net.drain_loadout() {
             state.player_state.loadout = rift_game::loadout::Loadout::from_slots(slots);
-            state.player_state.abilities = state
-                .player_state
-                .loadout
-                .materialize_with_weapon(&state.loot.equipment);
+            state.player_state.abilities = state.player_state.loadout.materialize();
+        }
+
+        // Authoritative talent-tree snapshots. The server's
+        // `TalentTree` is the source of truth; rebuild the
+        // local tree from invested-pairs + unspent so cast
+        // gates / UI render the authoritative state. Nodes
+        // not in the list are implicitly rank 0.
+        if let Some((invested, unspent)) = net.drain_talents() {
+            let tree = &mut state.player_state.talents;
+            for node in tree.nodes.iter_mut() {
+                node.current_rank = 0;
+            }
+            let mut total_spent: u32 = 0;
+            for (id, rank) in invested {
+                let id = rift_game::talents::TalentId(id);
+                if let Some(n) = tree.nodes.iter_mut().find(|n| n.id == id) {
+                    n.current_rank = rank.min(n.max_rank);
+                    total_spent += n.current_rank as u32;
+                }
+            }
+            tree.total_spent = total_spent;
+            tree.unspent_points = unspent;
         }
 
         // Authoritative shard balance. Pushed by the server on

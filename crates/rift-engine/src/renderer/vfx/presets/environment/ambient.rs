@@ -399,6 +399,133 @@ pub fn rift_void_embers() -> Effect {
                 blend: BlendMode::Additive,
                 opacity: 1.0,
             }),
+            // Drifting ash flakes — alpha-blended grey
+            // motes falling slowly from above the player.
+            // Counter-balances the rising embers with a
+            // downward motion layer, selling "this place is
+            // burning somewhere out of sight and the ash
+            // settles past us". `Column` spawns are
+            // distributed over the column's full Y range
+            // (anchor .. anchor + height); since the anchor
+            // sits ~10 m below the player, a 22 m column
+            // covers from below-the-floor up to ~12 m
+            // overhead. Flakes spawned below the floor sink
+            // unseen — only those born above the platform
+            // contribute to the visible drift.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Column {
+                    radius: 14.0,
+                    height: 22.0,
+                    axis: Vec3::Y,
+                },
+                // Sparse — ash is punctuation in the field,
+                // not a snowstorm. Lifetime × rate keeps the
+                // steady-state count around ~50 flakes.
+                emission: EmissionMode::Continuous { rate: 6.0 },
+                speed: (0.02, 0.10),
+                // Long lifetime: a flake spawned overhead
+                // takes most of this duration to drift past
+                // the platform on its way down.
+                lifetime: (6.0, 9.0),
+                forces: vec![
+                    // Gentle downward pull. Negative
+                    // strength along +Y == falling. Drag
+                    // dominates so flakes settle into a
+                    // slow terminal sink rather than
+                    // accelerating into bullets.
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: -0.35,
+                    },
+                    ForceField::Drag { coefficient: 0.6 },
+                    // Wide low-frequency curl so individual
+                    // flakes wander laterally as they fall
+                    // — reads as light air currents, not
+                    // straight-line snow.
+                    ForceField::Curl {
+                        frequency: 0.25,
+                        strength: 0.25,
+                    },
+                ],
+                // Moderate, roughly constant size — flakes
+                // shouldn't shrink to nothing because the
+                // alpha curve already handles the fade.
+                size: Curve::from_stops([(0.00, 0.06), (0.20, 0.14), (1.00, 0.10)]),
+                // Warm dim grey, no HDR — alpha-blended so
+                // the ash *occludes* the void instead of
+                // glowing. RGB tinted faintly orange so the
+                // flakes pick up the surrounding ember
+                // light rather than reading as cool snow.
+                // Alpha tops out around 0.35 so the flakes
+                // are visible against the dark void but
+                // never fight the embers for attention.
+                color: Gradient::from_stops([
+                    (0.00, [0.45, 0.38, 0.30, 0.00]),
+                    (0.15, [0.50, 0.42, 0.32, 0.35]),
+                    (0.70, [0.40, 0.32, 0.24, 0.28]),
+                    (1.00, [0.28, 0.22, 0.16, 0.00]),
+                ]),
+                sprite: SpriteShape::Smoke,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+            // Distant void wisps — slow vertical columns of
+            // dim crimson light at the silhouette horizon,
+            // far from the player. Adds parallax depth: as
+            // the player walks, these stay roughly fixed
+            // relative to the anchor (which follows the
+            // player), so they read as distant landmarks in
+            // the abyss rather than nearby motes. `Ring`
+            // spawn keeps them clear of the play area; the
+            // `Wisp` sprite always renders world-up so each
+            // particle reads as a tall ethereal strand
+            // regardless of velocity.
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Ring {
+                    radius: 28.0,
+                    thickness: 5.0,
+                },
+                // Very sparse — only a handful visible at
+                // any time. Long lifetime keeps the silhouette
+                // populated even at this low rate.
+                emission: EmissionMode::Continuous { rate: 1.2 },
+                // Near-zero initial velocity — wisps barely
+                // move; the curl gives them an organic
+                // sway and the gentle gravity lets them
+                // drift slowly upward.
+                speed: (0.02, 0.08),
+                lifetime: (8.0, 14.0),
+                forces: vec![
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 0.15,
+                    },
+                    ForceField::Drag { coefficient: 0.8 },
+                    ForceField::Curl {
+                        frequency: 0.15,
+                        strength: 0.20,
+                    },
+                ],
+                // Tall and slim — `Wisp` is anisotropic
+                // along world-up so the size value
+                // controls strand height/width. Grow over
+                // the first 25 % so they fade in rather
+                // than pop, then taper for the long fade.
+                size: Curve::from_stops([(0.00, 0.20), (0.25, 0.80), (1.00, 0.30)]),
+                // Dim HDR crimson — bright enough to glow
+                // against the void backdrop, dim enough
+                // that they read as distant. Alpha curve
+                // ramps in/out for soft births and deaths.
+                color: Gradient::from_stops([
+                    (0.00, [1.2, 0.10, 0.04, 0.00]),
+                    (0.20, [1.6, 0.18, 0.05, 0.55]),
+                    (0.70, [1.0, 0.10, 0.03, 0.45]),
+                    (1.00, [0.20, 0.02, 0.01, 0.00]),
+                ]),
+                sprite: SpriteShape::Wisp,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
         ],
     }
 }

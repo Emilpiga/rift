@@ -60,6 +60,106 @@ void main() {
     // field driven by gl_FragCoord. Keeping the noise in
     // pixel space means it doesn't crawl when the surface
     // resizes — each pixel always evaluates to the same grain.
+
+    // ── Glow-disc sentinel (UV in [-2.0, -1.1]) ────────────
+    //
+    // Stoney bevelled disc with a dark-centre → tint-rim
+    // radial gradient and a shader-rasterised glow halo
+    // outside the solid disc.
+    //
+    // The disc emits UVs in [-2.0, -1.1] so the gating check
+    // can clear the -1.0 sentinel boundary by a wide margin
+    // — under rasteriser interpolation a vertex at exactly
+    // -1.001 produces pixel UVs that overshoot to -1.0 along
+    // the corner diagonal, leaking into the atlas-sampling
+    // path and rendering as solid white strips next to the
+    // node. The 0.1-wide guard band fixes that.
+    //
+    // `fragColor.rgb` is the node tint. `fragColor.a` is the
+    // master *brightness* multiplier (gating dimming). The
+    // disc is rendered fully opaque so edges drawn behind
+    // it don't bleed through.
+    if (fragUV.x >= -2.0 && fragUV.x <= -1.1) {
+        // Map UV [-2.0, -1.1] linearly to local [0, 1].
+        vec2 lp = (fragUV - vec2(-2.0)) / 0.9;
+        vec2 c = (lp - 0.5) * 2.0;
+        float r = length(c);
+        // Solid disc occupies r in [0, CORE_R]; glow halo
+        // covers r in (CORE_R, 1.0].
+        const float CORE_R = 0.65;
+
+        if (r > 1.0) {
+            discard;
+        }
+
+        vec3 tint = fragColor.rgb;
+        float bright = fragColor.a;          // gating dim factor
+
+        if (r > CORE_R) {
+            // ── Outer glow halo ──
+            float t = (r - CORE_R) / (1.0 - CORE_R);
+            float halo = exp(-t * 3.4);
+            float aa = 1.0 - smoothstep(0.96, 1.0, r);
+            outColor = vec4(tint * halo * bright, halo * bright * aa * 0.85);
+            return;
+        }
+
+        // ── Solid disc: tint centre → dark rim ──
+        // Bright node-tint core blooms outward and fades to a
+        // near-black ring at the silhouette. `pow(rn, 2.2)`
+        // keeps the centre saturated across the inner ~70%
+        // of the disc; only the outer third darkens, which
+        // reads as an emissive gem set into a stone bezel.
+        float rn = r / CORE_R;                          // [0, 1]
+        float fade = pow(rn, 2.2);
+        vec3 deep = vec3(0.015, 0.015, 0.02);
+        // Brighten the centre tint slightly so it clearly
+        // wins against the dark rim.
+        vec3 core_tint = tint * 1.15;
+        vec3 col = mix(core_tint, deep, fade);
+
+        // Thin stone highlight at the very edge — a 1-2 px
+        // bright lip that gives the chip its 3D stamped feel
+        // without overwhelming the dark rim band.
+        vec2 nrm = (r > 1e-3) ? c / r : vec2(0.0, -1.0);
+        float light = dot(nrm, normalize(vec2(-0.55, -0.83)));
+        float lip = smoothstep(0.88, 0.94, rn) * (1.0 - smoothstep(0.96, 0.99, rn));
+        float hi = max(0.0, light);
+        vec3 stone_hi = vec3(0.55, 0.52, 0.48);
+        col = mix(col, stone_hi, lip * hi * 0.55);
+
+        // Subtle stone grain across the whole core.
+        float n = fbm3(gl_FragCoord.xy * (1.0 / 14.0));
+        col *= 1.0 + (n - 0.5) * 0.10;
+
+        // Thin near-black outline at the very rim.
+        float outline = smoothstep(0.96, 1.0, rn);
+        col = mix(col, vec3(0.01, 0.01, 0.015), outline * 0.92);
+
+        // Gating dim: multiply the resolved colour by the
+        // brightness factor. Alpha stays opaque (except AA
+        // edge) so the disc reliably hides edges drawn
+        // behind it.
+        col *= bright;
+        float disc_aa = 1.0 - smoothstep(0.985, 1.0, rn);
+        outColor = vec4(clamp(col, 0.0, 1.0), disc_aa);
+        return;
+    }
+
+    // ── Glow-line sentinel (UV in [-3.0, -2.1]) ────────────
+    if (fragUV.x >= -3.0 && fragUV.x <= -2.1) {
+        // Map UV [-3.0, -2.1] → across-axis [0, 1].
+        float across = (fragUV.x - (-3.0)) / 0.9;
+        float d = abs(across - 0.5) * 2.0;
+        vec3 tint = fragColor.rgb;
+        float bright = fragColor.a;
+        float halo = exp(-d * 3.0);
+        float core_light = smoothstep(0.35, 0.0, d);
+        vec3 col = mix(tint, vec3(1.0), core_light * 0.75);
+        outColor = vec4(col * halo * bright, halo * bright);
+        return;
+    }
+
     if (fragUV.x < 0.0) {
         // Domain-warped fbm: sample the noise twice and offset
         // the second sample by the first's vector field. The

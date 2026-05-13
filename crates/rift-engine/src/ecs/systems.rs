@@ -29,14 +29,18 @@ pub fn player_input_system(world: &mut World, input: &Input, dt: f32) {
                 continue;
             }
         }
-        // Full-body actions (rolls, jumps, lands) own the velocity for
-        // their duration. The game-side state machine drives velocity
-        // for `Roll`; `JumpStart` / `JumpLand` lock movement entirely;
-        // `JumpAir` permits limited air control below.
+        // Full-body actions (rolls, jumps, lands, swings)
+        // own the velocity for their duration. Roll uses a
+        // captured direction + speed curve; JumpStart /
+        // JumpLand lock movement entirely; Attack uses the
+        // forward-propulsion baked into the swing clip
+        // (driven by `kinematic::apply_input`); JumpAir
+        // permits limited air control below.
         match player.action {
             super::components::PlayerAction::Roll
             | super::components::PlayerAction::JumpStart
-            | super::components::PlayerAction::JumpLand => {
+            | super::components::PlayerAction::JumpLand
+            | super::components::PlayerAction::Attack => {
                 continue;
             }
             _ => {}
@@ -505,17 +509,23 @@ pub fn skinning_system(
             continue; // mismatch — skip skinning, render bind pose
         }
         // Advance the cast layer animator (if any) and pick up its weight/mask.
-        let (layer_anim, layer_mask, layer_weight): (Option<&Animator>, &[f32], f32) =
-            if let Some(c) = cast.as_deref_mut() {
-                if let Some(la) = c.layer_animator.as_mut() {
-                    la.advance(dt);
-                }
-                let weight = c.weight;
-                let mask: &[f32] = if weight > 0.001 { &c.mask } else { &[] };
-                (c.layer_animator.as_ref(), mask, weight)
-            } else {
-                (None, &[], 0.0)
-            };
+        let (layer_anim, layer_mask, layer_yaw_mask, layer_weight): (
+            Option<&Animator>,
+            &[f32],
+            &[f32],
+            f32,
+        ) = if let Some(c) = cast.as_deref_mut() {
+            if let Some(la) = c.layer_animator.as_mut() {
+                la.advance(dt);
+            }
+            let weight = c.weight;
+            let active = weight > 0.001;
+            let mask: &[f32] = if active { &c.mask } else { &[] };
+            let yaw_mask: &[f32] = if active { &c.yaw_only_mask } else { &[] };
+            (c.layer_animator.as_ref(), mask, yaw_mask, weight)
+        } else {
+            (None, &[], &[], 0.0)
+        };
 
         // Compute torso twist: difference between aim yaw and body yaw,
         // clamped so we never twist past ~120° (rig would tear apart).
@@ -552,7 +562,7 @@ pub fn skinning_system(
                     t * t * (3.0 - 2.0 * t)
                 };
                 let twisted = clamped * scale;
-                if p.spine_joint != u32::MAX {
+                if p.spine_joint != u32::MAX && twisted.abs() > 1e-4 {
                     Some((p.spine_joint as usize, twisted))
                 } else {
                     None
@@ -569,6 +579,7 @@ pub fn skinning_system(
                 animator,
                 layer_anim,
                 layer_mask,
+                layer_yaw_mask,
                 layer_weight,
                 twist,
                 &skinned.mesh.joints,
@@ -740,6 +751,10 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                 None => {
                     let mut la = Animator::new(target_clip.clone());
                     la.looping = false;
+                    // Honour the per-cast speed scale stashed by
+                    // `play_oneshot_preempt_scaled` (Punch compresses
+                    // a long swing clip into a short cooldown).
+                    la.speed = cast.pending_oneshot_speed.max(0.01);
                     cast.layer_animator = Some(la);
                 }
             }
@@ -823,6 +838,10 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
                         cast.pending_oneshot = None;
                         cast.oneshot_is_hit = false;
                         cast.weight = 0.0;
+                        // Restore natural playback speed so the next
+                        // non-scaled one-shot (pickup, hit-react)
+                        // doesn't inherit Punch's speed-up.
+                        cast.pending_oneshot_speed = 1.0;
                     }
                     SpellPhase::Idle => {}
                 }
@@ -1400,6 +1419,17 @@ pub fn player_action_pre_system(
                     v.linear.x = 0.0;
                     v.linear.z = 0.0;
                 }
+            }
+        }
+        PlayerAction::Attack => {
+            // Swing is animation-only; locomotion velocity
+            // flows through `kinematic::apply_input`
+            // untouched. We just need the timer to expire
+            // so the locomotion picker can take the body
+            // back from the swing clip.
+            if new_timer <= 0.0 {
+                new_action = PlayerAction::None;
+                new_timer = 0.0;
             }
         }
         PlayerAction::JumpAir | PlayerAction::None => {}

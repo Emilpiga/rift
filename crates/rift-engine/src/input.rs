@@ -68,6 +68,14 @@ pub struct Input {
     /// example). Auto-cleared at the start of every frame's
     /// `end_frame`.
     text_swallow: Cell<bool>,
+    /// When set for the current frame, mouse-driven camera
+    /// control (right-drag yaw, scroll-wheel zoom) is
+    /// suppressed. The raw scroll delta still surfaces via
+    /// [`Self::scroll_delta`] so UI widgets (the talent
+    /// panel's pan-zoom canvas) can read it; only the
+    /// camera-side application is muted. Toggled per-frame
+    /// by callers that own a fullscreen modal surface.
+    mouse_camera_capture: Cell<bool>,
     /// Vertical mouse-wheel delta accumulated this frame. Reset
     /// in [`Self::end_frame`]. Positive values mean scroll
     /// *up* / *toward* the user (matches winit's `LineDelta.y`).
@@ -100,6 +108,7 @@ impl Default for Input {
             enter_pressed: false,
             text_capture: Cell::new(false),
             text_swallow: Cell::new(false),
+            mouse_camera_capture: Cell::new(false),
             scroll_delta: 0.0,
         }
     }
@@ -172,6 +181,16 @@ impl Input {
     /// the flag tracks the open/closed state without staleness.
     pub fn set_text_capture(&self, on: bool) {
         self.text_capture.set(on);
+    }
+
+    /// Set the mouse-camera-capture flag. While `on`,
+    /// right-drag yaw and scroll-wheel zoom no longer modify
+    /// the camera; the raw scroll delta still flows through
+    /// to UI widgets. Mirrors [`Self::set_text_capture`]'s
+    /// per-frame contract — callers re-set this at the top of
+    /// every frame so the flag tracks the modal's open state.
+    pub fn set_mouse_camera_capture(&self, on: bool) {
+        self.mouse_camera_capture.set(on);
     }
 
     /// Call at end of frame to snapshot key state.
@@ -377,7 +396,7 @@ impl Input {
     /// is locked to the centre of the window during the drag
     /// and the raw deltas keep flowing.
     pub fn on_mouse_motion(&mut self, dx: f64, _dy: f64) {
-        if self.right_mouse_down {
+        if self.right_mouse_down && !self.mouse_camera_capture.get() {
             // Pitch is locked: the camera holds the standard
             // top-down ARPG angle (~30°). Yaw remains free so
             // the player can rotate around their character
@@ -387,7 +406,9 @@ impl Input {
     }
 
     pub fn on_scroll(&mut self, delta: f32) {
-        self.camera_distance = (self.camera_distance - delta * 0.5).clamp(2.0, 20.0);
+        if !self.mouse_camera_capture.get() {
+            self.camera_distance = (self.camera_distance - delta * 0.5).clamp(2.0, 20.0);
+        }
         // Also expose the raw frame-scoped delta so UI
         // widgets (scrollable panels) can react. Camera zoom
         // and UI scroll co-exist for now — widgets that want
@@ -501,6 +522,7 @@ fn im_key_to_winit(k: rift_ui_im::ImKey) -> winit::keyboard::KeyCode {
         I::KeyA => K::KeyA,
         I::KeyB => K::KeyB,
         I::KeyC => K::KeyC,
+        I::KeyN => K::KeyN,
         I::KeyR => K::KeyR,
         I::KeyT => K::KeyT,
         I::KeyV => K::KeyV,
@@ -537,6 +559,7 @@ pub(crate) fn winit_to_im_key(k: winit::keyboard::KeyCode) -> Option<rift_ui_im:
         K::KeyA => I::KeyA,
         K::KeyB => I::KeyB,
         K::KeyC => I::KeyC,
+        K::KeyN => I::KeyN,
         K::KeyR => I::KeyR,
         K::KeyT => I::KeyT,
         K::KeyV => I::KeyV,

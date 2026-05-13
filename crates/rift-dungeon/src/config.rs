@@ -66,14 +66,21 @@ impl FloorConfig {
             // Capped — past ~floor 9 enemies are at max chase speed.
             enemy_speed: (2.0 + f * 0.18).min(3.6),
             // Quadratic — kill time grows noticeably at depth.
-            // f1: 25, f5: 78, f10: 198, f15: 378, f20: 618.
-            enemy_health: 18.0 + f * 6.0 + f * f * 1.2,
+            // Tuned so a fresh character with only PUNCH
+            // (4 base damage, no weapon) can clear floor 1 in
+            // 2-3 hits per mob, while end-game floors still
+            // demand real builds. The quadratic term carries
+            // the curve past mid-game.
+            //   f1:  12,  f5:  53,  f10: 158,  f15: 323,  f20: 548.
+            enemy_health: 8.0 + f * 3.0 + f * f * 1.2,
             // Linear — keeps deep-rift hits scary even though
-            // HP scaling biases toward longer fights.
-            // f1: 1.15, f5: 1.75, f10: 2.5, f15: 3.25, f20: 4.0.
-            enemy_damage_mult: 1.0 + f * 0.15,
-            packs_per_room: 2 + floor.min(3),
-            mobs_per_pack: 4 + floor.min(4),
+            // HP scaling biases toward longer fights. Lowered
+            // floor-1 baseline so a fresh PUNCH-only character
+            // isn't out-traded in the opening fight.
+            //   f1: 0.65, f5: 1.25, f10: 2.0, f15: 2.75, f20: 3.5.
+            enemy_damage_mult: 0.5 + f * 0.15,
+            packs_per_room: 1 + floor.min(2),
+            mobs_per_pack: 2 + floor.min(3),
             elite_chance: 0.3 + (f * 0.05).min(0.2),
             elite_hp_mult: 3.0,
         }

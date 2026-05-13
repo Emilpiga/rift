@@ -55,6 +55,17 @@ pub struct CharacterRecord {
     /// `20260508000002_character_shards.sql`); legitimate
     /// totals stay well under `i32::MAX`.
     pub shards: i32,
+    /// Flat (id, rank) pairs of every invested talent node
+    /// (rank ≥ 1). Stored as `SMALLINT[]` of even length:
+    /// slot 2k is the `TalentId`, slot 2k+1 is the rank.
+    /// Nodes at rank 0 are omitted. See
+    /// `20260514000000_character_talents.sql`.
+    pub talents: Vec<i16>,
+    /// Unspent talent points the player can still invest. Per
+    /// `TALENT_TREE.md` §6 the design budget is roughly one per
+    /// level plus quest / boss rewards; this field mirrors
+    /// `TalentTree::unspent_points` on the gameplay side.
+    pub talent_unspent: i32,
 }
 
 /// One persisted inventory row. Keys items by *stable* string ids
@@ -644,10 +655,12 @@ async fn load_or_create(
     // `rift_game::loadout::Loadout::default_hero()`. The 255
     // entries are the EMPTY_SLOT sentinel.
     let default_loadout: [i16; 6] = [0, 255, 255, 255, 255, 255];
+    let default_talents: Vec<i16> = Vec::new();
+    let default_talent_unspent: i32 = 1;
     sqlx::query(
         "INSERT INTO characters \
-         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards) \
-         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0, 0)",
+         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0, 0, $7, $8)",
     )
     .bind(character_id)
     .bind(account_id)
@@ -655,6 +668,8 @@ async fn load_or_create(
     .bind(class_id)
     .bind(gender)
     .bind(&default_loadout[..])
+    .bind(&default_talents[..])
+    .bind(default_talent_unspent)
     .execute(&mut *tx)
     .await?;
 
@@ -671,6 +686,8 @@ async fn load_or_create(
         loadout: default_loadout,
         deepest_cleared_floor: 0,
         shards: 0,
+        talents: default_talents,
+        talent_unspent: default_talent_unspent,
     })
 }
 
@@ -705,8 +722,8 @@ async fn list_account_characters(
             id
         }
     };
-    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards \
+    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent \
          FROM characters WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(account_id)
@@ -716,7 +733,19 @@ async fn list_account_characters(
     let characters = rows
         .into_iter()
         .map(
-            |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
+            |(
+                id,
+                name,
+                class_id,
+                gender,
+                level,
+                xp,
+                loadout,
+                deepest_cleared_floor,
+                shards,
+                talents,
+                talent_unspent,
+            )| {
                 CharacterRecord {
                     id,
                     account_id,
@@ -728,6 +757,8 @@ async fn list_account_characters(
                     loadout: loadout_from_vec(loadout),
                     deepest_cleared_floor,
                     shards,
+                    talents,
+                    talent_unspent,
                 }
             },
         )
@@ -740,8 +771,8 @@ async fn fetch_by_account_and_name(
     account_id: Uuid,
     name: &str,
 ) -> Result<Option<CharacterRecord>, PersistenceError> {
-    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards \
+    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent \
          FROM characters WHERE account_id = $1 AND name = $2",
     )
     .bind(account_id)
@@ -749,7 +780,19 @@ async fn fetch_by_account_and_name(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.map(
-        |(id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards)| {
+        |(
+            id,
+            name,
+            class_id,
+            gender,
+            level,
+            xp,
+            loadout,
+            deepest_cleared_floor,
+            shards,
+            talents,
+            talent_unspent,
+        )| {
             CharacterRecord {
                 id,
                 account_id,
@@ -761,6 +804,8 @@ async fn fetch_by_account_and_name(
                 loadout: loadout_from_vec(loadout),
                 deepest_cleared_floor,
                 shards,
+                talents,
+                talent_unspent,
             }
         },
     ))
@@ -770,7 +815,8 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE characters SET \
             class_id = $2, gender = $3, level = $4, xp = $5, \
-            loadout = $6, deepest_cleared_floor = $7, shards = $8, updated_at = now() \
+            loadout = $6, deepest_cleared_floor = $7, shards = $8, \
+            talents = $9, talent_unspent = $10, updated_at = now() \
          WHERE id = $1",
     )
     .bind(rec.id)
@@ -781,6 +827,8 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     .bind(&rec.loadout[..])
     .bind(rec.deepest_cleared_floor)
     .bind(rec.shards)
+    .bind(&rec.talents[..])
+    .bind(rec.talent_unspent)
     .execute(pool)
     .await?;
     Ok(())

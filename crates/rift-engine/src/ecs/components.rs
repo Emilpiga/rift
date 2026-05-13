@@ -163,6 +163,13 @@ pub struct SpellCast {
     pub phase: SpellPhase,
     pub layer_animator: Option<crate::animation::Animator>,
     pub mask: Vec<f32>,
+    /// Per-joint flag (`1.0` = yes, `0.0` = no) marking joints
+    /// whose layered rotation should be **yaw-projected** before
+    /// being mixed with the base pose. Set for spine / chest so
+    /// a forward-pitched cast pose (Punch) doesn't tip the
+    /// running torso into the ground; only the lateral twist
+    /// transfers onto the locomotion clip.
+    pub yaw_only_mask: Vec<f32>,
     pub weight: f32,
     /// Ability captured at trigger time. Cloned so cooldown state on the
     /// `Abilities` resource has already been advanced and we don't need to
@@ -189,14 +196,32 @@ pub struct SpellCast {
     /// `Shooting` / `Exiting` when it ends. Cleared by
     /// [`SpellCast::cancel`] and on `Idle`.
     pub channeling: bool,
+    /// Playback speed multiplier applied to the next one-shot
+    /// when the system spins up a fresh `layer_animator`. Reset
+    /// to `1.0` whenever the one-shot ends so subsequent
+    /// vanilla one-shots play at natural speed. Used by rapid-
+    /// fire melee (Punch) to scale a longer wind-up / impact /
+    /// recovery clip into the cooldown window so the swing
+    /// actually reaches its forward-extension frames before
+    /// the next click preempts it.
+    pub pending_oneshot_speed: f32,
 }
 
 impl SpellCast {
     pub fn new(mask: Vec<f32>) -> Self {
+        let n = mask.len();
+        Self::new_with_axis(mask, vec![0.0; n])
+    }
+
+    /// Construct with explicit yaw-only flags per joint.
+    /// Caller obtains both vectors from
+    /// `MeshData::upper_body_mask_with_axis`.
+    pub fn new_with_axis(mask: Vec<f32>, yaw_only_mask: Vec<f32>) -> Self {
         Self {
             phase: SpellPhase::Idle,
             layer_animator: None,
             mask,
+            yaw_only_mask,
             weight: 0.0,
             pending_ability: None,
             pending_aim_dir: glam::Vec3::Z,
@@ -206,6 +231,7 @@ impl SpellCast {
             hit_cooldown: 0.0,
             oneshot_is_hit: false,
             channeling: false,
+            pending_oneshot_speed: 1.0,
         }
     }
     pub fn is_active(&self) -> bool {
@@ -262,6 +288,47 @@ impl SpellCast {
         }
         self.phase = SpellPhase::OneShot;
         self.pending_oneshot = Some(clip);
+        self.fired = false;
+        self.oneshot_is_hit = false;
+    }
+
+    /// Begin a one-shot upper-body action, **preempting** any
+    /// currently-playing one-shot. Unlike [`Self::play_oneshot`]
+    /// this restarts the cast layer even if a previous one-shot
+    /// is still in flight — used by rapid-fire melee (Punch)
+    /// whose cooldown is shorter than the swing clip, so a fresh
+    /// click should snap into a fresh swing rather than be
+    /// silently dropped while the previous Jab plays out.
+    ///
+    /// We refuse to interrupt a *projectile / channel* cast
+    /// (Entering / Shooting / Exiting) so a Punch tap can't
+    /// cancel a Fireball wind-up. Hit-reactions take priority
+    /// over us in the other direction via [`Self::play_hit`].
+    pub fn play_oneshot_preempt(&mut self, clip: std::sync::Arc<crate::animation::BoundClip>) {
+        self.play_oneshot_preempt_scaled(clip, 1.0);
+    }
+
+    /// Same as [`Self::play_oneshot_preempt`] but with an explicit
+    /// playback `speed` (1.0 = natural). Used by rapid-fire melee
+    /// to compress a 0.7 s swing clip into a 0.35 s cooldown so
+    /// the full wind-up / impact / recovery actually plays before
+    /// the next click restarts the layer.
+    pub fn play_oneshot_preempt_scaled(
+        &mut self,
+        clip: std::sync::Arc<crate::animation::BoundClip>,
+        speed: f32,
+    ) {
+        match self.phase {
+            SpellPhase::Idle | SpellPhase::OneShot => {}
+            _ => return,
+        }
+        self.phase = SpellPhase::OneShot;
+        // Drop the animator so the next tick spins up a fresh
+        // one starting at t=0 instead of cross-fading from the
+        // previous swing's tail pose.
+        self.layer_animator = None;
+        self.pending_oneshot = Some(clip);
+        self.pending_oneshot_speed = speed.max(0.01);
         self.fired = false;
         self.oneshot_is_hit = false;
     }

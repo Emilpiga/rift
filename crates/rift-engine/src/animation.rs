@@ -14,10 +14,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Path3 { Translation, Rotation, Scale }
+pub enum Path3 {
+    Translation,
+    Rotation,
+    Scale,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Interp { Linear, Step }
+pub enum Interp {
+    Linear,
+    Step,
+}
 
 /// One animation channel, targeting one component of one joint.
 ///
@@ -52,7 +59,11 @@ impl Channel {
         let mut hi = n - 1;
         while lo + 1 < hi {
             let mid = (lo + hi) / 2;
-            if self.times[mid] <= t { lo = mid; } else { hi = mid; }
+            if self.times[mid] <= t {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
         }
         let span = (self.times[hi] - self.times[lo]).max(1e-6);
         let f = ((t - self.times[lo]) / span).clamp(0.0, 1.0);
@@ -61,8 +72,16 @@ impl Channel {
 
     fn sample_vec3(&self, t: f32) -> Vec3 {
         let (i0, i1, f) = self.key_indices_for(t);
-        let a = Vec3::new(self.values[i0 * 3], self.values[i0 * 3 + 1], self.values[i0 * 3 + 2]);
-        let b = Vec3::new(self.values[i1 * 3], self.values[i1 * 3 + 1], self.values[i1 * 3 + 2]);
+        let a = Vec3::new(
+            self.values[i0 * 3],
+            self.values[i0 * 3 + 1],
+            self.values[i0 * 3 + 2],
+        );
+        let b = Vec3::new(
+            self.values[i1 * 3],
+            self.values[i1 * 3 + 1],
+            self.values[i1 * 3 + 2],
+        );
         match self.interp {
             Interp::Step => a,
             Interp::Linear => a.lerp(b, f),
@@ -76,13 +95,15 @@ impl Channel {
             self.values[i0 * 4 + 1],
             self.values[i0 * 4 + 2],
             self.values[i0 * 4 + 3],
-        ).normalize();
+        )
+        .normalize();
         let b = Quat::from_xyzw(
             self.values[i1 * 4],
             self.values[i1 * 4 + 1],
             self.values[i1 * 4 + 2],
             self.values[i1 * 4 + 3],
-        ).normalize();
+        )
+        .normalize();
         match self.interp {
             Interp::Step => a,
             Interp::Linear => a.slerp(b, f),
@@ -125,6 +146,84 @@ pub struct BoundClip {
     pub joint_count: usize,
 }
 
+impl BoundClip {
+    /// Sample the translation channel of `joint` at clip time `t`.
+    /// Returns `None` if this clip has no translation channel for that
+    /// joint (e.g. a pure-rotation clip on a non-root joint). `t` is
+    /// clamped to `[0, duration]` — sampling past the end yields the
+    /// final keyframe value, which is what we want for "total root
+    /// motion across the clip".
+    ///
+    /// Used by the gameplay layer to read authored root-joint
+    /// translation curves for melee swings: the root joint's
+    /// translation is the canonical "where did the animator move the
+    /// character" signal, and integrating it across the clip gives
+    /// us the authentic forward distance / lunge profile we feed
+    /// into [`rift_game::kinematic`] so the game-state position
+    /// matches the visual mesh's motion.
+    pub fn translation_at(&self, joint: u16, t: f32) -> Option<Vec3> {
+        let t = t.clamp(0.0, self.duration);
+        self.channels
+            .iter()
+            .find(|c| c.joint == joint && c.path == Path3::Translation)
+            .map(|c| c.sample_vec3(t))
+    }
+
+    /// Total translation of `joint` between clip times `t0` and `t1`.
+    /// Returns `Vec3::ZERO` if the channel is absent, so callers can
+    /// unconditionally subtract / sum without an `Option` dance.
+    pub fn translation_delta(&self, joint: u16, t0: f32, t1: f32) -> Vec3 {
+        let a = self.translation_at(joint, t0).unwrap_or(Vec3::ZERO);
+        let b = self.translation_at(joint, t1).unwrap_or(Vec3::ZERO);
+        b - a
+    }
+
+    /// Strip baked root-motion from this clip by pinning the root
+    /// joint's translation channel to its value at `t = 0`.
+    ///
+    /// Many character-action / soulslike-style sword clips have the
+    /// animator's authored forward lunge baked into the root joint's
+    /// translation curve. For an ARPG that's the wrong abstraction:
+    /// gameplay code wants to *own* the character's forward motion
+    /// (so chain attacks, knockback, hit-stop, and direction locking
+    /// behave consistently), and a clip with baked translation
+    /// either fights that ownership or forces the gameplay layer to
+    /// sample animation curves to stay in sync.
+    ///
+    /// This method neutralises the translation channel without
+    /// touching rotation, so the hip-rotation, weight-shift, and
+    /// follow-through that give the swing its weight are preserved
+    /// — only the root drift is removed. The end-of-clip pose
+    /// matches the start-of-clip pose in world position, which is
+    /// what an "in-place" combat animation looks like.
+    ///
+    /// Idempotent: applying it twice is a no-op.
+    pub fn strip_root_translation(&mut self, root_joint: u16) {
+        for ch in self.channels.iter_mut() {
+            if ch.joint != root_joint || ch.path != Path3::Translation {
+                continue;
+            }
+            // Hold the t=0 pose for every key so the joint doesn't
+            // jump. We keep the original `times` array (just
+            // duplicating the first value across all keys) rather
+            // than collapsing to a single keyframe — that way any
+            // other code path that assumes per-key alignment with
+            // sibling channels still sees the same layout.
+            if ch.values.len() < 3 {
+                continue;
+            }
+            let (x0, y0, z0) = (ch.values[0], ch.values[1], ch.values[2]);
+            let mut i = 0;
+            while i + 2 < ch.values.len() {
+                ch.values[i] = x0;
+                ch.values[i + 1] = y0;
+                ch.values[i + 2] = z0;
+                i += 3;
+            }
+        }
+    }
+}
+
 impl Clip {
     /// Load every animation in a glTF / .glb file as a separate `Clip`.
     /// Buffers are loaded but images are skipped (animation files don't
@@ -137,16 +236,24 @@ impl Clip {
             std::path::PathBuf::from("../..").join(&original),
             std::path::PathBuf::from("../../..").join(&original),
         ];
-        let resolved = candidates.iter().find(|p| p.exists()).cloned()
-            .ok_or_else(|| anyhow::anyhow!(
-                "animation gltf file not found in any candidate path (cwd={:?}): {:?}",
-                std::env::current_dir().ok(), original
-            ))?;
+        let resolved = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "animation gltf file not found in any candidate path (cwd={:?}): {:?}",
+                    std::env::current_dir().ok(),
+                    original
+                )
+            })?;
         log::info!("Loading animations from {:?}", resolved);
 
         let gltf = gltf::Gltf::open(&resolved)
             .map_err(|e| anyhow::anyhow!("gltf open failed for {:?}: {}", resolved, e))?;
-        let base_dir = resolved.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let base_dir = resolved
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let buffers = gltf::import_buffers(&gltf.document, Some(base_dir), gltf.blob.clone())
             .map_err(|e| anyhow::anyhow!("gltf buffer load failed for {:?}: {}", resolved, e))?;
         let doc = gltf.document;
@@ -182,18 +289,29 @@ impl Clip {
                 };
                 let values: Vec<f32> = match reader.read_outputs() {
                     Some(out) => match out {
-                        gltf::animation::util::ReadOutputs::Translations(it) =>
-                            it.flat_map(|v| v.into_iter()).collect(),
-                        gltf::animation::util::ReadOutputs::Scales(it) =>
-                            it.flat_map(|v| v.into_iter()).collect(),
-                        gltf::animation::util::ReadOutputs::Rotations(rot) =>
-                            rot.into_f32().flat_map(|v| v.into_iter()).collect(),
+                        gltf::animation::util::ReadOutputs::Translations(it) => {
+                            it.flat_map(|v| v.into_iter()).collect()
+                        }
+                        gltf::animation::util::ReadOutputs::Scales(it) => {
+                            it.flat_map(|v| v.into_iter()).collect()
+                        }
+                        gltf::animation::util::ReadOutputs::Rotations(rot) => {
+                            rot.into_f32().flat_map(|v| v.into_iter()).collect()
+                        }
                         _ => continue,
                     },
                     None => continue,
                 };
-                if let Some(&t) = times.last() { max_t = max_t.max(t); }
-                raw_channels.push(RawChannel { node_name, path, interp, times, values });
+                if let Some(&t) = times.last() {
+                    max_t = max_t.max(t);
+                }
+                raw_channels.push(RawChannel {
+                    node_name,
+                    path,
+                    interp,
+                    times,
+                    values,
+                });
             }
             if raw_channels.is_empty() {
                 continue;
@@ -211,7 +329,11 @@ impl Clip {
 
     /// Remap this clip's node-name-keyed channels onto a skeleton, dropping
     /// any channel whose target name isn't a joint of that skeleton.
-    pub fn bind_to_skeleton(&self, joint_index_by_name: &HashMap<String, u16>, joint_count: usize) -> BoundClip {
+    pub fn bind_to_skeleton(
+        &self,
+        joint_index_by_name: &HashMap<String, u16>,
+        joint_count: usize,
+    ) -> BoundClip {
         let mut channels = Vec::with_capacity(self.channels_by_node_name.len());
         for raw in &self.channels_by_node_name {
             if let Some(&j) = joint_index_by_name.get(&raw.node_name) {
@@ -268,9 +390,16 @@ pub struct Animator {
 impl Animator {
     pub fn new(clip: std::sync::Arc<BoundClip>) -> Self {
         Self {
-            clip, time: 0.0, speed: 1.0, looping: true,
-            prev: None, prev_time: 0.0, prev_speed: 1.0,
-            blend: 1.0, blend_time_remaining: 0.0, blend_total: 0.0,
+            clip,
+            time: 0.0,
+            speed: 1.0,
+            looping: true,
+            prev: None,
+            prev_time: 0.0,
+            prev_speed: 1.0,
+            blend: 1.0,
+            blend_time_remaining: 0.0,
+            blend_total: 0.0,
         }
     }
 
@@ -294,7 +423,9 @@ impl Animator {
             self.blend_time_remaining = (self.blend_time_remaining - dt).max(0.0);
             self.blend = if self.blend_total > 0.0 {
                 1.0 - (self.blend_time_remaining / self.blend_total)
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             // Smoothstep for nicer feel.
             self.blend = rift_math::smoothstep(self.blend.clamp(0.0, 1.0));
             if self.blend_time_remaining <= 0.0 {
@@ -345,16 +476,12 @@ impl Animator {
 
 /// Sample `clip` at `time` and write per-joint TRS into `t`, `r`, `s`.
 /// Joints with no animation channel keep the bind-pose TRS already there.
-fn sample_into_trs(
-    clip: &BoundClip,
-    time: f32,
-    t: &mut [Vec3],
-    r: &mut [Quat],
-    s: &mut [Vec3],
-) {
+fn sample_into_trs(clip: &BoundClip, time: f32, t: &mut [Vec3], r: &mut [Quat], s: &mut [Vec3]) {
     for ch in &clip.channels {
         let i = ch.joint as usize;
-        if i >= t.len() { continue }
+        if i >= t.len() {
+            continue;
+        }
         match ch.path {
             Path3::Translation => t[i] = ch.sample_vec3(time),
             Path3::Rotation => r[i] = ch.sample_quat(time),
@@ -382,7 +509,9 @@ pub fn build_bone_palette(
     let mut s = vec![Vec3::ONE; n];
     for (i, j) in joints.iter().enumerate() {
         let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-        t[i] = tr; r[i] = rot; s[i] = scl;
+        t[i] = tr;
+        r[i] = rot;
+        s[i] = scl;
     }
     sample_into_trs(&animator.clip, animator.time, &mut t, &mut r, &mut s);
 
@@ -396,7 +525,9 @@ pub fn build_bone_palette(
             let mut sp = vec![Vec3::ONE; n];
             for (i, j) in joints.iter().enumerate() {
                 let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-                tp[i] = tr; rp[i] = rot; sp[i] = scl;
+                tp[i] = tr;
+                rp[i] = rot;
+                sp[i] = scl;
             }
             sample_into_trs(prev, animator.prev_time, &mut tp, &mut rp, &mut sp);
 
@@ -444,10 +575,33 @@ pub fn build_bone_palette(
 /// Y axis to a single joint's local transform — used to point the torso
 /// at the cursor while the legs continue running in the body's facing
 /// direction. Pass `None` to skip twisting.
+///
+/// `layer_yaw_only_mask` marks joints (`> 0.5`) whose layered rotation
+/// should be projected to yaw before blending — used for spine/chest so
+/// a forward-pitched cast pose can't tip the running torso forward.
+fn project_yaw(q: Quat) -> Quat {
+    // Extract the rotation's yaw (rotation around local Y) and rebuild
+    // a pure-yaw quaternion. Method: take the body's forward axis
+    // (local +Z) through the quat, project onto the XZ plane, atan2
+    // the result. Cheap, no singularities for the upright poses we
+    // care about. For a degenerate (mostly-Y) forward vector we fall
+    // back to identity — that maps to "no twist", which is fine
+    // because there's no meaningful yaw to extract from an
+    // upside-down spine.
+    let fwd = q * Vec3::Z;
+    let xz_len_sq = fwd.x * fwd.x + fwd.z * fwd.z;
+    if xz_len_sq < 1e-6 {
+        return Quat::IDENTITY;
+    }
+    let yaw = fwd.x.atan2(fwd.z);
+    Quat::from_rotation_y(yaw)
+}
+
 pub fn build_bone_palette_layered(
     base: &Animator,
     layer: Option<&Animator>,
     layer_mask: &[f32],
+    layer_yaw_only_mask: &[f32],
     layer_weight: f32,
     twist: Option<(usize, f32)>,
     joints: &[crate::renderer::mesh::Joint],
@@ -464,7 +618,9 @@ pub fn build_bone_palette_layered(
     let mut s = vec![Vec3::ONE; n];
     for (i, j) in joints.iter().enumerate() {
         let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-        t[i] = tr; r[i] = rot; s[i] = scl;
+        t[i] = tr;
+        r[i] = rot;
+        s[i] = scl;
     }
 
     // Sample base clip (and its cross-fade prev, if any).
@@ -476,7 +632,9 @@ pub fn build_bone_palette_layered(
             let mut sp = vec![Vec3::ONE; n];
             for (i, j) in joints.iter().enumerate() {
                 let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-                tp[i] = tr; rp[i] = rot; sp[i] = scl;
+                tp[i] = tr;
+                rp[i] = rot;
+                sp[i] = scl;
             }
             sample_into_trs(prev, base.prev_time, &mut tp, &mut rp, &mut sp);
             let b = base.blend;
@@ -496,7 +654,9 @@ pub fn build_bone_palette_layered(
         let mut sl = vec![Vec3::ONE; n];
         for (i, j) in joints.iter().enumerate() {
             let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-            tl[i] = tr; rl[i] = rot; sl[i] = scl;
+            tl[i] = tr;
+            rl[i] = rot;
+            sl[i] = scl;
         }
         sample_into_trs(&layer.clip, layer.time, &mut tl, &mut rl, &mut sl);
         // Cross-fade inside the layer too (e.g. Enter→Shoot transition).
@@ -507,7 +667,9 @@ pub fn build_bone_palette_layered(
                 let mut sp = vec![Vec3::ONE; n];
                 for (i, j) in joints.iter().enumerate() {
                     let (scl, rot, tr) = j.local_bind.to_scale_rotation_translation();
-                    tp[i] = tr; rp[i] = rot; sp[i] = scl;
+                    tp[i] = tr;
+                    rp[i] = rot;
+                    sp[i] = scl;
                 }
                 sample_into_trs(prev, layer.prev_time, &mut tp, &mut rp, &mut sp);
                 let b = layer.blend;
@@ -520,10 +682,37 @@ pub fn build_bone_palette_layered(
         }
         for i in 0..n {
             let m = layer_mask.get(i).copied().unwrap_or(0.0) * layer_weight;
-            if m <= 0.001 { continue }
-            t[i] = t[i].lerp(tl[i], m);
-            s[i] = s[i].lerp(sl[i], m);
-            r[i] = r[i].slerp(rl[i], m);
+            if m <= 0.001 {
+                continue;
+            }
+            // Mix ROTATION ONLY at masked joints. Translations and
+            // scales are bone-offset baselines in the rig's bind
+            // pose; pulling them from a layered clip (e.g. Punch
+            // animating its spine-root translation downward to
+            // sell impact) bleeds the upper-body overlay into the
+            // body's vertical position, making the character look
+            // like they're punching into the ground while the
+            // legs continue running. Keeping `t` and `s` from the
+            // base locomotion clip preserves the rig's neutral
+            // posture and limits the overlay to limb / torso
+            // rotation, which is what a one-shot upper-body cast
+            // is supposed to do.
+            //
+            // YAW-ONLY joints (spine / chest): extract the world-Y
+            // (yaw) component of the layer's local rotation so we
+            // transfer only the lateral twist — the punch's chest
+            // turn that aims the arm — and drop pitch / roll. The
+            // base locomotion's upright torso then remains, instead
+            // of being tipped forward by the punch's authored
+            // forward lean (which on top of a run cycle reads as
+            // "punching into the ground").
+            let yaw_only = layer_yaw_only_mask.get(i).copied().unwrap_or(0.0) > 0.5;
+            let target = if yaw_only {
+                project_yaw(rl[i])
+            } else {
+                rl[i]
+            };
+            r[i] = r[i].slerp(target, m);
         }
     }
 
@@ -545,8 +734,7 @@ pub fn build_bone_palette_layered(
             if let Some(hip_idx) = parent.filter(|&p| p < n) {
                 let hip_yaw = yaw * HIP_FRACTION;
                 r[hip_idx] = r[hip_idx] * Quat::from_rotation_y(hip_yaw);
-                r[spine_idx] = r[spine_idx]
-                    * Quat::from_rotation_y(yaw * (1.0 - HIP_FRACTION));
+                r[spine_idx] = r[spine_idx] * Quat::from_rotation_y(yaw * (1.0 - HIP_FRACTION));
                 // Counter-rotate the legs so the hip rotation doesn't
                 // drag them along.  Any joint whose parent is the
                 // pelvis and whose name looks like a leg gets the
@@ -563,7 +751,9 @@ pub fn build_bone_palette_layered(
                         || lname.contains("hip_l")
                         || lname.contains("hip_r");
                     // Skip the spine itself (also a child of the pelvis).
-                    if i == spine_idx || lname.contains("spine") { continue; }
+                    if i == spine_idx || lname.contains("spine") {
+                        continue;
+                    }
                     if is_leg {
                         r[i] = counter * r[i];
                     }

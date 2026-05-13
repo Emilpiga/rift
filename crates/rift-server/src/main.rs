@@ -525,6 +525,9 @@ impl Server {
             } => {
                 self.handle_set_loadout_slot(from, slot_index, ability_id);
             }
+            ClientMsg::InvestTalent { talent_id } => {
+                self.handle_invest_talent(from, talent_id);
+            }
             ClientMsg::Ack { .. } => { /* phase 4 */ }
             ClientMsg::Goodbye => {
                 log::info!("Goodbye from {from:?}");

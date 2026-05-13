@@ -15,6 +15,7 @@ use rift_game::hero::HERO;
 use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::loadout::Loadout;
 use rift_game::stats::CharacterStats;
+use rift_game::talents::{fresh_character_tree, TalentTree};
 use rift_net::{
     messages::{button_bits, InputCmd},
     ClientId, NetId, NetTick,
@@ -92,21 +93,6 @@ pub struct ServerPlayer {
     /// snap the predicted position back into the still-
     /// rolling server pose every few frames.
     pub action_start: NetTick,
-    /// Tick on which the most recent melee swing fired. Combined
-    /// with [`Self::melee_combo_step`] to drive the
-    /// A→B→C→D swing-chain: a fresh `MeleeArc` cast within
-    /// [`rift_game::kinematic::ATTACK_COMBO_WINDOW`] of this
-    /// tick advances the step, otherwise it resets to 0. `0`
-    /// (the default) is fine as a sentinel — the very first
-    /// swing will always be far enough past tick 0 that the
-    /// window check naturally restarts the combo at step 0.
-    pub last_melee_tick: NetTick,
-    /// 0..=3 combo step of the next-or-current melee swing.
-    /// Mirrors `kinematic::action::ATTACK_A..=ATTACK_D` on the
-    /// wire so clients can pick the matching swing clip.
-    /// Advanced by `MeleeArc` dispatch using
-    /// [`Self::last_melee_tick`] as the timing reference.
-    pub melee_combo_step: u8,
     /// In-memory inventory of items the player has picked up this
     /// session. Authoritative on the server. Persisted via the
     /// `inventory_items` table; rows live across sessions and
@@ -206,6 +192,16 @@ pub struct ServerPlayer {
     /// `characters.shards` column; loaded at hello time
     /// alongside XP.
     pub shards: u32,
+    /// Authoritative talent tree. Every cast that isn't the
+    /// always-on `PUNCH` neutral attack is gated against
+    /// [`TalentTree::is_ability_unlocked`] in addition to the
+    /// loadout check, so a client can't fire an ability they
+    /// haven't invested the matching `UnlockAbility` node for.
+    /// Mutated through `ClientMsg::InvestTalent`; persisted on
+    /// the `characters.talents` + `characters.talent_unspent`
+    /// columns; mirrored to the owning client via
+    /// `ServerMsg::TalentsSync`.
+    pub talents: TalentTree,
 }
 
 impl ServerPlayer {
@@ -244,8 +240,6 @@ impl ServerPlayer {
             low_hp_proc_armed: true,
             last_input_seq: 0,
             action_start: NetTick(0),
-            last_melee_tick: NetTick(0),
-            melee_combo_step: 0,
             inventory: Vec::new(),
             equipment,
             stash: vec![StashTab::fresh(0)],
@@ -262,6 +256,18 @@ impl ServerPlayer {
             ghost_rise_timer: None,
             channeling_shrine: None,
             shards: 0,
+            talents: {
+                // Fresh in-memory tree with the level-1 starter
+                // point pre-allocated. Hello-time hydration
+                // overwrites this with the persisted ranks +
+                // unspent count from `CharacterRecord`, so this
+                // only matters for the brief pre-hello window
+                // and for sims that bypass persistence (dev /
+                // offline).
+                let mut t = fresh_character_tree();
+                t.unspent_points = 1;
+                t
+            },
         }
     }
 
@@ -337,6 +343,12 @@ impl ServerPlayer {
         let rewards = self.experience.grant_xp(amount);
         if !rewards.is_empty() {
             self.level = self.experience.level;
+            // Accumulate per-level talent points into the
+            // unspent pool so the player can invest the points
+            // granted by `LevelUpReward::talent_points`. Mirrors
+            // `TALENT_TREE.md` §6: 1 point per level.
+            let granted: u32 = rewards.iter().map(|r| r.talent_points).sum();
+            self.talents.unspent_points = self.talents.unspent_points.saturating_add(granted);
             // Heal-to-full feel on level up: keep current % then
             // top off the gained HP. We just call recompute and
             // then refill so a fresh-level character isn't stuck

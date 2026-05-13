@@ -273,6 +273,11 @@ pub struct NetClient {
     /// `PlayerState::loadout`, which re-materializes the runtime
     /// `AbilitySlot`.
     pending_loadout: Option<[u8; 6]>,
+    /// Latest authoritative talent-tree snapshot. Flat
+    /// `(talent_id, rank)` pairs plus the unspent-point count.
+    /// Drained by the binary once per frame and applied onto
+    /// `PlayerState::talents`.
+    pending_talents: Option<(Vec<(u16, u8)>, u32)>,
     /// Latest authoritative shard balance from
     /// [`ServerMsg::ShardsSync`]. Drained by the binary once
     /// per frame and mirrored into `PlayerState::shards`.
@@ -469,6 +474,7 @@ impl NetClient {
             pending_stash_sync: None,
             pending_character_stats: None,
             pending_loadout: None,
+            pending_talents: None,
             pending_shards: None,
             pending_rift_progress: None,
             pending_exit_vote: None,
@@ -924,6 +930,13 @@ impl NetClient {
                 log::debug!("net: Loadout {slots:?}");
                 self.pending_loadout = Some(slots);
             }
+            ServerMsg::TalentsSync { invested, unspent } => {
+                log::debug!(
+                    "net: TalentsSync invested={} unspent={unspent}",
+                    invested.len()
+                );
+                self.pending_talents = Some((invested, unspent));
+            }
             ServerMsg::ShardsSync { amount } => {
                 log::debug!("net: ShardsSync amount={amount}");
                 self.pending_shards = Some(amount);
@@ -1207,6 +1220,14 @@ impl NetClient {
     /// authoritative bar.
     pub fn drain_loadout(&mut self) -> Option<[u8; 6]> {
         self.pending_loadout.take()
+    }
+
+    /// Take the most recent `TalentsSync` reply if one has
+    /// arrived since the last call. The binary mirrors the
+    /// invested ranks + unspent count onto
+    /// `PlayerState::talents`.
+    pub fn drain_talents(&mut self) -> Option<(Vec<(u16, u8)>, u32)> {
+        self.pending_talents.take()
     }
 
     /// Drain the latest authoritative shard balance, if one

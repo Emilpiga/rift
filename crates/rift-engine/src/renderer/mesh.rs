@@ -2627,37 +2627,122 @@ impl SkinnedMesh {
     /// matches an upper-body name pattern. This way fingers/weapons that
     /// don't directly contain "spine"/"arm" still inherit the mask via
     /// their parent chain.
+    ///
+    /// **Spine / chest get a reduced weight** (~0.35) rather than the
+    /// full 1.0. The arms and shoulders need the full overlay to play
+    /// a recognisable swing / cast pose, but the spine sits at the
+    /// root of the upper-body chain — letting a Punch / Fireball clip
+    /// fully override its rotation makes the whole torso tip down to
+    /// match the cast pose's idle stance, which on top of a running
+    /// gait reads as "punching into the floor". Softening the spine
+    /// weight preserves the base locomotion's upright posture while
+    /// still letting the cast clip add some upper-body lean.
     pub fn upper_body_mask(&self) -> Vec<f32> {
-        const UPPER_TOKENS: &[&str] = &[
-            "spine", "chest", "neck", "head", "clavicle", "shoulder", "upperarm", "forearm",
-            "lowerarm", "hand", "finger", "thumb", "weapon", "prop", "tool",
+        self.upper_body_mask_with_axis().0
+    }
+
+    /// Return `(weight, yaw_only)` per joint:
+    ///
+    /// * `weight[i]` is the layered-blend mix weight in `[0, 1]`
+    ///   (same as [`Self::upper_body_mask`]).
+    /// * `yaw_only[i]` is `1.0` for joints whose rotation should
+    ///   be **yaw-projected** before being mixed with the base
+    ///   pose — i.e. spine / chest. Their pitch and roll from
+    ///   the cast clip are dropped so a forward-pitched punch
+    ///   pose doesn't tip the running torso into the floor;
+    ///   only the lateral twist (yaw) needed to aim the arm
+    ///   transfers onto the locomotion pose.
+    ///
+    /// All other joints (shoulders, arms, hands, head) get the
+    /// full rotation overlay (`yaw_only = 0.0`).
+    pub fn upper_body_mask_with_axis(&self) -> (Vec<f32>, Vec<f32>) {
+        // Full-weight tokens: limbs, hands, weapons, head. These joints
+        // are leaves of the rig and need 100 % override for the cast
+        // pose to read.
+        const FULL_TOKENS: &[&str] = &[
+            "neck", "head", "clavicle", "shoulder", "upperarm", "forearm", "lowerarm", "hand",
+            "finger", "thumb", "weapon", "prop", "tool",
         ];
-        // First pass: direct hits.
+        // Chest / upper-spine tokens: full weight. The arm hangs
+        // off the chest, so for the punch arm to extend in the
+        // direction the clip *authored* it (straight forward),
+        // the chest has to be in the clip's frame too. Anything
+        // less leaves the chest partly twisted by the run
+        // cycle's counter-swing (run animations rotate the
+        // chest opposite to the swinging arm), and the punch
+        // ends up extending along that residual twist — up to
+        // ~90° outward from the body's forward axis. The
+        // layered-blend code mixes ROTATION ONLY (translations
+        // / scales come from the base clip), so full chest
+        // weight no longer drags the torso downward — the
+        // "punching into the ground" failure mode is gone.
+        const CHEST_TOKENS: &[&str] = &["chest", "upperchest"];
+        const CHEST_WEIGHT: f32 = 1.0;
+        // Lower-spine tokens: full weight too. Same reasoning —
+        // residual run-cycle twist on the lower spine would
+        // pull the chest off-axis. The post-blend cursor
+        // twist (`build_bone_palette_layered` `twist` arg)
+        // still rotates the spine toward the cursor on top of
+        // this, so the punch's authored forward direction
+        // ends up pointing at the cursor.
+        const SPINE_TOKENS: &[&str] = &["spine"];
+        const SPINE_WEIGHT: f32 = 1.0;
+
+        // First pass: direct hits. Priority order: full tokens beat
+        // chest tokens beat spine tokens — so a "chest" joint with
+        // a "spine" parent ends up at CHEST_WEIGHT, and an
+        // "upperchest" containing both "chest" and "spine" still
+        // gets the chest weight via FULL_TOKENS / CHEST_TOKENS
+        // priority. (`upperchest` doesn't actually appear in our
+        // current rigs, but listing it keeps the rule robust.)
+        //
+        // Track which joints are "yaw-only" (spine chain) so the
+        // blend layer can strip pitch / roll from the layer pose
+        // before mixing — keeping the running torso upright while
+        // still letting the punch's lateral twist aim the arm.
+        let mut yaw_only: Vec<f32> = vec![0.0; self.joints.len()];
         let mut weight: Vec<f32> = self
             .joints
             .iter()
-            .map(|j| {
+            .enumerate()
+            .map(|(i, j)| {
                 let n = j.name.to_ascii_lowercase();
-                if UPPER_TOKENS.iter().any(|tok| n.contains(tok)) {
+                if FULL_TOKENS.iter().any(|tok| n.contains(tok)) {
                     1.0
+                } else if CHEST_TOKENS.iter().any(|tok| n.contains(tok)) {
+                    yaw_only[i] = 1.0;
+                    CHEST_WEIGHT
+                } else if SPINE_TOKENS.iter().any(|tok| n.contains(tok)) {
+                    yaw_only[i] = 1.0;
+                    SPINE_WEIGHT
                 } else {
                     0.0
                 }
             })
             .collect();
-        // Second pass: propagate from any matched ancestor down to descendants.
-        // Joints in skin order have parents earlier in the array (per glTF spec).
+        // Second pass: propagate from any matched ancestor down to
+        // descendants. Joints in skin order have parents earlier in
+        // the array (per glTF spec). A descendant inherits the
+        // *maximum* of its parent's and its own weight, so e.g. a
+        // hand under a partial-weighted spine still gets the full
+        // arm override (the hand itself matched a FULL_TOKEN), but
+        // a stray bone child of the spine with no direct match
+        // inherits the spine's weight.
+        //
+        // Yaw-only propagates the *same way* but only when the
+        // child doesn't override with a stronger weight: a hand
+        // under a yaw-only chest still wants full-rotation
+        // blending (it matched FULL_TOKENS directly).
         for i in 0..self.joints.len() {
-            if weight[i] >= 1.0 {
-                continue;
-            }
             if let Some(p) = self.joints[i].parent {
-                if weight[p as usize] >= 1.0 {
-                    weight[i] = 1.0;
+                let parent_w = weight[p as usize];
+                if parent_w > weight[i] {
+                    weight[i] = parent_w;
+                    yaw_only[i] = yaw_only[p as usize];
                 }
             }
         }
-        weight
+        (weight, yaw_only)
     }
 
     /// Find a joint whose name matches one of the left-hand naming

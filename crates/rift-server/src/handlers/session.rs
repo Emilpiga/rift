@@ -297,6 +297,11 @@ impl Server {
             self.hub.set_player_loadout(from, loadout);
             let shards = rec.shards.max(0) as u32;
             self.hub.set_player_shards(from, shards);
+            // Talent tree: rebuild invested ranks + unspent
+            // points from the persisted columns. See
+            // `20260514000000_character_talents.sql`.
+            self.hub
+                .set_player_talents(from, &rec.talents, rec.talent_unspent.max(0) as u32);
             // Mirror the persisted character UUID onto the
             // live `ServerPlayer` so the loot subsystem can
             // stamp `LootProvenance` onto every fresh drop
@@ -521,6 +526,16 @@ impl Server {
         if let Some(slots) = self.hub.player_loadout_snapshot(from) {
             self.send_to(from, Channel::Control, &ServerMsg::Loadout { slots });
         }
+        // Initial talent-tree snapshot so the talent panel can
+        // render the player's invested ranks + unspent pool the
+        // first time it opens.
+        if let Some((invested, unspent)) = self.hub.player_talents_snapshot(from) {
+            self.send_to(
+                from,
+                Channel::Control,
+                &ServerMsg::TalentsSync { invested, unspent },
+            );
+        }
         // Initial shard balance so the HUD readout is correct
         // before the player salvages anything.
         if let Some(shards) = self.hub.player_shards(from) {
@@ -687,5 +702,47 @@ impl Server {
             let _ = handle.save(rec);
         }
         self.send_to(from, Channel::Control, &ServerMsg::Loadout { slots });
+    }
+
+    /// Apply a `ClientMsg::InvestTalent`. Validates against the
+    /// authoritative `ServerPlayer.talents`, mirrors the change
+    /// into the persisted `CharacterRecord`, and pushes a fresh
+    /// `ServerMsg::TalentsSync` snapshot back. Silent no-op on
+    /// a rejected invest (unknown id, prereqs unmet, at max
+    /// rank, no unspent points) so a misbehaving client just
+    /// sees the last accepted snapshot.
+    pub(crate) fn handle_invest_talent(&mut self, from: ClientId, talent_id: u16) {
+        let Some((invested, unspent)) = self
+            .sim_for_client_mut(from)
+            .invest_talent_for_player(from, talent_id)
+        else {
+            return;
+        };
+        // Mirror into the cached `CharacterRecord` so the next
+        // periodic save tick writes the new investment.
+        let saved_record = if let Some(s) = self.sessions.get_mut(from) {
+            if let Some(rec) = s.record.as_mut() {
+                let mut flat: Vec<i16> = Vec::with_capacity(invested.len() * 2);
+                for &(id, rank) in &invested {
+                    flat.push(id as i16);
+                    flat.push(rank as i16);
+                }
+                rec.talents = flat;
+                rec.talent_unspent = unspent as i32;
+                Some(rec.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Some(handle), Some(rec)) = (&self.persistence, saved_record) {
+            let _ = handle.save(rec);
+        }
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::TalentsSync { invested, unspent },
+        );
     }
 }

@@ -133,6 +133,8 @@ impl Server {
             loadout: [0, 255, 255, 255, 255, 255],
             deepest_cleared_floor: 0,
             shards: 0,
+            talents: Vec::new(),
+            talent_unspent: 1,
         }
     }
 

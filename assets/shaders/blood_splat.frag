@@ -18,6 +18,37 @@ void main() {
     int slice = int(floor(v_atlas_slice + 0.5)) & 3;
     vec2 base_uv = fract(v_atlas_uv);
 
+    // Slice 0 is the boot-footprint silhouette. It has hand-tuned
+    // anatomy (heel/arch/sole/toes) which the splatter-flow warp
+    // below would smear into an unrecognisable blob. Branch out to
+    // a minimal path that just samples the mask with a small edge-
+    // noise warp + dither, preserving the foot shape while still
+    // breaking the silhouette boundary so prints don't read as
+    // stamped clones.
+    if (slice == 0) {
+        vec2 cell_uv = base_uv * 0.5;
+        // Light noise-warp confined to the edge, so the interior
+        // shape (toes, sole, heel) stays clean.
+        float r = length(base_uv - 0.5) * 2.0;
+        float edge = smoothstep(0.55, 1.05, r);
+        float seedFp = fract(v_time * 13.71);
+        vec2 nfp = vec2(
+            fract(sin(dot(base_uv * 22.0 + seedFp,
+                          vec2(12.9898, 78.233))) * 43758.5453),
+            fract(sin(dot(base_uv * 22.0 + seedFp * 1.7,
+                          vec2(63.7264, 10.873))) * 24634.6345)
+        ) - 0.5;
+        cell_uv += nfp * 0.020 * edge;
+        cell_uv = clamp(cell_uv, vec2(0.001), vec2(0.499));
+        float maskFp = texture(maskAtlas, cell_uv).r;
+        float ditherFp = fract(sin(dot(base_uv * 256.0 + seedFp * 11.0,
+                                       vec2(38.917, 73.211))) * 47891.231);
+        float threshFp = 0.06 + (ditherFp - 0.5) * 0.08 * edge;
+        if (maskFp < threshFp) discard;
+        outBlood = vec2(v_intensity * pow(maskFp, 0.70), v_time);
+        return;
+    }
+
     // ----- Per-splat shape parameters -----
     // The single biggest "procedural" giveaway is repetition in
     // *flow behaviour*: every splat sharing the same teardrop

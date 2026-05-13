@@ -27,6 +27,7 @@ pub mod pause;
 pub mod phases;
 pub mod props;
 pub mod spellbook;
+pub mod talent_tree;
 pub mod state;
 pub mod states;
 pub mod systems;

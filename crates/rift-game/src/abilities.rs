@@ -698,6 +698,16 @@ pub mod id {
     /// projectile-shaped.
     pub const FIREBALL_BEAM: AbilityWireId = AbilityWireId::new(13);
 
+    /// **Neutral fist attack** — the always-available basic
+    /// attack every fresh character has even with zero talents
+    /// invested. Unlike [`MELEE_ATTACK`] this is fully mobile:
+    /// the player keeps locomotion while the swing plays as an
+    /// upper-body overlay (no kinematic action lock, no
+    /// `forward_step` lunge, no aim lock). Pre-equipped to
+    /// loadout slot 0 by default but can be swapped out like
+    /// any other ability. Never gated by the talent tree.
+    pub const PUNCH: AbilityWireId = AbilityWireId::new(14);
+
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
     // upper half is plenty. Clients dispatch projectile mesh /
@@ -891,6 +901,7 @@ pub const HEAL_TARGET: AbilityId = AbilityId("heal_target");
 pub const HEAL_OVER_TIME_TARGET: AbilityId = AbilityId("heal_over_time_target");
 pub const FROST_SHATTER_SHARD: AbilityId = AbilityId("frost_shatter_shard");
 pub const MELEE_ATTACK: AbilityId = AbilityId("melee_attack");
+pub const PUNCH: AbilityId = AbilityId("punch");
 
 /// Master ability table. Server cast dispatch and client cooldown
 /// UI both read from here. Order is purely cosmetic — `lookup`
@@ -1220,16 +1231,69 @@ pub static REGISTRY: &[Ability] = &[
             arc_radians: 2.094,
         },
         visuals: AbilityVisuals::NONE,
-        // Swing visuals are driven outside the declarative
-        // effects list: the local cast site plays the combo-
-        // stepped clip on the upper-body `SpellCast` layer
-        // directly (so legs keep doing locomotion through
-        // the swing), and remote observers mirror the same
-        // clip by reading the snapshot's `ATTACK_*` action
-        // byte. Picking the clip table is a function of the
-        // combo step, which doesn't fit `SetPlayerAction`'s
-        // single-clip-list shape — see
-        // [`rift_game::kinematic::MELEE_COMBO_CLIPS`].
+        // Swing pose is driven through the generic
+        // declarative-effects pipeline: a `SetPlayerAction`
+        // entry cross-fades `Sword_Attack` onto the full-body
+        // animator and stamps `PlayerAction::Attack` for the
+        // swing's duration. Movement is owned by the
+        // kinematic (`Kinematic::apply_input` reads
+        // `action::ATTACK` and applies the
+        // [`rift_game::kinematic::MELEE_ATTACK::forward_step`]
+        // ease-out along the locked `attack_dir`), so we
+        // set `ActionMovement::None` here — a `Forward`
+        // entry would write the engine's `Velocity` component
+        // and fight the kinematic-driven lunge.
+        effects: &[AbilityEffect::SetPlayerAction {
+            action: PlayerAction::Attack,
+            duration: crate::kinematic::MELEE_ATTACK.duration,
+            clip: &["Sword_Attack"],
+            movement: ActionMovement::None,
+            cancel_cast: true,
+            emitter: None,
+        }],
+        audio: AbilityAudio::SILENT,
+    },
+    // Neutral fist attack. Always available — every fresh
+    // character starts with this in loadout slot 0 regardless
+    // of talent investment (see `TALENT_TREE.md` §2.1). The
+    // fantasy: bare-handed jab/cross combo you can throw
+    // while moving, before you've invested in any combat
+    // route. Damage shape is `MeleeArc` for the contact
+    // resolve, but the effects list is intentionally empty:
+    // no `SetPlayerAction`, so the kinematic does NOT engage
+    // its action lock (no `forward_step` lunge, no aim lock,
+    // no locomotion override). The upper-body swing pose is
+    // driven separately by the cast-pose FSM (`SpellCast`)
+    // wiring in `trigger_local_cast` — a follow-up change.
+    // Until that wiring lands the cast resolves correctly
+    // server-side but plays no client animation.
+    Ability {
+        id: PUNCH,
+        wire_id: id::PUNCH,
+        name: "Punch",
+        description: "A quick bare-handed jab. Always available.",
+        icon: None,
+        cooldown: 0.35,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 4.0,
+        damage_mult: 1.0,
+        range: 1.8,
+        // `unlock_level: 0` flags this as never-gated. Loadout
+        // slot 0 unlocks at level 1 so the player can use
+        // Punch from frame one.
+        unlock_level: 0,
+        element: Element::Physical,
+        archetype: Archetype::Melee,
+        scaling: Scaling::Weapon,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::MeleeArc {
+            radius: 1.8,
+            // Narrower than Sword Slash — a fist has less reach
+            // and less arc. ~90°.
+            arc_radians: 1.571,
+        },
+        visuals: AbilityVisuals::NONE,
         effects: &[],
         audio: AbilityAudio::SILENT,
     },

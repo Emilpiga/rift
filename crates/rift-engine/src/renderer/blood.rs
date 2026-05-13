@@ -604,10 +604,12 @@ impl BloodField {
             pool_center = pos_xz + dir * along_offset;
             pool_size_m = 0.95 + 0.55 * power;
             let intensity = 1.0;
-            // Stronger forward stretch — pool reads as oblong slick
-            // pointing along impulse, not a circle.
-            let pool_aspect = 1.65 + 0.45 * power;
-            let pool_jitter = self.signed_jitter(0.12);
+            // Per-kill variety: aspect spans wide circular slicks
+            // through long forward streaks. Some kills pancake,
+            // others elongate. Rotation jitter is also widened so
+            // the pool isn't always aligned to the impulse axis.
+            let pool_aspect = 1.05 + 1.25 * self.rand01() + 0.20 * power;
+            let pool_jitter = self.signed_jitter(0.35);
             self.emit_at(
                 pool_center,
                 pool_size_m,
@@ -632,6 +634,34 @@ impl BloodField {
                 1.0,
                 time_secs,
             );
+            // Asymmetric spill lobes — 2 extra stamps offset in
+            // random directions around the pool. These break the
+            // clean teardrop silhouette into something that reads
+            // as a real spreading slick: irregular bulges, finger-
+            // shaped excursions, the occasional sideways spurt.
+            // Without them every pool reads as the same forward
+            // teardrop regardless of seed.
+            for _ in 0..2 {
+                let lobe_angle = self.rand01() * std::f32::consts::TAU;
+                let lobe_dist = pool_size_m * (0.30 + self.rand01() * 0.40);
+                let lobe_dir = Vec2::new(lobe_angle.cos(), lobe_angle.sin());
+                let lobe_size = pool_size_m * (0.38 + self.rand01() * 0.28);
+                let lobe_aspect = 0.85 + self.rand01() * 0.85;
+                let lobe_rot = self.rand01() * std::f32::consts::TAU;
+                // Mix slices 2 and 3 so some lobes have drips,
+                // others read as rounder satellite blobs.
+                let lobe_slice = if self.rand01() < 0.55 { 2 } else { 3 };
+                let lobe_intensity = 0.85 + 0.15 * self.rand01();
+                self.emit_at(
+                    pool_center + lobe_dir * lobe_dist,
+                    lobe_size,
+                    lobe_aspect,
+                    lobe_rot,
+                    lobe_slice,
+                    lobe_intensity,
+                    time_secs,
+                );
+            }
         }
         // Register the pool as a soak stain so any player walking
         // through it will pick up a footprint-charge refill.
@@ -691,19 +721,11 @@ impl BloodField {
             let center = pos_xz + dropdir * dist;
             let size_m = 0.10 + self.rand01() * 0.14;
             let intensity = 0.70 + 0.20 * self.rand01();
-            // Mostly small-spray atlas slices (0 or 3); occasionally
-            // 1 for variety.
+            // Mostly small round-splat slice 3 for droplets;
+            // occasionally slice 1 for variety. Slice 0 is the
+            // boot-footprint silhouette so it's never used here.
             let slice_pick = self.rand01();
-            let slice_alt = self.rand01();
-            let slice = if slice_pick < 0.7 {
-                if slice_alt < 0.5 {
-                    0
-                } else {
-                    3
-                }
-            } else {
-                1
-            };
+            let slice = if slice_pick < 0.75 { 3 } else { 1 };
             // Forward droplets are slightly elongated along impulse;
             // wide-cone scatter stays roughly round.
             let aspect = if tight {
@@ -898,10 +920,12 @@ impl BloodField {
         }
     }
 
-    /// Stamp a single footprint as two small directional splats —
-    /// a sole patch + a smaller heel patch behind it, laterally
-    /// offset by ~10 cm from the player's centreline so prints
-    /// alternate left / right around the locomotion axis.
+    /// Stamp a single footprint as one boot-shaped splat. Uses the
+    /// dedicated `slice 0` atlas silhouette (heel + arch + sole +
+    /// toes) and the matching slice-0 shader path that skips the
+    /// blood-impact flow warp, so the print reads as a real boot
+    /// shape rather than a generic blood blob. Lateral offset
+    /// alternates left / right around the locomotion axis.
     fn emit_footprint(
         &mut self,
         pos: Vec3,
@@ -918,7 +942,9 @@ impl BloodField {
         }
         let fwd = fwd.normalize();
         let right = Vec2::new(fwd.y, -fwd.x);
-        let lateral = if foot_left { -0.10 } else { 0.10 };
+        // Slightly wider lateral offset so the L/R rhythm is
+        // visibly readable on the floor.
+        let lateral = if foot_left { -0.12 } else { 0.12 };
         let foot_pos = Vec2::new(pos.x, pos.z) + right * lateral;
         let angle = fwd.y.atan2(fwd.x);
 
@@ -926,26 +952,13 @@ impl BloodField {
         // faintest trace; a full boot stamps a punchy print.
         let intensity = (0.45 + 0.55 * charge).clamp(0.0, 1.0);
 
-        // Sole — slightly forward of foot centre.
-        self.emit_at(
-            foot_pos + fwd * 0.05,
-            0.18,
-            1.55,
-            angle,
-            1,
-            intensity,
-            time_secs,
-        );
-        // Heel — smaller, offset back along facing.
-        self.emit_at(
-            foot_pos - fwd * 0.10,
-            0.11,
-            1.20,
-            angle,
-            3,
-            intensity * 0.85,
-            time_secs,
-        );
+        // Single stamp using the boot silhouette. Size matches a
+        // real bloody bootprint (~26 cm long, ~10 cm wide). The
+        // atlas is authored with forward = +U, so the quad
+        // rotation (`angle`) aligns the print with the player's
+        // movement direction. Aspect 2.4 stretches the unit
+        // square into the long oval the boot mask wants.
+        self.emit_at(foot_pos, 0.26, 2.40, angle, 0, intensity, time_secs);
     }
 
     /// Push a recent kill XZ + soak radius into the ring used by
@@ -1355,19 +1368,32 @@ fn create_splat_pipeline(
     Ok((pipeline, pipeline_layout))
 }
 
-/// Procgen 4-silhouette mask atlas. 2×2 grid of organic blood-splatter
-/// shapes built from metaballs + radial drips so that splats don't
-/// look like geometric circles.
+/// Procgen 4-silhouette mask atlas. 2×2 grid:
+///
+///   slice 0 — **boot footprint** (heel + arch strip + sole pad +
+///             5 toe dots). Sampled by `emit_footprint`. The
+///             splat fragment shader skips its impact-flow warp
+///             for this slice so the foot shape stays readable.
+///   slice 1 — dense splatter (cores, leading-edge spray, wall
+///             impact cores).
+///   slice 2 — long-drip pool (corpse pools, wall impact main).
+///   slice 3 — round splat (small droplets, wall satellites).
 fn generate_mask_atlas() -> Vec<u8> {
     let mut pixels = vec![0u8; (MASK_RESOLUTION * MASK_RESOLUTION) as usize];
     let cell = MASK_RESOLUTION / 2;
     for slice in 0..MASK_SLICE_COUNT {
         let cx_off = (slice & 1) * cell;
         let cy_off = ((slice >> 1) & 1) * cell;
+        // Slice 0 is the bespoke boot-footprint silhouette; the
+        // other three are the generic blood-splatter masks.
+        if slice == 0 {
+            paint_boot_footprint(&mut pixels, cx_off, cy_off, cell);
+            continue;
+        }
         // Per-slice variation: different blob count + drip count +
-        // RNG seed so the four cells read as distinct silhouettes.
+        // RNG seed so the three splatter cells read as distinct
+        // silhouettes.
         let (blob_count, drip_count, seed) = match slice {
-            0 => (5, 6, 0x9e37_79b9_u32),  // small spray
             1 => (8, 12, 0xa1b2_c3d4_u32), // dense splatter
             2 => (3, 16, 0x1234_5678_u32), // long-drip pool
             _ => (6, 4, 0xface_cafe_u32),  // round splat
@@ -1450,6 +1476,85 @@ fn generate_mask_atlas() -> Vec<u8> {
         }
     }
     pixels
+}
+
+/// Paint a stylised bloody boot footprint into atlas cell
+/// `(cx_off, cy_off, cell × cell)`. The cell's atlas-local
+/// orientation is forward = +U (right within the cell), so the
+/// foot points to the right with the toe pads at high U and the
+/// heel at low U.
+///
+/// Layout (in cell-local UV, [0, 1]²):
+///   heel  : filled circle      centre (0.22, 0.50)  r 0.115
+///   arch  : narrow waist       (0.32 .. 0.55) × (0.42 .. 0.58)
+///   ball  : oval sole pad      centre (0.62, 0.50)  rx 0.13 ry 0.16
+///   toes  : 5 dots             arranged in an arc 0.74 .. 0.84
+///
+/// The mask is built from soft-distance metaballs so each
+/// component has a feathered edge; the shader then adds a
+/// small noise warp on top, which is enough to keep the print
+/// from looking stamped without obliterating the foot shape.
+fn paint_boot_footprint(pixels: &mut [u8], cx_off: u32, cy_off: u32, cell: u32) {
+    // (centre_u, centre_v, radius_u, radius_v, weight)
+    let parts: [(f32, f32, f32, f32, f32); 9] = [
+        // Heel — a bit oblong along forward axis.
+        (0.22, 0.50, 0.115, 0.105, 1.00),
+        // Arch — short thin bridge between heel and sole. Slim
+        // along V so it reads as a narrow waist.
+        (0.42, 0.50, 0.115, 0.040, 1.00),
+        // Ball / sole pad — the largest oval, biased forward of
+        // the foot's geometric centre as in a real footprint.
+        (0.62, 0.50, 0.135, 0.165, 1.00),
+        // 5 toes arranged in a slight arc in front of the ball.
+        (0.76, 0.31, 0.040, 0.040, 1.00), // pinky
+        (0.80, 0.40, 0.044, 0.046, 1.00),
+        (0.83, 0.50, 0.048, 0.050, 1.00), // middle
+        (0.81, 0.60, 0.046, 0.048, 1.00),
+        (0.78, 0.69, 0.058, 0.058, 1.00), // big toe (slightly larger)
+        // Soft toe-cap connector so the toes don't read as
+        // detached dots floating in front of the foot.
+        (0.78, 0.50, 0.065, 0.130, 0.55),
+    ];
+    for py in 0..cell {
+        for px in 0..cell {
+            let u = px as f32 / cell as f32;
+            let v = py as f32 / cell as f32;
+            // Soft union: take the max contribution of any part.
+            // Each part is a smooth radial falloff
+            // `1 - ((du/rx)² + (dv/ry)²)` clamped at zero so the
+            // boundary feathers rather than snaps.
+            let mut m = 0.0_f32;
+            for &(cu, cv, rx, ry, w) in &parts {
+                let du = (u - cu) / rx;
+                let dv = (v - cv) / ry;
+                let r2 = du * du + dv * dv;
+                let c = (1.0 - r2).clamp(0.0, 1.0).powf(0.85) * w;
+                if c > m {
+                    m = c;
+                }
+            }
+            // Subtle texture variation across the print so the
+            // sole isn't perfectly flat — picks up the noise
+            // floor a real bloody print leaves on stone. Cheap
+            // 2-octave hash noise.
+            let n1 = (((px as u32).wrapping_mul(0x9E37_79B9))
+                ^ ((py as u32).wrapping_mul(0x85EB_CA77))) as f32
+                / u32::MAX as f32;
+            let n2 = (((px as u32).wrapping_mul(0xC2B2_AE3D))
+                ^ ((py as u32).wrapping_mul(0x27D4_EB2F))) as f32
+                / u32::MAX as f32;
+            let noise = n1 * 0.7 + n2 * 0.3;
+            // Modulate mostly the interior so the silhouette
+            // boundary stays smooth (the shader handles edge
+            // tearing). 25 % depth, biased toward 1.0 so the
+            // print darkens rather than getting holes.
+            let modulated = m * (0.75 + 0.25 * noise);
+            let dst_x = cx_off + px;
+            let dst_y = cy_off + py;
+            pixels[(dst_y * MASK_RESOLUTION + dst_x) as usize] =
+                (modulated.clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
 }
 
 /// 2D ray vs. axis-aligned box (XZ projection of an `Aabb`) — slab

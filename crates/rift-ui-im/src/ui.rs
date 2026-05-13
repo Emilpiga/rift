@@ -698,6 +698,109 @@ impl<'a> Ui<'a> {
         );
     }
 
+    /// Filled line segment between two pixel-space points with
+    /// the given `thickness` (butt caps, no antialias).
+    /// Degenerate inputs (zero length, non-positive thickness)
+    /// are dropped silently so graph-style call sites can
+    /// forward computed endpoints unconditionally.
+    pub fn draw_line(&mut self, p0: Pos2, p1: Pos2, thickness: f32, color: Color) {
+        if thickness <= 0.0 {
+            return;
+        }
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        if dx * dx + dy * dy <= 1e-12 {
+            return;
+        }
+        self.layers.push(
+            self.current_layer,
+            DrawCmd::Line {
+                p0,
+                p1,
+                thickness,
+                color,
+            },
+        );
+    }
+
+    /// Filled circle centred at `centre` with pixel `radius`.
+    /// Implemented as a square rounded-rect with `radius =
+    /// half-side`, so it inherits the smooth perimeter
+    /// triangulation `rounded_rect_px` already does. Use for
+    /// graph nodes, minimap pips, and anywhere else you want a
+    /// disc without thinking about bounding rects.
+    pub fn draw_circle(&mut self, centre: Pos2, radius: f32, color: Color) {
+        if radius <= 0.0 {
+            return;
+        }
+        let d = radius * 2.0;
+        self.draw_rounded_rect(
+            Rect::from_xywh(centre.x - radius, centre.y - radius, d, d),
+            radius,
+            color,
+        );
+    }
+
+    /// Bevelled stone disc with an indented dark→tint radial
+    /// gradient and a shader-rasterised glow halo. Single quad
+    /// per call (cheaper than the stacked-circles fake-glow
+    /// approach) and the falloff is anti-aliased in the
+    /// fragment shader so the chip reads as a real emissive
+    /// stone at any zoom.
+    ///
+    /// `radius` — solid-disc radius in pixels.
+    /// `halo` — minimum halo extent in pixels; the shader
+    /// hard-codes a 35 % halo band around the core, so `halo`
+    /// is taken as a minimum and expanded if needed.
+    /// `color.a` is the master alpha (drives gating dimming).
+    pub fn draw_glow_disc(&mut self, centre: Pos2, radius: f32, halo: f32, color: Color) {
+        if radius <= 0.0 {
+            return;
+        }
+        self.layers.push(
+            self.current_layer,
+            DrawCmd::GlowDisc {
+                centre,
+                radius,
+                halo,
+                color,
+            },
+        );
+    }
+
+    /// Glowing line — bright core with an exponential tinted
+    /// halo falling off perpendicular to the segment axis. The
+    /// shader rasterises the halo, so a single quad per edge
+    /// suffices (no need to stack three translucent lines for
+    /// a fake bloom).
+    pub fn draw_glow_line(
+        &mut self,
+        p0: Pos2,
+        p1: Pos2,
+        core_thickness: f32,
+        halo_extent: f32,
+        color: Color,
+    ) {
+        if core_thickness <= 0.0 {
+            return;
+        }
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        if dx * dx + dy * dy <= 1e-12 {
+            return;
+        }
+        self.layers.push(
+            self.current_layer,
+            DrawCmd::GlowLine {
+                p0,
+                p1,
+                core_thickness,
+                halo_extent,
+                color,
+            },
+        );
+    }
+
     /// Draw text at `pos` (top-left). Returns the rendered width.
     pub fn draw_text(&mut self, pos: Pos2, text: &str, size: f32, color: Color) -> f32 {
         // Width measurement matches OverlayBatch's bitmap font:

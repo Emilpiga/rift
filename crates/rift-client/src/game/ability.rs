@@ -38,8 +38,8 @@ use glam::Vec3;
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::Renderer;
 use rift_game::abilities::Ability;
-use rift_game::talents::TalentTree;
 
+use super::player_state::{PlayerState, PUNCH_RESET_AFTER};
 use super::state::GameState;
 use super::sub_state::ChannelVisual;
 
@@ -69,9 +69,32 @@ pub fn trigger_local_cast(
     origin: Vec3,
     world: &mut hecs::World,
     renderer: &mut Renderer,
-    talents: &TalentTree,
+    player_state: &mut PlayerState,
 ) {
-    use rift_engine::ecs::components::SpellCast;
+    use rift_engine::ecs::components::{AnimationSet, SpellCast};
+
+    let talents = &player_state.talents;
+
+    // 0. Talent-tree unlock gate. Every ability except the two
+    //    always-available neutrals (`PUNCH` — the bare-handed
+    //    fallback — and `EVASIVE_ROLL` — the hub-tier-1 dodge,
+    //    bound to Space rather than a loadout slot) must have
+    //    its `UnlockAbility` talent node invested before it can
+    //    be cast locally. Mirrors `TALENT_TREE.md` §2 / §10.3.
+    //
+    //    NOTE: this is a CLIENT-SIDE gate only today; the
+    //    server's `sim::ability::submit` does not yet consult
+    //    the talent tree (the tree lives on `PlayerState`, not
+    //    `ServerPlayer`). A hostile / out-of-date client could
+    //    still send a cast for a locked ability and have it
+    //    resolve. Plumbing `TalentTree` to `ServerPlayer` (and
+    //    persisting it) is a follow-up.
+    if ability.wire_id != rift_game::abilities::id::PUNCH
+        && ability.wire_id != rift_game::abilities::id::EVASIVE_ROLL
+        && !talents.is_ability_unlocked(ability.id)
+    {
+        return;
+    }
 
     // 1. Always run the declarative effects list. Authors put
     //    visual / movement / FSM-side-effects here; we don't
@@ -85,6 +108,79 @@ pub fn trigger_local_cast(
         world,
         renderer,
     );
+
+    // 1b. Punch — auto-alternating Jab/Cross upper-body overlay.
+    //     Punch has no `SetPlayerAction` (it's fully mobile;
+    //     locomotion drives the lower body), so the swing pose
+    //     comes from a one-shot upper-body clip on the
+    //     `SpellCast` layer rather than the full-body action
+    //     pose pipeline. Successive swings alternate Jab → Cross
+    //     → Jab → … with a [`PUNCH_RESET_AFTER`] idle-window
+    //     reset that snaps the next opener back to Jab.
+    if ability.wire_id == rift_game::abilities::id::PUNCH {
+        let now = std::time::Instant::now();
+        if let Some(prev) = player_state.last_punch_at {
+            if now.duration_since(prev) > PUNCH_RESET_AFTER {
+                player_state.punch_jab_next = true;
+            }
+        }
+        let clip_names: &[&str] = if player_state.punch_jab_next {
+            // Fall back to Punch_Cross / Sword_Attack if the
+            // animation library is missing the Jab clip — the
+            // swing still plays *something* rather than going
+            // silent.
+            &["Punch_Jab", "Punch", "Punch_Cross", "Sword_Attack"]
+        } else {
+            &["Punch_Cross", "Punch", "Punch_Jab", "Sword_Attack"]
+        };
+        let pid_opt = world
+            .query::<(&Player, &LocalPlayer)>()
+            .iter()
+            .map(|(e, _)| e)
+            .next();
+        if let Some(pid) = pid_opt {
+            let clip = world
+                .get::<&AnimationSet>(pid)
+                .ok()
+                .and_then(|set| set.find_any(clip_names));
+            if let Some(clip) = clip {
+                if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
+                    // Use the preempting variant: punch's
+                    // cooldown (0.35 s) is shorter than the
+                    // Jab / Cross clip duration, so a vanilla
+                    // `play_oneshot` would be dropped while the
+                    // previous swing is still in `OneShot`
+                    // phase. Preempting restarts the cast
+                    // layer cleanly so every click reads as a
+                    // fresh swing.
+                    //
+                    // Compress the clip into the cooldown
+                    // window so the full wind-up → impact →
+                    // recovery actually plays before the next
+                    // click restarts the layer. At natural
+                    // playback the next click would preempt
+                    // mid-wind-up, so the player only ever
+                    // saw the hand cocking back / sideways —
+                    // never reaching the forward-extension
+                    // frames — which reads as "punching
+                    // outward" instead of in front. Target a
+                    // duration slightly *longer* than the
+                    // cooldown so a held click still gets the
+                    // impact frame before being interrupted.
+                    let cd = ability.cooldown.max(0.05);
+                    let target_dur = cd * 1.10;
+                    let speed = (clip.duration / target_dur).clamp(0.5, 4.0);
+                    cast.play_oneshot_preempt_scaled(clip, speed);
+                }
+            }
+        }
+        player_state.punch_jab_next = !player_state.punch_jab_next;
+        player_state.last_punch_at = Some(now);
+        // Punch never participates in the projectile / channel
+        // pose FSM below — return early so we don't
+        // accidentally drive a `cast.begin` on a MeleeArc shape.
+        return;
+    }
 
     // 2. Cast-pose FSM. Projectile shapes get a one-shot pose;
     //    channels get a held pose released by `cast.end_channel`
@@ -146,6 +242,7 @@ pub fn on_remote_ability_cast(
     cast_origin: Vec3,
     target: Option<Vec3>,
     caster_avatar: Option<hecs::Entity>,
+    start_tick: rift_net::NetTick,
 ) {
     use rift_engine::combat::effect_for_vfx;
     use rift_engine::ecs::components::SpellCast;
@@ -203,6 +300,42 @@ pub fn on_remote_ability_cast(
     // 2. Remote cast pose. Only projectile / channel shapes drive
     //    a pose today; snapshots cover the rest.
     let Some(entity) = caster_avatar else { return };
+
+    // 2a. Punch — auto-alternating Jab/Cross overlay for remote
+    //     observers. Mirrors the local caster's `trigger_local_cast`
+    //     branch (§1b above). Punch carries no `SetPlayerAction`
+    //     and no projectile, so without this the swing would be
+    //     invisible to everyone but the caster.
+    //
+    //     Jab vs Cross is picked deterministically from
+    //     `start_tick`'s parity so every observer's client agrees
+    //     on the same clip without needing a per-caster state
+    //     map. Two rapid punches on consecutive sim ticks land
+    //     on opposite clips; bursts that share a tick will pick
+    //     the same clip, which reads as a stutter at worst — an
+    //     acceptable trade against the complexity of a per-NetId
+    //     alternator on the client.
+    if ability.wire_id == rift_game::abilities::id::PUNCH {
+        use rift_engine::ecs::components::AnimationSet;
+        let jab_first = start_tick.0 % 2 == 0;
+        let clip_names: &[&str] = if jab_first {
+            &["Punch_Jab", "Punch", "Punch_Cross", "Sword_Attack"]
+        } else {
+            &["Punch_Cross", "Punch", "Punch_Jab", "Sword_Attack"]
+        };
+        let clip = state
+            .world
+            .get::<&AnimationSet>(entity)
+            .ok()
+            .and_then(|set| set.find_any(clip_names));
+        if let Some(clip) = clip {
+            if let Ok(mut cast) = state.world.get::<&mut SpellCast>(entity) {
+                cast.play_oneshot(clip);
+            }
+        }
+        return;
+    }
+
     let has_projectile = ability.effects.iter().any(|e| {
         matches!(
             e,

@@ -318,20 +318,14 @@ impl NetClient {
                 }
             } else if rift_game::kinematic::action::is_attack(auth_action) {
                 // Same reconcile recipe as the roll branch
-                // above, scaled to the swing window. Swings
-                // no longer freeze locomotion (the combo
-                // pivot landed the swing on the upper-body
-                // `SpellCast` layer), so the predicted
-                // `attack_remaining` purely drives the
-                // action-byte expiry timing \u2014 the body
-                // continues to read move input during the
-                // swing. We still echo the exact `ATTACK_*`
-                // step byte the server is broadcasting so
-                // remote observers and any combo-aware
-                // local logic see a stable value.
+                // above, scaled to the swing window. Melee
+                // is a single fixed-duration action; we just
+                // mirror `attack_remaining` from the server's
+                // clock so prediction expires in sync.
                 let elapsed_ticks = snap.tick.diff(auth_action_start).max(0) as f32;
                 let elapsed_s = elapsed_ticks / rift_net::TICK_HZ as f32;
-                let remaining = (rift_game::kinematic::ATTACK_DURATION - elapsed_s).max(0.0);
+                let total = rift_game::kinematic::MELEE_ATTACK.duration;
+                let remaining = (total - elapsed_s).max(0.0);
                 self.predicted.attack_remaining = remaining;
                 self.predicted.action = auth_action;
                 self.predicted.roll_remaining = 0.0;

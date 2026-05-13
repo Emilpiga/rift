@@ -71,6 +71,11 @@ pub struct NetState {
     /// `ServerMsg::Loadout`, so we never mutate the local
     /// loadout optimistically.
     pub pending_loadout_changes: Vec<(u8, AbilityWireId)>,
+    /// Talent-investment requests the binary forwards as
+    /// `ClientMsg::InvestTalent`. The server replies with
+    /// `ServerMsg::TalentsSync`; we never mutate the local
+    /// tree optimistically.
+    pub pending_talent_invests: Vec<u16>,
     /// `true` for one frame when the local player F-presses the
     /// rift-spawn portal, asking the binary to fire
     /// `ClientMsg::RiftExitVoteStart`. Server validates +

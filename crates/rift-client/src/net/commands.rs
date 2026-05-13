@@ -317,6 +317,16 @@ impl NetClient {
         );
     }
 
+    /// Ask the server to spend one talent point on `talent_id`.
+    /// Server validates the invest (prereqs satisfied, current
+    /// rank below max, unspent points > 0); on accept it
+    /// mirrors the change to the persisted record and replies
+    /// with a fresh [`rift_net::messages::ServerMsg::TalentsSync`].
+    pub fn request_invest_talent(&mut self, talent_id: u16) {
+        log::debug!("net: -> InvestTalent talent_id={talent_id}");
+        self.send(Channel::Control, &ClientMsg::InvestTalent { talent_id });
+    }
+
     /// Ask the server to claim a ground-loot drop on our behalf.
     /// Server validates range and broadcasts [`ServerMsg::LootClaimed`]
     /// on success; clients tear down their visuals on receipt.

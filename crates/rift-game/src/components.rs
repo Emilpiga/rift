@@ -19,4 +19,12 @@ pub enum PlayerAction {
     /// Evasive dodge roll; `Roll` clip is playing and game-side code
     /// is driving forward velocity for the duration.
     Roll,
+    /// Melee swing in flight; the `Sword_Attack` clip from
+    /// `rift_game::kinematic::MELEE_ATTACK` is playing. The
+    /// kinematic owns forward motion (`Kinematic::apply_input`
+    /// reads `action::ATTACK` and applies the profile's
+    /// `forward_step` along the locked `attack_dir`); the
+    /// action gate exists so `locomotion_anim_system` doesn't
+    /// override the swing pose with Walk/Idle.
+    Attack,
 }

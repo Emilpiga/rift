@@ -1038,6 +1038,209 @@ impl OverlayBatch {
         }
     }
 
+    /// Filled line segment from `(x0, y0)` to `(x1, y1)` with
+    /// the given pixel `thickness`. Emitted as a single
+    /// rotated quad — the two long edges run parallel to the
+    /// segment, the two short ends are perpendicular caps.
+    /// No end-caps beyond the perpendicular butt, no antialias
+    /// — fine for diagrammatic edges (graph viewers, talent
+    /// trees, debug overlays). Degenerate inputs (zero length
+    /// or non-positive thickness) are dropped silently.
+    pub fn line_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if thickness <= 0.0 {
+            return;
+        }
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 1e-6 {
+            return;
+        }
+        // Perpendicular unit vector × half-thickness — the
+        // four corners are then p0 ± n and p1 ± n.
+        let nx = -dy / len * thickness * 0.5;
+        let ny = dx / len * thickness * 0.5;
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x0 + nx, y0 + ny),
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x1 + nx, y1 + ny),
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x1 - nx, y1 - ny),
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x0 - nx, y0 - ny),
+            color,
+            uv,
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Bevelled stone disc with an indented dark-to-tint radial
+    /// gradient and a shader-rasterised glow halo. One quad,
+    /// the fragment shader does everything via SDF math + the
+    /// `[-2.0, -1.0]` UV sentinel.
+    ///
+    /// * `radius` — solid-disc radius in pixels.
+    /// * `halo` — extra pixels of glow halo to leave around
+    ///   the disc. The emitted quad is sized
+    ///   `2 * (radius + halo)` so the halo has room to fade
+    ///   into the background.
+    /// * `color` — node tint. Alpha drives the master
+    ///   brightness (the gating-driven dimming curve).
+    pub fn glow_disc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        halo: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if radius <= 0.0 {
+            return;
+        }
+        let halo = halo.max(0.0);
+        // The shader hard-codes `CORE_R = 0.65` as the local-r
+        // boundary between solid disc and halo. We size the
+        // quad so that `radius` lands exactly at that boundary:
+        //     quad_half = radius / CORE_R
+        // and the halo extent is the remainder
+        //     halo_extent = quad_half - radius = radius * (1/0.65 - 1)
+        //                ≈ radius * 0.538
+        // The caller's `halo` parameter is taken as a *minimum*
+        // — we expand the quad if needed but never shrink the
+        // shader-fixed halo band, otherwise the visual halo
+        // gets clipped against the quad edge.
+        let core_r: f32 = 0.65;
+        let quad_half = (radius / core_r).max(radius + halo);
+        let x = cx - quad_half;
+        let y = cy - quad_half;
+        let w = quad_half * 2.0;
+        let h = quad_half * 2.0;
+        let to_ndc = |px: f32, py: f32| -> [f32; 2] {
+            [(px / screen_w) * 2.0 - 1.0, (py / screen_h) * 2.0 - 1.0]
+        };
+        // UV in [-2.0, -1.1] per axis — the shader maps
+        // back to local [0, 1] for the SDF. The 0.1 guard
+        // band keeps interpolated corner pixels well clear
+        // of the -1.0 atlas-sampling sentinel boundary.
+        const U0: f32 = -2.0;
+        const U1: f32 = -1.1;
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x, y),
+            color,
+            uv: [U0, U0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x + w, y),
+            color,
+            uv: [U1, U0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x + w, y + h),
+            color,
+            uv: [U1, U1],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x, y + h),
+            color,
+            uv: [U0, U1],
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Glowing line from `(x0, y0)` to `(x1, y1)`. Emitted as
+    /// a rotated quad wider than the visible line — the shader
+    /// rasterises an exponential glow falloff across the
+    /// perpendicular axis using the `[-3.0, -2.0]` UV sentinel.
+    ///
+    /// * `core_thickness` — width of the bright core in pixels.
+    /// * `halo_extent` — extra pixels each side that the halo
+    ///   fades over. Total quad width = `core + 2 * halo`.
+    pub fn glow_line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        core_thickness: f32,
+        halo_extent: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        if core_thickness <= 0.0 {
+            return;
+        }
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 1e-6 {
+            return;
+        }
+        let total = core_thickness + halo_extent.max(0.0) * 2.0;
+        let nx = -dy / len * total * 0.5;
+        let ny = dx / len * total * 0.5;
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        // UV.x in [-3.0, -2.1] maps to *across-axis* in
+        // [0, 1] (0.5 = line core). 0.1 guard band keeps
+        // interpolated pixels clear of the -2.0 sentinel.
+        const A0: f32 = -3.0;
+        const A1: f32 = -2.1;
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x0 + nx, y0 + ny),
+            color,
+            uv: [A0, A0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x1 + nx, y1 + ny),
+            color,
+            uv: [A0, A1],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x1 - nx, y1 - ny),
+            color,
+            uv: [A1, A1],
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x0 - nx, y0 - ny),
+            color,
+            uv: [A1, A0],
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
     /// Draw a text string at pixel position (top-left origin).
     /// Returns the width in pixels of the rendered text.
     pub fn text(
@@ -2265,6 +2468,59 @@ impl rift_ui_im::DrawList for OverlayBatch {
     ) {
         OverlayBatch::rounded_outline_px(
             self, x, y, w, h, radius, thickness, color, screen_w, screen_h,
+        );
+    }
+
+    fn line_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::line_px(self, x0, y0, x1, y1, thickness, color, screen_w, screen_h);
+    }
+
+    fn glow_disc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        halo: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::glow_disc(self, cx, cy, radius, halo, color, screen_w, screen_h);
+    }
+
+    fn glow_line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        core_thickness: f32,
+        halo_extent: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::glow_line(
+            self,
+            x0,
+            y0,
+            x1,
+            y1,
+            core_thickness,
+            halo_extent,
+            color,
+            screen_w,
+            screen_h,
         );
     }
 
