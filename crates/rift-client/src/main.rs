@@ -276,6 +276,13 @@ impl RiftApp {
             dt,
         );
         net.sync_projectiles(renderer, state.audio.as_mut(), dt);
+        let selection_names = net.selection_names();
+        state.selection.refresh(
+            &state.world,
+            &net.remote,
+            &selection_names,
+            state.net.our_net_id_cached,
+        );
 
         // Spawn loot-pillar visuals from snapshot rows. The
         // `LootDropped` event is the fast path for fresh kills

@@ -80,6 +80,28 @@ pub fn create_graphics_pipeline(
     vert_module: vk::ShaderModule,
     frag_module: vk::ShaderModule,
 ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
+    create_graphics_pipeline_with_options(
+        device,
+        render_pass,
+        extent,
+        descriptor_set_layouts,
+        vert_module,
+        frag_module,
+        vk::CullModeFlags::BACK,
+        true,
+    )
+}
+
+pub fn create_graphics_pipeline_with_options(
+    device: &Device,
+    render_pass: vk::RenderPass,
+    extent: vk::Extent2D,
+    descriptor_set_layouts: &[vk::DescriptorSetLayout],
+    vert_module: vk::ShaderModule,
+    frag_module: vk::ShaderModule,
+    cull_mode: vk::CullModeFlags,
+    depth_write: bool,
+) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
     let entry_name = c"main";
 
     let shader_stages = [
@@ -124,7 +146,7 @@ pub fn create_graphics_pipeline(
     let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.0)
-        .cull_mode(vk::CullModeFlags::BACK)
+        .cull_mode(cull_mode)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
 
     let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
@@ -132,7 +154,7 @@ pub fn create_graphics_pipeline(
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(true)
+        .depth_write_enable(depth_write)
         .depth_compare_op(vk::CompareOp::LESS)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);

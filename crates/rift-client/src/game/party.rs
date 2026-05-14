@@ -27,15 +27,16 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use rift_engine::ui::im::{
-    widgets::{Button, ProgressBar},
-    Color, Frame, Id, Layer, Pad, Pos2, Rect, Stroke, Ui,
-};
+use rift_engine::ui::im::{widgets::Button, Color, Frame, Id, Layer, Pad, Pos2, Rect, Stroke, Ui};
 use rift_net::messages::{party_mode, ClientMsg, PartyMember, MAX_PARTY};
 
 use crate::game::chat::ChatUi;
 use crate::game::states::frame_state::FrameState;
 use crate::game::states::sub_state::NetState;
+use crate::game::unit_frame::{
+    apply_unit_context_action, draw_unit_context_menu, draw_unit_frame,
+    unit_context_menu_should_close, UnitContextMenuState, UnitFrameBars, UnitFrameData,
+};
 use crate::net::PendingPortalPrompt;
 
 /// How long an error toast remains on screen.
@@ -72,7 +73,7 @@ pub struct PartyUi {
     /// portal-confirm modal.
     confirm_prompt: Option<ConfirmPromptState>,
     /// Right-click context menu anchored to a party frame.
-    context_menu: Option<ContextMenuState>,
+    context_menu: Option<UnitContextMenuState>,
     /// Rects we drew this frame that should swallow gameplay
     /// mouse input (party frames, modals, context menu).
     /// Filled by [`Self::frame`]; queried by
@@ -110,15 +111,6 @@ struct ConfirmPromptState {
     /// the user's reply as the source of truth.
     opened_at: Instant,
     seconds_remaining: u32,
-}
-
-#[derive(Clone, Debug)]
-struct ContextMenuState {
-    target: String,
-    pos: Pos2,
-    /// `true` when the local player is the leader (kick /
-    /// promote rows enabled).
-    is_leader: bool,
 }
 
 impl PartyUi {
@@ -328,11 +320,8 @@ impl PartyUi {
         }
         let theme = *ui.theme();
         let s = theme.scale;
-        let frame_w = 220.0 * s;
-        // Slightly taller than the natural "name + bar"
-        // minimum so there's clear vertical breathing room
-        // between the player label / level and the HP bar.
-        let frame_h = 64.0 * s;
+        let frame_w = 286.0 * s;
+        let frame_h = 58.0 * s;
         let gap = 6.0 * s;
         // Top-left, leaving room for any future minimap badge.
         let origin = Pos2::new(12.0 * s, 12.0 * s);
@@ -347,7 +336,7 @@ impl PartyUi {
             ordered.sort_by_key(|m| if &m.character_name == lead { 0 } else { 1 });
         }
 
-        let mut new_menu: Option<ContextMenuState> = None;
+        let mut new_menu: Option<UnitContextMenuState> = None;
         let targeting_active = frame_state.entity_targeting.is_some();
         // Non-consuming read: peek at the LMB rising edge so
         // we don't steal the click from buttons drawn later
@@ -366,11 +355,11 @@ impl PartyUi {
             draw_one_frame_static(ui, rect, member, leader.as_deref());
             if rect.contains(ui.mouse_pos()) {
                 if ui.input().right_clicked() && Some(&member.character_name) != our_name.as_ref() {
-                    new_menu = Some(ContextMenuState {
-                        target: member.character_name.clone(),
-                        pos: ui.mouse_pos(),
-                        is_leader: we_lead,
-                    });
+                    new_menu = Some(UnitContextMenuState::party_member(
+                        member.character_name.clone(),
+                        ui.mouse_pos(),
+                        we_lead,
+                    ));
                 }
                 // Left-click while a friendly-target ability is
                 // armed: route the cast through the party
@@ -718,76 +707,15 @@ impl PartyUi {
         let Some(menu) = self.context_menu.clone() else {
             return;
         };
-        let theme = *ui.theme();
-        let s = theme.scale;
-        // Dismiss on any outside click. We test before drawing
-        // so the menu's own buttons get their click first.
-        let mp = ui.mouse_pos();
-        let w = 160.0 * s;
-        let row_h = 24.0 * s;
-        let rows: &[(&str, ContextAction, bool)] = &[
-            ("Whisper", ContextAction::Whisper, true),
-            ("Mute", ContextAction::Mute, true),
-            ("Promote", ContextAction::Promote, menu.is_leader),
-            ("Kick", ContextAction::Kick, menu.is_leader),
-        ];
-        let h = row_h * rows.len() as f32 + 8.0 * s;
-        let rect = Rect::from_xywh(menu.pos.x, menu.pos.y, w, h);
-        self.cached_consume_rects.push(rect);
-        let mut chosen: Option<ContextAction> = None;
-        Frame::panel(&theme).show(ui, rect, |ui, body| {
-            let pad = 4.0 * s;
-            for (i, (label, action, enabled)) in rows.iter().enumerate() {
-                let row = Rect::from_xywh(
-                    body.x() + pad,
-                    body.y() + pad + i as f32 * row_h,
-                    body.width() - pad * 2.0,
-                    row_h - 2.0 * s,
-                );
-                let btn = Button::new(label).enabled(*enabled);
-                if btn.show(ui, row).clicked && *enabled {
-                    chosen = Some(*action);
-                }
-            }
-        });
-
-        if let Some(action) = chosen {
-            match action {
-                ContextAction::Whisper => {
-                    // Open the chat input prefilled with the
-                    // /w form so the player just has to type
-                    // their message and hit Enter.
-                    chat.open_with_draft(ui, format!("/w {} ", menu.target));
-                }
-                ContextAction::Mute => {
-                    chat.toggle_mute(&menu.target);
-                }
-                ContextAction::Promote => {
-                    net.pending_party_msgs.push(ClientMsg::PartyPromote {
-                        name: menu.target.clone(),
-                    });
-                }
-                ContextAction::Kick => {
-                    net.pending_party_msgs.push(ClientMsg::PartyKick {
-                        name: menu.target.clone(),
-                    });
-                }
-            }
+        if let Some(action) = draw_unit_context_menu(
+            ui,
+            &menu,
+            Id::root("party::unit_context"),
+            &mut self.cached_consume_rects,
+        ) {
+            apply_unit_context_action(action, &menu.target, ui, net, chat);
             self.context_menu = None;
-        } else if !rect.contains(mp)
-            && (ui.input().left_just_pressed() || ui.input().right_clicked())
-        {
-            // Any outside click closes. We use right-click
-            // (already consumed by the frame that opened the
-            // menu, so a fresh right-click is needed) and a
-            // best-effort left-click sentinel.
-            self.context_menu = None;
-        }
-        // Pressing Escape also closes.
-        if ui
-            .input()
-            .key_just_pressed(rift_engine::ui::im::ImKey::Escape)
-        {
+        } else if unit_context_menu_should_close(ui, &menu) {
             self.context_menu = None;
         }
     }
@@ -1006,66 +934,37 @@ fn scale_rgb(color: Color, mul: f32) -> Color {
     )
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ContextAction {
-    Whisper,
-    Mute,
-    Promote,
-    Kick,
-}
-
 /// Free helper so the borrow on `self.members` stays alive for
 /// the duration of the loop in `draw_party_frames`. The closure
 /// captures only the inputs it needs and never re-borrows
 /// `PartyUi`.
 fn draw_one_frame_static(ui: &mut Ui<'_>, rect: Rect, member: &PartyMember, leader: Option<&str>) {
-    let theme = *ui.theme();
-    let pad = 6.0 * theme.scale;
-    Frame::panel(&theme).show(ui, rect, |ui, body| {
-        let leader_marker = if leader == Some(member.character_name.as_str()) {
-            "* "
-        } else {
-            ""
-        };
-        let label = format!(
-            "{leader_marker}{} (Lv {})",
-            member.character_name, member.level
-        );
-        // Top text row: full `pad` above so the label
-        // doesn't kiss the frame border.
-        let _ = ui.draw_text(
-            Pos2::new(body.x() + pad, body.y() + pad),
-            &label,
-            theme.fonts.size_md,
-            theme.colors.text,
-        );
-        let floor_label = format!("F{}", member.floor);
-        let fw = ui.measure_text(&floor_label, theme.fonts.size_sm);
-        let _ = ui.draw_text(
-            Pos2::new(body.x() + body.width() - pad - fw, body.y() + pad),
-            &floor_label,
-            theme.fonts.size_sm,
-            theme.colors.text_dim,
-        );
-        let bar_h = 14.0 * theme.scale;
-        // Pin the HP bar to the bottom edge with the same
-        // `pad` margin used at the top; the extra `frame_h`
-        // (vs the previous 56*s) becomes the gap between the
-        // label row above and the bar.
-        let bar = Rect::from_xywh(
-            body.x() + pad,
-            body.y() + body.height() - pad - bar_h,
-            body.width() - pad * 2.0,
-            bar_h,
-        );
-        let pct = if member.hp_max > 0.001 {
-            (member.hp / member.hp_max).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        ProgressBar::new(pct)
-            .fill(rift_engine::ui::im::widgets::hp_color(pct))
-            .label(&format!("{:.0}/{:.0}", member.hp, member.hp_max))
-            .show(ui, bar);
-    });
+    let leader_marker = if leader == Some(member.character_name.as_str()) {
+        "* "
+    } else {
+        ""
+    };
+    let name = format!("{leader_marker}{}", member.character_name);
+    let detail = format!("Lv {} / F{}", member.level, member.floor);
+    let pct = if member.hp_max > 0.001 {
+        (member.hp / member.hp_max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    draw_unit_frame(
+        ui,
+        rect,
+        UnitFrameData {
+            name: &name,
+            detail: Some(&detail),
+            bars: UnitFrameBars {
+                health_displayed: pct,
+                health_trail: pct,
+                health_pulse: 0.0,
+                resource_displayed: Some(member.resource_pct.clamp(0.0, 1.0)),
+                resource_trail: member.resource_pct.clamp(0.0, 1.0),
+                resource_pulse: 0.0,
+            },
+        },
+    );
 }

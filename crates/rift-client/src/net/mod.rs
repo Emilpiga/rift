@@ -1412,6 +1412,17 @@ impl NetClient {
             .map(|p| p.character_name.as_str())
     }
 
+    pub fn selection_names(&self) -> std::collections::HashMap<NetId, String> {
+        let mut names = std::collections::HashMap::new();
+        if let (Some(net_id), Some(name)) = (self.our_net_id, self.character_name()) {
+            names.insert(net_id, name.to_string());
+        }
+        for (net_id, profile) in &self.profiles {
+            names.insert(*net_id, profile.character_name.clone());
+        }
+        names
+    }
+
     /// `true` once the latest snapshot flagged our player row with
     /// `entity_flags::DEAD`. The binary uses this to drive the
     /// death fade overlay and skip click-to-cast / interaction

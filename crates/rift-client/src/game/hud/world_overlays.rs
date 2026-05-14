@@ -9,8 +9,10 @@ use rift_engine::ecs::components::{
     Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Resource, Transform,
 };
 use rift_engine::ui::im::{Color, Pos2, Rect, ResourceBarAnim, Ui, Vec2 as UiVec2};
+use rift_net::NetId;
 
 use super::draw_effect_pip_strip;
+use crate::game::selection::SelectionState;
 
 /// Boss locator shown during the active boss phase. Uses the same
 /// projection convention as the portal compass so the marker sits on
@@ -356,6 +358,49 @@ pub fn render_remote_player_health_bars(
         ) {
             draw_effect_pips(&mut wui, rect, effects);
         }
+    }
+}
+
+/// Hub-only name labels above remote player avatars. Combat floors
+/// keep the cleaner health/resource overlay instead, while the hub
+/// benefits from readable names for social targeting.
+pub fn render_hub_remote_player_names(
+    ui: &mut Ui<'_>,
+    world: &hecs::World,
+    view_proj: Mat4,
+    selection: &SelectionState,
+) {
+    use rift_engine::ui::im::WorldUi;
+
+    const Y_OFFSET: f32 = -42.0;
+
+    let s = ui.scale();
+    let font = 13.0 * s;
+    let mut wui = WorldUi::new(ui, view_proj);
+    for (_, (transform, remote)) in world.query::<(&Transform, &RemotePlayer)>().iter() {
+        let Some(name) = selection.display_name_for_net_id(NetId(remote.net_id)) else {
+            continue;
+        };
+        let world_pos = transform.position + Vec3::new(0.0, 1.95, 0.0);
+        let Some(anchor) = wui.world_to_screen(world_pos) else {
+            continue;
+        };
+        let text_w = wui.ui().measure_text(name, font);
+        let x = anchor.x - text_w * 0.5;
+        let y = anchor.y + Y_OFFSET * s;
+        let ui = wui.ui();
+        ui.draw_text(
+            Pos2::new(x + 1.5 * s, y + 1.5 * s),
+            name,
+            font,
+            Color::rgba(0.0, 0.0, 0.0, 0.78),
+        );
+        ui.draw_text(
+            Pos2::new(x, y),
+            name,
+            font,
+            Color::rgba(0.92, 0.86, 0.74, 0.98),
+        );
     }
 }
 

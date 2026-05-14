@@ -162,6 +162,13 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         state.frame.level_up_flash,
         state.floor.in_hub,
     );
+    state.selection.frame_target_ui(
+        &mut ui,
+        &mut state.net,
+        &mut state.chat,
+        ui_dt,
+        &mut state.frame.hud_consume_rects,
+    );
     if let Some(slot_idx) = hud::render_ability_bar(
         &mut ui,
         &state.player_state.abilities,
@@ -236,7 +243,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         }
     }
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj, ui_dt);
-    if !state.floor.in_hub {
+    if state.floor.in_hub {
+        hud::render_hub_remote_player_names(&mut ui, &state.world, view_proj, &state.selection);
+    } else {
         if state.rift.boss_spawned && !state.rift.boss_killed && !state.rift.floor_complete {
             hud::render_boss_arrow(
                 &mut ui,
@@ -537,6 +546,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                 state.spellbook.close();
             } else if pre_inventory_open {
                 state.inventory_ui.open = false;
+            } else if state.selection.selected().is_some() {
+                state.selection.clear_selected();
             } else if !escape_busy {
                 state.pause.menu_open = true;
             }

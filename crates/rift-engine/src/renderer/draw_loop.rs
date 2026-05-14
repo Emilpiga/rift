@@ -518,6 +518,7 @@ impl Renderer {
         &self,
         cmd: vk::CommandBuffer,
         image_index: u32,
+        frame: usize,
         draws: &[DrawCommand],
     ) {
         let device = &self.device.device;
@@ -600,12 +601,163 @@ impl Renderer {
             device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
         }
 
+        self.record_selected_outline_pass(cmd, draws);
+
+        self.record_portrait_draws(cmd, frame);
+
         // End the opaque scene pass. Depth is now in
         // DEPTH_STENCIL_READ_ONLY_OPTIMAL — translucent
         // pipelines can both depth-test against it and
         // sample it as a combined-image-sampler for soft-
         // particle fade.
         device.cmd_end_render_pass(cmd);
+    }
+
+    unsafe fn record_selected_outline_pass(&self, cmd: vk::CommandBuffer, draws: &[DrawCommand]) {
+        const SELECTED_FLAG: u32 = 16;
+        const OUTLINE_PASS_FLAG: u32 = 128;
+
+        let selected_draws = draws
+            .iter()
+            .filter(|draw| (draw.material_params[2].to_bits() & SELECTED_FLAG) != 0);
+        let device = &self.device.device;
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.outline_pipeline);
+        for draw in selected_draws {
+            device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
+            device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.outline_pipeline_layout,
+                0,
+                &[draw.descriptor_set, draw.material_set],
+                &[],
+            );
+            let model_bytes: &[u8] = bytemuck::bytes_of(&draw.model_matrix);
+            device.cmd_push_constants(
+                cmd,
+                self.outline_pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                model_bytes,
+            );
+            let tint = [1.0_f32, 1.0, 1.0, 0.92];
+            let tint_bytes: &[u8] = bytemuck::bytes_of(&tint);
+            device.cmd_push_constants(
+                cmd,
+                self.outline_pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                64,
+                tint_bytes,
+            );
+            let mut params = draw.material_params;
+            params[2] = f32::from_bits(params[2].to_bits() | OUTLINE_PASS_FLAG);
+            let mp_bytes: &[u8] = bytemuck::bytes_of(&params);
+            device.cmd_push_constants(
+                cmd,
+                self.outline_pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                80,
+                mp_bytes,
+            );
+            device.cmd_draw_indexed(cmd, draw.index_count, 1, 0, 0, 0);
+        }
+    }
+
+    unsafe fn record_portrait_draws(&self, cmd: vk::CommandBuffer, frame: usize) {
+        if self.portrait_draws.is_empty() {
+            return;
+        }
+        let device = &self.device.device;
+        let forward = (self.camera.target - self.camera.position).normalize_or_zero();
+        if forward.length_squared() <= 0.001 {
+            return;
+        }
+        let right = forward.cross(self.camera.up).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
+        let d = 2.2_f32;
+        let tan_half = (self.camera.fov_y * 0.5).tan();
+        let screen_w = self.window_extent[0].max(1) as f32;
+        let screen_h = self.window_extent[1].max(1) as f32;
+        let world_h = 2.0 * d * tan_half;
+        let world_per_px = world_h / screen_h;
+        let head_center_y = 1.55_f32;
+
+        for portrait in &self.portrait_draws {
+            let Some(obj) = self.objects.get(portrait.object_index) else {
+                continue;
+            };
+            if obj.model_matrix == Mat4::ZERO {
+                continue;
+            }
+            let [x0, y0, x1, y1] = portrait.rect_px_bl;
+            let h = (y1 - y0).max(1.0);
+            let center_x = (x0 + x1) * 0.5;
+            let center_y_top = (y0 + y1) * 0.5;
+            let ndc_x = (center_x / screen_w) * 2.0 - 1.0;
+            let ndc_y = (center_y_top / screen_h) * 2.0 - 1.0;
+            let view_x = ndc_x * tan_half * self.camera.aspect * d;
+            let view_y = ndc_y * tan_half * d;
+            let desired_head_h = h * 0.88 * world_per_px;
+            let scale = (desired_head_h / 0.72).clamp(0.12, 1.4);
+            let head_world_center =
+                self.camera.position + forward * d + right * view_x - up * view_y;
+            let basis = Mat4::from_cols(
+                (right * scale).extend(0.0),
+                (up * scale).extend(0.0),
+                (-forward * scale).extend(0.0),
+                (head_world_center - up * head_center_y * scale).extend(1.0),
+            );
+
+            let vb = match obj
+                .skin_handle
+                .and_then(|h| self.skin_system.output_vertex_buffer(h))
+            {
+                Some(b) => b,
+                None => match obj.dynamic_vertex_buffers.as_ref() {
+                    Some(bufs) => bufs[frame].buffer,
+                    None => obj.vertex_buffer.buffer,
+                },
+            };
+            device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
+            device.cmd_bind_index_buffer(cmd, obj.index_buffer.buffer, 0, vk::IndexType::UINT32);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.uniforms.descriptor_sets[frame], obj.material_set],
+                &[],
+            );
+            let model_bytes: &[u8] = bytemuck::bytes_of(&basis);
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                model_bytes,
+            );
+            let rect_bytes: &[u8] = bytemuck::bytes_of(&portrait.rect_px_bl);
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                64,
+                rect_bytes,
+            );
+            let mut params = obj.material_params;
+            params[2] = f32::from_bits(params[2].to_bits() | 32u32);
+            params[3] = 0.0;
+            let mp_bytes: &[u8] = bytemuck::bytes_of(&params);
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                80,
+                mp_bytes,
+            );
+            device.cmd_draw_indexed(cmd, obj.index_count, 1, 0, 0, 0);
+        }
     }
 
     /// Record the translucent pass: ribbons + particles. Loads
@@ -833,7 +985,7 @@ impl Renderer {
             self.blood_field
                 .record(&self.device.device, cmd, frame, self.elapsed_secs());
 
-            self.record_scene_pass(cmd, image_index, &draws);
+            self.record_scene_pass(cmd, image_index, frame, &draws);
             self.record_translucent_pass(cmd, image_index, frame);
             if self.ssao_enabled || self.volumetrics_enabled {
                 self.post.record_post_graph(

@@ -82,6 +82,10 @@ impl Server {
             .sim_for_client(cid)
             .player_health(cid)
             .unwrap_or((1.0, 1.0));
+        let resource_pct = self
+            .sim_for_client(cid)
+            .player_resource_pct(cid)
+            .unwrap_or(1.0);
         let floor = self.floor_for_client(cid);
         Some(PartyMember {
             character_name,
@@ -89,6 +93,7 @@ impl Server {
             level,
             hp,
             hp_max,
+            resource_pct,
             floor,
             deepest_cleared_floor: deepest,
         })

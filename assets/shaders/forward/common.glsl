@@ -64,6 +64,7 @@ layout(location = 0) in vec3 fragWorldPos;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec3 fragColor;
 layout(location = 3) in vec2 fragUV;
+layout(location = 4) in vec3 fragLocalPos;
 
 layout(location = 0) out vec4 outColor;
 
@@ -75,7 +76,7 @@ layout(location = 0) out vec4 outColor;
 //   y = parallaxScale    (tangent-space parallax depth amplitude;
 //                         `0` disables parallax)
 //   z = flagsFloat       (bit 0 = enable PBR + normal mapping)
-//   w = reserved
+//   w = reserved; portrait draws use this as local head clip Y
 layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 tint;

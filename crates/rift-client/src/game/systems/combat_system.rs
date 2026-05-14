@@ -20,7 +20,7 @@
 use glam::{Mat4, Vec3};
 use winit::keyboard::KeyCode;
 
-use rift_engine::ecs::components::{LocalPlayer, Player, RemotePlayer, Skinned, Transform};
+use rift_engine::ecs::components::{LocalPlayer, Player, Skinned, Transform};
 use rift_engine::input::Input;
 use rift_engine::renderer::Renderer;
 
@@ -28,6 +28,7 @@ use rift_game::abilities::{self, Ability, TargetingMode};
 
 use crate::game::state::GameState;
 use crate::game::sub_state::{ActiveChannel, NetCastRequest};
+use crate::game::SelectionRelation;
 
 /// Active placed-ability targeting state (player is choosing
 /// where to place an AoE). Pure visual / input state — the
@@ -270,87 +271,6 @@ fn tick_placed_targeting(
     true
 }
 
-/// Pick the alive player whose XZ position lies closest to
-/// `cursor` and within `pick_radius_xz` of it, but only if the
-/// candidate is also within `range` of the caster. Returns
-/// `(net_id, position)` or `None` if no candidate qualifies.
-///
-/// Self-cast is allowed: the local player is included in the
-/// scan with our cached `NetId`. This means hovering over your
-/// own avatar (or just clicking with no other ally near the
-/// cursor) targets yourself, which is the natural fallback
-/// behaviour when soloing.
-fn pick_friendly_target(
-    state: &GameState,
-    cursor: glam::Vec3,
-    caster: glam::Vec3,
-    range: f32,
-    pick_radius_xz: f32,
-) -> Option<(rift_net::NetId, glam::Vec3)> {
-    let our_id = state.net.our_net_id_cached;
-    let r2 = range * range;
-    let pr2 = pick_radius_xz * pick_radius_xz;
-    let mut best: Option<(rift_net::NetId, glam::Vec3, f32)> = None;
-    // Local player (only if we know our own net id; before the
-    // first Welcome we silently skip — the keybind path also
-    // gates on `our_net_id_cached.is_some()` for the same
-    // reason).
-    if let Some(net_id) = our_id {
-        for (_, (t, _, _)) in state
-            .world
-            .query::<(&Transform, &Player, &LocalPlayer)>()
-            .iter()
-        {
-            consider_candidate(t.position, net_id, cursor, caster, r2, pr2, &mut best);
-            break;
-        }
-    }
-    // Remote players. Snapshot-driven, no `LocalPlayer` tag.
-    for (_, (t, _, rp)) in state
-        .world
-        .query::<(&Transform, &Player, &RemotePlayer)>()
-        .iter()
-    {
-        consider_candidate(
-            t.position,
-            rift_net::NetId(rp.net_id),
-            cursor,
-            caster,
-            r2,
-            pr2,
-            &mut best,
-        );
-    }
-    best.map(|(id, pos, _)| (id, pos))
-}
-
-fn consider_candidate(
-    pos: glam::Vec3,
-    net_id: rift_net::NetId,
-    cursor: glam::Vec3,
-    caster: glam::Vec3,
-    range_sq: f32,
-    pick_radius_sq: f32,
-    best: &mut Option<(rift_net::NetId, glam::Vec3, f32)>,
-) {
-    // Range gate (cast distance from caster).
-    let dx = pos.x - caster.x;
-    let dz = pos.z - caster.z;
-    if dx * dx + dz * dz > range_sq {
-        return;
-    }
-    // Pick gate (cursor distance from candidate).
-    let cx = pos.x - cursor.x;
-    let cz = pos.z - cursor.z;
-    let cd2 = cx * cx + cz * cz;
-    if cd2 > pick_radius_sq {
-        return;
-    }
-    if best.map_or(true, |(_, _, d)| cd2 < d) {
-        *best = Some((net_id, pos, cd2));
-    }
-}
-
 /// Drive the entity-target picking indicator. Returns `true`
 /// if the caller should bail out of this frame's combat tick
 /// (mode is active — confirmed, cancelled, or still picking).
@@ -401,8 +321,19 @@ fn tick_entity_targeting(
         .as_ref()
         .map(|t| t.ability.range)
         .unwrap_or(15.0);
-    let cursor_pos = crate::game::cursor::world_pos(input, renderer, 0.0);
-    let pick = cursor_pos.and_then(|c| pick_friendly_target(state, c, player_pos, range, 1.2));
+    let pick = state
+        .selection
+        .target_for_ability(SelectionRelation::Friendly, range, player_pos)
+        .and_then(|target_net_id| {
+            state
+                .selection
+                .candidate(crate::game::SelectionRef {
+                    net_id: target_net_id,
+                    kind: crate::game::SelectableKind::OwnPlayer,
+                    relation: SelectionRelation::SelfUnit,
+                })
+                .map(|candidate| (target_net_id, candidate.position))
+        });
 
     // Update indicator visual + cached hovered net id.
     {
@@ -659,6 +590,26 @@ fn tick_ability_keybinds(
                         slot.cooldown_remaining = 0.0;
                     }
                 }
+            } else if let Some(target_net_id) = state.selection.target_for_ability(
+                SelectionRelation::Friendly,
+                ability_clone.range,
+                player_pos,
+            ) {
+                state.net.casts.push(NetCastRequest {
+                    ability_id: ability_clone.wire_id,
+                    origin: player_pos,
+                    aim_dir,
+                    placed_target: None,
+                    target_net_id: Some(target_net_id),
+                });
+                crate::game::ability::trigger_local_cast(
+                    &ability_clone,
+                    aim_dir,
+                    player_pos,
+                    &mut state.world,
+                    renderer,
+                    &mut state.player_state,
+                );
             } else {
                 // Refund the cooldown that `try_use` just
                 // consumed: targeting mode hasn't actually

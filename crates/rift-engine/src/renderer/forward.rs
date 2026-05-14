@@ -43,6 +43,12 @@ pub struct DisplayResolution {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PortraitDraw {
+    pub object_index: usize,
+    pub rect_px_bl: [f32; 4],
+}
+
 // Backwards-compat re-exports: external code imports these as
 // `rift_engine::renderer::forward::{KeyLight, PointLight}`.
 // The types themselves now live in the `uniforms` sibling module.
@@ -60,6 +66,8 @@ pub struct Renderer {
     pub(super) command_pool: vk::CommandPool,
     pub(super) pipeline: vk::Pipeline,
     pub(super) pipeline_layout: vk::PipelineLayout,
+    pub(super) outline_pipeline: vk::Pipeline,
+    pub(super) outline_pipeline_layout: vk::PipelineLayout,
     /// HDR offscreen + bloom + composite. Owns three render
     /// passes (scene/bloom/composite), the HDR & bloom images,
     /// all per-image framebuffers and the post-process
@@ -140,6 +148,12 @@ pub struct Renderer {
     /// shadow pass and as the input list for per-light point
     /// shadow culling.
     pub(super) shadow_draw_scratch: Vec<DrawCommand>,
+    /// Per-frame mini scene draws rendered into UI portrait
+    /// slots. The fragment shader clips these by screen rect
+    /// and local head height so the overlay can show the
+    /// target's actual skinned head mesh without a render
+    /// texture path.
+    pub(super) portrait_draws: Vec<PortraitDraw>,
     /// Per-slot dirty-tracking state for the point-light shadow
     /// atlas. `point_shadow_state[i]` is `Some(state)` if slot
     /// `i` was rendered on a previous frame; `None` means the
@@ -243,6 +257,28 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    pub fn clear_portrait_draws(&mut self) {
+        self.portrait_draws.clear();
+    }
+
+    pub fn queue_object_portrait(&mut self, object_index: usize, rect_px: [f32; 4]) {
+        if object_index >= self.objects.len() {
+            return;
+        }
+        let [x, y, w, h] = rect_px;
+        if w <= 1.0 || h <= 1.0 {
+            return;
+        }
+        let x0 = x.max(0.0);
+        let y0 = y.max(0.0);
+        let x1 = (x + w).min(self.window_extent[0] as f32);
+        let y1 = (y + h).min(self.window_extent[1] as f32);
+        self.portrait_draws.push(PortraitDraw {
+            object_index,
+            rect_px_bl: [x0, y0, x1, y1],
+        });
+    }
+
     pub fn smooth_loading_progress(&mut self, target: f32) -> f32 {
         let target = target.clamp(0.0, 1.0);
         let now = std::time::Instant::now();
@@ -336,6 +372,13 @@ impl Renderer {
             Self::init_default_resources(&device, &allocator, &shader_dir, &uniforms)?;
 
         let (pipeline_handle, pipeline_layout) = Self::compile_pipeline_from_disk(
+            &device.device,
+            render_pass,
+            swapchain.extent,
+            &[uniforms.descriptor_set_layout, material_pool.layout],
+            &shader_dir,
+        )?;
+        let (outline_pipeline, outline_pipeline_layout) = Self::compile_outline_pipeline_from_disk(
             &device.device,
             render_pass,
             swapchain.extent,
@@ -447,6 +490,8 @@ impl Renderer {
             post,
             pipeline: pipeline_handle,
             pipeline_layout,
+            outline_pipeline,
+            outline_pipeline_layout,
             command_pool,
             command_buffers,
             frame_sync,
@@ -487,6 +532,7 @@ impl Renderer {
             draw_scratch: Vec::with_capacity(256),
             point_shadow_draw_scratch: Vec::with_capacity(64),
             shadow_draw_scratch: Vec::with_capacity(256),
+            portrait_draws: Vec::with_capacity(16),
             point_shadow_state: [None; shadow_point::MAX_POINT_SHADOWS],
             shadows_enabled: true,
             height_shadows_enabled: false,
@@ -541,6 +587,12 @@ impl Renderer {
             self.device
                 .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .device
+                .destroy_pipeline(self.outline_pipeline, None);
+            self.device
+                .device
+                .destroy_pipeline_layout(self.outline_pipeline_layout, None);
         }
 
         // Destroy old swapchain
@@ -585,8 +637,20 @@ impl Renderer {
             ],
             &self.shader_dir,
         )?;
+        let (new_outline_pipeline, new_outline_layout) = Self::compile_outline_pipeline_from_disk(
+            &self.device.device,
+            self.post.scene_pass,
+            self.swapchain.extent,
+            &[
+                self.uniforms.descriptor_set_layout,
+                self.material_pool.layout,
+            ],
+            &self.shader_dir,
+        )?;
         self.pipeline = new_pipeline;
         self.pipeline_layout = new_layout;
+        self.outline_pipeline = new_outline_pipeline;
+        self.outline_pipeline_layout = new_outline_layout;
 
         // Recreate overlay pipeline
         self.overlay.recreate_pipeline(
@@ -799,6 +863,12 @@ impl Drop for Renderer {
             self.device
                 .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .device
+                .destroy_pipeline(self.outline_pipeline, None);
+            self.device
+                .device
+                .destroy_pipeline_layout(self.outline_pipeline_layout, None);
 
             self.swapchain.cleanup(&self.device.device);
             self.surface_fn.destroy_surface(self.surface, None);

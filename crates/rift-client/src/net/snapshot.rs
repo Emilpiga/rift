@@ -28,6 +28,8 @@ pub struct RemoteEntity {
     pub yaw: f32,
     pub velocity: Vec3,
     pub health_pct: f32,
+    /// Current target/focus replicated by the server when known.
+    pub target_net_id: Option<NetId>,
     /// Essence (universal ability resource) 0..=1. Meaningful
     /// only on the local player's own row — server fills 1.0
     /// for everyone else. HUD reads it via
@@ -191,6 +193,7 @@ impl NetClient {
                     yaw,
                     velocity: Vec3::from_array(e.velocity),
                     health_pct: e.health_pct,
+                    target_net_id: e.target_net_id,
                     resource_pct: e.resource_pct,
                     dead: e.flags & rift_net::messages::entity_flags::DEAD != 0,
                     airborne: e.flags & rift_net::messages::entity_flags::AIRBORNE != 0,

@@ -120,25 +120,52 @@ impl Renderer {
                 self.device.device.device_wait_idle().ok();
             }
 
-            match Self::compile_pipeline_from_disk(
+            let forward_layouts = [
+                self.uniforms.descriptor_set_layout,
+                self.material_pool.layout,
+            ];
+            let forward_reload = Self::compile_pipeline_from_disk(
                 &self.device.device,
                 self.post.scene_pass,
                 self.swapchain.extent,
-                &[
-                    self.uniforms.descriptor_set_layout,
-                    self.material_pool.layout,
-                ],
+                &forward_layouts,
                 &self.shader_dir,
-            ) {
-                Ok((new_pipeline, new_layout)) => {
+            )
+            .and_then(|(new_pipeline, new_layout)| {
+                Self::compile_outline_pipeline_from_disk(
+                    &self.device.device,
+                    self.post.scene_pass,
+                    self.swapchain.extent,
+                    &forward_layouts,
+                    &self.shader_dir,
+                )
+                .map(|(new_outline_pipeline, new_outline_layout)| {
+                    (
+                        new_pipeline,
+                        new_layout,
+                        new_outline_pipeline,
+                        new_outline_layout,
+                    )
+                })
+            });
+            match forward_reload {
+                Ok((new_pipeline, new_layout, new_outline_pipeline, new_outline_layout)) => {
                     unsafe {
                         self.device.device.destroy_pipeline(self.pipeline, None);
                         self.device
                             .device
                             .destroy_pipeline_layout(self.pipeline_layout, None);
+                        self.device
+                            .device
+                            .destroy_pipeline(self.outline_pipeline, None);
+                        self.device
+                            .device
+                            .destroy_pipeline_layout(self.outline_pipeline_layout, None);
                     }
                     self.pipeline = new_pipeline;
                     self.pipeline_layout = new_layout;
+                    self.outline_pipeline = new_outline_pipeline;
+                    self.outline_pipeline_layout = new_outline_layout;
                     log::info!("Pipeline hot-reloaded successfully!");
                 }
                 Err(e) => {
@@ -250,6 +277,41 @@ impl Renderer {
             descriptor_set_layouts,
             vert_module,
             frag_module,
+        );
+
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+        }
+
+        result
+    }
+
+    pub(super) fn compile_outline_pipeline_from_disk(
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+        descriptor_set_layouts: &[vk::DescriptorSetLayout],
+        shader_dir: &std::path::Path,
+    ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
+        let vert_path = shader_dir.join("forward_opaque.vert");
+        let frag_path = shader_dir.join("forward_opaque.frag");
+
+        let vert_spv = hot_reload::compile_glsl_file(&vert_path, shaderc::ShaderKind::Vertex)?;
+        let frag_spv = hot_reload::compile_glsl_file(&frag_path, shaderc::ShaderKind::Fragment)?;
+
+        let vert_module = pipeline::create_shader_module(device, &vert_spv)?;
+        let frag_module = pipeline::create_shader_module(device, &frag_spv)?;
+
+        let result = pipeline::create_graphics_pipeline_with_options(
+            device,
+            render_pass,
+            extent,
+            descriptor_set_layouts,
+            vert_module,
+            frag_module,
+            vk::CullModeFlags::FRONT,
+            false,
         );
 
         unsafe {

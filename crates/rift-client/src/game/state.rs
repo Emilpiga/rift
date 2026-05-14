@@ -38,6 +38,10 @@ pub struct GameState {
     /// transparently. Landing 1 is scaffolding-only; subsequent
     /// landings migrate the bespoke panels onto it.
     pub ui_state: rift_engine::ui::im::UiState,
+    /// Global world selection state. Populated from the latest
+    /// network snapshot and reused by click selection, targeted
+    /// abilities, and target-of-target presentation.
+    pub selection: super::selection::SelectionState,
     pub(super) needs_new_floor: bool,
     /// Per-floor state: walls, portals, hub flag. Rebuilt on
     /// every floor regen.
@@ -175,6 +179,7 @@ impl GameState {
             inventory_ui: rift_ui_types::inventory::InventoryUiState::new(),
             combat_text: CombatTextSystem::new(),
             ui_state: rift_engine::ui::im::UiState::new(),
+            selection: super::selection::SelectionState::default(),
             needs_new_floor: false,
             floor: super::floor_state::FloorState::default(),
             frame: super::frame_state::FrameState::default(),

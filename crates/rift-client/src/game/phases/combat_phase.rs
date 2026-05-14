@@ -55,6 +55,17 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
     let spellbook_open = state.spellbook.open();
     let talents_open = state.talents_panel.open;
 
+    let selection_blocked = pointer_in_inventory
+        || pointer_in_party_ui
+        || pointer_in_chat
+        || pointer_in_meters
+        || pointer_in_hud
+        || spellbook_open
+        || talents_open;
+    if !selection_blocked {
+        state.selection.tick(input, renderer);
+    }
+
     // Ability-based combat (sends cast requests to the server).
     // Two gates beyond the obvious "alive" check:
     //  * `is_dead` — covers the down-pose window before the
@@ -70,13 +81,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached)
             || is_ghost
             || state.floor.in_hub
-            || pointer_in_inventory
-            || pointer_in_party_ui
-            || pointer_in_chat
-            || pointer_in_meters
-            || pointer_in_hud
-            || spellbook_open
-            || talents_open;
+            || selection_blocked;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
     } else if is_ghost

@@ -28,7 +28,7 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 ///   trip.
 /// - v3: previous schema (free-form `account_name` string,
 ///   pre-Hello `RequestRoster` lookup).
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Hard cap on simultaneous connected clients per server. Matches the
 /// design target of 4-player co-op (one slot is the host on a listen

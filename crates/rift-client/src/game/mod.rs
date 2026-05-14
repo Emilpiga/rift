@@ -26,6 +26,7 @@ pub mod party;
 pub mod pause;
 pub mod phases;
 pub mod props;
+pub mod selection;
 pub mod spellbook;
 pub mod state;
 pub mod states;
@@ -33,6 +34,7 @@ pub mod systems;
 pub mod talent_tree;
 pub mod torches;
 pub mod transition;
+pub mod unit_frame;
 pub mod weapon_visuals;
 
 // Flatten the systems / phases / states hierarchies back into
@@ -47,5 +49,6 @@ pub use systems::{
 };
 
 pub use player_state::PlayerState;
+pub use selection::{SelectableKind, SelectionRef, SelectionRelation, SelectionState};
 pub use state::GameState;
 pub use sub_state::{EquipRequest, NetCastRequest, NetTransitionRequest, StashRequest};

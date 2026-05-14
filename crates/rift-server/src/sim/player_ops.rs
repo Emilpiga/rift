@@ -126,6 +126,15 @@ impl Sim {
         Some((vitals.hp, vitals.hp_max))
     }
 
+    /// Read a player's authoritative essence/resource fraction.
+    /// Used by party frames so teammates see the same secondary
+    /// resource bar as remote-player world overlays.
+    pub fn player_resource_pct(&self, client_id: ClientId) -> Option<f32> {
+        let &entity = self.sessions.get(&client_id)?;
+        let player = self.world.get::<&ServerPlayer>(entity).ok()?;
+        Some((player.resource / player.stats.max_resource.max(0.001)).clamp(0.0, 1.0))
+    }
+
     /// Replace the entire ability loadout for `client_id`. Used
     /// at hydrate time to restore the persisted bar after a
     /// fresh `Hello`. No-op when the client isn't connected.

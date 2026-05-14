@@ -690,6 +690,10 @@ pub struct PartyMember {
     /// member.
     pub hp: f32,
     pub hp_max: f32,
+    /// Live essence/resource percentage for the party frame's
+    /// secondary bar. Defaults to full for older serialized rows.
+    #[serde(default = "resource_pct_default")]
+    pub resource_pct: f32,
     /// Floor index the member is currently on. `0` = hub. The
     /// frame greys out when the member is on a different floor
     /// than the viewer (so heals can visually flag as
@@ -1231,6 +1235,7 @@ pub struct SnapshotDelta {
 pub struct EntitySnapshotDelta {
     pub net_id: NetId,
     pub kind: Option<EntityKind>,
+    pub target_net_id: Option<Option<NetId>>,
     pub position: Option<[f32; 3]>,
     pub yaw: Option<f32>,
     pub velocity: Option<[f32; 3]>,
@@ -1253,6 +1258,8 @@ impl Snapshot {
                     let delta = EntitySnapshotDelta {
                         net_id: row.net_id,
                         kind: (!same_serialized(&row.kind, &prev.kind)).then(|| row.kind.clone()),
+                        target_net_id: (row.target_net_id != prev.target_net_id)
+                            .then_some(row.target_net_id),
                         position: (row.position != prev.position).then_some(row.position),
                         yaw: (row.yaw != prev.yaw).then_some(row.yaw),
                         velocity: (row.velocity != prev.velocity).then_some(row.velocity),
@@ -1319,6 +1326,7 @@ impl EntitySnapshotDelta {
         Self {
             net_id: row.net_id,
             kind: Some(row.kind.clone()),
+            target_net_id: Some(row.target_net_id),
             position: Some(row.position),
             yaw: Some(row.yaw),
             velocity: Some(row.velocity),
@@ -1331,6 +1339,7 @@ impl EntitySnapshotDelta {
 
     fn has_changes(&self) -> bool {
         self.kind.is_some()
+            || self.target_net_id.is_some()
             || self.position.is_some()
             || self.yaw.is_some()
             || self.velocity.is_some()
@@ -1343,6 +1352,9 @@ impl EntitySnapshotDelta {
     fn apply_to(self, row: &mut EntitySnapshot) {
         if let Some(kind) = self.kind {
             row.kind = kind;
+        }
+        if let Some(target_net_id) = self.target_net_id {
+            row.target_net_id = target_net_id;
         }
         if let Some(position) = self.position {
             row.position = position;
@@ -1371,6 +1383,7 @@ impl EntitySnapshotDelta {
         Some(EntitySnapshot {
             net_id: self.net_id,
             kind: self.kind?,
+            target_net_id: self.target_net_id.unwrap_or(None),
             position: self.position?,
             yaw: self.yaw?,
             velocity: self.velocity?,
@@ -1397,6 +1410,7 @@ mod snapshot_delta_tests {
         EntitySnapshot {
             net_id: NetId(id),
             kind: EntityKind::Enemy { role: 1, anim: 0 },
+            target_net_id: None,
             position: [x, 0.0, 0.0],
             yaw: 0.0,
             velocity: [0.0, 0.0, 0.0],
@@ -1474,6 +1488,14 @@ mod snapshot_delta_tests {
 pub struct EntitySnapshot {
     pub net_id: NetId,
     pub kind: EntityKind,
+    /// Current entity target/focus when the server knows one.
+    /// Enemies fill this from their aggro lock, minions fill it
+    /// from their attack lock, and player rows reserve it for
+    /// future replicated player selection. Clients use it for
+    /// target-of-target UI only; ability validation remains
+    /// server-authoritative.
+    #[serde(default)]
+    pub target_net_id: Option<NetId>,
     /// World-space position.
     pub position: [f32; 3],
     /// Body yaw in radians. Aim yaw, when different (players), rides

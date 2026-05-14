@@ -30,6 +30,10 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
     let mut ack_seq = 0;
     let mut viewer_pos: Option<Vec3> = None;
 
+    let net_id_for_entity = |entity: hecs::Entity| -> Option<rift_net::NetId> {
+        world.get::<&NetIdentity>(entity).ok().map(|id| id.net_id)
+    };
+
     // Players first — every connected player ships every snapshot,
     // EXCEPT ghosts (risen-but-dead): a ghost is owner-only, so
     // their row is dropped from any snapshot whose `ack_for`
@@ -66,6 +70,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 action: kinematic.action,
                 action_start: p.action_start,
             },
+            target_net_id: None,
             position: kinematic.position.to_array(),
             yaw: kinematic.yaw,
             velocity: kinematic.velocity.to_array(),
@@ -119,6 +124,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 role: en.role.to_wire_byte(),
                 anim,
             },
+            target_net_id: en.target_lock.and_then(net_id_for_entity),
             position: kinematic.position.to_array(),
             yaw: kinematic.yaw,
             velocity: kinematic.velocity.to_array(),
@@ -150,6 +156,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 owner: minion.owner_net_id,
                 anim: minions::anim_byte(minion, kinematic),
             },
+            target_net_id: minion.target_lock,
             position: kinematic.position.to_array(),
             yaw: kinematic.yaw,
             velocity: kinematic.velocity.to_array(),
@@ -173,6 +180,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             kind: EntityKind::Projectile {
                 ability: proj.ability_id.raw() as u16,
             },
+            target_net_id: None,
             position: proj.position.to_array(),
             yaw,
             velocity: proj.velocity.to_array(),
@@ -213,6 +221,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                     rift_touched: loot_row.item.rift_touched_to_wire(),
                 },
             },
+            target_net_id: None,
             position: loot_row.position.to_array(),
             yaw: 0.0,
             velocity: [0.0; 3],
@@ -237,6 +246,7 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
                 channelers: shrine.channelers,
                 required: shrine.required,
             },
+            target_net_id: None,
             position: shrine.position.to_array(),
             yaw: 0.0,
             velocity: [0.0; 3],

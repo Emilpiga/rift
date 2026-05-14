@@ -28,8 +28,8 @@ pub use exploration::{render_descend_tooltip, render_hud_prompt, render_minimap}
 pub use loot_labels::render_loot_labels;
 pub use voting::{render_exit_vote, render_shrine_progress};
 pub use world_overlays::{
-    render_boss_arrow, render_enemy_health_bars, render_portal_compass,
-    render_remote_player_health_bars,
+    render_boss_arrow, render_enemy_health_bars, render_hub_remote_player_names,
+    render_portal_compass, render_remote_player_health_bars,
 };
 
 use glam::Vec3;

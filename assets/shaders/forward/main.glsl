@@ -46,6 +46,22 @@ void main() {
     uint flags = floatBitsToUint(push.materialParams.z);
     bool usePbr  = (flags & 1u) != 0u;
     bool useRift = (flags & 2u) != 0u;
+    bool selected = (flags & 16u) != 0u;
+    bool portrait = (flags & 32u) != 0u;
+    bool hovered = (flags & 64u) != 0u;
+    bool outlinePass = (flags & 128u) != 0u;
+
+    if (outlinePass) {
+        outColor = vec4(1.0, 1.0, 1.0, push.tint.a);
+        return;
+    }
+
+    if (portrait) {
+        if (gl_FragCoord.x < push.tint.x || gl_FragCoord.x > push.tint.z ||
+            gl_FragCoord.y < push.tint.y || gl_FragCoord.y > push.tint.w) {
+            discard;
+        }
+    }
 
     if (shouldDiscardWallXray(flags)) {
         discard;
@@ -66,8 +82,24 @@ void main() {
     float fogFactor = fogRaw;
     fogFactor = fogFactor * fogFactor;
     if (useRift) fogFactor *= 0.35;
+    if (portrait) fogFactor = 0.0;
 
     vec3 finalColor = mix(lighting, ubo.fogColor.rgb, fogFactor);
 
-    outColor = vec4(finalColor * push.tint.rgb, push.tint.a);
+    if (hovered && !selected) {
+        vec3 N = normalize(fragNormal);
+        vec3 V = normalize(ubo.cameraPos.xyz - fragWorldPos);
+        float fresnel = 1.0 - clamp(abs(dot(N, V)), 0.0, 1.0);
+        float rim = smoothstep(0.42, 0.88, fresnel);
+        float pulse = 0.78 + 0.22 * sin(ubo.timeData.x * 5.5);
+        vec3 outline = vec3(1.0, 0.68, 0.18);
+        float strength = 0.72;
+        finalColor += outline * rim * pulse * strength;
+    }
+
+    if (portrait) {
+        outColor = vec4(finalColor, 1.0);
+    } else {
+        outColor = vec4(finalColor * push.tint.rgb, push.tint.a);
+    }
 }
