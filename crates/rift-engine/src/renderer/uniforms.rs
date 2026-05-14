@@ -183,7 +183,11 @@ impl Renderer {
     ///
     /// Returns `(merged, light_count, n_shadow)`.
     pub(super) fn merge_per_frame_lights(&self) -> ([PointLight; MAX_POINT_LIGHTS], usize, usize) {
-        let n_shadow = self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS);
+        let n_shadow = if self.shadows_enabled {
+            self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS)
+        } else {
+            0
+        };
         // Build the merged light list directly into a stack
         // array — saves the per-frame heap allocation that
         // a `.chain().take(N).collect()` version would do.
@@ -308,7 +312,16 @@ impl Renderer {
             point_light_count: Vec4::new(light_count as f32, 0.0, 0.0, 0.0),
             light_vp,
             point_shadow_face_vp,
-            point_shadow_meta: Vec4::new(point_shadow_count as f32, 0.0, 0.0, 0.0),
+            point_shadow_meta: Vec4::new(
+                point_shadow_count as f32,
+                if self.shadows_enabled { 1.0 } else { 0.0 },
+                if self.height_shadows_enabled {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+            ),
             // `time` packs scalar globals consumed by the
             // forward fragment shader:
             //   x = elapsed seconds (used by VFX time-driven

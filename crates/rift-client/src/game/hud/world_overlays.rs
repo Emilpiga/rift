@@ -156,6 +156,143 @@ pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) 
     }
 }
 
+/// Post-boss portal-room locator. Unlike the boss arrow this is
+/// target-driven, so it can point at the generated portal room as
+/// soon as the floor is complete, before either portal is on-screen.
+pub fn render_portal_compass(
+    ui: &mut Ui<'_>,
+    world: &hecs::World,
+    view_proj: Mat4,
+    target_pos: Vec3,
+) {
+    const EDGE_PAD: f32 = 96.0;
+    const NEAR_HIDE_DIST_SQ: f32 = 4.2 * 4.2;
+
+    let screen = ui.screen_size();
+    let sw = screen.x;
+    let sh = screen.y;
+
+    let player_pos: Option<Vec3> = world
+        .query::<(&Transform, &Player, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (t, _, _))| t.position)
+        .next();
+    let Some(player_pos) = player_pos else { return };
+
+    let delta = target_pos - player_pos;
+    let dist_sq = delta.x * delta.x + delta.z * delta.z;
+    if dist_sq < NEAR_HIDE_DIST_SQ {
+        return;
+    }
+
+    let marker_pos = target_pos + Vec3::new(0.0, 1.8, 0.0);
+    let clip = view_proj * marker_pos.extend(1.0);
+    let cx = sw * 0.5;
+    let cy = sh * 0.5;
+    let (raw_x, raw_y, on_screen) = if clip.w > 0.0 {
+        let ndc = clip.truncate() / clip.w;
+        let sx = (ndc.x + 1.0) * 0.5 * sw;
+        let sy = (1.0 - (ndc.y + 1.0) * 0.5) * sh;
+        (sx - cx, sy - cy, ndc.x.abs() <= 0.86 && ndc.y.abs() <= 0.78)
+    } else {
+        let ndc_clip = clip.truncate() / clip.w.abs().max(1.0);
+        (-ndc_clip.x * sw, ndc_clip.y * sh, false)
+    };
+
+    let len = (raw_x * raw_x + raw_y * raw_y).sqrt().max(1e-3);
+    let nx = raw_x / len;
+    let ny = raw_y / len;
+    let (ax, ay) = if on_screen {
+        (cx + raw_x, cy + raw_y)
+    } else {
+        let max_x = sw * 0.5 - EDGE_PAD;
+        let max_y = sh * 0.5 - EDGE_PAD;
+        let scale = (max_x / nx.abs().max(1e-3)).min(max_y / ny.abs().max(1e-3));
+        (cx + nx * scale, cy + ny * scale)
+    };
+
+    let dist = dist_sq.sqrt();
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let pulse = 0.5 + 0.5 * ((dist * 0.12).sin().abs());
+    let accent = Color::rgba(0.96, 0.24, 0.15, 0.90 + 0.10 * pulse);
+    let warm = Color::rgba(1.0, 0.72, 0.36, 0.80 + 0.14 * pulse);
+    let dim = Color::rgba(0.10, 0.02, 0.05, 0.62);
+
+    let tx = -ny;
+    let ty = nx;
+    let line = |ui: &mut Ui<'_>, u0: f32, v0: f32, u1: f32, v1: f32, thickness: f32, col: Color| {
+        let du = u1 - u0;
+        let dv = v1 - v0;
+        let line_len = (du * du + dv * dv).sqrt().max(1.0);
+        let count = (line_len / 1.45).ceil() as i32;
+        for i in 0..=count {
+            let t = i as f32 / count as f32;
+            let u = u0 + du * t;
+            let v = v0 + dv * t;
+            let sx_ = ax + nx * u + tx * v;
+            let sy_ = ay + ny * u + ty * v;
+            ui.draw_rect(
+                Rect::from_xywh(
+                    sx_ - thickness * 0.5,
+                    sy_ - thickness * 0.5,
+                    thickness,
+                    thickness,
+                ),
+                col,
+            );
+        }
+    };
+
+    let halo = 26.0 * s;
+    ui.draw_gradient_rect(
+        Rect::from_xywh(ax - halo, ay - halo, halo * 2.0, halo * 2.0),
+        Color::rgba(0.85, 0.07, 0.12, 0.16),
+        Color::rgba(0.02, 0.00, 0.02, 0.00),
+    );
+
+    if on_screen {
+        let r = 13.0 * s;
+        ui.draw_rect(Rect::from_xywh(ax - r, ay - r, r * 2.0, r * 2.0), dim);
+        ui.draw_outline(
+            Rect::from_xywh(ax - r, ay - r, r * 2.0, r * 2.0),
+            1.0 * s,
+            accent,
+        );
+        line(ui, -8.0 * s, 0.0, 8.0 * s, 0.0, 3.0 * s, warm);
+        line(ui, 0.0, -8.0 * s, 0.0, 8.0 * s, 3.0 * s, warm);
+    } else {
+        let head = 24.0 * s;
+        let wing = 18.0 * s;
+        let tail = 28.0 * s;
+        line(ui, head, 0.0, 0.0, wing, 4.0 * s, accent);
+        line(ui, head, 0.0, 0.0, -wing, 4.0 * s, accent);
+        line(ui, 0.0, wing, -tail, 0.0, 3.0 * s, warm);
+        line(ui, 0.0, -wing, -tail, 0.0, 3.0 * s, warm);
+        line(ui, -tail, 0.0, -tail - 16.0 * s, 0.0, 3.0 * s, accent);
+    }
+
+    let label = format!("PORTAL  {:.0}m", dist);
+    let font = 11.0 * s;
+    let label_w = ui.measure_text(&label, font);
+    let label_pad_x = 8.0 * s;
+    let label_rect = Rect::from_xywh(
+        (ax - label_w * 0.5 - label_pad_x)
+            .clamp(8.0 * s, sw - label_w - label_pad_x * 2.0 - 8.0 * s),
+        (ay + 22.0 * s).clamp(48.0 * s, sh - 38.0 * s),
+        label_w + label_pad_x * 2.0,
+        19.0 * s,
+    );
+    ui.draw_rect(label_rect, Color::rgba(0.035, 0.012, 0.020, 0.82));
+    ui.draw_outline(label_rect, 1.0 * s, Color::rgba(1.0, 0.40, 0.24, 0.42));
+    ui.draw_text(
+        Pos2::new(label_rect.x() + label_pad_x, label_rect.y() + 3.0 * s),
+        &label,
+        font,
+        Color::rgba(1.0, 0.78, 0.48, 0.96),
+    );
+}
+
 /// Render thin health bars above enemies that have taken damage.
 pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4, dt: f32) {
     use rift_engine::ui::im::WorldUi;

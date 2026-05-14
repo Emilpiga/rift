@@ -211,6 +211,9 @@ pub struct MinimapEnemy {
 #[derive(Copy, Clone, Debug)]
 pub struct MinimapPartyMember {
     pub pos: (f32, f32),
+    /// Facing as a 2D vector in nav-grid space (x, z). The
+    /// widget normalises it before drawing the directional marker.
+    pub facing: (f32, f32),
 }
 
 /// Local player marker on the minimap.
@@ -249,6 +252,9 @@ pub struct MinimapView<'a> {
     pub props: &'a [MinimapProp],
     /// Grid-space centre for the zoomed minimap viewport.
     pub focus: Option<(f32, f32)>,
+    /// When true, fit the whole grid into the minimap instead
+    /// of using the player-centered dungeon viewport.
+    pub show_full_extent: bool,
     /// Optional rift / hub portal pip (grid coords).
     pub portal: Option<(f32, f32)>,
     /// Enemy / boss pips drawn over the floor.

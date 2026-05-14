@@ -16,6 +16,7 @@ pub fn render_item_tooltip(
 /// (falling back to the right if it doesn't fit). Used by the
 /// "Equipped" compare panel so it chains leftward off the
 /// "Hovered" tooltip rather than overlapping it.
+#[allow(dead_code)]
 pub fn render_item_tooltip_left_of(
     ui: &mut Ui<'_>,
     item: &ItemView<'_>,
@@ -162,11 +163,13 @@ fn render_item_tooltip_inner(
     t.show(ui, anchor, &lines)
 }
 
+#[allow(dead_code)]
 pub fn render_compare_delta(ui: &mut Ui<'_>, rows: &[CompareDeltaRow<'_>], anchor: Pos2) -> Rect {
     render_compare_delta_inner(ui, rows, anchor, None, true)
 }
 
 /// Place the delta panel to the LEFT of `anchor_rect`.
+#[allow(dead_code)]
 pub fn render_compare_delta_left_of(
     ui: &mut Ui<'_>,
     rows: &[CompareDeltaRow<'_>],

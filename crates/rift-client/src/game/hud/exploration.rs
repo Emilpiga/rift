@@ -24,6 +24,7 @@ pub fn render_minimap(
     seen: &mut Vec<bool>,
     zone_title: &str,
     zone_detail: &str,
+    show_full_extent: bool,
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
 ) {
@@ -47,8 +48,10 @@ pub fn render_minimap(
 
     let mut party: Vec<MinimapPartyMember> = Vec::new();
     for (_id, (t, _rp)) in world.query::<(&Transform, &RemotePlayer)>().iter() {
+        let facing = t.rotation * Vec3::Z;
         party.push(MinimapPartyMember {
             pos: (t.position.x, t.position.z),
+            facing: (facing.x, facing.z),
         });
     }
 
@@ -79,7 +82,19 @@ pub fn render_minimap(
             seen.resize(needed, false);
         }
         let mut visible = vec![false; needed];
-        update_minimap_visibility(floor, seen, &mut visible, &revealers);
+        if show_full_extent {
+            for z in 0..floor.depth {
+                for x in 0..floor.width {
+                    let idx = z * floor.width + x;
+                    if floor.tiles[idx] != Tile::Wall {
+                        seen[idx] = true;
+                        visible[idx] = true;
+                    }
+                }
+            }
+        } else {
+            update_minimap_visibility(floor, seen, &mut visible, &revealers);
+        }
 
         cells.reserve(needed);
         for z in 0..floor.depth {
@@ -119,6 +134,7 @@ pub fn render_minimap(
         cells: &cells,
         props: &props,
         focus: player.map(|p| p.pos),
+        show_full_extent,
         portal: portal_pos.map(|p| (p.x, p.z)),
         enemies: &enemies,
         party: &party,

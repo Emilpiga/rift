@@ -1,6 +1,5 @@
 use glam::{Mat4, Vec3};
-use rift_dungeon::NavGrid;
-use rift_dungeon::RoomTheme;
+use rift_dungeon::{FloorMood, NavGrid, RoomTheme};
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::{
     Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, Renderable, Skinned,
@@ -406,37 +405,26 @@ impl FloorManager {
             .map(|s| s + rift.floor as u64 * 7)
             .unwrap_or(42 + rift.floor as u64 * 7);
         let floor = Floor::generate(config, seed);
+        let mood = floor.mood;
 
         self.boss_room_center = floor.boss_room_center;
         self.portal_anchors = floor.portal_anchors;
         self.nav_grid = NavGrid::from_floor(&floor);
         self.minimap_seen = vec![false; floor.width * floor.depth];
 
-        // Set floor theme clear color — cave-dark Diablo ambience.
-        // Torches carry the warm punctuation, so the unlit base
-        // is intentionally near-black.
-        renderer.clear_color = match rift.floor % 4 {
-            0 => [0.006, 0.004, 0.003, 1.0], // dark stone dungeon
-            1 => [0.004, 0.007, 0.004, 1.0], // mossy crypts
-            2 => [0.014, 0.004, 0.003, 1.0], // infernal red tint
-            _ => [0.003, 0.005, 0.010, 1.0], // icy depths
-        };
-        // Fog color matches `SkyConfig::rift`'s dim oxblood horizon,
-        // so distant geometry dissolves into the dome instead of
-        // reading as a separate visibility wall around the player.
-        renderer.fog_color = [0.060, 0.012, 0.012];
-        // Tighter fog for damp, claustrophobic rift floors. The
-        // player still has line-of-sight to the room they're in,
-        // but anything past the next doorway dissolves into the
-        // black, keeping torches dramatic.
-        renderer.fog_start = 6.0;
-        renderer.fog_end = 22.0;
+        let atmosphere = mood_atmosphere(mood);
+        renderer.clear_color = atmosphere.clear_color;
+        renderer.ssao_strength = 0.7;
+        renderer.fog_color = atmosphere.fog_color;
+        renderer.fog_start = atmosphere.fog_start;
+        renderer.fog_end = atmosphere.fog_end;
 
-        // Crimson-and-black gloom dome. The dungeon is roofless,
-        // so the player sees the sky above the parapets — paired
-        // with the black fog wall it reads as a bleeding sky
-        // strangled by smoke, which is the rift's whole vibe.
-        renderer.sky = rift_engine::SkyConfig::rift();
+        // Rift gloom dome tinted by the floor mood. The fog wall
+        // and the abyss-ocean shader now share the same chromatic
+        // signature, so a crypt floor reads cold-blue below the
+        // platforms, an archive reads violet, an infernal floor
+        // stays blood-red, etc.
+        renderer.sky = rift_sky_for_atmosphere(&atmosphere);
         // Cave-dark key + low ambient so torches drive the look.
         renderer.key_light = rift_engine::KeyLight::DUNGEON;
 
@@ -997,16 +985,38 @@ impl FloorManager {
         let anchor = Vec3::new(-0.95, 0.6, 0.0);
         let centre = Vec3::new(-0.95, 0.02, 0.0);
 
-        // Atmosphere is cheap to set every frame and `point_lights`
-        // gets repopulated by per-frame systems anyway, so just
-        // overwrite — matches `generate_hub`'s recipe verbatim.
-        renderer.clear_color = [0.30, 0.20, 0.12, 1.0];
-        renderer.fog_color = [0.78, 0.55, 0.30];
-        renderer.fog_start = 8.0;
-        renderer.fog_end = 55.0;
+        // Atmosphere is cheap to set every frame. Character
+        // select gets its own quieter variant of the hub
+        // sandstorm so the preview model stays legible.
+        renderer.clear_color = [0.22, 0.15, 0.10, 1.0];
+        renderer.fog_color = [0.58, 0.40, 0.24];
+        renderer.fog_start = 14.0;
+        renderer.fog_end = 80.0;
+        renderer.ssao_strength = 0.08;
         renderer.camera.far = 260.0;
         renderer.sky = rift_engine::SkyConfig::sandstorm_hub();
-        renderer.key_light = rift_engine::KeyLight::SANDSTORM;
+        renderer.sky.sun_dir = Vec3::new(0.24, 0.46, -0.86).normalize();
+        renderer.sky.sun_strength = 0.32;
+        renderer.sky.sun_size = 0.9992;
+        renderer.sky.cloud_flash_color = Vec3::new(0.95, 0.76, 0.48);
+        renderer.key_light = rift_engine::KeyLight {
+            direction: Vec3::new(0.24, 0.62, -0.74),
+            color: Vec3::new(1.65, 1.22, 0.76),
+            ambient: 0.42,
+        };
+        renderer.point_lights.clear();
+        renderer.point_lights.push(rift_engine::PointLight {
+            position: Vec3::new(-1.30, 2.05, 2.65),
+            color: Vec3::new(1.0, 0.72, 0.42),
+            radius: 9.5,
+            intensity: 2.4,
+        });
+        renderer.point_lights.push(rift_engine::PointLight {
+            position: Vec3::new(1.25, 2.80, -2.25),
+            color: Vec3::new(0.95, 0.62, 0.34),
+            radius: 12.0,
+            intensity: 1.15,
+        });
 
         if !self.char_select_backdrop_built {
             // ── Ground disc (sand PBR) ──────────────────────
@@ -1020,12 +1030,7 @@ impl FloorManager {
                     renderer.set_object_shared_material(platform_obj_idx, set);
                     let pbr_flags = f32::from_bits(1u32);
                     renderer
-                        .set_object_material_params(platform_obj_idx, [1.0, 0.015, pbr_flags, 0.0]);
-                } else {
-                    self.env.ensure_crimson_stone(renderer);
-                    if let Some(set) = self.env.crimson_stone_set {
-                        renderer.set_object_shared_material(platform_obj_idx, set);
-                    }
+                        .set_object_material_params(platform_obj_idx, [1.0, 0.012, pbr_flags, 0.0]);
                 }
                 renderer.set_object_casts_shadow(platform_obj_idx, false);
             }
@@ -1049,7 +1054,8 @@ impl FloorManager {
                 if let Some(set) = self.env.desert_rocks_set {
                     renderer.set_object_shared_material(dunes_obj_idx, set);
                     let pbr_flags = f32::from_bits(1u32);
-                    renderer.set_object_material_params(dunes_obj_idx, [1.0, 0.01, pbr_flags, 0.0]);
+                    renderer
+                        .set_object_material_params(dunes_obj_idx, [1.0, 0.008, pbr_flags, 0.0]);
                 }
                 renderer.set_object_casts_shadow(dunes_obj_idx, false);
             }
@@ -1073,7 +1079,7 @@ impl FloorManager {
                 + (t * 0.08 + 0.4).sin() * 0.10;
             let gust = (1.0 + slow * 0.45).max(0.05);
             renderer.vfx_system.set_anchor(h, anchor);
-            renderer.vfx_system.set_brightness(h, gust);
+            renderer.vfx_system.set_brightness(h, gust * 0.10);
         }
     }
 
@@ -1139,6 +1145,7 @@ impl FloorManager {
         // play area reads as enclosed by airborne sand
         // rather than open desert.
         renderer.clear_color = [0.30, 0.20, 0.12, 1.0];
+        renderer.ssao_strength = 0.7;
         // Fog colour: matches the sky's horizon band so the
         // foggy platform edge fades smoothly into the dust
         // horizon instead of showing a darker rust-coloured
@@ -1470,6 +1477,99 @@ impl FloorManager {
     }
 }
 
+struct MoodAtmosphere {
+    clear_color: [f32; 4],
+    fog_color: [f32; 3],
+    fog_start: f32,
+    fog_end: f32,
+}
+
+fn mood_atmosphere(mood: FloorMood) -> MoodAtmosphere {
+    match mood {
+        FloorMood::Sanctuary => MoodAtmosphere {
+            clear_color: [0.30, 0.20, 0.12, 1.0],
+            fog_color: [0.78, 0.55, 0.30],
+            fog_start: 8.0,
+            fog_end: 55.0,
+        },
+        FloorMood::Crypt => MoodAtmosphere {
+            clear_color: [0.004, 0.007, 0.010, 1.0],
+            fog_color: [0.030, 0.060, 0.085],
+            fog_start: 5.5,
+            fog_end: 20.0,
+        },
+        FloorMood::Armory => MoodAtmosphere {
+            clear_color: [0.010, 0.006, 0.004, 1.0],
+            fog_color: [0.080, 0.036, 0.016],
+            fog_start: 6.5,
+            fog_end: 24.0,
+        },
+        FloorMood::Archive => MoodAtmosphere {
+            clear_color: [0.006, 0.005, 0.010, 1.0],
+            fog_color: [0.038, 0.032, 0.075],
+            fog_start: 6.0,
+            fog_end: 23.0,
+        },
+        FloorMood::Shrine => MoodAtmosphere {
+            clear_color: [0.012, 0.009, 0.004, 1.0],
+            fog_color: [0.095, 0.060, 0.022],
+            fog_start: 7.0,
+            fog_end: 26.0,
+        },
+        FloorMood::Prison => MoodAtmosphere {
+            clear_color: [0.004, 0.006, 0.005, 1.0],
+            fog_color: [0.030, 0.050, 0.036],
+            fog_start: 5.0,
+            fog_end: 19.0,
+        },
+        FloorMood::Infernal => MoodAtmosphere {
+            clear_color: [0.014, 0.004, 0.003, 1.0],
+            fog_color: [0.090, 0.012, 0.008],
+            fog_start: 5.5,
+            fog_end: 21.0,
+        },
+    }
+}
+
+fn rift_sky_for_atmosphere(atmosphere: &MoodAtmosphere) -> rift_engine::SkyConfig {
+    let mut sky = rift_engine::SkyConfig::rift();
+    let fog = Vec3::new(
+        atmosphere.fog_color[0],
+        atmosphere.fog_color[1],
+        atmosphere.fog_color[2],
+    );
+    let peak = fog.max_element().max(0.001);
+    let chroma = fog / peak;
+    let mood_zenith = fog * 1.85 + chroma * 0.050;
+    let mood_horizon = fog * 0.88 + chroma * 0.014;
+    let mood_ground = fog * 0.46 + chroma * 0.004;
+
+    sky.zenith = mix_rgb(
+        sky.zenith,
+        [mood_zenith.x, mood_zenith.y, mood_zenith.z],
+        0.56,
+    );
+    sky.horizon = mix_rgb(
+        sky.horizon,
+        [mood_horizon.x, mood_horizon.y, mood_horizon.z],
+        0.74,
+    );
+    sky.ground = mix_rgb(
+        sky.ground,
+        [mood_ground.x, mood_ground.y, mood_ground.z],
+        0.70,
+    );
+    sky
+}
+
+fn mix_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
 /// Spawn a remote (server-replicated) enemy's visual + ECS shell.
 /// Used by `net_client::sync_enemies` when a fresh enemy `NetId`
 /// shows up in a snapshot. We omit `Enemy`, `AiAgent`, and
@@ -1513,6 +1613,12 @@ pub fn spawn_remote_enemy_entity(
     if let Some(set) = shared_set {
         renderer.set_object_shared_material(obj_index, set);
     }
+    if matches!(role, MonsterRole::Wraith) {
+        if let Some(obj) = renderer.objects.get_mut(obj_index) {
+            obj.tint = [0.72, 1.20, 1.35, 0.48];
+        }
+        renderer.set_object_casts_shadow(obj_index, false);
+    }
     let skinned = Skinned {
         mesh: asset.mesh.clone(),
         scratch: Vec::new(),
@@ -1541,8 +1647,8 @@ pub fn spawn_remote_enemy_entity(
         progress_value: 0.0,
         kind: match role {
             MonsterRole::Brute | MonsterRole::Elite | MonsterRole::Boss => EnemyKind::Brute,
-            MonsterRole::Stalker => EnemyKind::Stalker,
-            MonsterRole::Caster => EnemyKind::Caster,
+            MonsterRole::Stalker | MonsterRole::Wraith => EnemyKind::Stalker,
+            MonsterRole::Caster | MonsterRole::Mindbinder => EnemyKind::Caster,
         },
     });
     builder.add(skinned);

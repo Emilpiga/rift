@@ -244,7 +244,7 @@ pub fn tick(
         // Other-role wind-up phases shouldn't occur on a
         // stalker; if they ever do (component shuffle, save
         // load), reset to a clean Approach.
-        AiPhase::Windup { .. } | AiPhase::Idle => {
+        AiPhase::Windup { .. } | AiPhase::MindbinderSigil { .. } | AiPhase::Idle => {
             en.ai_phase = AiPhase::StalkerApproach;
         }
     }

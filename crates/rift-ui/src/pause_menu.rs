@@ -1,5 +1,5 @@
 //! In-game pause menu (Escape). Renders a centred modal with
-//! Resume / Settings / Exit-to-Character-Select / Exit-Game
+//! Resume / Settings / optional Exit-to-Hub / Exit-to-Character-Select / Exit-Game
 //! buttons over a dimmed backdrop.
 //!
 //! State-less widget — the host owns the "menu open" flag and
@@ -15,7 +15,7 @@ use rift_ui_types::pause_menu::PauseMenuAction;
 
 /// One frame of the pause menu. Call inside `Ui::begin`/`end`
 /// scope when the menu is open.
-pub fn frame_pause_menu(ui: &mut Ui<'_>) -> Option<PauseMenuAction> {
+pub fn frame_pause_menu(ui: &mut Ui<'_>, in_rift: bool) -> Option<PauseMenuAction> {
     let screen = ui.screen_rect();
     ui.with_layer(Layer::Modal, |ui| {
         ui.draw_rect(screen, Color::rgba(0.0, 0.0, 0.0, 0.55));
@@ -29,7 +29,7 @@ pub fn frame_pause_menu(ui: &mut Ui<'_>) -> Option<PauseMenuAction> {
     let sc = theme.scale;
     let s = ui.screen_size();
     let mw = 360.0 * sc;
-    let mh = 340.0 * sc;
+    let mh = if in_rift { 398.0 * sc } else { 340.0 * sc };
     let modal_rect = Rect::from_xywh((s.x - mw) * 0.5, (s.y - mh) * 0.5, mw, mh);
 
     let mut action: Option<PauseMenuAction> = None;
@@ -65,6 +65,18 @@ pub fn frame_pause_menu(ui: &mut Ui<'_>) -> Option<PauseMenuAction> {
                     action = Some(PauseMenuAction::OpenSettings);
                 }
                 y += btn_h + gap;
+
+                if in_rift {
+                    let hub_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
+                    if Button::danger("Exit to Hub")
+                        .size(ButtonSize::Large)
+                        .show_with_id(ui, id.child("hub"), hub_rect)
+                        .clicked
+                    {
+                        action = Some(PauseMenuAction::ExitToHub);
+                    }
+                    y += btn_h + gap;
+                }
 
                 let chsel_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
                 if Button::new("Exit to Character Select")

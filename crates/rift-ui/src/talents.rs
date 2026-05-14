@@ -133,7 +133,10 @@ pub fn frame_talent_panel(
     PanelHeader::new("TALENTS")
         .subtitle("Left-click to spend. Right-click to refund. Drag to pan, scroll to zoom.")
         .right_text(&pill_text)
-        .show(ui, Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h));
+        .show(
+            ui,
+            Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h),
+        );
 
     // ── Search field (top, below header text) ───────────
     let search_w = 240.0 * theme.scale;

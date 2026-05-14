@@ -202,48 +202,117 @@ impl Mesh {
     /// A wall segment with a custom color (for per-floor theme).
     pub fn wall_colored(color: Vec3) -> Self {
         let h = 5.0_f32; // Wall height
-        let v = |pos: [f32; 3], normal: [f32; 3], uv: [f32; 2]| Vertex {
-            position: Vec3::from(pos),
-            normal: Vec3::from(normal),
-            color,
-            uv: Vec2::from(uv),
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let mut emit_face = |p00: Vec3,
+                             p10: Vec3,
+                             p11: Vec3,
+                             p01: Vec3,
+                             normal: Vec3,
+                             uv00: Vec2,
+                             uv10: Vec2,
+                             uv11: Vec2,
+                             uv01: Vec2,
+                             u_steps: u32,
+                             v_steps: u32| {
+            let base = vertices.len() as u32;
+            for v in 0..=v_steps {
+                let tv = v as f32 / v_steps as f32;
+                let left = p00.lerp(p01, tv);
+                let right = p10.lerp(p11, tv);
+                let uv_left = uv00.lerp(uv01, tv);
+                let uv_right = uv10.lerp(uv11, tv);
+                for u in 0..=u_steps {
+                    let tu = u as f32 / u_steps as f32;
+                    vertices.push(Vertex {
+                        position: left.lerp(right, tu),
+                        normal,
+                        color,
+                        uv: uv_left.lerp(uv_right, tu),
+                    });
+                }
+            }
+            let row = u_steps + 1;
+            for v in 0..v_steps {
+                for u in 0..u_steps {
+                    let a = base + v * row + u;
+                    let b = a + 1;
+                    let c = a + row;
+                    let d = c + 1;
+                    indices.extend_from_slice(&[a, b, d, d, c, a]);
+                }
+            }
         };
 
-        let vertices = vec![
-            // Front face (z+)
-            v([-0.5, 0.0, 0.5], [0.0, 0.0, 1.0], [0.0, 0.0]),
-            v([0.5, 0.0, 0.5], [0.0, 0.0, 1.0], [1.0, 0.0]),
-            v([0.5, h, 0.5], [0.0, 0.0, 1.0], [1.0, h]),
-            v([-0.5, h, 0.5], [0.0, 0.0, 1.0], [0.0, h]),
-            // Back face (z-)
-            v([0.5, 0.0, -0.5], [0.0, 0.0, -1.0], [0.0, 0.0]),
-            v([-0.5, 0.0, -0.5], [0.0, 0.0, -1.0], [1.0, 0.0]),
-            v([-0.5, h, -0.5], [0.0, 0.0, -1.0], [1.0, h]),
-            v([0.5, h, -0.5], [0.0, 0.0, -1.0], [0.0, h]),
-            // Top face (y+)
-            v([-0.5, h, 0.5], [0.0, 1.0, 0.0], [0.0, 0.0]),
-            v([0.5, h, 0.5], [0.0, 1.0, 0.0], [1.0, 0.0]),
-            v([0.5, h, -0.5], [0.0, 1.0, 0.0], [1.0, 1.0]),
-            v([-0.5, h, -0.5], [0.0, 1.0, 0.0], [0.0, 1.0]),
-            // Right face (x+)
-            v([0.5, 0.0, 0.5], [1.0, 0.0, 0.0], [0.0, 0.0]),
-            v([0.5, 0.0, -0.5], [1.0, 0.0, 0.0], [1.0, 0.0]),
-            v([0.5, h, -0.5], [1.0, 0.0, 0.0], [1.0, h]),
-            v([0.5, h, 0.5], [1.0, 0.0, 0.0], [0.0, h]),
-            // Left face (x-)
-            v([-0.5, 0.0, -0.5], [-1.0, 0.0, 0.0], [0.0, 0.0]),
-            v([-0.5, 0.0, 0.5], [-1.0, 0.0, 0.0], [1.0, 0.0]),
-            v([-0.5, h, 0.5], [-1.0, 0.0, 0.0], [1.0, h]),
-            v([-0.5, h, -0.5], [-1.0, 0.0, 0.0], [0.0, h]),
-        ];
-
-        let indices = vec![
-            0, 1, 2, 2, 3, 0, // front
-            4, 5, 6, 6, 7, 4, // back
-            8, 9, 10, 10, 11, 8, // top
-            12, 13, 14, 14, 15, 12, // right
-            16, 17, 18, 18, 19, 16, // left
-        ];
+        let side_u = 4;
+        let side_v = 10;
+        let top_steps = 4;
+        emit_face(
+            Vec3::new(-0.5, 0.0, 0.5),
+            Vec3::new(0.5, 0.0, 0.5),
+            Vec3::new(0.5, h, 0.5),
+            Vec3::new(-0.5, h, 0.5),
+            Vec3::Z,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, h),
+            Vec2::new(0.0, h),
+            side_u,
+            side_v,
+        );
+        emit_face(
+            Vec3::new(0.5, 0.0, -0.5),
+            Vec3::new(-0.5, 0.0, -0.5),
+            Vec3::new(-0.5, h, -0.5),
+            Vec3::new(0.5, h, -0.5),
+            Vec3::NEG_Z,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, h),
+            Vec2::new(0.0, h),
+            side_u,
+            side_v,
+        );
+        emit_face(
+            Vec3::new(-0.5, h, 0.5),
+            Vec3::new(0.5, h, 0.5),
+            Vec3::new(0.5, h, -0.5),
+            Vec3::new(-0.5, h, -0.5),
+            Vec3::Y,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0),
+            top_steps,
+            top_steps,
+        );
+        emit_face(
+            Vec3::new(0.5, 0.0, 0.5),
+            Vec3::new(0.5, 0.0, -0.5),
+            Vec3::new(0.5, h, -0.5),
+            Vec3::new(0.5, h, 0.5),
+            Vec3::X,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, h),
+            Vec2::new(0.0, h),
+            side_u,
+            side_v,
+        );
+        emit_face(
+            Vec3::new(-0.5, 0.0, -0.5),
+            Vec3::new(-0.5, 0.0, 0.5),
+            Vec3::new(-0.5, h, 0.5),
+            Vec3::new(-0.5, h, -0.5),
+            Vec3::NEG_X,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, h),
+            Vec2::new(0.0, h),
+            side_u,
+            side_v,
+        );
 
         Self { vertices, indices }
     }
@@ -506,8 +575,11 @@ impl Mesh {
     /// Generate a batched dungeon floor from tile positions.
     /// Uses checker pattern with slight color variation for visual interest.
     pub fn dungeon_floor(positions: &[Vec3], floor_num: u32) -> Self {
-        let mut vertices = Vec::with_capacity(positions.len() * 4);
-        let mut indices = Vec::with_capacity(positions.len() * 6);
+        const SUBDIV: u32 = 4;
+        let verts_per_tile = ((SUBDIV + 1) * (SUBDIV + 1)) as usize;
+        let indices_per_tile = (SUBDIV * SUBDIV * 6) as usize;
+        let mut vertices = Vec::with_capacity(positions.len() * verts_per_tile);
+        let mut indices = Vec::with_capacity(positions.len() * indices_per_tile);
 
         // Color palette changes per floor for visual variety
         // These tint the stone texture, so keep them brighter (texture darkens them)
@@ -518,58 +590,45 @@ impl Mesh {
             _ => Vec3::new(0.38, 0.48, 0.60), // ice cavern
         };
 
-        for (i, pos) in positions.iter().enumerate() {
-            let base_idx = (i * 4) as u32;
+        for pos in positions.iter() {
+            let base_idx = vertices.len() as u32;
             let ix = pos.x as u32;
             let iz = pos.z as u32;
             // Subtle variation using position hash
             let hash = ((ix.wrapping_mul(7) ^ iz.wrapping_mul(13)) % 100) as f32 / 800.0;
             let color = base_color + Vec3::splat(hash);
 
-            // Use world-space UVs for seamless tiling across tiles
-            let u0 = pos.x - 0.5;
-            let v0 = pos.z - 0.5;
-            let u1 = pos.x + 0.5;
-            let v1 = pos.z + 0.5;
-
             // pos.y carries the tile's elevation (set by
             // dungeon::Floor::floor_positions); we lay the
             // quad at that height so raised daises and sunken
             // pits land at the right Y without per-tile
             // transforms.
-            vertices.push(Vertex {
-                position: *pos + Vec3::new(-0.5, 0.0, -0.5),
-                normal: Vec3::Y,
-                color,
-                uv: Vec2::new(u0, v0),
-            });
-            vertices.push(Vertex {
-                position: *pos + Vec3::new(0.5, 0.0, -0.5),
-                normal: Vec3::Y,
-                color,
-                uv: Vec2::new(u1, v0),
-            });
-            vertices.push(Vertex {
-                position: *pos + Vec3::new(0.5, 0.0, 0.5),
-                normal: Vec3::Y,
-                color,
-                uv: Vec2::new(u1, v1),
-            });
-            vertices.push(Vertex {
-                position: *pos + Vec3::new(-0.5, 0.0, 0.5),
-                normal: Vec3::Y,
-                color,
-                uv: Vec2::new(u0, v1),
-            });
+            for z in 0..=SUBDIV {
+                let tz = z as f32 / SUBDIV as f32;
+                let local_z = -0.5 + tz;
+                for x in 0..=SUBDIV {
+                    let tx = x as f32 / SUBDIV as f32;
+                    let local_x = -0.5 + tx;
+                    let world = *pos + Vec3::new(local_x, 0.0, local_z);
+                    vertices.push(Vertex {
+                        position: world,
+                        normal: Vec3::Y,
+                        color,
+                        uv: Vec2::new(world.x, world.z),
+                    });
+                }
+            }
 
-            indices.extend_from_slice(&[
-                base_idx,
-                base_idx + 2,
-                base_idx + 1,
-                base_idx,
-                base_idx + 3,
-                base_idx + 2,
-            ]);
+            let row = SUBDIV + 1;
+            for z in 0..SUBDIV {
+                for x in 0..SUBDIV {
+                    let a = base_idx + z * row + x;
+                    let b = a + 1;
+                    let c = a + row;
+                    let d = c + 1;
+                    indices.extend_from_slice(&[a, d, b, a, c, d]);
+                }
+            }
         }
 
         Self { vertices, indices }
@@ -2146,35 +2205,35 @@ fn visit_node_inner(
         let mesh_name = gmesh.name().unwrap_or("");
         if mesh_name_filter(node_name, mesh_name) {
             for prim in gmesh.primitives() {
-            let reader = prim.reader(|b| Some(&buffers[b.index()]));
-            let positions: Vec<[f32; 3]> = match reader.read_positions() {
-                Some(it) => it.collect(),
-                None => continue,
-            };
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|it| it.collect())
-                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
-            let uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(|tc| tc.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.5, 0.5]; positions.len()]);
-            let colors: Option<Vec<[f32; 3]>> =
-                reader.read_colors(0).map(|c| c.into_rgb_f32().collect());
+                let reader = prim.reader(|b| Some(&buffers[b.index()]));
+                let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                    Some(it) => it.collect(),
+                    None => continue,
+                };
+                let normals: Vec<[f32; 3]> = reader
+                    .read_normals()
+                    .map(|it| it.collect())
+                    .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+                let uvs: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|tc| tc.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.5, 0.5]; positions.len()]);
+                let colors: Option<Vec<[f32; 3]>> =
+                    reader.read_colors(0).map(|c| c.into_rgb_f32().collect());
 
-            // Material base colour: factor + (optional) texture sampled
-            // at each vertex's UV and baked into vertex colour. This is
-            // a cheap stand-in for binding per-primitive material sets
-            // and is what makes the nature-prop pack actually look
-            // like trees / leaves / mushrooms instead of pure white.
-            let material = prim.material();
-            let pbr = material.pbr_metallic_roughness();
-            let base_color = pbr.base_color_factor();
-            let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
-            let base_tex = pbr.base_color_texture().and_then(|info| {
-                load_gltf_image(info.texture().source(), buffers, base_dir, assets)
-            });
-            log::info!(
+                // Material base colour: factor + (optional) texture sampled
+                // at each vertex's UV and baked into vertex colour. This is
+                // a cheap stand-in for binding per-primitive material sets
+                // and is what makes the nature-prop pack actually look
+                // like trees / leaves / mushrooms instead of pure white.
+                let material = prim.material();
+                let pbr = material.pbr_metallic_roughness();
+                let base_color = pbr.base_color_factor();
+                let tint = glam::Vec3::new(base_color[0], base_color[1], base_color[2]);
+                let base_tex = pbr.base_color_texture().and_then(|info| {
+                    load_gltf_image(info.texture().source(), buffers, base_dir, assets)
+                });
+                log::info!(
                 "  primitive material={:?} base_color_factor=[{:.2},{:.2},{:.2},{:.2}] base_tex={} emissive=[{:.2},{:.2},{:.2}] emissive_strength={:.2} emissive_tex={}",
                 material.name(),
                 base_color[0],
@@ -2193,65 +2252,65 @@ fn visit_node_inner(
                 },
             );
 
-            // Emissive contribution from the Principled BSDF's
-            // Emission socket (Blender) → glTF `emissiveFactor`,
-            // optionally amplified by `KHR_materials_emissive_strength`
-            // when the Emission Strength in Blender is > 1. We add
-            // this on top of the base colour so emissive primitives
-            // (e.g. a wand's crystal tip) push past linear 1.0 and
-            // get picked up by the bloom bright-pass downstream.
-            // Areas without emission contribute zero, so a base-only
-            // primitive is unchanged.
-            let emissive_factor = material.emissive_factor();
-            let emissive_strength = material.emissive_strength().unwrap_or(1.0);
-            let emissive =
-                glam::Vec3::new(emissive_factor[0], emissive_factor[1], emissive_factor[2])
-                    * emissive_strength;
-            let emissive_tex = material.emissive_texture().and_then(|info| {
-                load_gltf_image(info.texture().source(), buffers, base_dir, assets)
-            });
-
-            let base_idx = out.vertices.len() as u32;
-            for i in 0..positions.len() {
-                let p_local = glam::Vec3::from(positions[i]).extend(1.0);
-                let p_world = (world * p_local).truncate();
-                let n_local = glam::Vec3::from(normals[i]);
-                let n_world = (normal_mat * n_local).normalize_or_zero();
-                let mut color = match &colors {
-                    Some(c) => glam::Vec3::from(c[i]) * tint,
-                    None => tint,
-                };
-                if let Some(img) = &base_tex {
-                    color *= img.sample(uvs[i]);
-                }
-                let mut em = emissive;
-                if let Some(img) = &emissive_tex {
-                    em *= img.sample(uvs[i]);
-                }
-                color += em;
-                out.vertices.push(Vertex {
-                    position: p_world,
-                    normal: if n_world == glam::Vec3::ZERO {
-                        glam::Vec3::Y
-                    } else {
-                        n_world
-                    },
-                    color,
-                    uv: glam::Vec2::from(uvs[i]),
+                // Emissive contribution from the Principled BSDF's
+                // Emission socket (Blender) → glTF `emissiveFactor`,
+                // optionally amplified by `KHR_materials_emissive_strength`
+                // when the Emission Strength in Blender is > 1. We add
+                // this on top of the base colour so emissive primitives
+                // (e.g. a wand's crystal tip) push past linear 1.0 and
+                // get picked up by the bloom bright-pass downstream.
+                // Areas without emission contribute zero, so a base-only
+                // primitive is unchanged.
+                let emissive_factor = material.emissive_factor();
+                let emissive_strength = material.emissive_strength().unwrap_or(1.0);
+                let emissive =
+                    glam::Vec3::new(emissive_factor[0], emissive_factor[1], emissive_factor[2])
+                        * emissive_strength;
+                let emissive_tex = material.emissive_texture().and_then(|info| {
+                    load_gltf_image(info.texture().source(), buffers, base_dir, assets)
                 });
-            }
 
-            if let Some(idx_iter) = reader.read_indices() {
-                for i in idx_iter.into_u32() {
-                    out.indices.push(base_idx + i);
+                let base_idx = out.vertices.len() as u32;
+                for i in 0..positions.len() {
+                    let p_local = glam::Vec3::from(positions[i]).extend(1.0);
+                    let p_world = (world * p_local).truncate();
+                    let n_local = glam::Vec3::from(normals[i]);
+                    let n_world = (normal_mat * n_local).normalize_or_zero();
+                    let mut color = match &colors {
+                        Some(c) => glam::Vec3::from(c[i]) * tint,
+                        None => tint,
+                    };
+                    if let Some(img) = &base_tex {
+                        color *= img.sample(uvs[i]);
+                    }
+                    let mut em = emissive;
+                    if let Some(img) = &emissive_tex {
+                        em *= img.sample(uvs[i]);
+                    }
+                    color += em;
+                    out.vertices.push(Vertex {
+                        position: p_world,
+                        normal: if n_world == glam::Vec3::ZERO {
+                            glam::Vec3::Y
+                        } else {
+                            n_world
+                        },
+                        color,
+                        uv: glam::Vec2::from(uvs[i]),
+                    });
                 }
-            } else {
-                // Non-indexed primitive: emit sequential indices.
-                for i in 0..(positions.len() as u32) {
-                    out.indices.push(base_idx + i);
+
+                if let Some(idx_iter) = reader.read_indices() {
+                    for i in idx_iter.into_u32() {
+                        out.indices.push(base_idx + i);
+                    }
+                } else {
+                    // Non-indexed primitive: emit sequential indices.
+                    for i in 0..(positions.len() as u32) {
+                        out.indices.push(base_idx + i);
+                    }
                 }
             }
-        }
         }
     }
 

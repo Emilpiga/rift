@@ -737,6 +737,26 @@ pub mod id {
     /// around the caster after a wind-up. Kind is
     /// [`AbilityKind::Summon`].
     pub const SUMMON_BRUTES: AbilityWireId = AbilityWireId::new(69);
+    /// Wraith cone scream. Server-resolved directly by the
+    /// Wraith AI so it can hit a cone of players, but it has
+    /// a registry row for combat-meter attribution.
+    pub const WRAITH_SCREAM: AbilityWireId = AbilityWireId::new(70);
+    /// Mindbinder ground-control sigil. Kind is
+    /// [`AbilityKind::DelayedAoe`]; the AI places it under the
+    /// target and reuses the ground-slam telegraph visuals.
+    pub const VOID_SIGIL: AbilityWireId = AbilityWireId::new(71);
+    /// Visual-only Wraith scream wind-up event. `dir` carries
+    /// the cone facing direction.
+    pub const WRAITH_SCREAM_WINDUP: AbilityWireId = AbilityWireId::new(72);
+    /// Visual-only Wraith scream release event. `dir` carries
+    /// the cone facing direction.
+    pub const WRAITH_SCREAM_IMPACT: AbilityWireId = AbilityWireId::new(73);
+    /// Visual-only Mindbinder sigil wind-up event. `target`
+    /// carries the sigil centre and `dir.x` carries radius.
+    pub const VOID_SIGIL_WINDUP: AbilityWireId = AbilityWireId::new(74);
+    /// Visual-only Mindbinder sigil impact event. Same payload
+    /// convention as [`VOID_SIGIL_WINDUP`].
+    pub const VOID_SIGIL_IMPACT: AbilityWireId = AbilityWireId::new(75);
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -1669,6 +1689,53 @@ pub static REGISTRY: &[Ability] = &[
             cast_spark: None,
             shape: ShapeVisuals::None,
         },
+        effects: &[],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: AbilityId("wraith_scream"),
+        wire_id: id::WRAITH_SCREAM,
+        name: "Wraith Scream",
+        description: "",
+        icon: None,
+        cooldown: 3.2,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 12.0,
+        damage_mult: 1.0,
+        range: 4.8,
+        unlock_level: 0,
+        element: Element::None,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::ClientOnly,
+        visuals: AbilityVisuals::NONE,
+        effects: &[],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: AbilityId("void_sigil"),
+        wire_id: id::VOID_SIGIL,
+        name: "Void Sigil",
+        description: "",
+        icon: None,
+        cooldown: 4.8,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 14.0,
+        damage_mult: 1.0,
+        range: 11.0,
+        unlock_level: 0,
+        element: Element::None,
+        archetype: Archetype::Aoe,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::DelayedAoe {
+            radius: 2.6,
+            windup: 0.95,
+        },
+        visuals: AbilityVisuals::NONE,
         effects: &[],
         audio: AbilityAudio::SILENT,
     },

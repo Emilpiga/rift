@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use glam::Vec3;
+use rift_client::auth::Signer;
 use rift_client::game::{EquipRequest, GameState, NetTransitionRequest, StashRequest};
 use rift_client::net_client::{ClientProfile, NetClient};
 use rift_engine::{App, Input, LoadStatus, Renderer, Window};
@@ -12,6 +13,8 @@ struct RiftApp {
     /// fallback. See `parse_args` for the resolution order of
     /// the connect address.
     net: NetClient,
+    server_addr: SocketAddr,
+    signer: Signer,
 }
 
 impl App for RiftApp {
@@ -50,16 +53,20 @@ impl App for RiftApp {
 
         self.state.update(renderer, input, dt);
 
+        if self.state.pause.request_character_select {
+            self.return_to_character_select(renderer);
+            return;
+        }
+
         if !self.state.is_net_transitioning() {
             self.forward_client_commands();
             self.apply_server_pushed_state(renderer);
         }
 
-        // Pause-menu request: the in-game "Exit Game" / "Exit
-        // to Character Select" buttons set this flag. Both
-        // currently terminate the process; the latter will be
-        // wired through a graceful session-leave message in a
-        // later landing.
+        // Pause-menu request: only the in-game "Exit Game"
+        // button terminates the process. "Exit to Character
+        // Select" is handled above by reconnecting and routing
+        // back to the roster screen.
         if self.state.pause.request_quit {
             log::info!("pause menu: quit requested");
             std::process::exit(0);
@@ -128,12 +135,35 @@ impl App for RiftApp {
 /// The client is always networked — there is no offline mode —
 /// so these helpers can borrow the `NetClient` directly.
 impl RiftApp {
+    fn return_to_character_select(&mut self, renderer: &mut Renderer) {
+        log::info!("pause menu: returning to character select");
+        if !self.state.floor.in_hub {
+            self.net.request_return_to_hub();
+        }
+        self.net.request_goodbye();
+        self.net.step(Duration::ZERO, None);
+
+        let identity = self.signer.identity_hint();
+        match NetClient::connect(self.server_addr) {
+            Ok(mut net) => {
+                net.set_signer(self.signer.clone());
+                self.net = net;
+                self.state.return_to_character_select(renderer, identity);
+            }
+            Err(err) => {
+                log::error!("failed to reconnect for character select: {err}");
+                self.state.pause.request_character_select = false;
+                self.state.pause.request_quit = true;
+            }
+        }
+    }
+
     /// Drive the network layer and apply any server-driven floor
     /// transition. Has to run before [`Self::sync_entities_from_snapshot`]
     /// so freshly-spawned avatars land in the new world rather
     /// than the old one.
     fn net_pre_phase(&mut self, renderer: &mut Renderer, input: &Input, dt: f32) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
 
         // If the server told us to go away (protocol mismatch,
         // future auth failure, ...) there's no point continuing
@@ -224,7 +254,7 @@ impl RiftApp {
     /// camera + render-sync see authoritative positions this
     /// frame.
     fn sync_entities_from_snapshot(&mut self, renderer: &mut Renderer, dt: f32) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
 
         net.sync_local_player(&mut state.world);
         net.sync_avatars(
@@ -347,6 +377,14 @@ impl RiftApp {
             WorldEvent::Hit { target, .. } => {
                 log::debug!("net: Hit target={target:?}");
             }
+            WorldEvent::ProjectileImpact {
+                projectile,
+                ability,
+                position,
+                dir,
+            } => {
+                self.handle_projectile_impact_event(projectile, ability, position, dir, renderer);
+            }
             WorldEvent::LootDropped {
                 loot,
                 item,
@@ -422,7 +460,7 @@ impl RiftApp {
         position: [f32; 3],
         renderer: &mut Renderer,
     ) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
         let world_pos = Vec3::from_array(position);
         if Some(target) == net.our_net_id() {
             state.combat_text.spawn_player_damage(world_pos, amount);
@@ -477,7 +515,7 @@ impl RiftApp {
         hit_dir: [f32; 3],
         renderer: &mut Renderer,
     ) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
         let enemy_entity = net.enemy_entity(entity);
         let enemy_pos = enemy_entity.and_then(|enemy| {
             state
@@ -609,7 +647,7 @@ impl RiftApp {
         renderer: &mut Renderer,
     ) {
         log::info!("net: PlayerGhosted entity={entity:?}");
-        let Self { state: _, net } = self;
+        let Self { state: _, net, .. } = self;
         if Some(entity) == net.our_net_id() {
             return;
         }
@@ -632,7 +670,7 @@ impl RiftApp {
         renderer: &mut Renderer,
     ) {
         log::info!("net: PlayersRevived count={}", entities.len());
-        let Self { state: _, net } = self;
+        let Self { state: _, net, .. } = self;
         for revived in entities {
             // Try the avatar position (remote players) first,
             // falling back to last_positions (works for the
@@ -665,6 +703,46 @@ impl RiftApp {
             }
             _ => {
                 log::trace!("net: unknown Vfx kind={kind}");
+            }
+        }
+    }
+
+    fn handle_projectile_impact_event(
+        &mut self,
+        projectile: rift_net::NetId,
+        ability: u16,
+        position: [f32; 3],
+        dir: [f32; 3],
+        renderer: &mut Renderer,
+    ) {
+        use rift_game::abilities::ShapeVisuals;
+
+        self.net.note_projectile_impact(projectile);
+
+        let Some(ability) =
+            rift_game::abilities::lookup(rift_game::abilities::AbilityWireId::new(ability as u8))
+        else {
+            return;
+        };
+        let ShapeVisuals::Projectile { impact, .. } = ability.visuals.shape else {
+            return;
+        };
+
+        let mut pos = Vec3::from_array(position);
+        let impact_dir = Vec3::from_array(dir);
+        if impact_dir.length_squared() > 1.0e-6 {
+            pos -= impact_dir.normalize() * 0.35;
+        }
+        renderer
+            .vfx_system
+            .spawn_bundle(rift_engine::combat::effect_for_vfx(impact), pos);
+
+        if let Some(audio) = self.state.audio.as_mut() {
+            let recipe = rift_client::game::ability_audio::audio_for(ability.wire_id);
+            if let Some(path) = recipe.impact {
+                let mut spec = rift_client::game::ability_audio::impact_spec(path);
+                rift_client::game::ability_audio::jitter_one_shot(&mut spec);
+                audio.play_one_shot(&spec, pos);
             }
         }
     }
@@ -714,6 +792,41 @@ impl RiftApp {
                 );
                 return;
             }
+            rift_game::abilities::id::VOID_SIGIL_WINDUP => {
+                let centre = target_pos.unwrap_or(cast_origin);
+                let radius = dir[0].max(0.5);
+                let duration = dir[1].max(0.05);
+                renderer.vfx_system.spawn(
+                    rift_engine::renderer::vfx::presets::void_sigil_telegraph(radius, duration),
+                    centre + Vec3::new(0.0, 0.06, 0.0),
+                );
+                return;
+            }
+            rift_game::abilities::id::VOID_SIGIL_IMPACT => {
+                let centre = target_pos.unwrap_or(cast_origin);
+                let radius = dir[0].max(0.5);
+                renderer.vfx_system.spawn_bundle(
+                    rift_engine::renderer::vfx::presets::void_sigil_impact(radius),
+                    centre + Vec3::new(0.0, 0.06, 0.0),
+                );
+                return;
+            }
+            rift_game::abilities::id::WRAITH_SCREAM_WINDUP => {
+                let scream_dir = aim.normalize_or_zero();
+                renderer.vfx_system.spawn(
+                    rift_engine::renderer::vfx::presets::wraith_scream_telegraph(aim, 0.48),
+                    cast_origin + scream_dir * 0.55 + Vec3::new(0.0, 0.95, 0.0),
+                );
+                return;
+            }
+            rift_game::abilities::id::WRAITH_SCREAM_IMPACT => {
+                let scream_dir = aim.normalize_or_zero();
+                renderer.vfx_system.spawn_bundle(
+                    rift_engine::renderer::vfx::presets::wraith_scream_impact(aim),
+                    cast_origin + scream_dir * 0.70 + Vec3::new(0.0, 0.95, 0.0),
+                );
+                return;
+            }
             _ => {}
         }
         let Some(def) = rift_game::abilities::from_wire_id(
@@ -722,7 +835,7 @@ impl RiftApp {
             return;
         };
 
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
         let caster_avatar = if Some(caster) == net.our_net_id() {
             None
         } else {
@@ -790,7 +903,7 @@ impl RiftApp {
     /// the server timed us out before the local timeout did).
     fn handle_channel_end_event(&mut self, caster: rift_net::NetId, ability: u16) {
         log::debug!("net: ChannelEnd caster={caster:?} ability={ability}");
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
 
         let is_local = Some(caster) == net.our_net_id();
         let entity = if is_local {
@@ -815,7 +928,7 @@ impl RiftApp {
     /// requests. None of these read server-pushed state, so
     /// they all live in one phase.
     fn forward_client_commands(&mut self) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
 
         // Push the chosen profile to the wire as soon as
         // character-select completes. Until this fires the
@@ -1180,7 +1293,7 @@ impl RiftApp {
     /// the next frame, so they live here instead of in
     /// `net_pre_phase`.
     fn apply_server_pushed_state(&mut self, renderer: &mut Renderer) {
-        let Self { state, net } = self;
+        let Self { state, net, .. } = self;
 
         // Loot-claim confirmations. `claimed_by == our_client_id`
         // means *we* picked it up; everyone else just removes
@@ -1619,8 +1732,9 @@ fn main() -> anyhow::Result<()> {
     // parallel with character-select. The cosmetic profile is
     // pushed via `set_profile` once the player picks one, which
     // also unblocks Hello.
-    let mut net = NetClient::connect(args.connect)?;
-    net.set_signer(signer);
+    let server_addr = args.connect;
+    let mut net = NetClient::connect(server_addr)?;
+    net.set_signer(signer.clone());
 
     let mut state = GameState::new();
     // Queue the dev / steam identity straight into the net
@@ -1635,5 +1749,10 @@ fn main() -> anyhow::Result<()> {
     state.character_select_skip_to_loading(identity);
 
     let window = Window::new("Rift Crawler", 1280, 720);
-    window.run(RiftApp { state, net })
+    window.run(RiftApp {
+        state,
+        net,
+        server_addr,
+        signer,
+    })
 }

@@ -32,17 +32,13 @@ vec3 shadePbr() {
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-    // Cast shadow uses plain world-space lookup; the
-    // previous heightmap-displaced shadowPos and per-light
-    // self-shadow march were removed because the visual
-    // payoff (faintly wiggly shadow edges over sand ripples)
-    // wasn't worth the per-fragment heightmap taps and, at
-    // the cast-shadow boundary, often read as noise.
-
     // ---- Directional key light ----
     vec3 L = normalize(ubo.lightDir.xyz);
     vec3 H = normalize(L + V);
-    float shadow = sampleShadowAt(fragWorldPos, N, L);
+    vec3 shadowWorldPos = heightShadowWorldPos(fragWorldPos, Ngeo, uv, push.materialParams.y);
+    vec3 lightTS = transpose(TBN) * L;
+    float shadow = sampleShadowAt(shadowWorldPos, N, L)
+                 * heightDirectionalSelfShadow(uv, lightTS, push.materialParams.y);
 
     float NDF = distributionGGX(N, H, roughness);
     float G   = geometrySmith(N, V, L, roughness);
@@ -97,19 +93,25 @@ vec3 shadePbr() {
                      (4.0 * max(dot(N, V), 0.0) * NdotLp + 1e-4);
         vec3 kSp = Fp;
         vec3 kDp = (1.0 - kSp) * (1.0 - metallic);
-        // Sample the point shadow at the heightmap-displaced
-        // position so its boundary bends along surface relief
-        // (see the directional sample for full rationale).
-        // We deliberately do *not* run a per-light heightmap
-        // self-shadow march here \u2014 in dungeons every torch
-        // is a shadow caster, so a 4-tap march per light
-        // multiplies into 30+ extra texture taps per pixel.
-        // The heightmap-displaced shadow lookup above already
-        // gives the visible "shadow bends along ridges" cue
-        // for cast shadows; the per-light self-shadow march
-        // is reserved for the directional sun where we only
-        // pay it once per fragment.
-        float pshadow = samplePointShadow(i, fragWorldPos, lightPos, radius, N);
+        vec3 lightPointTS = transpose(TBN) * Lp;
+        // Texture-height shadows add a compact self-shadow
+        // march per affecting point light. This is deliberately
+        // hidden behind the experimental setting: in torch-lit
+        // rifts it is the part of the feature the player can
+        // actually see, while slower GPUs can skip the extra
+        // height taps entirely.
+        float pshadow = sampleHeightPointShadow(
+            i,
+            fragWorldPos,
+            lightPos,
+            radius,
+            N,
+            Ngeo,
+            TBN,
+            uv,
+            lightPointTS,
+            push.materialParams.y
+        );
         lighting += (kDp * albedo / PI + specP) * lightCol * intensity * NdotLp * atten * pshadow;
 
         // ---- Fake hemispherical bounce -----

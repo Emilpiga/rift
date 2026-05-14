@@ -93,6 +93,22 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         .next()
         .unwrap_or(Vec3::Z);
     let hub_portal_pos = state.floor.hub_portal.as_ref().map(|p| p.position);
+    let portal_compass_pos = if !state.floor.in_hub && state.rift.floor_complete {
+        state
+            .floor
+            .exit_portal
+            .as_ref()
+            .map(|p| p.position)
+            .or_else(|| {
+                state
+                    .floor_mgr
+                    .portal_anchors
+                    .map(|(descend, extract)| (descend + extract) * 0.5)
+            })
+            .or(Some(state.floor_mgr.boss_room_center))
+    } else {
+        None
+    };
 
     use rift_engine::ui::im::{Color, Ui, DEFAULT_THEME};
     let mut ui = Ui::begin(
@@ -201,6 +217,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     if !state.floor.in_hub {
         hud::render_boss_arrow(&mut ui, &state.world, view_proj);
+        if let Some(portal_pos) = portal_compass_pos {
+            hud::render_portal_compass(&mut ui, &state.world, view_proj, portal_pos);
+        }
         hud::render_remote_player_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     }
     // Alt-hold loot nameplates. Drawn after world HP bars so
@@ -215,7 +234,13 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     let (minimap_zone_title, minimap_zone_detail) = if state.floor.in_hub {
         ("HUB", String::from("SANCTUARY"))
     } else {
-        ("RIFT", format!("LEVEL {}", state.rift.floor))
+        let mood = state
+            .floor_mgr
+            .dungeon
+            .as_ref()
+            .map(|floor| floor.mood.display_name())
+            .unwrap_or("UNKNOWN DEPTH");
+        ("RIFT", format!("{} - LEVEL {}", mood, state.rift.floor))
     };
     hud::render_minimap(
         &mut ui,
@@ -225,6 +250,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut state.floor_mgr.minimap_seen,
         minimap_zone_title,
         &minimap_zone_detail,
+        state.floor.in_hub,
         player_facing,
         hub_portal_pos,
     );
@@ -491,6 +517,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         if state.pause.settings_open {
             let view = rift_ui_types::settings::SettingsView {
                 master_volume: state.pause.master_volume,
+                shadows_enabled: state.pause.shadows_enabled,
+                height_shadows_enabled: state.pause.height_shadows_enabled,
             };
             for action in rift_ui::settings::frame_settings(&mut ui, &view) {
                 use rift_ui_types::settings::SettingsAction;
@@ -501,6 +529,14 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                             audio.set_master_volume(state.pause.master_volume);
                         }
                     }
+                    SettingsAction::SetShadowsEnabled(enabled) => {
+                        state.pause.shadows_enabled = enabled;
+                        renderer.shadows_enabled = enabled;
+                    }
+                    SettingsAction::SetHeightShadowsEnabled(enabled) => {
+                        state.pause.height_shadows_enabled = enabled;
+                        renderer.height_shadows_enabled = enabled;
+                    }
                     SettingsAction::Close => {
                         state.pause.settings_open = false;
                         state.pause.menu_open = true;
@@ -508,7 +544,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                 }
             }
         } else if state.pause.menu_open {
-            if let Some(action) = rift_ui::pause_menu::frame_pause_menu(&mut ui) {
+            if let Some(action) =
+                rift_ui::pause_menu::frame_pause_menu(&mut ui, !state.floor.in_hub)
+            {
                 use rift_ui_types::pause_menu::PauseMenuAction;
                 match action {
                     PauseMenuAction::Resume => state.pause.menu_open = false,
@@ -516,14 +554,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                         state.pause.menu_open = false;
                         state.pause.settings_open = true;
                     }
-                    PauseMenuAction::ExitToCharacterSelect | PauseMenuAction::ExitGame => {
-                        // Both routes currently terminate the
-                        // process. `main.rs` polls `request_quit`
-                        // after the update tick and calls
-                        // `std::process::exit(0)`. A future
-                        // landing will wire
-                        // ExitToCharacterSelect through a
-                        // graceful session-leave message.
+                    PauseMenuAction::ExitToHub => {
+                        state.pause.menu_open = false;
+                        state.net.transition = Some(crate::game::NetTransitionRequest::ReturnToHub);
+                    }
+                    PauseMenuAction::ExitToCharacterSelect => {
+                        state.pause.menu_open = false;
+                        state.pause.request_character_select = true;
+                    }
+                    PauseMenuAction::ExitGame => {
                         state.pause.request_quit = true;
                     }
                 }

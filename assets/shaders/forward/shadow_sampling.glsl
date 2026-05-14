@@ -1,14 +1,11 @@
 // ---------------------------------------------------------------------------
 // Shadow sampling shared by PBR and cel paths.
 // ---------------------------------------------------------------------------
-const vec2 POISSON_DISK[12] = vec2[](
-    vec2(-0.326,-0.406), vec2(-0.840,-0.074), vec2(-0.696, 0.457),
-    vec2(-0.203, 0.621), vec2( 0.962,-0.195), vec2( 0.473,-0.480),
-    vec2( 0.519, 0.767), vec2( 0.185,-0.893), vec2( 0.507, 0.064),
-    vec2( 0.896, 0.412), vec2(-0.322,-0.933), vec2(-0.792,-0.598)
-);
-
 float sampleShadowAt(vec3 worldPos, vec3 N, vec3 L) {
+    if (ubo.pointShadowMeta.y < 0.5) {
+        return 1.0;
+    }
+
     vec4 lightClip = ubo.lightVP * vec4(worldPos, 1.0);
     vec3 lightNDC = lightClip.xyz / max(lightClip.w, 1e-5);
     vec3 shadowUV = vec3(lightNDC.xy * 0.5 + 0.5, lightNDC.z);
@@ -78,72 +75,25 @@ float sampleShadowAt(vec3 worldPos, vec3 N, vec3 L) {
     float grazing     = 1.0 - clamp(NdotL, 0.0, 1.0);
     float depthFactor = smoothstep(0.05, 0.95, clamp(shadowUV.z, 0.0, 1.0));
 
-    // ----- Smooth Gaussian penumbra -----
-    // Earlier revisions used a 12-tap rotated-Poisson kernel
-    // for the near-range disc. With per-pixel rotation jitter
-    // and only 12 samples the *average* across neighbouring
-    // fragments was correct, but each individual fragment
-    // sampled a different sub-disc of the kernel — so on
-    // curved receivers (character torsos, limbs, helmets)
-    // the cast shadow read as stippled noise instead of a
-    // smooth gradient. The eye picks that up immediately
-    // as "pixelated shadow", even with a wide kernel.
-    //
-    // Solution: replace the rotated-Poisson disc with a
-    // fixed 5×5 separable Gaussian. Every fragment samples
-    // exactly the same 25 positions in the same orientation,
-    // so the result is a *deterministic* smooth blur of the
-    // hardware-PCF result instead of a stochastic estimate
-    // of one. Cost is higher (25 taps vs 12) but each tap
-    // is a hardware-PCF compare, and we drop the second
-    // 12-tap "soft" loop entirely — a single kernel whose
-    // radius scales with distance/grazing covers everything.
-    float nearTexels = 4.0 * (1.0 + grazing * 1.2);
-    // Widen further with camera distance so distant shadows
-    // soften into the fog band rather than aliasing.
-    float kernelTexels = mix(nearTexels, 8.0, distFactor);
-    vec2  kernelStep   = texelSize * (kernelTexels / 2.0); // half-radius per ring
+    // Fixed 3x3 Gaussian. The old 5x5 kernel was smooth, but it
+    // spent 25 hardware-PCF compares on every lit fragment even
+    // when texture-height shadows were disabled. This keeps the
+    // same stable, non-crawling shape at roughly one third the
+    // sampling cost.
+    float nearTexels = 2.1 * (1.0 + grazing * 0.75);
+    float kernelTexels = mix(nearTexels, 4.6, distFactor);
+    vec2 kernelStep = texelSize * kernelTexels;
 
-    // 5×5 Gaussian weights (sigma ≈ 1.0). Hand-rolled so the
-    // compiler unrolls cleanly on every driver.
-    const float W0 = 0.2270270270;          // centre
-    const float W1 = 0.1945945946;          // axial ±1
-    const float W2 = 0.1216216216;          // axial ±2
-    // Off-axis weights are products. We don't store them;
-    // the compiler folds the constants.
     float s = 0.0;
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0, -2.0), shadowUV.z)) * (W2 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0, -2.0), shadowUV.z)) * (W1 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0, -2.0), shadowUV.z)) * (W0 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0, -2.0), shadowUV.z)) * (W1 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0, -2.0), shadowUV.z)) * (W2 * W2);
-
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0, -1.0), shadowUV.z)) * (W2 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0, -1.0), shadowUV.z)) * (W1 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0, -1.0), shadowUV.z)) * (W0 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0, -1.0), shadowUV.z)) * (W1 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0, -1.0), shadowUV.z)) * (W2 * W1);
-
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  0.0), shadowUV.z)) * (W2 * W0);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  0.0), shadowUV.z)) * (W1 * W0);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  0.0), shadowUV.z)) * (W0 * W0);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  0.0), shadowUV.z)) * (W1 * W0);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  0.0), shadowUV.z)) * (W2 * W0);
-
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  1.0), shadowUV.z)) * (W2 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  1.0), shadowUV.z)) * (W1 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  1.0), shadowUV.z)) * (W0 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  1.0), shadowUV.z)) * (W1 * W1);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  1.0), shadowUV.z)) * (W2 * W1);
-
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-2.0,  2.0), shadowUV.z)) * (W2 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  2.0), shadowUV.z)) * (W1 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  2.0), shadowUV.z)) * (W0 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  2.0), shadowUV.z)) * (W1 * W2);
-    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 2.0,  2.0), shadowUV.z)) * (W2 * W2);
-    // Weights sum to 1.0 by construction (the W{0,1,2}
-    // values above are the canonical 5-tap Gaussian
-    // coefficients), so no normalisation is required.
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0, -1.0), shadowUV.z)) * 0.0625;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0, -1.0), shadowUV.z)) * 0.1250;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0, -1.0), shadowUV.z)) * 0.0625;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  0.0), shadowUV.z)) * 0.1250;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  0.0), shadowUV.z)) * 0.2500;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  0.0), shadowUV.z)) * 0.1250;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2(-1.0,  1.0), shadowUV.z)) * 0.0625;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 0.0,  1.0), shadowUV.z)) * 0.1250;
+    s += texture(shadowMap, vec3(shadowUV.xy + kernelStep * vec2( 1.0,  1.0), shadowUV.z)) * 0.0625;
 
     // Apply the frustum-edge feather: pull s toward 1.0 as the
     // sample approaches the frustum boundary. This kills the
@@ -179,7 +129,14 @@ float pointShadowCompare(int lightIdx, vec3 sampleDir, float receiver, float bia
 // 0.0 = fully occluded. Returns 1.0 when `lightIdx` is past the active
 // shadow-caster count so non-shadowed point lights remain pure additive.
 // ---------------------------------------------------------------------------
-float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radius, vec3 N) {
+float samplePointShadowBiased(
+    int lightIdx,
+    vec3 fragWorld,
+    vec3 lightPos,
+    float radius,
+    vec3 N,
+    float receiverBias
+) {
     if (lightIdx >= int(ubo.pointShadowMeta.x)) {
         return 1.0;
     }
@@ -191,7 +148,7 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
         // contribution, so save the texture taps.
         return 1.0;
     }
-    float normFrag = fragDist / radius;
+    float normFrag = clamp(fragDist / radius + receiverBias, 0.0, 1.0);
     vec3 dir = toFrag / max(fragDist, 1e-4);
 
     // Slope-scaled bias: cosine-grazing surfaces need a larger
@@ -202,16 +159,9 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     float NdotL = max(dot(N, -dir), 0.0);
     float bias = max(0.0040 * (1.0 - NdotL), 0.0010);
 
-    // PCF over an orthonormal basis built from `dir`. Offsets
-    // are scaled in normalised-distance space so the kernel
-    // covers ~1–2 atlas texels at our 512² per face.
-    //
-    // A 12-tap disk plus a tiny smooth compare gives enough
-    // levels that torch shadows read as a continuous penumbra
-    // instead of stacked rings. The rotation is world-stable
-    // below, so any residual grain sticks to the receiver
-    // surface instead of crawling over the screen when the
-    // camera pans.
+    // Small cross PCF over an orthonormal basis built from `dir`.
+    // The earlier 12-tap disk looked a little softer, but the cost
+    // was paid once per affecting shadowed point light, per fragment.
     vec3 up = abs(dir.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
     vec3 tuRaw = normalize(cross(up, dir));
     vec3 tvRaw = cross(dir, tuRaw);
@@ -231,20 +181,90 @@ float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radiu
     float grazing = 1.0 - clamp(NdotL, 0.0, 1.0);
     // Keep nearby contacts tight, then broaden the angular
     // kernel as the receiver approaches the light's range.
-    float k = mix(0.0025, 0.0065, distFade) * (1.0 + grazing * 0.20);
+    float k = mix(0.0030, 0.0075, distFade) * (1.0 + grazing * 0.20);
     // Manual compare softness turns the binary R32 distance
     // test into a narrow transition. It removes the 9-level
     // banding without making fully-shadowed interiors glow.
     float softness = mix(0.00025, 0.00140, distFade) * (1.0 + grazing * 0.25);
 
-    float occ = pointShadowCompare(lightIdx, dir, normFrag, bias, softness) * 2.0;
-    for (int i = 0; i < 12; i++) {
-        vec2 p = POISSON_DISK[i];
-        occ += pointShadowCompare(lightIdx, dir + (tu * p.x + tv * p.y) * k,
-                                  normFrag, bias, softness);
-    }
-    occ *= (1.0 / 14.0);
+    float occ = pointShadowCompare(lightIdx, dir, normFrag, bias, softness) * 0.36;
+    occ += pointShadowCompare(lightIdx, dir + tu * k, normFrag, bias, softness) * 0.16;
+    occ += pointShadowCompare(lightIdx, dir - tu * k, normFrag, bias, softness) * 0.16;
+    occ += pointShadowCompare(lightIdx, dir + tv * k, normFrag, bias, softness) * 0.16;
+    occ += pointShadowCompare(lightIdx, dir - tv * k, normFrag, bias, softness) * 0.16;
     return occ;
+}
+
+float samplePointShadowAt(int lightIdx, vec3 fragWorld, vec3 lightPos, float radius, vec3 N) {
+    return samplePointShadowBiased(lightIdx, fragWorld, lightPos, radius, N, 0.0);
+}
+
+float samplePointShadow(int lightIdx, vec3 fragWorld, vec3 lightPos, float radius, vec3 N) {
+    return samplePointShadowAt(lightIdx, fragWorld, lightPos, radius, N);
+}
+
+float sampleHeightPointShadow(
+    int lightIdx,
+    vec3 fragWorld,
+    vec3 lightPos,
+    float radius,
+    vec3 N,
+    vec3 Ngeo,
+    mat3 TBN,
+    vec2 uv,
+    vec3 lightTS,
+    float scale
+) {
+    if (lightIdx >= int(ubo.pointShadowMeta.x)) {
+        return 1.0;
+    }
+    if (!heightShadowsEnabled(scale) || lightTS.z <= 0.08) {
+        return samplePointShadowAt(lightIdx, fragWorld, lightPos, radius, N);
+    }
+
+    vec3 toLight = normalize(lightPos - fragWorld);
+    float heightTowardLight = max(dot(Ngeo, toLight), 0.0);
+    float baseHeight = texture(heightMap, uv).r;
+    float shadowRelief = scale * 24.0;
+    float relief = smoothstep(0.004, 0.020, scale);
+    float invLightZ = 1.0 / max(lightTS.z, 0.08);
+    vec2 lightRayUv = lightTS.xy * invLightZ * shadowRelief * 1.35;
+    vec2 receiverProjection = -lightTS.xy * invLightZ;
+    float grazing = 1.0 - smoothstep(0.14, 0.82, lightTS.z);
+
+    float centeredBaseHeight = baseHeight - 0.5;
+    vec3 baseTangentOffset = TBN * vec3(
+        receiverProjection * centeredBaseHeight * shadowRelief * 0.85 * grazing,
+        0.0
+    );
+    vec3 baseReceiver = fragWorld + Ngeo * (centeredBaseHeight * shadowRelief)
+        + baseTangentOffset;
+    float baseBias = -centeredBaseHeight * shadowRelief * heightTowardLight / max(radius, 1e-3);
+    float shadow = samplePointShadowBiased(lightIdx, baseReceiver, lightPos, radius, N, baseBias);
+
+    float blockerOcc = 0.0;
+
+    for (int i = 1; i <= 6; i++) {
+        float t = float(i) / 6.0;
+        vec2 sampleUv = uv + lightRayUv * t;
+        float h = texture(heightMap, sampleUv).r;
+        float centeredHeight = h - 0.5;
+        vec3 tangentOffset = TBN * vec3(
+            receiverProjection * centeredHeight * shadowRelief * 0.95 * grazing,
+            0.0
+        );
+        vec3 receiver = fragWorld + Ngeo * (centeredHeight * shadowRelief) + tangentOffset;
+        float sampleReceiverBias = -centeredHeight * shadowRelief * heightTowardLight / max(radius, 1e-3);
+        shadow = min(
+            shadow,
+            samplePointShadowBiased(lightIdx, receiver, lightPos, radius, N, sampleReceiverBias)
+        );
+
+        float blocker = h - baseHeight - t * 0.018;
+        blockerOcc = max(blockerOcc, smoothstep(0.006, 0.045, blocker));
+    }
+
+    return shadow * mix(1.0, 0.58, blockerOcc * relief);
 }
 
 // ---------------------------------------------------------------------------

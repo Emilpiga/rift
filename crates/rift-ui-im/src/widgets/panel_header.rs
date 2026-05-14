@@ -112,13 +112,19 @@ fn draw_panel_header(ui: &mut Ui<'_>, rect: Rect, header: PanelHeader<'_>, theme
     let title_color = header
         .title_color
         .unwrap_or(Color::rgba(0.98, 0.86, 0.58, 1.0));
-    let text_x = rect.x() + 14.0 * scale;
+    let text_x = rect.x() + 17.0 * scale;
     let title_y = if header.subtitle.is_some() {
         rect.y() + 6.0 * scale
     } else {
         rect.y() + (rect.height() - title_size) * 0.5 - 1.0 * scale
     };
-    draw_shadowed_text(ui, Pos2::new(text_x, title_y), header.title, title_size, title_color);
+    draw_shadowed_text(
+        ui,
+        Pos2::new(text_x, title_y),
+        header.title,
+        title_size,
+        title_color,
+    );
 
     if let Some(subtitle) = header.subtitle {
         let subtitle_size = theme.fonts.size_sm;
@@ -153,7 +159,12 @@ fn draw_header_rule(ui: &mut Ui<'_>, rect: Rect, scale: f32) {
     let bronze = Color::rgba(0.86, 0.58, 0.25, 0.82);
     let mid_x = rect.x() + rect.width() * 0.5;
     ui.draw_grad4_rect(
-        Rect::from_xywh(rect.x() + 7.0 * scale, y, mid_x - rect.x() - 7.0 * scale, 1.0),
+        Rect::from_xywh(
+            rect.x() + 7.0 * scale,
+            y,
+            mid_x - rect.x() - 7.0 * scale,
+            1.0,
+        ),
         clear,
         bronze,
         clear,

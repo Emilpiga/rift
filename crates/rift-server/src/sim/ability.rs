@@ -965,9 +965,14 @@ pub fn dispatch(
             // Paired impact visual — sustained ground ring
             // is already up from the wind-up event; this
             // fires the shockwave.
+            let impact_ability = if accepted.ability_id == id::VOID_SIGIL {
+                id::VOID_SIGIL_IMPACT
+            } else {
+                id::GROUND_SLAM_IMPACT
+            };
             sinks.events.push(WorldEvent::AbilityCast {
                 caster: accepted.caster,
-                ability: id::GROUND_SLAM_IMPACT.raw() as u16,
+                ability: impact_ability.raw() as u16,
                 origin: accepted.origin.to_array(),
                 dir: [effective_radius, 0.0],
                 target: Some(accepted.origin.to_array()),

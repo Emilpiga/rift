@@ -8,6 +8,8 @@
 // normalized distance to determine occlusion.
 
 layout(location = 0) in vec3 worldPos;
+layout(location = 1) in vec3 worldNormal;
+layout(location = 2) in vec2 shadowUV;
 layout(location = 0) out float outNormalizedDistance;
 
 layout(set = 0, binding = 0) uniform UniformData {
@@ -30,10 +32,37 @@ layout(set = 0, binding = 0) uniform UniformData {
 layout(push_constant) uniform PushConstants {
     mat4 model;
     uvec4 indices;
+    vec4 materialParams;
 } pc;
 
+// Matches the forward material descriptor set. The shadow pass only
+// needs heightMap, but Vulkan pipeline layout compatibility requires
+// binding the same full material set.
+layout(set = 1, binding = 4) uniform sampler2D heightMap;
+
 void main() {
+    gl_FragDepth = gl_FragCoord.z;
+
     vec3 lightPos = ubo.pointLightPos[pc.indices.y].xyz;
     float radius  = max(ubo.pointLightPos[pc.indices.y].w, 1e-3);
-    outNormalizedDistance = length(worldPos - lightPos) / radius;
+    uint flags = floatBitsToUint(pc.materialParams.z);
+    bool usePbrHeight = (flags & 1u) != 0u
+        && ubo.pointShadowMeta.z > 0.5
+        && pc.materialParams.y > 0.001;
+
+    vec3 shadowWorldPos = worldPos;
+    if (usePbrHeight) {
+        float h = texture(heightMap, shadowUV).r;
+        vec3 N = normalize(worldNormal);
+        if (!any(isnan(N))) {
+            shadowWorldPos += N * ((h - 0.5) * pc.materialParams.y * 14.0);
+        }
+    }
+
+    if (usePbrHeight) {
+        vec4 clip = ubo.pointShadowFaceVP[pc.indices.x] * vec4(shadowWorldPos, 1.0);
+        gl_FragDepth = clamp(clip.z / max(clip.w, 1e-5), 0.0, 1.0);
+    }
+
+    outNormalizedDistance = length(shadowWorldPos - lightPos) / radius;
 }

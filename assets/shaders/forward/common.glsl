@@ -20,6 +20,8 @@ layout(binding = 0) uniform UniformData {
     // loop below uses this to decide which point lights have a cube
     // atlas slot (and so should be sampled for occlusion) vs. which
     // are shadowless additive fill.
+    // y = realtime shadow sampling enabled.
+    // z = experimental texture-height-aware PBR shadow lookup enabled.
     vec4 pointShadowMeta;
     // x = seconds since renderer start. Used by the blood-field
     // composite to compute splat age (`u_time - splat_spawn_time`)

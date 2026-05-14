@@ -87,6 +87,10 @@ pub struct SkyConfig {
     /// Cool-white-blue for normal sky lightning, warm amber for
     /// the rare "hellfire" strikes.
     pub cloud_flash_color: Vec3,
+    /// Procedural abyss layer drawn below the horizon. Rift floors
+    /// use this to make the space under floating dungeon pieces read
+    /// as a deep void instead of a flat ground-colour gradient.
+    pub void_depth_strength: f32,
 }
 
 impl Default for SkyConfig {
@@ -107,6 +111,7 @@ impl Default for SkyConfig {
             cloud_strength: 0.0,
             cloud_flash: 0.0,
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+            void_depth_strength: 0.0,
         }
     }
 }
@@ -127,6 +132,7 @@ impl SkyConfig {
             cloud_strength: 0.0,
             cloud_flash: 0.0,
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+            void_depth_strength: 0.0,
         }
     }
 
@@ -165,6 +171,7 @@ impl SkyConfig {
             cloud_strength: 0.0,
             cloud_flash: 0.0,
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+            void_depth_strength: 1.0,
         }
     }
 
@@ -203,6 +210,7 @@ impl SkyConfig {
             cloud_strength: 0.95,
             cloud_flash: 0.0,
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+            void_depth_strength: 0.55,
         }
     }
 
@@ -252,6 +260,7 @@ impl SkyConfig {
             cloud_strength: 0.0,
             cloud_flash: 0.0,
             cloud_flash_color: Vec3::new(0.85, 0.95, 1.25),
+            void_depth_strength: 0.0,
         }
     }
 }
@@ -451,7 +460,12 @@ impl SkyRenderer {
                 config.sun_strength,
             ],
             sun_dir: [config.sun_dir.x, config.sun_dir.y, config.sun_dir.z, 0.0],
-            cloud_params: [time_secs, config.cloud_strength, config.cloud_flash, 0.0],
+            cloud_params: [
+                time_secs,
+                config.cloud_strength,
+                config.cloud_flash,
+                config.void_depth_strength,
+            ],
             cloud_flash_color: [
                 config.cloud_flash_color.x,
                 config.cloud_flash_color.y,

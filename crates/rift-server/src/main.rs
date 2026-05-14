@@ -296,6 +296,9 @@ impl Server {
             renet::ServerEvent::ClientDisconnected { client_id, reason } => {
                 let cid = ClientId(client_id.raw());
                 log::info!("{} disconnected ({reason:?})", self.client_tag(cid));
+                if self.client_instance.contains_key(&cid) {
+                    self.move_client_to_hub(cid);
+                }
                 // Pull the session out so we can fire one final
                 // save and broadcast `PlayerLeft` with the net id
                 // it owned. After this point the session row is
@@ -548,6 +551,9 @@ impl Server {
             ClientMsg::Ack { .. } => { /* phase 4 */ }
             ClientMsg::Goodbye => {
                 log::info!("Goodbye from {from:?}");
+                if self.instance_for_client(from).is_some() {
+                    self.move_client_to_hub(from);
+                }
             }
             ClientMsg::RequestEnterRift => {
                 // Legacy / shorthand: behave as if the player

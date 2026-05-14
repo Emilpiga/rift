@@ -28,7 +28,8 @@ pub use exploration::{render_descend_tooltip, render_hud_prompt, render_minimap}
 pub use loot_labels::render_loot_labels;
 pub use voting::{render_exit_vote, render_shrine_progress};
 pub use world_overlays::{
-    render_boss_arrow, render_enemy_health_bars, render_remote_player_health_bars,
+    render_boss_arrow, render_enemy_health_bars, render_portal_compass,
+    render_remote_player_health_bars,
 };
 
 use glam::Vec3;
@@ -159,14 +160,17 @@ pub fn render_hud(
     if !in_hub {
         let prog_pct = rift.progress_percent() / 100.0;
         let prog_w = 300.0 * s;
-        let prog_h = 16.0 * s;
+        let prog_h = 18.0 * s;
         let prog_x = (sw - prog_w) / 2.0;
         let prog_y = 10.0 * s;
-        ProgressBar::new(prog_pct)
-            .fill(theme.colors.accent)
-            .track(Color::rgba(0.10, 0.10, 0.10, 0.80))
-            .border(theme.colors.border)
-            .show(ui, Rect::from_xywh(prog_x, prog_y, prog_w, prog_h));
+        render_rift_progress_bar(
+            ui,
+            Rect::from_xywh(prog_x, prog_y, prog_w, prog_h),
+            prog_pct,
+            rift.boss_spawned,
+            rift.floor_complete,
+            ui_dt,
+        );
 
         let floor_w = 40.0 * s;
         let floor_h = 20.0 * s;
@@ -191,15 +195,230 @@ pub fn render_hud(
     }
 
     if rift.floor_complete {
-        Banner::new("ENTER THE PORTAL")
-            .pill()
-            .fill(Color::rgba(0.10, 0.15, 0.25, 0.85))
-            .text_size(12.0 * s)
-            .text_color(theme.colors.accent)
-            .min_width(200.0 * s)
-            .y_factor(35.0 * s / sh)
-            .show(ui);
+        render_portal_ready_banner(ui);
     }
+}
+
+fn render_portal_ready_banner(ui: &mut Ui<'_>) {
+    let theme = *ui.theme();
+    let screen = ui.screen_size();
+    let s = theme.scale;
+    let sw = screen.x;
+    let flow = ui.state_mut().rift_progress.flow;
+
+    let w = (360.0 * s).min(sw - 28.0 * s);
+    let h = 54.0 * s;
+    let x = (sw - w) * 0.5;
+    let y = 34.0 * s;
+    let rect = Rect::from_xywh(x, y, w, h);
+    let glow = Rect::from_xywh(x - 9.0 * s, y - 7.0 * s, w + 18.0 * s, h + 14.0 * s);
+    let pulse = 0.5 + 0.5 * (flow * std::f32::consts::TAU).sin();
+
+    ui.draw_grad4_rect(
+        glow,
+        Color::rgba(0.80, 0.05, 0.10, 0.16 + pulse * 0.08),
+        Color::rgba(1.00, 0.52, 0.20, 0.12 + pulse * 0.06),
+        Color::rgba(0.08, 0.00, 0.05, 0.00),
+        Color::rgba(0.08, 0.00, 0.05, 0.00),
+    );
+    ui.draw_grad4_rect(
+        rect,
+        Color::rgba(0.13, 0.018, 0.035, 0.96),
+        Color::rgba(0.19, 0.060, 0.040, 0.96),
+        Color::rgba(0.035, 0.012, 0.026, 0.97),
+        Color::rgba(0.060, 0.020, 0.020, 0.97),
+    );
+    ui.draw_outline(rect, 1.0 * s, Color::rgba(1.0, 0.47, 0.24, 0.64));
+    ui.draw_outline(
+        Rect::from_xywh(
+            rect.x() + 2.0 * s,
+            rect.y() + 2.0 * s,
+            rect.width() - 4.0 * s,
+            rect.height() - 4.0 * s,
+        ),
+        1.0 * s,
+        Color::rgba(1.0, 0.82, 0.42, 0.16),
+    );
+
+    let sweep_x = rect.x() + rect.width() * flow;
+    ui.draw_gradient_rect(
+        Rect::from_xywh(sweep_x - 34.0 * s, rect.y(), 68.0 * s, rect.height()),
+        Color::rgba(1.0, 0.50, 0.24, 0.00),
+        Color::rgba(1.0, 0.70, 0.34, 0.14),
+    );
+
+    let title = "PORTAL OPEN";
+    let subtitle = "ENTER THE PORTAL";
+    let title_size = 15.0 * s;
+    let subtitle_size = 10.0 * s;
+    let title_w = ui.measure_text(title, title_size);
+    let subtitle_w = ui.measure_text(subtitle, subtitle_size);
+    ui.draw_text(
+        Pos2::new(
+            rect.x() + (rect.width() - title_w) * 0.5,
+            rect.y() + 9.0 * s,
+        ),
+        title,
+        title_size,
+        Color::rgba(1.0, 0.86, 0.58, 0.98),
+    );
+    ui.draw_text(
+        Pos2::new(
+            rect.x() + (rect.width() - subtitle_w) * 0.5,
+            rect.y() + 31.0 * s,
+        ),
+        subtitle,
+        subtitle_size,
+        Color::rgba(1.0, 0.38, 0.25, 0.92),
+    );
+
+    let tick_y = rect.y() + rect.height() - 5.0 * s;
+    for i in 0..9 {
+        let t = i as f32 / 8.0;
+        let alpha = 0.18 + (1.0 - (t - flow).abs().min(1.0)) * 0.12;
+        ui.draw_rect(
+            Rect::from_xywh(
+                rect.x() + 26.0 * s + t * (rect.width() - 52.0 * s),
+                tick_y,
+                14.0 * s,
+                1.0 * s,
+            ),
+            Color::rgba(1.0, 0.65, 0.30, alpha),
+        );
+    }
+}
+
+fn render_rift_progress_bar(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    target: f32,
+    boss_spawned: bool,
+    floor_complete: bool,
+    dt: f32,
+) {
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let (displayed, pulse, flow) = {
+        let anim = &mut ui.state_mut().rift_progress;
+        anim.tick(target, dt);
+        (
+            anim.bar.displayed.clamp(0.0, 1.0),
+            anim.bar.pulse.clamp(0.0, 1.0),
+            anim.flow,
+        )
+    };
+    let ready = boss_spawned || floor_complete || target >= 0.999;
+    let frame = Rect::from_xywh(
+        rect.x() - 5.0 * s,
+        rect.y() - 4.0 * s,
+        rect.width() + 10.0 * s,
+        rect.height() + 8.0 * s,
+    );
+
+    ui.draw_grad4_rect(
+        frame,
+        Color::rgba(0.055, 0.045, 0.075, 0.94),
+        Color::rgba(0.10, 0.075, 0.135, 0.94),
+        Color::rgba(0.020, 0.018, 0.026, 0.97),
+        Color::rgba(0.040, 0.030, 0.055, 0.97),
+    );
+    ui.draw_outline(frame, 1.0 * s, Color::rgba(0.60, 0.44, 0.92, 0.70));
+    ui.draw_outline(
+        Rect::from_xywh(
+            frame.x() + 2.0 * s,
+            frame.y() + 2.0 * s,
+            frame.width() - 4.0 * s,
+            frame.height() - 4.0 * s,
+        ),
+        1.0 * s,
+        Color::rgba(1.0, 0.86, 0.46, 0.16),
+    );
+
+    ui.draw_gradient_rect(
+        rect,
+        Color::rgba(0.020, 0.018, 0.028, 0.98),
+        Color::rgba(0.004, 0.004, 0.008, 0.99),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(rect.x(), rect.y() + 1.0 * s, rect.width(), 1.0 * s),
+        Color::rgba(1.0, 1.0, 1.0, 0.06),
+    );
+
+    let fill_w = rect.width() * displayed;
+    if fill_w > 0.5 {
+        let fill = Rect::from_xywh(rect.x(), rect.y(), fill_w, rect.height());
+        let lift = 1.0 + pulse * 0.22 + if ready { 0.16 } else { 0.0 };
+        ui.draw_grad4_rect(
+            fill,
+            scale_rgb_ui(Color::rgba(0.92, 0.42, 1.0, 0.98), lift),
+            scale_rgb_ui(Color::rgba(0.55, 0.82, 1.0, 0.96), lift),
+            Color::rgba(0.24, 0.08, 0.58, 0.96),
+            Color::rgba(0.12, 0.30, 0.70, 0.94),
+        );
+        ui.draw_gradient_rect(
+            Rect::from_xywh(
+                fill.x(),
+                fill.y() + 1.0 * s,
+                fill.width(),
+                fill.height() * 0.42,
+            ),
+            Color::rgba(1.0, 1.0, 1.0, 0.22 + pulse * 0.08),
+            Color::rgba(1.0, 1.0, 1.0, 0.02),
+        );
+
+        let shimmer = 0.5 + 0.5 * (flow * std::f32::consts::TAU).sin();
+        ui.draw_gradient_rect(
+            Rect::from_xywh(
+                fill.x(),
+                fill.y() + fill.height() * 0.58,
+                fill.width(),
+                fill.height() * 0.28,
+            ),
+            Color::rgba(0.75, 0.38, 1.0, 0.035 + shimmer * 0.025),
+            Color::rgba(0.20, 0.72, 1.0, 0.018 + shimmer * 0.018),
+        );
+
+        let cap_x = fill.max.x;
+        if cap_x < rect.max.x - 0.5 {
+            ui.draw_gradient_rect(
+                Rect::from_xywh(
+                    (cap_x - 2.0 * s).max(fill.x()),
+                    rect.y() + 1.0 * s,
+                    2.0 * s,
+                    rect.height() - 2.0 * s,
+                ),
+                Color::rgba(1.0, 0.92, 1.0, 0.76 + pulse * 0.18),
+                Color::rgba(0.45, 0.86, 1.0, 0.52),
+            );
+        }
+    }
+
+    let glow_alpha = if ready { 0.22 } else { 0.05 + pulse * 0.14 };
+    if fill_w > 0.5 {
+        ui.draw_grad4_rect(
+            Rect::from_xywh(
+                rect.x(),
+                rect.y() - 2.0 * s,
+                fill_w,
+                rect.height() + 4.0 * s,
+            ),
+            Color::rgba(0.95, 0.34, 1.0, glow_alpha * 0.75),
+            Color::rgba(0.38, 0.78, 1.0, glow_alpha * 0.50),
+            Color::rgba(0.20, 0.06, 0.52, glow_alpha * 0.16),
+            Color::rgba(0.10, 0.30, 0.70, glow_alpha * 0.14),
+        );
+    }
+
+    ui.draw_outline(rect, 1.0 * s, Color::rgba(0.95, 0.78, 1.0, 0.70));
+}
+
+fn scale_rgb_ui(color: Color, mul: f32) -> Color {
+    Color::rgba(
+        (color.0[0] * mul).clamp(0.0, 1.0),
+        (color.0[1] * mul).clamp(0.0, 1.0),
+        (color.0[2] * mul).clamp(0.0, 1.0),
+        color.0[3],
+    )
 }
 
 /// Fullscreen black quad used by the death→hub fade transition.
@@ -718,59 +937,19 @@ fn ability_abbrev(name: &str) -> String {
     }
 }
 
-/// Full-screen "Entering World" overlay: title, progress bar,
-/// and a tiny status label. Drawn on top of the live scene
-/// during the staged-init steps after a hub↔rift transition so
-/// the player sees something other than a frozen frame while
-/// monsters / icons stream in.
+/// Full-screen "Entering World" overlay drawn on top of the live scene
+/// during staged hub↔rift transitions.
 pub fn draw_world_loading_overlay(
     renderer: &mut rift_engine::Renderer,
     progress: f32,
     label: &str,
 ) {
-    let (sw, sh) = renderer.screen_size();
-    let batch = &mut renderer.overlay_batch;
-
-    batch.rect_px(0.0, 0.0, sw, sh, [0.02, 0.02, 0.03, 0.92], sw, sh);
-
-    let title = "Entering World";
-    let title_size = 30.0;
-    let title_w = batch.measure_text(title, title_size);
-    batch.text(
-        title,
-        (sw - title_w) * 0.5,
-        sh * 0.40 - title_size,
-        title_size,
-        [0.85, 0.80, 0.65, 1.0],
-        sw,
-        sh,
-    );
-
-    let bar_w = (sw * 0.45).max(240.0);
-    let bar_h = 18.0;
-    let bar_x = (sw - bar_w) * 0.5;
-    let bar_y = sh * 0.50;
-    batch.rect_px(bar_x, bar_y, bar_w, bar_h, [0.10, 0.10, 0.14, 1.0], sw, sh);
-    let fill_w = bar_w * progress.clamp(0.0, 1.0);
-    if fill_w > 0.5 {
-        batch.rect_px(bar_x, bar_y, fill_w, bar_h, [0.55, 0.45, 0.20, 1.0], sw, sh);
-    }
-    let border = [0.30, 0.28, 0.22, 1.0];
-    let t = 1.5;
-    batch.rect_px(bar_x, bar_y, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y + bar_h - t, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y, t, bar_h, border, sw, sh);
-    batch.rect_px(bar_x + bar_w - t, bar_y, t, bar_h, border, sw, sh);
-
-    let label_size = 14.0;
-    let label_w = batch.measure_text(label, label_size);
-    batch.text(
+    rift_engine::window::draw_forged_loading_backdrop(renderer);
+    rift_engine::window::draw_forged_loading_panel(
+        renderer,
+        "ENTERING WORLD",
+        "Crossing the threshold",
+        progress,
         label,
-        (sw - label_w) * 0.5,
-        bar_y + bar_h + 16.0,
-        label_size,
-        [0.65, 0.62, 0.55, 1.0],
-        sw,
-        sh,
     );
 }

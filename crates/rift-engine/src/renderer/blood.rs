@@ -59,6 +59,7 @@ pub const MASK_SLICE_COUNT: u32 = 4;
 /// kill) plus several queued kills overlapping; sized so the instance
 /// buffer is small (`MAX_INSTANCES * 32 B` ≈ 8 KiB).
 pub const MAX_INSTANCES: usize = 256;
+const MAX_SCHEDULED_SPLATS: usize = 1024;
 
 /// Per-instance vertex attributes. Mirrored in `blood_splat.vert`.
 #[repr(C)]
@@ -71,6 +72,12 @@ pub struct SplatInstance {
     /// z = rotation in radians (XZ orientation), w = atlas slice (cast
     /// to int via `floor(.+0.5)` in the shader).
     pub size_rot_slice: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+struct TimedSplat {
+    due_time_secs: f32,
+    instance: SplatInstance,
 }
 
 /// Description of a kill, used to drive the layered splat emission.
@@ -132,6 +139,10 @@ pub struct BloodField {
     /// Splats queued by gameplay this frame, drained into the next
     /// frame's instance buffer at record time.
     pending: Vec<SplatInstance>,
+    /// Future splats for kill sprays. Drained into `pending` once
+    /// their due time arrives so blood appears to hit and spread
+    /// across the floor instead of popping in as one finished decal.
+    scheduled: Vec<TimedSplat>,
     /// Number of instances actually uploaded for the most recent
     /// frame. Read by `record_splat_pass`.
     pub frame_instance_counts: [u32; MAX_FRAMES_IN_FLIGHT],
@@ -435,6 +446,7 @@ impl BloodField {
             mask_set,
             instance_buffers,
             pending: Vec::with_capacity(MAX_INSTANCES),
+            scheduled: Vec::with_capacity(MAX_INSTANCES),
             frame_instance_counts: [0; MAX_FRAMES_IN_FLIGHT],
             world_xform: Vec4::ZERO,
             floor_y: 0.0,
@@ -482,6 +494,7 @@ impl BloodField {
         self.active = true;
         self.needs_clear = true;
         self.pending.clear();
+        self.scheduled.clear();
         // New floor — stains from the previous floor are stale.
         // Trackers keep their charge so a player walking out of one
         // floor with bloody boots still leaves prints in the next.
@@ -496,6 +509,7 @@ impl BloodField {
         self.floor_y_max = 0.0;
         self.active = false;
         self.pending.clear();
+        self.scheduled.clear();
         self.recent_kills.clear();
     }
 
@@ -610,7 +624,7 @@ impl BloodField {
             // the pool isn't always aligned to the impulse axis.
             let pool_aspect = 1.05 + 1.25 * self.rand01() + 0.20 * power;
             let pool_jitter = self.signed_jitter(0.35);
-            self.emit_at(
+            self.emit_at_after(
                 pool_center,
                 pool_size_m,
                 pool_aspect,
@@ -618,6 +632,7 @@ impl BloodField {
                 2,
                 intensity,
                 time_secs,
+                0.08,
             );
             // Inner core stamp — smaller, fully saturated, slot 1.
             // Offset slightly forward inside the pool so the bright
@@ -625,7 +640,7 @@ impl BloodField {
             let core_jit_x = self.signed_jitter(0.05);
             let core_jit_z = self.signed_jitter(0.05);
             let core_rot_jit = self.signed_jitter(0.20);
-            self.emit_at(
+            self.emit_at_after(
                 pool_center + dir * 0.10 + Vec2::new(core_jit_x, core_jit_z),
                 pool_size_m * 0.62,
                 1.30,
@@ -633,6 +648,7 @@ impl BloodField {
                 1,
                 1.0,
                 time_secs,
+                0.16,
             );
             // Asymmetric spill lobes — 2 extra stamps offset in
             // random directions around the pool. These break the
@@ -652,7 +668,8 @@ impl BloodField {
                 // others read as rounder satellite blobs.
                 let lobe_slice = if self.rand01() < 0.55 { 2 } else { 3 };
                 let lobe_intensity = 0.85 + 0.15 * self.rand01();
-                self.emit_at(
+                let lobe_delay = 0.20 + self.rand01() * 0.18;
+                self.emit_at_after(
                     pool_center + lobe_dir * lobe_dist,
                     lobe_size,
                     lobe_aspect,
@@ -660,6 +677,7 @@ impl BloodField {
                     lobe_slice,
                     lobe_intensity,
                     time_secs,
+                    lobe_delay,
                 );
             }
         }
@@ -690,14 +708,15 @@ impl BloodField {
             let rot_jit = self.signed_jitter(0.25);
             // Stagger gives a motion-blur read.
             let stagger = 0.04 + i as f32 * 0.05;
-            self.emit_at(
+            self.emit_at_after(
                 center,
                 size_m,
                 aspect,
                 angle + rot_jit,
                 1,
                 intensity,
-                time_secs + stagger,
+                time_secs,
+                0.04 + stagger,
             );
         }
 
@@ -740,7 +759,17 @@ impl BloodField {
             } else {
                 self.rand01() * std::f32::consts::TAU
             };
-            self.emit_at(center, size_m, aspect, rot, slice, intensity, time_secs);
+            let drop_delay = 0.06 + self.rand01() * 0.42;
+            self.emit_at_after(
+                center,
+                size_m,
+                aspect,
+                rot,
+                slice,
+                intensity,
+                time_secs,
+                drop_delay,
+            );
         }
 
         // ---- Layer 4: Wall arcs ----
@@ -774,8 +803,17 @@ impl BloodField {
             let main_size = 0.55 + 0.40 * power;
             let main_jit = self.signed_jitter(0.25);
             let core_jit = self.signed_jitter(0.40);
-            self.emit_at(hit_xz, main_size, 1.30, theta + main_jit, 2, 1.0, time_secs);
-            self.emit_at(
+            self.emit_at_after(
+                hit_xz,
+                main_size,
+                1.30,
+                theta + main_jit,
+                2,
+                1.0,
+                time_secs,
+                0.10,
+            );
+            self.emit_at_after(
                 hit_xz,
                 main_size * 0.55,
                 1.10,
@@ -783,27 +821,30 @@ impl BloodField {
                 1,
                 1.0,
                 time_secs,
+                0.18,
             );
             // Lateral satellites along the wall to imply spread.
             let sat_rot_a = self.rand01() * std::f32::consts::TAU;
             let sat_rot_b = self.rand01() * std::f32::consts::TAU;
-            self.emit_at(
+            self.emit_at_after(
                 hit_xz + wall_tan * (0.35 + 0.15 * power),
                 main_size * 0.40,
                 0.95,
                 sat_rot_a,
                 3,
                 0.85,
-                time_secs + 0.02,
+                time_secs,
+                0.24,
             );
-            self.emit_at(
+            self.emit_at_after(
                 hit_xz - wall_tan * (0.35 + 0.15 * power),
                 main_size * 0.40,
                 0.95,
                 sat_rot_b,
                 3,
                 0.85,
-                time_secs + 0.04,
+                time_secs,
+                0.30,
             );
         }
     }
@@ -984,8 +1025,65 @@ impl BloodField {
         intensity: f32,
         time_secs: f32,
     ) {
-        let Some(uv) = self.world_to_uv(center_xz) else {
+        let Some(instance) = self.splat_instance(
+            center_xz,
+            size_m,
+            aspect,
+            rotation,
+            atlas_slice,
+            intensity,
+            time_secs,
+        ) else {
             return;
+        };
+        self.queue_splat(instance);
+    }
+
+    fn emit_at_after(
+        &mut self,
+        center_xz: Vec2,
+        size_m: f32,
+        aspect: f32,
+        rotation: f32,
+        atlas_slice: u32,
+        intensity: f32,
+        base_time_secs: f32,
+        delay_secs: f32,
+    ) {
+        let due_time_secs = base_time_secs + delay_secs.max(0.0);
+        let Some(instance) = self.splat_instance(
+            center_xz,
+            size_m,
+            aspect,
+            rotation,
+            atlas_slice,
+            intensity,
+            due_time_secs,
+        ) else {
+            return;
+        };
+        if delay_secs <= 1.0e-4 {
+            self.queue_splat(instance);
+        } else if self.active && self.scheduled.len() < MAX_SCHEDULED_SPLATS {
+            self.scheduled.push(TimedSplat {
+                due_time_secs,
+                instance,
+            });
+        }
+    }
+
+    fn splat_instance(
+        &self,
+        center_xz: Vec2,
+        size_m: f32,
+        aspect: f32,
+        rotation: f32,
+        atlas_slice: u32,
+        intensity: f32,
+        time_secs: f32,
+    ) -> Option<SplatInstance> {
+        let Some(uv) = self.world_to_uv(center_xz) else {
+            return None;
         };
         let half_size_uv = self.world_size_to_uv(size_m * 0.5);
         // Keep the recorded aspect within sane bounds; >2.5 produces
@@ -995,10 +1093,10 @@ impl BloodField {
         // tiny droplets at least cover a few texels.
         let min_uv = 2.0 / FIELD_RESOLUTION as f32;
         let half_size_uv = half_size_uv.max(min_uv);
-        self.queue_splat(SplatInstance {
+        Some(SplatInstance {
             center_time_intensity: [uv.x, uv.y, time_secs, intensity.clamp(0.0, 1.0)],
             size_rot_slice: [half_size_uv, aspect, rotation, atlas_slice as f32],
-        });
+        })
     }
 
     /// xorshift32 in [0, 1).
@@ -1018,11 +1116,28 @@ impl BloodField {
     /// Drain the pending queue into this frame's instance buffer
     /// and record the splat pass. No-op when the field isn't bound
     /// or the queue is empty (and no clear is pending).
-    pub fn record(&mut self, device: &ash::Device, cmd: vk::CommandBuffer, frame: usize) {
+    pub fn record(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        current_time_secs: f32,
+    ) {
         if !self.active {
             self.pending.clear();
+            self.scheduled.clear();
             self.frame_instance_counts[frame] = 0;
             return;
+        }
+
+        let mut i = 0;
+        while i < self.scheduled.len() && self.pending.len() < MAX_INSTANCES {
+            if self.scheduled[i].due_time_secs <= current_time_secs {
+                let timed = self.scheduled.swap_remove(i);
+                self.pending.push(timed.instance);
+            } else {
+                i += 1;
+            }
         }
 
         let instance_count = self.pending.len() as u32;

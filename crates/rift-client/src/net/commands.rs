@@ -224,6 +224,13 @@ impl NetClient {
         self.send(Channel::Control, &ClientMsg::RequestReturnToHub);
     }
 
+    /// Send a best-effort clean leave before the client reconnects
+    /// to surface character select again.
+    pub fn request_goodbye(&mut self) {
+        log::info!("net: -> Goodbye");
+        self.send(Channel::Control, &ClientMsg::Goodbye);
+    }
+
     /// Open the rift exit vote. Sent when the local player
     /// presses F at the rift-spawn portal. Server validates the
     /// caster is alive and on a non-hub floor; on success it

@@ -6,7 +6,7 @@
 //! with everything (endpoints, width, time, brightness, baked
 //! gradients, noise params) packed into [`VfxRibbonInstance`].
 //!
-//! The vertex shader expands a billboard quad oriented along the
+//! The vertex shader expands a camera-facing segmented strip oriented along the
 //! beam, and the fragment shader samples the baked cross/length
 //! gradients with optional scrolling fbm noise — no texture
 //! atlas, no asset pipeline.
@@ -27,12 +27,30 @@ use crate::vulkan::buffer::GpuBuffer;
 use crate::vulkan::sync::MAX_FRAMES_IN_FLIGHT;
 use gpu_allocator::vulkan::Allocator;
 
-/// Quad corners in `(cross, length)` space:
+/// Strip vertices in `(cross, length)` space:
 ///   x ∈ [-0.5, 0.5] = perpendicular to the beam,
 ///   y ∈ [ 0.0, 1.0] = origin → tip.
-const QUAD_VERTICES: [[f32; 2]; 4] = [[-0.5, 0.0], [0.5, 0.0], [0.5, 1.0], [-0.5, 1.0]];
+const RIBBON_SEGMENTS: usize = 14;
+const RIBBON_INDEX_COUNT: u32 = (RIBBON_SEGMENTS * 6) as u32;
 
-const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+fn ribbon_vertices() -> Vec<[f32; 2]> {
+    let mut vertices = Vec::with_capacity((RIBBON_SEGMENTS + 1) * 2);
+    for i in 0..=RIBBON_SEGMENTS {
+        let v = i as f32 / RIBBON_SEGMENTS as f32;
+        vertices.push([-0.5, v]);
+        vertices.push([0.5, v]);
+    }
+    vertices
+}
+
+fn ribbon_indices() -> Vec<u32> {
+    let mut indices = Vec::with_capacity(RIBBON_SEGMENTS * 6);
+    for i in 0..RIBBON_SEGMENTS as u32 {
+        let base = i * 2;
+        indices.extend_from_slice(&[base, base + 1, base + 3, base, base + 3, base + 2]);
+    }
+    indices
+}
 
 pub struct RibbonRenderer {
     pub pipeline: vk::Pipeline,
@@ -55,12 +73,15 @@ impl RibbonRenderer {
         translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<Self> {
+        let vertices = ribbon_vertices();
+        let indices = ribbon_indices();
+
         let quad_vb = crate::vulkan::buffer::create_device_local_buffer(
             device,
             allocator,
             queue,
             command_pool,
-            &QUAD_VERTICES,
+            &vertices,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             "ribbon_quad_vb",
         )?;
@@ -70,7 +91,7 @@ impl RibbonRenderer {
             allocator,
             queue,
             command_pool,
-            &QUAD_INDICES,
+            &indices,
             vk::BufferUsageFlags::INDEX_BUFFER,
             "ribbon_quad_ib",
         )?;
@@ -148,7 +169,7 @@ impl RibbonRenderer {
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.quad_vb.buffer, instance_buf], &[0, 0]);
             device.cmd_bind_index_buffer(cmd, self.quad_ib.buffer, 0, vk::IndexType::UINT32);
-            device.cmd_draw_indexed(cmd, 6, count, 0, 0, 0);
+            device.cmd_draw_indexed(cmd, RIBBON_INDEX_COUNT, count, 0, 0, 0);
         }
     }
 

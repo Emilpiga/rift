@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ash::{vk, Device};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 
 pub fn create_command_pool(device: &Device, queue_family: u32) -> Result<vk::CommandPool> {
     let pool_info = vk::CommandPoolCreateInfo::default()
@@ -23,7 +23,7 @@ pub fn allocate_command_buffers(
     Ok(buffers)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct DrawCommand {
     pub vertex_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
@@ -33,6 +33,11 @@ pub struct DrawCommand {
     /// uniform set.
     pub material_set: vk::DescriptorSet,
     pub model_matrix: Mat4,
+    /// World-space center copied from `model_matrix` once while
+    /// building draw lists. Shadow passes touch this repeatedly
+    /// for light and cube-face culling, so carrying it avoids
+    /// re-extracting the translation column in inner loops.
+    pub center: Vec3,
     /// World-space bounding-sphere radius copied from the source
     /// `RenderObject` after frustum culling. Carried through here
     /// so the shadow passes (which iterate `&draws` rather than

@@ -51,6 +51,7 @@ struct WinitApp<A: App> {
     height: u32,
     initialized: bool,
     loading: bool,
+    loading_screen_presented: bool,
     last_progress: (f32, String),
     last_frame_time: std::time::Instant,
 }
@@ -61,6 +62,7 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
             let attrs = WindowAttributes::default()
                 .with_title(&self.title)
                 .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
+                .with_visible(false)
                 // Launch in borderless fullscreen on the
                 // current monitor. `Fullscreen::Borderless(None)`
                 // picks whichever monitor the window would
@@ -89,14 +91,28 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                         );
                     }
                     match Renderer::new(&window) {
-                        Ok(renderer) => {
+                        Ok(mut renderer) => {
                             // App-side init now happens incrementally via
                             // `load_step` so we can render a loading
                             // screen while it runs. Just stash the
                             // renderer here.
+                            draw_loading_overlay(
+                                &mut renderer,
+                                self.last_progress.0,
+                                &self.last_progress.1,
+                            );
+                            if let Err(e) = renderer.draw_frame() {
+                                log::warn!(
+                                    "Initial loading frame failed before window reveal: {}",
+                                    e
+                                );
+                            }
+                            window.set_visible(true);
+                            window.request_redraw();
                             self.renderer = Some(renderer);
                             self.initialized = true;
                             self.loading = true;
+                            self.loading_screen_presented = true;
                             log::info!("Window and renderer created");
                         }
                         Err(e) => {
@@ -215,24 +231,27 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                         log::error!("Prepare frame error: {}", e);
                     }
                     if self.loading {
-                        // Drive one step of app initialization, then draw
-                        // a loading screen overlay. Keep doing this every
-                        // frame until the app reports `Done`.
-                        match self.user_app.load_step(renderer) {
-                            Ok(LoadStatus::Loading { progress, label }) => {
-                                self.last_progress = (progress.clamp(0.0, 1.0), label);
-                            }
-                            Ok(LoadStatus::Done) => {
-                                self.loading = false;
-                                log::info!("App loading complete");
-                            }
-                            Err(e) => {
-                                log::error!("App load_step failed: {}", e);
-                                event_loop.exit();
-                                return;
+                        if self.loading_screen_presented {
+                            // Drive one step of app initialization, then draw
+                            // a loading screen overlay. Keep doing this every
+                            // frame until the app reports `Done`.
+                            match self.user_app.load_step(renderer) {
+                                Ok(LoadStatus::Loading { progress, label }) => {
+                                    self.last_progress = (progress.clamp(0.0, 1.0), label);
+                                }
+                                Ok(LoadStatus::Done) => {
+                                    self.loading = false;
+                                    log::info!("App loading complete");
+                                }
+                                Err(e) => {
+                                    log::error!("App load_step failed: {}", e);
+                                    event_loop.exit();
+                                    return;
+                                }
                             }
                         }
                         if self.loading {
+                            self.loading_screen_presented = true;
                             draw_loading_overlay(
                                 renderer,
                                 self.last_progress.0,
@@ -310,6 +329,7 @@ impl Window {
             height: self.height,
             initialized: false,
             loading: false,
+            loading_screen_presented: false,
             last_progress: (0.0, String::from("Loading…")),
             last_frame_time: std::time::Instant::now(),
         };
@@ -325,68 +345,181 @@ impl Window {
     }
 }
 
-/// Built-in loading screen: a dark backdrop, centered title, a horizontal
-/// progress bar, and the current task label. Drawn into the renderer's
-/// overlay batch (which is already wired into the per-frame submit path).
+/// Built-in loading screen drawn into the renderer's overlay batch.
 fn draw_loading_overlay(renderer: &mut Renderer, progress: f32, label: &str) {
-    let [w, h] = renderer.window_extent();
-    let (sw, sh) = (w as f32, h as f32);
-
     // Switch the clear color to a near-black tone for the loading screen
     // so the swapchain doesn't flash white before our overlay renders.
-    renderer.clear_color = [0.02, 0.02, 0.03, 1.0];
+    renderer.clear_color = [0.018, 0.014, 0.012, 1.0];
 
     let batch = &mut renderer.overlay_batch;
 
     // Reset any leftover overlay from the previous frame.
     batch.clear();
 
-    // Full-screen darken (in case clear color isn't honored on some path).
-    batch.rect_px(0.0, 0.0, sw, sh, [0.02, 0.02, 0.03, 1.0], sw, sh);
+    draw_forged_loading_backdrop(renderer);
 
-    // Title.
-    let title = "Rift Crawler";
-    let title_size = 36.0;
+    draw_forged_loading_panel(
+        renderer,
+        "RIFT CRAWLER",
+        "Preparing the rift",
+        progress,
+        label,
+    );
+}
+
+pub fn draw_forged_loading_backdrop(renderer: &mut Renderer) {
+    let [w, h] = renderer.window_extent();
+    let (sw, sh) = (w as f32, h as f32);
+    renderer.clear_color = [0.018, 0.015, 0.014, 1.0];
+    let batch = &mut renderer.overlay_batch;
+
+    batch.rect_px(0.0, 0.0, sw, sh, [0.018, 0.015, 0.014, 1.0], sw, sh);
+    batch.rect_px(0.0, 0.0, sw, sh, [0.030, 0.022, 0.018, 0.55], sw, sh);
+}
+
+pub fn draw_forged_loading_panel(
+    renderer: &mut Renderer,
+    title: &str,
+    subtitle: &str,
+    progress: f32,
+    label: &str,
+) {
+    let [w, h] = renderer.window_extent();
+    let (sw, sh) = (w as f32, h as f32);
+    let displayed_progress = renderer.smooth_loading_progress(progress);
+    let batch = &mut renderer.overlay_batch;
+
+    let panel_w = (sw * 0.38).clamp(360.0, 560.0);
+    let panel_x = (sw - panel_w) * 0.5;
+    let panel_y = sh * 0.50 - 76.0;
+
+    let title_size = 30.0;
     let title_w = batch.measure_text(title, title_size);
     batch.text(
         title,
-        (sw - title_w) * 0.5,
-        sh * 0.40 - title_size,
+        panel_x + (panel_w - title_w) * 0.5,
+        panel_y,
         title_size,
-        [0.85, 0.80, 0.65, 1.0],
+        [0.94, 0.84, 0.68, 1.0],
         sw,
         sh,
     );
 
-    // Progress bar geometry.
-    let bar_w = (sw * 0.45).max(240.0);
-    let bar_h = 18.0;
-    let bar_x = (sw - bar_w) * 0.5;
-    let bar_y = sh * 0.50;
-    // Bar background.
-    batch.rect_px(bar_x, bar_y, bar_w, bar_h, [0.10, 0.10, 0.14, 1.0], sw, sh);
-    // Bar fill.
-    let fill_w = bar_w * progress.clamp(0.0, 1.0);
-    if fill_w > 0.5 {
-        batch.rect_px(bar_x, bar_y, fill_w, bar_h, [0.55, 0.45, 0.20, 1.0], sw, sh);
-    }
-    // Bar border (4 thin rects).
-    let border = [0.30, 0.28, 0.22, 1.0];
-    let t = 1.5;
-    batch.rect_px(bar_x, bar_y, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y + bar_h - t, bar_w, t, border, sw, sh);
-    batch.rect_px(bar_x, bar_y, t, bar_h, border, sw, sh);
-    batch.rect_px(bar_x + bar_w - t, bar_y, t, bar_h, border, sw, sh);
+    let subtitle_size = 13.0;
+    let subtitle_w = batch.measure_text(subtitle, subtitle_size);
+    batch.text(
+        subtitle,
+        panel_x + (panel_w - subtitle_w) * 0.5,
+        panel_y + 42.0,
+        subtitle_size,
+        [0.58, 0.53, 0.46, 1.0],
+        sw,
+        sh,
+    );
 
-    // Current task label, centered below the bar.
+    let bar_w = panel_w;
+    let bar_h = 8.0;
+    let bar_x = panel_x;
+    let bar_y = panel_y + 82.0;
+    batch.rect_px_grad_v(
+        bar_x,
+        bar_y,
+        bar_w,
+        bar_h,
+        [0.060, 0.046, 0.038, 1.0],
+        [0.018, 0.015, 0.014, 1.0],
+        sw,
+        sh,
+    );
+    batch.rect_px(bar_x, bar_y, bar_w, 1.0, [1.0, 0.92, 0.72, 0.08], sw, sh);
+    let fill_w = (bar_w * displayed_progress).max(0.0);
+    if fill_w > 0.5 {
+        batch.rect_px_grad4(
+            bar_x,
+            bar_y,
+            fill_w,
+            bar_h,
+            [0.96, 0.38, 0.22, 1.0],
+            [0.72, 0.16, 0.12, 1.0],
+            [0.46, 0.055, 0.045, 1.0],
+            [0.58, 0.095, 0.065, 1.0],
+            sw,
+            sh,
+        );
+        batch.rect_px_grad_v(
+            bar_x,
+            bar_y + 1.0,
+            fill_w,
+            (bar_h * 0.38).max(2.0),
+            [1.0, 1.0, 1.0, 0.20],
+            [1.0, 1.0, 1.0, 0.015],
+            sw,
+            sh,
+        );
+        let streak_w = (bar_h * 1.8).clamp(14.0, 34.0).min(fill_w);
+        if streak_w > 2.0 {
+            let streak_x = (bar_x + fill_w - streak_w * 1.08).max(bar_x);
+            batch.rect_px_grad4(
+                streak_x,
+                bar_y + 1.0,
+                streak_w,
+                bar_h - 2.0,
+                [1.0, 1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 0.22],
+                [1.0, 1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 0.06],
+                sw,
+                sh,
+            );
+        }
+        if fill_w < bar_w - 0.5 {
+            let cursor_x = bar_x + fill_w;
+            let halo_w = (bar_h * 1.25).clamp(9.0, 20.0);
+            batch.rect_px_grad4(
+                cursor_x - halo_w * 0.55,
+                bar_y,
+                halo_w,
+                bar_h,
+                [1.0, 1.0, 1.0, 0.0],
+                [1.0, 0.70, 0.38, 0.34],
+                [1.0, 1.0, 1.0, 0.0],
+                [0.80, 0.20, 0.10, 0.14],
+                sw,
+                sh,
+            );
+            batch.rect_px_grad_v(
+                cursor_x - 1.0,
+                bar_y + 1.0,
+                2.0,
+                bar_h - 2.0,
+                [1.0, 0.94, 0.76, 0.90],
+                [0.95, 0.35, 0.18, 0.54],
+                sw,
+                sh,
+            );
+        }
+    }
+
+    let pct = format!("{:>3}%", (displayed_progress * 100.0).round() as i32);
+    let pct_size = 13.0;
+    let pct_w = batch.measure_text(&pct, pct_size);
+    batch.text(
+        &pct,
+        bar_x + bar_w - pct_w,
+        bar_y + bar_h + 18.0,
+        pct_size,
+        [0.70, 0.62, 0.50, 1.0],
+        sw,
+        sh,
+    );
+
     let label_size = 14.0;
-    let label_w = batch.measure_text(label, label_size);
     batch.text(
         label,
-        (sw - label_w) * 0.5,
-        bar_y + bar_h + 12.0,
+        bar_x,
+        bar_y + bar_h + 18.0,
         label_size,
-        [0.70, 0.70, 0.72, 1.0],
+        [0.70, 0.66, 0.58, 1.0],
         sw,
         sh,
     );

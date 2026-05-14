@@ -12,6 +12,7 @@ use crate::hot_reload;
 use crate::renderer::blood;
 use crate::renderer::forward::Renderer;
 use crate::renderer::material::MaterialPool;
+use crate::renderer::passes::shadow_point;
 use crate::renderer::texture::Texture;
 use crate::renderer::uniform::UniformBuffers;
 use crate::vulkan::{commands, pipeline, VulkanDevice};
@@ -175,6 +176,21 @@ impl Renderer {
                 );
             } else {
                 log::info!("Sky pipeline hot-reloaded successfully!");
+            }
+
+            if let Err(e) = self.point_shadow_atlas.recreate_pipeline(
+                &self.device.device,
+                self.uniforms.descriptor_set_layout,
+                self.material_pool.layout,
+                &self.shader_dir,
+            ) {
+                log::error!(
+                    "Point-shadow pipeline hot-reload failed (keeping old pipeline): {}",
+                    e
+                );
+            } else {
+                self.point_shadow_state = [None; shadow_point::MAX_POINT_SHADOWS];
+                log::info!("Point-shadow pipeline hot-reloaded successfully!");
             }
 
             if let Err(e) = self.vfx_ribbon_renderer.reload_pipeline(

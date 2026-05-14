@@ -463,14 +463,14 @@ pub fn skinning_system(
 ) {
     // CPU skinning + clip sampling is the most expensive per-frame work
     // for skinned characters. We always process the player, but for any
-    // other skinned entity we bail out early when:
-    //   1. the entity is farther than `SKIN_RADIUS` from the camera, OR
-    //   2. its bounding sphere is outside the view frustum.
-    // In those cases the dynamic vertex buffer keeps its last-uploaded
-    // pose, which is correct because the entity isn't visible anyway.
-    const SKIN_RADIUS: f32 = 22.0;
-    let skin_radius_sq = SKIN_RADIUS * SKIN_RADIUS;
-    let cam_pos = renderer.camera.position;
+    // other skinned entity we bail out early when it is outside the same
+    // player-anchored fog bubble the renderer uses for scene culling, or
+    // outside the camera frustum. Keeping this tied to fog distance avoids
+    // visible enemies freezing their animation while still inside the fog
+    // of war volume.
+    let skin_cull_dist = renderer.fog_end + 4.0;
+    let skin_cull_dist_sq = skin_cull_dist * skin_cull_dist;
+    let fog_origin = renderer.fog_origin;
     let frustum = renderer.camera.frustum_planes();
 
     let mut palette: Vec<glam::Mat4> = Vec::new();
@@ -489,9 +489,9 @@ pub fn skinning_system(
         let is_player = player.is_some();
         if !is_player {
             // Distance cull.
-            let dx = transform.position.x - cam_pos.x;
-            let dz = transform.position.z - cam_pos.z;
-            if dx * dx + dz * dz > skin_radius_sq {
+            let dx = transform.position.x - fog_origin.x;
+            let dz = transform.position.z - fog_origin.z;
+            if dx * dx + dz * dz > skin_cull_dist_sq {
                 continue;
             }
             // Frustum cull. Use a generous radius so loose-fitting bind
@@ -1147,12 +1147,13 @@ pub fn player_attack_system(world: &mut World, input: &Input, dt: f32) -> Vec<(g
     }
 
     // Damage enemies in range
+    let range_sq = range * range;
     let enemies_in_range: Vec<(hecs::Entity, Vec3)> = world
         .query::<(&Transform, &Enemy)>()
         .iter()
         .filter(|(_, (t, _))| {
-            let dist = (t.position - player_pos).length();
-            dist <= range
+            let dist_sq = (t.position - player_pos).length_squared();
+            dist_sq <= range_sq
         })
         .map(|(e, (t, _))| (e, t.position))
         .collect();
@@ -1345,7 +1346,7 @@ impl Default for PlayerActionConfig {
 /// fade-to-black is in progress so input is ignored cleanly.
 pub fn player_action_pre_system(
     world: &mut World,
-    input: &Input,
+    _input: &Input,
     dt: f32,
     cfg: &PlayerActionConfig,
     accept_input: bool,
@@ -1369,8 +1370,8 @@ pub fn player_action_pre_system(
         .unwrap_or(false);
     let is_ghost = world.get::<&super::components::Ghost>(player_id).is_ok();
 
-    let (action, action_timer, airborne, aim_dir) = match world.get::<&Player>(player_id) {
-        Ok(p) => (p.action, p.action_timer, p.airborne, p.aim_dir),
+    let (action, action_timer, aim_dir) = match world.get::<&Player>(player_id) {
+        Ok(p) => (p.action, p.action_timer, p.aim_dir),
         Err(_) => return,
     };
 

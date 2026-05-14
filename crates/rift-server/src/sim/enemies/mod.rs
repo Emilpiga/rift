@@ -27,7 +27,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
-use rift_dungeon::{Floor, FloorConfig};
+use rift_dungeon::{Floor, FloorConfig, FloorMood};
 use rift_game::abilities::AbilityWireId;
 use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::monsters::MonsterRole;
@@ -38,7 +38,9 @@ use super::actor::{NetIdentity, Vitals};
 pub mod boss;
 pub mod brute;
 pub mod caster;
+pub mod mindbinder;
 pub mod stalker;
+pub mod wraith;
 
 pub use boss::BossState;
 
@@ -193,6 +195,81 @@ pub const ELITE_JUGGERNAUT_HP_MULT: f32 = 1.20;
 /// Speed multiplier added on top of the elite base for SWIFT.
 pub const ELITE_SWIFT_SPEED_MULT: f32 = 1.25;
 
+type MoodRoleWeights = &'static [(MonsterRole, u32)];
+
+const MOOD_ROLE_WEIGHTS: &[(FloorMood, MoodRoleWeights)] = &[
+    (
+        FloorMood::Crypt,
+        &[
+            (MonsterRole::Brute, 20),
+            (MonsterRole::Stalker, 38),
+            (MonsterRole::Caster, 14),
+            (MonsterRole::Wraith, 22),
+            (MonsterRole::Mindbinder, 6),
+        ],
+    ),
+    (
+        FloorMood::Armory,
+        &[
+            (MonsterRole::Brute, 48),
+            (MonsterRole::Stalker, 22),
+            (MonsterRole::Caster, 14),
+            (MonsterRole::Wraith, 6),
+            (MonsterRole::Mindbinder, 10),
+        ],
+    ),
+    (
+        FloorMood::Archive,
+        &[
+            (MonsterRole::Brute, 14),
+            (MonsterRole::Stalker, 18),
+            (MonsterRole::Caster, 38),
+            (MonsterRole::Wraith, 8),
+            (MonsterRole::Mindbinder, 22),
+        ],
+    ),
+    (
+        FloorMood::Shrine,
+        &[
+            (MonsterRole::Brute, 18),
+            (MonsterRole::Stalker, 16),
+            (MonsterRole::Caster, 38),
+            (MonsterRole::Wraith, 14),
+            (MonsterRole::Mindbinder, 14),
+        ],
+    ),
+    (
+        FloorMood::Prison,
+        &[
+            (MonsterRole::Brute, 22),
+            (MonsterRole::Stalker, 48),
+            (MonsterRole::Caster, 12),
+            (MonsterRole::Wraith, 14),
+            (MonsterRole::Mindbinder, 4),
+        ],
+    ),
+    (
+        FloorMood::Infernal,
+        &[
+            (MonsterRole::Brute, 46),
+            (MonsterRole::Stalker, 12),
+            (MonsterRole::Caster, 24),
+            (MonsterRole::Wraith, 6),
+            (MonsterRole::Mindbinder, 12),
+        ],
+    ),
+    (
+        FloorMood::Sanctuary,
+        &[
+            (MonsterRole::Brute, 26),
+            (MonsterRole::Stalker, 24),
+            (MonsterRole::Caster, 24),
+            (MonsterRole::Wraith, 13),
+            (MonsterRole::Mindbinder, 13),
+        ],
+    ),
+];
+
 // ---- Wind-up + AI phase --------------------------------------
 
 /// Wind-up *kind* — distinguishes the three structurally
@@ -215,6 +292,9 @@ pub enum WindupKind {
     /// Stalker dash — resolves to a phase swap into
     /// [`AiPhase::StalkerDash`] with the snapshotted aim.
     StalkerDash,
+    /// Wraith cone scream — resolves to a short frontal cone
+    /// that can catch multiple players.
+    WraithScream,
 }
 
 impl WindupKind {
@@ -226,6 +306,7 @@ impl WindupKind {
             WindupKind::BruteMelee => telegraph_kind::MELEE_WINDUP,
             WindupKind::CasterBolt => telegraph_kind::RANGED_WINDUP,
             WindupKind::StalkerDash => telegraph_kind::DASH_WINDUP,
+            WindupKind::WraithScream => telegraph_kind::SCREAM_WINDUP,
         }
     }
 }
@@ -261,6 +342,14 @@ pub enum AiPhase {
     /// Post-dash retreat / cooldown. Counts down to zero, then
     /// flips back to `StalkerApproach`.
     StalkerRecover(f32),
+    /// Mindbinder has committed a placed sigil. The centre and
+    /// radius are captured at wind-up start so the damage lands
+    /// exactly where the player saw the ground telegraph.
+    MindbinderSigil {
+        remaining: f32,
+        centre: Vec3,
+        radius: f32,
+    },
 }
 
 impl Default for AiPhase {
@@ -597,6 +686,30 @@ pub fn tick_ai(
         // Per-role steering + attack. Adding a new role is one
         // arm here + a new sibling module file.
         match en.role {
+            MonsterRole::Wraith => wraith::tick(
+                en,
+                kinematic,
+                identity.net_id,
+                &wraith::SPEC,
+                target,
+                player_positions,
+                speed_mult,
+                damage_mult,
+                dt,
+                &mut outcome,
+            ),
+            MonsterRole::Mindbinder => mindbinder::tick(
+                en,
+                kinematic,
+                identity.net_id,
+                &mindbinder::SPEC,
+                floor,
+                target,
+                speed_mult,
+                damage_mult,
+                dt,
+                &mut outcome,
+            ),
             MonsterRole::Stalker => stalker::tick(
                 en,
                 kinematic,
@@ -765,6 +878,14 @@ fn resolve_target(
         en.target_lock = None;
     }
 
+    if en.role == MonsterRole::Wraith {
+        let picked = nearest_player_in_range(kinematic.position, players, LEASH_RANGE * 0.65);
+        if let Some((pe, _, _)) = picked {
+            en.target_lock = Some(pe);
+        }
+        return picked;
+    }
+
     // 2. Fresh aggro: nearest *visible* player within
     //    `AGGRO_RANGE`. LOS gate prevents aggro through walls.
     let picked = nearest_visible_player(kinematic.position, floor, players);
@@ -772,6 +893,25 @@ fn resolve_target(
         en.target_lock = Some(pe);
     }
     picked
+}
+
+fn nearest_player_in_range(
+    pos: Vec3,
+    players: &[(Entity, Vec3)],
+    range: f32,
+) -> Option<(Entity, Vec3, f32)> {
+    let mut best: Option<(Entity, Vec3, f32)> = None;
+    let range2 = range * range;
+    for (pe, pp) in players {
+        let dx = pp.x - pos.x;
+        let dz = pp.z - pos.z;
+        let d2 = dx * dx + dz * dz;
+        if d2 > range2 || best.map_or(false, |(_, _, bd2)| d2 >= bd2) {
+            continue;
+        }
+        best = Some((*pe, *pp, d2));
+    }
+    best
 }
 
 /// Multiplicative threat decay applied every AI tick. Iterates
@@ -1050,7 +1190,13 @@ pub fn integrate_motion(world: &mut hecs::World, floor: &Floor, dt: f32) {
         if en.is_dying() {
             continue;
         }
-        kinematic::integrate(kinematic, floor, dt);
+        if en.role == MonsterRole::Wraith {
+            kinematic.position += kinematic.velocity * dt;
+            kinematic.position.x = kinematic.position.x.clamp(1.0, floor.width as f32 - 2.0);
+            kinematic.position.z = kinematic.position.z.clamp(1.0, floor.depth as f32 - 2.0);
+        } else {
+            kinematic::integrate(kinematic, floor, dt);
+        }
     }
 }
 
@@ -1142,11 +1288,7 @@ pub fn spawn_for_floor(
                 let role = if is_elite {
                     MonsterRole::Elite
                 } else {
-                    match i % 3 {
-                        0 => MonsterRole::Caster,
-                        1 => MonsterRole::Stalker,
-                        _ => MonsterRole::Brute,
-                    }
+                    role_for_mood(floor.mood, enemy_seed, i)
                 };
                 // Roll elite affixes deterministically from the
                 // pack RNG. Picks 1-2 modifiers; never the same
@@ -1165,6 +1307,26 @@ pub fn spawn_for_floor(
                         elite_mods |= 1u8 << roll2;
                         enemy_seed = enemy_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                     }
+                }
+
+                fn role_for_mood(mood: FloorMood, seed: u64, index: usize) -> MonsterRole {
+                    let weights = MOOD_ROLE_WEIGHTS
+                        .iter()
+                        .find(|(candidate, _)| *candidate == mood)
+                        .map(|(_, weights)| *weights)
+                        .unwrap_or(&[(MonsterRole::Brute, 1)]);
+                    let total: u32 = weights.iter().map(|(_, w)| *w).sum();
+                    let roll = ((seed.rotate_left((index as u32 % 31) + 1) >> 24) as u32
+                        + index as u32 * 17)
+                        % total;
+                    let mut cursor = 0;
+                    for (role, weight) in weights {
+                        cursor += *weight;
+                        if roll < cursor {
+                            return *role;
+                        }
+                    }
+                    MonsterRole::Brute
                 }
                 // Look up role stats through the central
                 // table. Elites use `cfg.elite_hp_mult` /

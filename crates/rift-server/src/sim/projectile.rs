@@ -245,6 +245,12 @@ pub fn tick(
         // matches `kinematic::tile_at` (1 unit per tile, world
         // origin at (0,0)).
         if hits_wall(floor, proj.position) {
+            ctx.events.push(WorldEvent::ProjectileImpact {
+                projectile: proj.net_id,
+                ability: proj.ability_id.raw() as u16,
+                position: proj.position.to_array(),
+                dir: proj.velocity.to_array(),
+            });
             to_despawn.push(pe);
             continue;
         }
@@ -290,6 +296,12 @@ pub fn tick(
                         if proj.pierce_remaining > 0 {
                             proj.pierce_remaining -= 1;
                         } else {
+                            ctx.events.push(WorldEvent::ProjectileImpact {
+                                projectile: proj.net_id,
+                                ability: proj.ability_id.raw() as u16,
+                                position: proj.position.to_array(),
+                                dir: proj.velocity.to_array(),
+                            });
                             consumed = true;
                             break;
                         }
@@ -335,6 +347,12 @@ pub fn tick(
                                 proj.attacker_kind,
                             ));
                         }
+                        ctx.events.push(WorldEvent::ProjectileImpact {
+                            projectile: proj.net_id,
+                            ability: proj.ability_id.raw() as u16,
+                            position: proj.position.to_array(),
+                            dir: proj.velocity.to_array(),
+                        });
                         consumed = true;
                         break;
                     }

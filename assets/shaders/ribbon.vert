@@ -1,8 +1,9 @@
 #version 450
 
-// VFX ribbon: camera-aligned quad expanded from (origin, tip,
-// width). Each instance produces one quad; we receive the four
-// corner positions in [-0.5..0.5] × [0..1] via inCorner.
+// VFX ribbon: camera-aligned segmented strip expanded from
+// (origin, tip, width). Each instance produces a lengthwise strip;
+// inCorner carries cross positions in [-0.5..0.5] and segment
+// positions in [0..1].
 //
 // Coordinate convention:
 //   inCorner.x in [-0.5, 0.5]  → cross-axis (perpendicular to beam)
@@ -67,6 +68,7 @@ void main() {
     vec3 origin = inOrigin.xyz;
     vec3 tip    = inTip.xyz;
     float width = inOrigin.w;
+    float time  = inTip.w;
 
     vec3 along  = tip - origin;
     float len   = length(along);
@@ -75,24 +77,39 @@ void main() {
     // Cross direction = axis × (camera→midpoint), so the ribbon
     // always presents its broad face to the camera even as the
     // beam rotates.
-    vec3 mid    = 0.5 * (origin + tip);
-    vec3 toCam  = ubo.cameraPos.xyz - mid;
-    vec3 perp   = normalize(cross(axis, toCam));
-    if (any(isnan(perp)) || dot(perp, perp) < 0.5) {
-        // Beam pointed straight at the camera — fall back to up.
-        perp = vec3(0.0, 1.0, 0.0);
+    vec3 mid     = 0.5 * (origin + tip);
+    vec3 viewDir = normalize(ubo.cameraPos.xyz - mid);
+    if (any(isnan(viewDir)) || dot(viewDir, viewDir) < 0.5) {
+        viewDir = vec3(0.0, 0.0, 1.0);
     }
+    vec3 perp = cross(axis, viewDir);
+    if (dot(perp, perp) < 1e-5 || any(isnan(perp))) {
+        vec3 fallback = abs(axis.y) < 0.90 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        perp = cross(axis, fallback);
+    }
+    perp = normalize(perp);
 
-    // Quad expansion.
-    vec3 along_offset  = along * inCorner.y;
-    vec3 cross_offset  = perp * (width * inCorner.x);
+    float v = inCorner.y;
+    float strength = clamp(inParams.y, 0.0, 1.0);
+    float scroll = max(inParams.z, 0.35);
+    float envelope = sin(v * 3.14159265);
+    float wave_a = sin(v * 12.5663706 + time * scroll * 2.4);
+    float wave_b = sin(v * 31.4159265 - time * scroll * 1.35 + 1.7);
+    float centre_wave = (wave_a * 0.070 + wave_b * 0.035) * width * strength * envelope;
+    float width_wave = 1.0 + (wave_b * 0.12 + wave_a * 0.07) * strength * envelope;
+
+    // Segmented strip expansion. The centreline wave is kept at
+    // zero at both endpoints so gameplay-driven beam anchors stay
+    // exact while the mid-body breathes.
+    vec3 along_offset  = along * v;
+    vec3 cross_offset  = perp * (width * width_wave * inCorner.x + centre_wave);
     vec3 worldPos      = origin + along_offset + cross_offset;
 
     gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
 
     vUv     = vec2(inCorner.x + 0.5, inCorner.y);
     vParams = inParams;
-    vTime   = inTip.w;
+    vTime   = time;
 
     vCross[0] = inCross0; vCross[1] = inCross1;
     vCross[2] = inCross2; vCross[3] = inCross3;

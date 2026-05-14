@@ -717,6 +717,29 @@ pub fn fire_beam() -> EffectBundle {
                 }),
                 blend: BlendMode::Additive,
             }),
+            Layer::Ribbon(RibbonSpec {
+                width: 0.16,
+                cross_gradient: Gradient::from_stops([
+                    (0.00, [1.00, 0.45, 0.10, 0.0]),
+                    (0.36, [3.20, 1.30, 0.28, 0.48]),
+                    (0.50, [11.0, 5.60, 1.50, 1.00]),
+                    (0.64, [3.20, 1.30, 0.28, 0.48]),
+                    (1.00, [1.00, 0.45, 0.10, 0.0]),
+                ]),
+                length_gradient: Some(Gradient::from_stops([
+                    (0.00, [0.20, 0.20, 0.20, 0.0]),
+                    (0.08, [1.25, 1.10, 0.90, 0.85]),
+                    (0.70, [1.00, 0.92, 0.78, 1.00]),
+                    (1.00, [0.50, 0.30, 0.18, 0.0]),
+                ])),
+                noise: Some(RibbonNoise {
+                    tile: 0.22,
+                    scroll: 8.5,
+                    strength: 0.78,
+                    octaves: 4,
+                }),
+                blend: BlendMode::Additive,
+            }),
         ],
     })
     // Warm orange hand-light — same role as the frost_ray

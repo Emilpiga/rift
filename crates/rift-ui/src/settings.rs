@@ -1,6 +1,5 @@
-//! Settings sub-screen (volume only for now). Reached from the
-//! pause menu's "Settings" button; closes via the on-modal Back
-//! button or by pressing Escape.
+//! Settings sub-screen. Reached from the pause menu's "Settings"
+//! button; closes via the on-modal Back button or by pressing Escape.
 //!
 //! Returns a `Vec<SettingsAction>` so a single frame can both
 //! drag the slider (emitting `SetMasterVolume`) AND click Back
@@ -26,7 +25,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
     let sc = theme.scale;
     let s = ui.screen_size();
     let mw = 460.0 * sc;
-    let mh = 260.0 * sc;
+    let mh = 320.0 * sc;
     let modal_rect = Rect::from_xywh((s.x - mw) * 0.5, (s.y - mh) * 0.5, mw, mh);
 
     ui.with_layer(Layer::Modal, |ui| {
@@ -73,6 +72,62 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
                     14.0 * sc,
                     theme.colors.text,
                 );
+
+                label(ui, body.min + Vec2::new(0.0, 118.0 * sc), "Graphics");
+
+                let shadows_y = body.min.y + 148.0 * sc;
+                label(
+                    ui,
+                    rift_ui_im::Pos2::new(body.min.x, shadows_y + 10.0 * sc),
+                    "Realtime Shadows",
+                );
+                let toggle_w = 116.0 * sc;
+                let toggle_h = 34.0 * sc;
+                let toggle_rect =
+                    Rect::from_xywh(body.max.x - toggle_w, shadows_y, toggle_w, toggle_h);
+                let toggle_label = if view.shadows_enabled { "On" } else { "Off" };
+                let toggle_resp = if view.shadows_enabled {
+                    Button::active(toggle_label)
+                } else {
+                    Button::new(toggle_label)
+                }
+                .show_with_id(
+                    ui,
+                    Id::root("settings").child("shadows"),
+                    toggle_rect,
+                );
+                if toggle_resp.clicked {
+                    actions.push(SettingsAction::SetShadowsEnabled(!view.shadows_enabled));
+                }
+
+                let height_y = body.min.y + 190.0 * sc;
+                label(
+                    ui,
+                    rift_ui_im::Pos2::new(body.min.x, height_y + 10.0 * sc),
+                    "Texture Height Shadows",
+                );
+                let height_rect =
+                    Rect::from_xywh(body.max.x - toggle_w, height_y, toggle_w, toggle_h);
+                let height_label = if view.height_shadows_enabled {
+                    "On"
+                } else {
+                    "Off"
+                };
+                let height_resp = if view.height_shadows_enabled {
+                    Button::active(height_label)
+                } else {
+                    Button::new(height_label)
+                }
+                .show_with_id(
+                    ui,
+                    Id::root("settings").child("height_shadows"),
+                    height_rect,
+                );
+                if height_resp.clicked {
+                    actions.push(SettingsAction::SetHeightShadowsEnabled(
+                        !view.height_shadows_enabled,
+                    ));
+                }
 
                 // Back button at the bottom-right.
                 let btn_h = 44.0 * sc;

@@ -17,13 +17,20 @@ pub struct PauseState {
     /// `AudioSystem::set_master_volume` whenever the player
     /// drags the slider. Persists across menu open/close.
     pub master_volume: f32,
-    /// Set to `true` when the player picks "Exit Game" or
-    /// "Exit to Character Select". `main.rs` polls this after
-    /// `GameState::update` and terminates the process. (The
-    /// "to character select" path will be wired to a graceful
-    /// session-leave message in a later landing; both options
-    /// currently quit the binary so the player can relaunch.)
+    /// Session graphics toggle for directional and point-light
+    /// shadow maps. Persists across menu open/close.
+    pub shadows_enabled: bool,
+    /// Experimental session graphics toggle for height-map-aware
+    /// shadow receiver lookups on PBR materials.
+    pub height_shadows_enabled: bool,
+    /// Set to `true` when the player picks "Exit Game".
+    /// `main.rs` polls this after `GameState::update` and
+    /// terminates the process.
     pub request_quit: bool,
+    /// Set to `true` when the player picks "Exit to Character
+    /// Select". The top-level app tears down the active net
+    /// session, reconnects, and returns to the roster screen.
+    pub request_character_select: bool,
 }
 
 impl PauseState {
@@ -45,7 +52,10 @@ impl Default for PauseState {
             menu_open: false,
             settings_open: false,
             master_volume: DEFAULT_MASTER_VOLUME,
+            shadows_enabled: true,
+            height_shadows_enabled: false,
             request_quit: false,
+            request_character_select: false,
         }
     }
 }

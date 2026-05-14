@@ -1,6 +1,6 @@
 use super::config::FloorConfig;
 use super::rooms::{Room, RoomShape, RoomTheme, RoomType};
-use super::SimpleRng;
+use super::{FloorMood, SimpleRng};
 
 /// A leaf node in the BSP tree.
 #[derive(Debug)]
@@ -173,7 +173,7 @@ impl Leaf {
 pub fn generate_bsp(
     config: &FloorConfig,
     seed: u64,
-) -> (Vec<Room>, Vec<(usize, usize, usize, usize)>) {
+) -> (Vec<Room>, Vec<(usize, usize, usize, usize)>, FloorMood) {
     let mut rng = SimpleRng::new(seed);
     let mut root = Leaf::new(0, 0, config.width, config.depth);
 
@@ -266,6 +266,7 @@ pub fn generate_bsp(
     // weighted draw, biased by size (large rooms favour
     // ceremonial themes — Library, Shrine — and small rooms
     // favour functional ones — Storage, Prison).
+    let mood = FloorMood::for_seed(config.floor, seed);
     let mut theme_rng = SimpleRng::new(seed.wrapping_add(0x7E3E_A11E));
     for room in rooms.iter_mut() {
         let (theme, shape) = match room.room_type {
@@ -285,7 +286,7 @@ pub fn generate_bsp(
                 // space to breathe) and functional themes
                 // onto the small ones.
                 let big = area >= 60;
-                let weights: &[(RoomTheme, u32)] = if big {
+                let base_weights: &[(RoomTheme, u32)] = if big {
                     &[
                         (RoomTheme::Library, 4),
                         (RoomTheme::Crypt, 3),
@@ -304,7 +305,11 @@ pub fn generate_bsp(
                         (RoomTheme::Shrine, 1),
                     ]
                 };
-                let theme = weighted_pick(weights, &mut theme_rng);
+                let weights: Vec<(RoomTheme, u32)> = base_weights
+                    .iter()
+                    .map(|&(theme, weight)| (theme, weight + mood.theme_bonus(theme)))
+                    .collect();
+                let theme = weighted_pick(&weights, &mut theme_rng);
                 let shape = choose_shape_for_size(room.width, room.depth, &mut theme_rng, false);
                 (theme, shape)
             }
@@ -313,7 +318,7 @@ pub fn generate_bsp(
         room.shape = shape;
     }
 
-    (rooms, corridors)
+    (rooms, corridors, mood)
 }
 
 /// Deterministic weighted pick from a `(value, weight)` slice.

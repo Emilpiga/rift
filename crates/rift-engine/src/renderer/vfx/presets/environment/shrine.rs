@@ -190,6 +190,29 @@ pub fn shrine_channel_beam() -> Effect {
                 }),
                 blend: BlendMode::Additive,
             }),
+            Layer::Ribbon(RibbonSpec {
+                width: 0.055,
+                cross_gradient: Gradient::from_stops([
+                    (0.0, [0.60, 0.95, 1.30, 0.0]),
+                    (0.38, [1.40, 1.90, 2.40, 0.42]),
+                    (0.5, [5.80, 6.80, 7.60, 1.0]),
+                    (0.62, [1.40, 1.90, 2.40, 0.42]),
+                    (1.0, [0.60, 0.95, 1.30, 0.0]),
+                ]),
+                length_gradient: Some(Gradient::from_stops([
+                    (0.0, [0.20, 0.24, 0.30, 0.0]),
+                    (0.18, [1.05, 1.12, 1.20, 0.85]),
+                    (0.80, [1.0, 1.0, 1.0, 1.0]),
+                    (1.0, [0.35, 0.44, 0.55, 0.0]),
+                ])),
+                noise: Some(RibbonNoise {
+                    tile: 0.18,
+                    scroll: 6.5,
+                    strength: 0.66,
+                    octaves: 4,
+                }),
+                blend: BlendMode::Additive,
+            }),
         ],
     }
 }

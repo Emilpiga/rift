@@ -46,7 +46,8 @@ fn enemy_arrival_scale(role: MonsterRole) -> f32 {
         MonsterRole::Boss => 2.0,
         MonsterRole::Elite => 1.35,
         MonsterRole::Brute => 1.15,
-        MonsterRole::Stalker | MonsterRole::Caster => 1.0,
+        MonsterRole::Mindbinder => 1.1,
+        MonsterRole::Stalker | MonsterRole::Caster | MonsterRole::Wraith => 1.0,
     }
 }
 
@@ -760,6 +761,9 @@ impl NetClient {
                 audio.despawn_emitter(em);
             }
             if let Some(visual) = self.projectile_render.remove(&net_id) {
+                if self.projectile_impacts.remove(&net_id) {
+                    continue;
+                }
                 // Stored at spawn, so no per-ability branch here.
                 let burst = rift_engine::combat::effect_for_vfx(visual.impact);
                 // Pull the burst back along the last known

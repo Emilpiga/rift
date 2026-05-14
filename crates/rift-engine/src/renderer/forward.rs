@@ -143,6 +143,12 @@ pub struct Renderer {
     /// plus all caster transforms within the light's radius;
     /// see [`Self::compute_point_shadow_slot_hash`].
     pub(super) point_shadow_state: [Option<PointShadowSlotState>; shadow_point::MAX_POINT_SHADOWS],
+    /// Session graphics setting: when false, skip all shadow-map
+    /// passes and make the forward shader use unshadowed lighting.
+    pub shadows_enabled: bool,
+    /// Session graphics setting: when true, PBR materials perturb
+    /// shadow receiver lookups with their height maps.
+    pub height_shadows_enabled: bool,
     // Ambient clear color (themed per floor)
     pub clear_color: [f32; 4],
     // Fog parameters
@@ -212,9 +218,46 @@ pub struct Renderer {
     /// `post_composite.frag` as a push constant. `0.0` is the
     /// default no-op (normal scene).
     pub ghost_mix: f32,
+    /// Screen-space ambient occlusion strength. Kept mutable so
+    /// clean preview scenes can opt out of the noisy low-sample
+    /// AO pass without changing gameplay lighting.
+    pub ssao_strength: f32,
+    /// Visual progress used by the shared loading overlay. This
+    /// eases toward the real loading target so staged work reads
+    /// smoothly while never claiming more progress than the app
+    /// has actually reported.
+    pub(super) loading_progress_visual: f32,
+    pub(super) loading_progress_target: f32,
+    pub(super) loading_progress_last_update: std::time::Instant,
 }
 
 impl Renderer {
+    pub fn smooth_loading_progress(&mut self, target: f32) -> f32 {
+        let target = target.clamp(0.0, 1.0);
+        let now = std::time::Instant::now();
+        let dt = (now - self.loading_progress_last_update)
+            .as_secs_f32()
+            .clamp(0.0, 0.1);
+        self.loading_progress_last_update = now;
+
+        if target + 0.02 < self.loading_progress_target || target <= 0.001 {
+            self.loading_progress_visual = target;
+        }
+        self.loading_progress_target = target;
+
+        if self.loading_progress_visual < target {
+            let alpha = 1.0 - (-14.0 * dt).exp();
+            self.loading_progress_visual += (target - self.loading_progress_visual) * alpha;
+            if target - self.loading_progress_visual < 0.002 {
+                self.loading_progress_visual = target;
+            }
+        } else {
+            self.loading_progress_visual = target;
+        }
+
+        self.loading_progress_visual.min(target).clamp(0.0, 1.0)
+    }
+
     pub fn new(window: &winit::window::Window) -> Result<Self> {
         let instance = VulkanInstance::new(window)?;
 
@@ -305,6 +348,7 @@ impl Renderer {
             &device.device,
             &allocator,
             uniforms.descriptor_set_layout,
+            material_pool.layout,
             &shader_dir,
         )?;
         uniforms.bind_point_shadow_atlas(
@@ -426,6 +470,8 @@ impl Renderer {
             point_shadow_draw_scratch: Vec::with_capacity(64),
             shadow_draw_scratch: Vec::with_capacity(256),
             point_shadow_state: [None; shadow_point::MAX_POINT_SHADOWS],
+            shadows_enabled: true,
+            height_shadows_enabled: false,
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
             fog_start: 5.0,
@@ -441,6 +487,10 @@ impl Renderer {
             bloom: BloomConfig::default(),
             key_light: KeyLight::default(),
             ghost_mix: 0.0,
+            ssao_strength: 0.7,
+            loading_progress_visual: 0.0,
+            loading_progress_target: 0.0,
+            loading_progress_last_update: std::time::Instant::now(),
         })
     }
 

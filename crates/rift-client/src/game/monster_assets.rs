@@ -8,7 +8,7 @@
 //! animation in the file to the monster's own skeleton so gameplay
 //! systems can name them at runtime.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::AnimationSet;
@@ -38,32 +38,16 @@ pub struct MonsterAsset {
 /// failed — the spawner should fall back to a procedural mesh.
 #[derive(Default)]
 pub struct MonsterCache {
-    pub brute: Option<MonsterAsset>,
-    pub stalker: Option<MonsterAsset>,
-    pub caster: Option<MonsterAsset>,
-    pub elite: Option<MonsterAsset>,
-    pub boss: Option<MonsterAsset>,
+    assets: HashMap<MonsterRole, Option<MonsterAsset>>,
 }
 
 impl MonsterCache {
     pub fn get(&self, role: MonsterRole) -> Option<&MonsterAsset> {
-        match role {
-            MonsterRole::Brute => self.brute.as_ref(),
-            MonsterRole::Stalker => self.stalker.as_ref(),
-            MonsterRole::Caster => self.caster.as_ref(),
-            MonsterRole::Elite => self.elite.as_ref(),
-            MonsterRole::Boss => self.boss.as_ref(),
-        }
+        self.assets.get(&role).and_then(Option::as_ref)
     }
 
     pub fn slot_mut(&mut self, role: MonsterRole) -> &mut Option<MonsterAsset> {
-        match role {
-            MonsterRole::Brute => &mut self.brute,
-            MonsterRole::Stalker => &mut self.stalker,
-            MonsterRole::Caster => &mut self.caster,
-            MonsterRole::Elite => &mut self.elite,
-            MonsterRole::Boss => &mut self.boss,
-        }
+        self.assets.entry(role).or_insert(None)
     }
 
     /// Free GPU resources owned by every loaded monster role.  Must be
@@ -75,13 +59,7 @@ impl MonsterCache {
         device: &rift_engine::ash::Device,
         allocator: &std::sync::Arc<std::sync::Mutex<rift_engine::gpu_allocator::vulkan::Allocator>>,
     ) {
-        for slot in [
-            &mut self.brute,
-            &mut self.stalker,
-            &mut self.caster,
-            &mut self.elite,
-            &mut self.boss,
-        ] {
+        for slot in self.assets.values_mut() {
             if let Some(asset) = slot.as_mut() {
                 if let Some(mut tex) = asset.shared_texture.take() {
                     tex.cleanup(device, allocator);

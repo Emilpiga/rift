@@ -119,7 +119,9 @@ pub const PAPERDOLL_LAYOUT: [(u8, u8, u8, u8); EquipSlotIdx::COUNT] = [
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub drawer: Rect,
+    #[allow(dead_code)]
     pub content: Rect,
+    #[allow(dead_code)]
     pub header: Rect,
     pub paperdoll: Rect,
     pub paperdoll_cell: f32,

@@ -65,6 +65,7 @@ pub(super) fn trim_trailing_none<T>(v: &mut Vec<Option<T>>) {
 /// or append to the end if every slot is occupied. Used by
 /// pickups and unequip-into-bag flows where the caller doesn't
 /// have an explicit destination index.
+#[allow(dead_code)]
 pub(super) fn push_into_sparse<T>(v: &mut Vec<Option<T>>, item: T) {
     if let Some(slot) = v.iter_mut().find(|s| s.is_none()) {
         *slot = Some(item);

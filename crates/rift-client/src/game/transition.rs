@@ -15,10 +15,14 @@ use rift_engine::{Input, Renderer};
 use rift_game::character;
 
 use super::character_select;
+use super::floor::FloorManager;
 use super::hud;
 use super::player_state::PlayerState;
 use super::rift_state::RiftState;
 use super::state::{AppState, GameState};
+use super::states::floor_state::FloorState;
+use super::states::frame_state::FrameState;
+use super::states::sub_state::{ChannelState, LootClientState, NetState};
 use super::systems::portal_system;
 
 /// One step of the character-select → in-game transition.
@@ -200,6 +204,53 @@ pub fn apply_server_roster(state: &mut GameState, entries: Vec<rift_net::message
     state.character_select.apply_server_roster(entries);
 }
 
+/// Tear down the active world and return to the roster screen.
+/// The top-level app reconnects the net client before calling this,
+/// so the next auth reply repopulates the roster from the server.
+pub fn return_to_character_select(
+    state: &mut GameState,
+    renderer: &mut Renderer,
+    account_identity: String,
+) {
+    if let Some(audio) = state.audio.as_mut() {
+        state.floor.detach_portal_audio(audio);
+        state.floor_mgr.torches.clear_audio(audio);
+    }
+
+    state
+        .character_select
+        .teardown_preview(&mut state.world, renderer);
+    renderer.overlay_batch.clear();
+    renderer.clear_objects();
+    renderer.point_lights.clear();
+    renderer.vfx_system.clear_all();
+
+    state.world = hecs::World::new();
+    state.rift = RiftState::new(1);
+    state.player_state = PlayerState::new();
+    state.floor_mgr = FloorManager::new();
+    state.floor = FloorState::default();
+    state.frame = FrameState::default();
+    state.exit_vote = None;
+    state.net = NetState::default();
+    state.channel = ChannelState::default();
+    state.loot = LootClientState::default();
+    state.shrines = super::sub_state::ShrineClientState::default();
+    state.inventory_ui.open = false;
+    state.spellbook = super::spellbook::SpellbookUi::new();
+    state.talents_panel.open = false;
+    state.meters = super::meters::MeterUi::new();
+    state.app_state = AppState::CharacterSelect;
+    state.character_select = character_select::CharacterSelect::new();
+    state
+        .character_select
+        .skip_to_loading(account_identity.clone());
+    state.net.roster_request = Some(account_identity);
+    state.pause.menu_open = false;
+    state.pause.settings_open = false;
+    state.pause.request_character_select = false;
+}
+
 /// Drive one step of the staged character-select → in-game
 /// transition. The state machine is single-step-per-frame so
 /// the netcode loop keeps pumping while heavy work runs (asset
@@ -212,13 +263,13 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
     // decodes.
     state.floor_mgr.env.tick_world_preload(renderer);
 
-    let (label, next): (&'static str, Option<EnterPhase>) = match phase {
+    let (label, progress, next): (&'static str, f32, Option<EnterPhase>) = match phase {
         EnterPhase::PrepareScene => {
             state
                 .character_select
                 .teardown_preview(&mut state.world, renderer);
             renderer.point_lights.clear();
-            ("Preparing world…", Some(EnterPhase::PreloadHub))
+            ("Preparing world…", 0.10, Some(EnterPhase::PreloadHub))
         }
         EnterPhase::PreloadHub => {
             // Stream a few gltf assets per tick so the netcode
@@ -233,7 +284,12 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
             } else {
                 Some(EnterPhase::PreloadHub)
             };
-            ("Loading environment…", next)
+            let asset_progress = if total == 0 {
+                1.0
+            } else {
+                done as f32 / total as f32
+            };
+            ("Loading environment…", 0.20 + asset_progress * 0.25, next)
         }
         EnterPhase::GenerateHub => {
             state.floor.in_hub = true;
@@ -279,17 +335,17 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
             // re-applies the local equipment visuals on the
             // new entity.
             state.loot.equipment_visuals_dirty = true;
-            ("Generating hub…", Some(EnterPhase::AttachOutfits))
+            ("Generating hub…", 0.58, Some(EnterPhase::AttachOutfits))
         }
-        EnterPhase::AttachOutfits => ("Preparing outfits…", Some(EnterPhase::LoadOutfits)),
-        EnterPhase::LoadOutfits => ("Loading outfits…", Some(EnterPhase::RebuildWalls)),
+        EnterPhase::AttachOutfits => ("Preparing outfits…", 0.74, Some(EnterPhase::LoadOutfits)),
+        EnterPhase::LoadOutfits => ("Loading outfits…", 0.86, Some(EnterPhase::RebuildWalls)),
         EnterPhase::RebuildWalls => {
             rebuild_wall_caches(state, renderer);
-            ("Finalizing…", None)
+            ("Finalizing…", 1.0, None)
         }
     };
 
-    hud::draw_world_loading_overlay(renderer, 0.0, label);
+    hud::draw_world_loading_overlay(renderer, progress, label);
 
     match next {
         Some(p) => state.app_state = AppState::EnteringWorld(p),

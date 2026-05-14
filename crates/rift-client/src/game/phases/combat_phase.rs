@@ -131,6 +131,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         crate::game::ghost_system::tick_hit_react(
             &mut state.world,
             &mut state.frame.prev_player_hp,
+            &mut state.frame.damage_flash,
             state.rift.floor as u32,
         );
     } else {

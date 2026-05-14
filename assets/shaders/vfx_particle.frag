@@ -313,21 +313,11 @@ float streak(vec2 uv) {
     return clamp(line + head * 1.4 * headMod, 0.0, 2.0);
 }
 
-// Wisp: ethereal vertical fog column. The vertex shader has
-// already oriented the billboard along world-up in screen
-// space (encoded in `vStretchDir`) and stretched it into a
-// tall capsule. Here we draw a *very* soft volumetric strand
-// — closer to a god-ray or magical smoke plume than a hard
-// laser cylinder. The silhouette has a wide gaussian falloff
-// (no crisp edge), the body is eroded by scrolling fBm so it
-// reads as drifting density rather than a uniform tube, and
-// there is no hard inner core: brightness comes purely from
-// stacking many of these and letting additive blend build the
-// pillar in screen space.
-//
-// Returns mask in [0, 1] — the soft falloff means most pixels
-// contribute very little, so the caller is expected to layer
-// several wisps to build readable density.
+// Wisp: ethereal strand, not a straight light column. The vertex
+// shader provides a world-up cylindrical billboard, but the mask
+// below bends the centreline, tapers the ends, and breaks the
+// body into drifting density pockets so a field of wisps reads as
+// animated vapor rather than repeated vertical smears.
 float wisp(vec2 uv, float seed) {
     vec2 c = (uv - 0.5) * 2.0;
     vec2 along  = (length(vStretchDir) > 0.01)
@@ -337,33 +327,45 @@ float wisp(vec2 uv, float seed) {
     float a = dot(c, along);   // -1..1 along the strand
     float t = dot(c, across);  // -1..1 across thickness
 
-    // ----- Soft fog silhouette -----
-    // Wide gaussian across (sigma ~ 0.5 so the body is *fully*
-    // soft, no visible edge). Long smoothstep at the ends so
-    // adjacent wisps overlap and fuse into one continuous
-    // column rather than terminating in visible caps.
-    float thickness = exp(-t * t * 4.0);
-    float endFade   = (1.0 - smoothstep(0.30, 1.00, abs(a)));
+    float h = a * 0.5 + 0.5;
+    float time = ubo.timeData.x;
+    float phase = seed * 6.2831853;
 
-    // ----- Scrolling fBm density -----
-    // Sample fBm in (across, along) coords with a vertical
-    // scroll. Per-particle seed offsets the pattern so
-    // neighbouring wisps don't resonate. We use the noise
-    // *only* to break up density — never to make the body
-    // disappear — so the bias is heavy toward the high end.
-    float scroll = ubo.timeData.x * 0.45 + seed * 17.0;
-    vec2 noiseUV = vec2(t * 1.1 + seed * 3.7,
-                        a * 1.4 + scroll);
-    float n = fbm2(noiseUV * 1.6);
-    // Heavy floor: density never drops below 60% of base, so
-    // the column always reads as continuous fog rather than
-    // dashed strands.
-    float density = mix(0.60, 1.00, n);
+    float endFade = smoothstep(0.00, 0.16, h) * (1.0 - smoothstep(0.78, 1.00, h));
+    float taper = mix(0.72, 0.24, smoothstep(0.10, 1.00, h));
 
-    // Pure body — no bright core. Density layering happens
-    // in screen space via additive blend across many wisps.
-    float body = thickness * endFade * density;
-    return clamp(body, 0.0, 1.0);
+    float centre = sin(h * 5.4 + phase + time * 0.62) * 0.18
+                 + sin(h * 11.0 + phase * 1.7 - time * 0.38) * 0.07;
+    centre *= endFade;
+    float localT = t - centre;
+
+    vec2 flowUV = vec2(localT * 1.8 + seed * 3.1,
+                       h * 2.4 - time * 0.34 + seed * 8.7);
+    float largeNoise = fbm2(flowUV);
+    float fineNoise = fbm2(flowUV * 2.6 + vec2(time * 0.18, -time * 0.27));
+
+    float width = mix(0.16, 0.34, largeNoise) * taper;
+    float shell = exp(-pow(localT / max(width * 1.8, 0.02), 2.0)) * 0.28;
+    float core = exp(-pow(localT / max(width * 0.48, 0.012), 2.0)) * 0.64;
+
+    float strand = 0.0;
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        float strandPhase = phase + fi * 2.0943951;
+        float offset = centre * (0.45 + fi * 0.18)
+                     + sin(h * (7.0 + fi * 2.1) + strandPhase - time * (0.45 + fi * 0.12))
+                     * (0.09 + fi * 0.025) * endFade;
+        float d = localT - offset;
+        float strandWidth = mix(0.035, 0.075, fineNoise) * taper;
+        float broken = smoothstep(0.22, 0.88, fbm2(vec2(fi * 5.3 + h * 3.0, seed * 4.0 - time * 0.55)));
+        strand += exp(-pow(d / max(strandWidth, 0.01), 2.0)) * broken;
+    }
+    strand *= 0.22;
+
+    float density = mix(0.35, 1.08, largeNoise) * mix(0.72, 1.08, fineNoise);
+    float edgeBreak = smoothstep(0.10, 0.78, fineNoise + largeNoise * 0.35);
+    float mask = (shell + core + strand) * density * edgeBreak * endFade;
+    return clamp(mask, 0.0, 1.15);
 }
 
 // SilkStrand: a single sprite that *is* the loot beam — a

@@ -128,6 +128,9 @@ pub struct UiState {
     pub modals: Vec<Modal>,
     /// Visual-only animation state for the bottom HUD vitals.
     pub vitals: VitalsAnimState,
+    /// Visual-only animation state for the top-center rift
+    /// progress meter.
+    pub rift_progress: RiftProgressAnimState,
     /// Visual-only animation state for health / essence bars
     /// anchored to world entities. Keys are supplied by the
     /// caller so this crate stays independent of the ECS type.
@@ -153,6 +156,20 @@ pub struct VitalsAnimState {
 pub struct WorldVitalsAnimState {
     pub hp: ResourceBarAnim,
     pub essence: ResourceBarAnim,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RiftProgressAnimState {
+    pub bar: ResourceBarAnim,
+    pub flow: f32,
+}
+
+impl RiftProgressAnimState {
+    pub fn tick(&mut self, target: f32, dt: f32) {
+        let dt = dt.clamp(1.0 / 240.0, 1.0 / 20.0);
+        self.bar.tick(target, dt);
+        self.flow = (self.flow + dt * (0.42 + self.bar.pulse * 0.55)).fract();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

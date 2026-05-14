@@ -94,6 +94,20 @@ const MAX_CORRECTION: f32 = 0.6;
 /// enough that a single tile boundary doesn't pop the foot.
 const SMOOTH_TAU: f32 = 0.08;
 
+/// Pelvis recovery should be much quicker than foot placement
+/// smoothing. Foot corrections need a little glide so planted feet
+/// don't pop on stair edges, but the hips staying dropped after the
+/// avatar has reached stable ground reads as an unwanted crouch.
+const PELVIS_RECOVERY_TAU: f32 = 0.025;
+
+/// Pelvis lowering is for asymmetric terrain contact: one foot down
+/// in a pit / off a platform while the other is still near the body.
+/// When both feet ask for roughly the same downward correction, that
+/// is usually visible-body Y smoothing after stepping down, and the
+/// legs should absorb it without also dragging the hips into a crouch.
+const PELVIS_UNEVEN_START: f32 = 0.08;
+const PELVIS_UNEVEN_FULL: f32 = 0.35;
+
 /// Blend factor for foot rotation alignment with the surface
 /// normal. Currently unused — see the comment in `solve_leg`
 /// where the alignment was disabled because it requires a
@@ -318,12 +332,25 @@ pub fn apply_foot_ik<G: GroundSampler>(
     //     opposite leg from over-extending. But scaling
     //     by 0.6 means the foot does most of the work and
     //     the body stays mostly stable.
-    let desired_pelvis = state
-        .left_correction_y
-        .min(state.right_correction_y)
-        .min(0.0)
-        * 0.6;
-    state.pelvis_offset_y += (desired_pelvis - state.pelvis_offset_y) * alpha;
+    let lower_foot = state.left_correction_y.min(state.right_correction_y);
+    let higher_foot = state.left_correction_y.max(state.right_correction_y);
+    let foot_unevenness = (higher_foot - lower_foot).max(0.0);
+    let uneven_t = ((foot_unevenness - PELVIS_UNEVEN_START)
+        / (PELVIS_UNEVEN_FULL - PELVIS_UNEVEN_START))
+        .clamp(0.0, 1.0);
+    let uneven_weight = uneven_t * uneven_t * (3.0 - 2.0 * uneven_t);
+    let desired_pelvis = lower_foot.min(0.0) * 0.6 * uneven_weight;
+
+    let pelvis_tau = if desired_pelvis > state.pelvis_offset_y {
+        PELVIS_RECOVERY_TAU
+    } else {
+        SMOOTH_TAU
+    };
+    let pelvis_alpha = 1.0 - (-(dt.max(0.0) / pelvis_tau)).exp();
+    state.pelvis_offset_y += (desired_pelvis - state.pelvis_offset_y) * pelvis_alpha;
+    if state.pelvis_offset_y.abs() < 0.001 && desired_pelvis.abs() < 0.001 {
+        state.pelvis_offset_y = 0.0;
+    }
 
     if state.pelvis_offset_y.abs() > 1.0e-4 {
         translate_root_chain(joints, joint_worlds, palette, state.pelvis_offset_y);

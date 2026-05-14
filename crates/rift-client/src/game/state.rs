@@ -382,6 +382,18 @@ impl GameState {
     pub fn character_select_skip_to_loading(&mut self, account_identity: String) {
         self.character_select.skip_to_loading(account_identity);
     }
+
+    /// Tear down the active world and surface the roster screen.
+    /// The caller is responsible for replacing/re-arming the net
+    /// client before the next frame so the roster refresh arrives
+    /// from a fresh session.
+    pub fn return_to_character_select(
+        &mut self,
+        renderer: &mut Renderer,
+        account_identity: String,
+    ) {
+        crate::game::transition::return_to_character_select(self, renderer, account_identity);
+    }
 }
 
 // Ability / channel / remote-death event handlers live in

@@ -4,6 +4,7 @@
 
 pub mod arcane;
 pub mod cast;
+pub mod enemy;
 pub mod fire;
 pub mod frost;
 pub mod impact;
@@ -12,6 +13,7 @@ pub mod support;
 
 pub use arcane::*;
 pub use cast::*;
+pub use enemy::*;
 pub use fire::*;
 pub use frost::*;
 pub use impact::*;

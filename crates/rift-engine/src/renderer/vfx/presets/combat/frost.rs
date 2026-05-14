@@ -76,6 +76,29 @@ pub fn frost_ray() -> EffectBundle {
                 }),
                 blend: BlendMode::Additive,
             }),
+            Layer::Ribbon(RibbonSpec {
+                width: 0.14,
+                cross_gradient: Gradient::from_stops([
+                    (0.00, [0.28, 0.70, 1.20, 0.0]),
+                    (0.34, [0.90, 2.20, 3.60, 0.46]),
+                    (0.50, [5.60, 8.20, 10.5, 1.00]),
+                    (0.66, [0.90, 2.20, 3.60, 0.46]),
+                    (1.00, [0.28, 0.70, 1.20, 0.0]),
+                ]),
+                length_gradient: Some(Gradient::from_stops([
+                    (0.00, [0.20, 0.26, 0.34, 0.0]),
+                    (0.12, [0.90, 1.05, 1.20, 0.90]),
+                    (0.74, [1.05, 1.18, 1.28, 1.00]),
+                    (1.00, [0.35, 0.50, 0.70, 0.0]),
+                ])),
+                noise: Some(RibbonNoise {
+                    tile: 0.20,
+                    scroll: 7.5,
+                    strength: 0.72,
+                    octaves: 4,
+                }),
+                blend: BlendMode::Additive,
+            }),
         ],
     })
     // Cold cyan hand-glow. The beam ribbon is additive and

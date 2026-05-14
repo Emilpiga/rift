@@ -19,8 +19,9 @@ pub use snapshot::{PendingFloor, RemoteEntity, RemoteProfile};
 pub use world_sync::wire_gender_to_game;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -215,6 +216,10 @@ pub struct NetClient {
     /// whenever a fresh snapshot lands. Doubles as the spawn
     /// anchor for the detonation when the projectile despawns.
     pub(super) projectile_render: HashMap<NetId, ProjectileRender>,
+    /// Projectile ids whose authoritative impact event has already
+    /// spawned its burst. When their snapshot row disappears later,
+    /// the despawn fallback only tears down mesh/trail/audio.
+    pub(super) projectile_impacts: HashSet<NetId>,
     /// Last known world-space position of every replicated entity
     /// the server has ever told us about. Survives across snapshots
     /// (the snapshot drops a row the moment an enemy dies, but the
@@ -457,10 +462,9 @@ pub struct NetClient {
 
 impl NetClient {
     pub fn connect(server: SocketAddr) -> anyhow::Result<Self> {
-        // Pick a stable-but-process-unique client id. For Phase 1 we
-        // use the OS PID; once auth lands this becomes the player's
-        // account id.
-        let client_id = ClientId(std::process::id() as u64);
+        static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+        let local_connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        let client_id = ClientId(((std::process::id() as u64) << 32) ^ local_connection_id);
         let handle = open_client(server, client_id, &NetSettings::default())?;
         Ok(Self {
             handle,
@@ -484,6 +488,7 @@ impl NetClient {
             projectile_audio: HashMap::new(),
             projectile_ability: HashMap::new(),
             projectile_render: HashMap::new(),
+            projectile_impacts: HashSet::new(),
             last_positions: HashMap::new(),
             last_velocities: HashMap::new(),
             dead_net_ids: std::collections::HashSet::new(),
@@ -529,6 +534,19 @@ impl NetClient {
             display_name: None,
             fatal_reject_reason: None,
         })
+    }
+
+    /// Mark a projectile as having already played its reliable
+    /// authoritative impact cue. Returns true when the projectile
+    /// currently has a local render row whose later disappearance
+    /// should skip the old despawn-driven impact fallback.
+    pub fn note_projectile_impact(&mut self, projectile: NetId) -> bool {
+        let tracked = self.projectile_render.contains_key(&projectile)
+            || self.projectile_objects.contains_key(&projectile);
+        if tracked {
+            self.projectile_impacts.insert(projectile);
+        }
+        tracked
     }
 
     /// Pump network state. Call once per frame, before the renderer's
@@ -894,6 +912,7 @@ impl NetClient {
                 // forget our id handles here.
                 self.projectile_trails.clear();
                 self.projectile_render.clear();
+                self.projectile_impacts.clear();
                 // Hand the transition off to the binary. It runs
                 // the equivalent SP regenerate path next frame.
                 self.pending_floor = Some(PendingFloor {

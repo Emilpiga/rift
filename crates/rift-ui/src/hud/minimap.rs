@@ -16,7 +16,6 @@ const MAP_PX_BASE: f32 = 292.0;
 const HEADER_H_BASE: f32 = 30.0;
 const INSET_BASE: f32 = 10.0;
 const MARGIN_BASE: f32 = 14.0;
-const RADIUS_BASE: f32 = 8.0;
 const VIEW_TILES_BASE: f32 = 58.0;
 
 /// Render the minimap anchored to the top-right corner. Returns
@@ -29,7 +28,6 @@ pub fn frame_minimap(ui: &mut Ui<'_>, view: &MinimapView<'_>) -> Rect {
     let header_h = HEADER_H_BASE * s;
     let inset = INSET_BASE * s;
     let margin = MARGIN_BASE * s;
-    let radius = RADIUS_BASE * s;
     let screen = ui.screen_size();
 
     let map_x = screen.x - map_px - margin;
@@ -37,11 +35,11 @@ pub fn frame_minimap(ui: &mut Ui<'_>, view: &MinimapView<'_>) -> Rect {
     let panel_rect = Rect::from_xywh(map_x, map_y, map_px, map_px);
 
     let frame = Frame::stone(&theme)
-        .with_radius(radius)
+        .with_radius(0.0)
         .with_padding(Pad::all(0.0));
     frame.show(ui, panel_rect, |ui, body| {
-        draw_header(ui, body, header_h, s, &theme, view);
-        draw_floor_and_pips(ui, body, header_h, inset, radius, s, view);
+        draw_header(ui, body, header_h, &theme, view);
+        draw_floor_and_pips(ui, body, header_h, inset, view);
     });
 
     panel_rect
@@ -51,26 +49,57 @@ fn draw_header(
     ui: &mut Ui<'_>,
     body: Rect,
     header_h: f32,
-    s: f32,
     theme: &rift_ui_im::Theme,
     view: &MinimapView<'_>,
 ) {
     let header = Rect::from_xywh(body.x(), body.y(), body.width(), header_h);
     PanelHeader::new(view.zone_title)
-        .subtitle(view.zone_detail)
         .font_size(theme.fonts.size_md)
         .show(ui, header);
-    let n_w = ui.measure_text("N", theme.fonts.size_sm);
-    let n_x = header.max.x - n_w - 12.0 * s;
-    ui.draw_rect(
-        Rect::from_xywh(n_x - 5.0 * s, header.y() + 6.0 * s, 3.0 * s, 6.0 * s),
-        Color::rgba(0.86, 0.66, 0.32, 0.82),
+    draw_header_detail(ui, header, theme, view.zone_title, view.zone_detail);
+}
+
+fn draw_header_detail(
+    ui: &mut Ui<'_>,
+    header: Rect,
+    theme: &rift_ui_im::Theme,
+    title: &str,
+    detail: &str,
+) {
+    let scale = theme.scale;
+    let title_x = header.x() + 17.0 * scale;
+    let title_w = ui.measure_text(title, theme.fonts.size_md);
+    let left_guard = title_x + title_w + 14.0 * scale;
+    let right_pad = 14.0 * scale;
+    let available = (header.max.x - right_pad - left_guard).max(0.0);
+    if available <= 8.0 * scale {
+        return;
+    }
+
+    let mut size = theme.fonts.size_md;
+    let mut width = ui.measure_text(detail, size);
+    if width > available {
+        size = (size * (available / width)).clamp(theme.fonts.size_sm * 0.78, theme.fonts.size_md);
+        width = ui.measure_text(detail, size);
+    }
+    if width > available {
+        size = theme.fonts.size_sm * 0.78;
+        width = ui.measure_text(detail, size).min(available);
+    }
+
+    let x = header.max.x - right_pad - width;
+    let y = header.y() + (header.height() - size) * 0.5 - 1.0 * scale;
+    ui.draw_text(
+        Pos2::new(x + 1.0 * scale, y + 1.0 * scale),
+        detail,
+        size,
+        Color::rgba(0.0, 0.0, 0.0, 0.58),
     );
     ui.draw_text(
-        Pos2::new(n_x, header.y() + 7.0 * s),
-        "N",
-        theme.fonts.size_sm,
-        Color::rgba(0.94, 0.84, 0.58, 0.95),
+        Pos2::new(x, y),
+        detail,
+        size,
+        Color::rgba(0.96, 0.84, 0.52, 1.0),
     );
 }
 
@@ -79,8 +108,6 @@ fn draw_floor_and_pips(
     body: Rect,
     header_h: f32,
     inset: f32,
-    radius: f32,
-    s: f32,
     view: &MinimapView<'_>,
 ) {
     let inner_rect = Rect::from_xywh(
@@ -90,14 +117,10 @@ fn draw_floor_and_pips(
         body.height() - header_h - inset * 2.0,
     );
 
-    ui.draw_rounded_rect(
-        inner_rect,
-        (radius - 2.0 * s).max(1.0),
-        Color::rgba(0.010, 0.011, 0.014, 1.0),
-    );
+    ui.draw_rounded_rect(inner_rect, 0.0, Color::rgba(0.010, 0.011, 0.014, 1.0));
     ui.draw_rounded_radial_rect_noisy(
         inner_rect,
-        (radius - 2.0 * s).max(1.0),
+        0.0,
         Color::rgba(0.010, 0.010, 0.013, 1.0),
         Color::rgba(0.060, 0.052, 0.044, 0.62),
     );
@@ -108,35 +131,51 @@ fn draw_floor_and_pips(
     }
     let stride = view.grid_width as usize;
     let rich_cells = view.cells.len() == stride * view.grid_depth as usize;
-    let view_tiles = if rich_cells {
-        VIEW_TILES_BASE
+    let full_bounds = if view.show_full_extent {
+        minimap_content_bounds(view, stride, rich_cells)
     } else {
-        grid_max
+        None
     };
-    let cell = (inner_rect.width().min(inner_rect.height()) / view_tiles).max(1.0);
+    let (view_tiles_x, view_tiles_z) = if let Some((min_x, min_z, max_x, max_z)) = full_bounds {
+        (
+            (max_x - min_x + 1.0).max(1.0),
+            (max_z - min_z + 1.0).max(1.0),
+        )
+    } else if rich_cells {
+        (VIEW_TILES_BASE, VIEW_TILES_BASE)
+    } else {
+        (grid_max, grid_max)
+    };
+    let cell_x = (inner_rect.width() / view_tiles_x).max(1.0);
+    let cell_z = (inner_rect.height() / view_tiles_z).max(1.0);
+    let cell = cell_x.min(cell_z);
     let (focus_x, focus_z) = view
         .focus
         .unwrap_or((view.grid_width as f32 * 0.5, view.grid_depth as f32 * 0.5));
-    let origin_x = if rich_cells {
-        (focus_x - view_tiles * 0.5)
-            .clamp(0.0, (view.grid_width as f32 - view_tiles).max(0.0))
-            .floor()
+    let origin_x = if let Some((min_x, _min_z, _max_x, _max_z)) = full_bounds {
+        min_x
+    } else if rich_cells {
+        (focus_x - view_tiles_x * 0.5).clamp(0.0, (view.grid_width as f32 - view_tiles_x).max(0.0))
     } else {
         0.0
     };
-    let origin_z = if rich_cells {
-        (focus_z - view_tiles * 0.5)
-            .clamp(0.0, (view.grid_depth as f32 - view_tiles).max(0.0))
-            .floor()
+    let origin_z = if let Some((_min_x, min_z, _max_x, _max_z)) = full_bounds {
+        min_z
+    } else if rich_cells {
+        (focus_z - view_tiles_z * 0.5).clamp(0.0, (view.grid_depth as f32 - view_tiles_z).max(0.0))
     } else {
         0.0
     };
-    let inner_x = inner_rect.x() - origin_x * cell;
-    let inner_y = inner_rect.y() - origin_z * cell;
+    let inner_x = inner_rect.x() - origin_x * cell_x;
+    let inner_y = inner_rect.y() - origin_z * cell_z;
     if rich_cells {
-        draw_rich_floor(ui, view, inner_rect, inner_x, inner_y, cell, stride);
+        draw_rich_floor(
+            ui, view, inner_rect, inner_x, inner_y, cell_x, cell_z, stride,
+        );
     } else {
-        draw_walkable_floor(ui, view, inner_rect, inner_x, inner_y, cell, stride);
+        draw_walkable_floor(
+            ui, view, inner_rect, inner_x, inner_y, cell_x, cell_z, stride,
+        );
     }
 
     // Inner vignette — soft dark band on each edge so the
@@ -185,16 +224,14 @@ fn draw_floor_and_pips(
         );
     }
 
-    ui.draw_rounded_outline(
-        inner_rect,
-        (radius - 2.0 * s).max(1.0),
-        1.0,
-        Color::rgba(0.18, 0.20, 0.26, 1.0),
-    );
+    ui.draw_rounded_outline(inner_rect, 0.0, 1.0, Color::rgba(0.18, 0.20, 0.26, 1.0));
 
     // Mapping helpers — closures borrow `inner_x`/`inner_y`/`cell`.
     let to_map = |p: (f32, f32)| -> (f32, f32) {
-        (inner_x + (p.0 + 0.5) * cell, inner_y + (p.1 + 0.5) * cell)
+        (
+            inner_x + (p.0 + 0.5) * cell_x,
+            inner_y + (p.1 + 0.5) * cell_z,
+        )
     };
     let in_inner = |mx: f32, my: f32| -> bool {
         mx >= inner_rect.x()
@@ -218,15 +255,7 @@ fn draw_floor_and_pips(
     if let Some(p) = view.portal {
         let (mx, my) = to_map(p);
         if pos_explored(view, stride, p) && in_inner(mx, my) {
-            let pip_size = (cell * 2.4).max(5.0);
-            draw_pip(
-                ui,
-                mx,
-                my,
-                pip_size,
-                Color::rgba(0.45, 0.85, 1.0, 1.0),
-                Color::rgba(0.30, 0.75, 1.0, 0.35),
-            );
+            draw_portal_marker(ui, mx, my, (cell * 2.7).max(7.0));
         }
     }
 
@@ -235,14 +264,14 @@ fn draw_floor_and_pips(
         if !in_inner(mx, my) {
             continue;
         }
-        let pip_size = (cell * 2.1).max(4.5);
-        draw_pip(
+        draw_player_marker(
             ui,
             mx,
             my,
-            pip_size,
-            Color::rgba(0.22, 0.86, 1.0, 1.0),
-            Color::rgba(0.20, 0.76, 1.0, 0.42),
+            cell,
+            member.facing,
+            Color::rgba(0.25, 0.78, 1.0, 1.0),
+            Color::rgba(0.08, 0.18, 0.26, 0.58),
         );
     }
 
@@ -255,15 +284,7 @@ fn draw_floor_and_pips(
             continue;
         }
         if enemy.is_boss {
-            let pip_size = (cell * 2.6).max(5.0);
-            draw_pip(
-                ui,
-                mx,
-                my,
-                pip_size,
-                Color::rgba(1.00, 0.60, 0.10, 1.0),
-                Color::rgba(1.00, 0.55, 0.10, 0.40),
-            );
+            draw_boss_marker(ui, mx, my, (cell * 3.0).max(8.0));
         } else {
             let pip_size = (cell * 1.7).max(3.0);
             draw_pip(
@@ -280,45 +301,53 @@ fn draw_floor_and_pips(
     if let Some(p) = view.player {
         let (mx, my) = to_map(p.pos);
         if in_inner(mx, my) {
-            // Heading fan — 5 fading pips along the facing
-            // vector, only drawn when the host passed a
-            // non-zero direction.
-            let len_sq = p.facing.0 * p.facing.0 + p.facing.1 * p.facing.1;
-            if len_sq > 1e-4 {
-                let len = len_sq.sqrt();
-                let fx = p.facing.0 / len;
-                let fz = p.facing.1 / len;
-                let fan_len = (cell * 4.5).max(8.0);
-                let dx = fx * fan_len;
-                let dz = fz * fan_len;
-                const STEPS: i32 = 5;
-                for i in 1..=STEPS {
-                    let t = i as f32 / STEPS as f32;
-                    let size = (3.2 * (1.0 - t * 0.6)).max(1.4);
-                    let alpha = (1.0 - t) * 0.85 + 0.15;
-                    ui.draw_rounded_rect(
-                        Rect::from_xywh(
-                            mx + dx * t - size * 0.5,
-                            my + dz * t - size * 0.5,
-                            size,
-                            size,
-                        ),
-                        size * 0.5,
-                        Color::rgba(0.95, 0.97, 1.0, alpha),
-                    );
-                }
-            }
-            let pip_size = (cell * 2.0).max(4.5);
-            draw_pip(
+            draw_player_marker(
                 ui,
                 mx,
                 my,
-                pip_size,
+                cell,
+                p.facing,
                 Color::rgba(0.98, 0.99, 1.0, 1.0),
-                Color::rgba(0.55, 0.78, 1.0, 0.45),
+                Color::rgba(0.55, 0.78, 1.0, 0.46),
             );
         }
     }
+}
+
+fn minimap_content_bounds(
+    view: &MinimapView<'_>,
+    stride: usize,
+    rich_cells: bool,
+) -> Option<(f32, f32, f32, f32)> {
+    let mut min_x = view.grid_width;
+    let mut min_z = view.grid_depth;
+    let mut max_x = 0u32;
+    let mut max_z = 0u32;
+    let mut any = false;
+
+    for z in 0..view.grid_depth {
+        for x in 0..view.grid_width {
+            let idx = z as usize * stride + x as usize;
+            let occupied = if rich_cells {
+                view.cells
+                    .get(idx)
+                    .map(|c| c.kind != MinimapTileKind::Wall && c.explored)
+                    .unwrap_or(false)
+            } else {
+                view.walkable.get(idx).copied().unwrap_or(false)
+            };
+            if !occupied {
+                continue;
+            }
+            any = true;
+            min_x = min_x.min(x);
+            min_z = min_z.min(z);
+            max_x = max_x.max(x);
+            max_z = max_z.max(z);
+        }
+    }
+
+    any.then_some((min_x as f32, min_z as f32, max_x as f32, max_z as f32))
 }
 
 fn draw_walkable_floor(
@@ -327,7 +356,8 @@ fn draw_walkable_floor(
     clip: Rect,
     inner_x: f32,
     inner_y: f32,
-    cell: f32,
+    cell_x: f32,
+    cell_z: f32,
     stride: usize,
 ) {
     let floor_a = Color::rgba(0.42, 0.36, 0.30, 0.95);
@@ -336,7 +366,7 @@ fn draw_walkable_floor(
         for x in 0..view.grid_width {
             let idx = z as usize * stride + x as usize;
             if view.walkable.get(idx).copied().unwrap_or(false) {
-                let rect = tile_rect(inner_x, inner_y, cell, x, z);
+                let rect = tile_rect(inner_x, inner_y, cell_x, cell_z, x, z);
                 if !rect_intersects(rect, clip) {
                     continue;
                 }
@@ -353,9 +383,11 @@ fn draw_rich_floor(
     clip: Rect,
     inner_x: f32,
     inner_y: f32,
-    cell: f32,
+    cell_x: f32,
+    cell_z: f32,
     stride: usize,
 ) {
+    let cell = cell_x.min(cell_z);
     for z in 0..view.grid_depth {
         for x in 0..view.grid_width {
             let idx = z as usize * stride + x as usize;
@@ -365,7 +397,7 @@ fn draw_rich_floor(
             if c.kind == MinimapTileKind::Wall {
                 continue;
             }
-            let rect = tile_rect(inner_x, inner_y, cell, x, z);
+            let rect = tile_rect(inner_x, inner_y, cell_x, cell_z, x, z);
             if !rect_intersects(rect, clip) {
                 continue;
             }
@@ -389,6 +421,8 @@ fn draw_rich_floor(
                 draw_stair(ui, rect, c.stair_dir, cell);
             }
             draw_soft_fog(ui, view, stride, x as i32, z as i32, rect);
+            draw_undiscovered_fog(ui, view, stride, x as i32, z as i32, rect);
+            draw_undiscovered_edge_fade(ui, view, stride, x as i32, z as i32, rect, cell);
         }
     }
 
@@ -401,11 +435,11 @@ fn draw_rich_floor(
             if c.kind == MinimapTileKind::Wall || c.explored {
                 continue;
             }
-            let rect = tile_rect(inner_x, inner_y, cell, x, z);
+            let rect = tile_rect(inner_x, inner_y, cell_x, cell_z, x, z);
             if !rect_intersects(rect, clip) {
                 continue;
             }
-            draw_unexplored_fog_frontier(ui, view, stride, x as i32, z as i32, rect);
+            draw_undiscovered_fog(ui, view, stride, x as i32, z as i32, rect);
         }
     }
 
@@ -418,7 +452,7 @@ fn draw_rich_floor(
             if c.kind == MinimapTileKind::Wall {
                 continue;
             }
-            let rect = tile_rect(inner_x, inner_y, cell, x, z);
+            let rect = tile_rect(inner_x, inner_y, cell_x, cell_z, x, z);
             if !c.explored || !rect_intersects(rect, clip) {
                 continue;
             }
@@ -512,7 +546,7 @@ fn draw_soft_fog(
     ui.draw_grad4_rect(soft_rect, tl, tr, bl, br);
 }
 
-fn draw_unexplored_fog_frontier(
+fn draw_undiscovered_fog(
     ui: &mut Ui<'_>,
     view: &MinimapView<'_>,
     stride: usize,
@@ -520,25 +554,73 @@ fn draw_unexplored_fog_frontier(
     z: i32,
     rect: Rect,
 ) {
-    let haze = |explored: f32| {
-        let alpha = 0.42 * explored.clamp(0.0, 1.0).powf(1.35);
-        Color::rgba(0.030, 0.034, 0.044, alpha)
+    let fog = |explored: f32| {
+        let unknown = 1.0 - explored.clamp(0.0, 1.0);
+        let alpha = 0.88 * smoothstep(unknown).powf(1.10);
+        Color::rgba(0.0, 0.0, 0.0, alpha)
     };
-    let tl = haze(smoothed_corner_explored(view, stride, x, z, -1, -1));
-    let tr = haze(smoothed_corner_explored(view, stride, x, z, 1, -1));
-    let bl = haze(smoothed_corner_explored(view, stride, x, z, -1, 1));
-    let br = haze(smoothed_corner_explored(view, stride, x, z, 1, 1));
+    let tl = fog(smoothed_corner_explored(view, stride, x, z, -1, -1));
+    let tr = fog(smoothed_corner_explored(view, stride, x, z, 1, -1));
+    let bl = fog(smoothed_corner_explored(view, stride, x, z, -1, 1));
+    let br = fog(smoothed_corner_explored(view, stride, x, z, 1, 1));
     let max_alpha = tl.0[3].max(tr.0[3]).max(bl.0[3]).max(br.0[3]);
     if max_alpha <= 0.01 {
         return;
     }
     let soft_rect = Rect::from_xywh(
-        rect.x() - 0.75,
-        rect.y() - 0.75,
-        rect.width() + 1.50,
-        rect.height() + 1.50,
+        rect.x() - 1.25,
+        rect.y() - 1.25,
+        rect.width() + 2.50,
+        rect.height() + 2.50,
     );
     ui.draw_grad4_rect(soft_rect, tl, tr, bl, br);
+}
+
+fn draw_undiscovered_edge_fade(
+    ui: &mut Ui<'_>,
+    view: &MinimapView<'_>,
+    stride: usize,
+    x: i32,
+    z: i32,
+    rect: Rect,
+    cell: f32,
+) {
+    let band = (cell * 3.4).clamp(8.0, 22.0);
+    let black = Color::rgba(0.0, 0.0, 0.0, 0.82);
+    let soft = Color::rgba(0.0, 0.0, 0.0, 0.0);
+
+    if is_undiscovered_open(view, stride, x, z - 1) {
+        ui.draw_gradient_rect(
+            Rect::from_xywh(rect.x(), rect.y(), rect.width(), band),
+            black,
+            soft,
+        );
+    }
+    if is_undiscovered_open(view, stride, x, z + 1) {
+        ui.draw_gradient_rect(
+            Rect::from_xywh(rect.x(), rect.max.y - band, rect.width(), band),
+            soft,
+            black,
+        );
+    }
+    if is_undiscovered_open(view, stride, x - 1, z) {
+        ui.draw_grad4_rect(
+            Rect::from_xywh(rect.x(), rect.y(), band, rect.height()),
+            black,
+            soft,
+            black,
+            soft,
+        );
+    }
+    if is_undiscovered_open(view, stride, x + 1, z) {
+        ui.draw_grad4_rect(
+            Rect::from_xywh(rect.max.x - band, rect.y(), band, rect.height()),
+            soft,
+            black,
+            soft,
+            black,
+        );
+    }
 }
 
 fn smoothed_corner_visibility(
@@ -555,8 +637,8 @@ fn smoothed_corner_visibility(
     let base_z = corner_z.floor() as i32;
     let mut visible_weight = 0.0;
     let mut total_weight = 0.0;
-    for sz in -2..=2 {
-        for sx in -2..=2 {
+    for sz in -4..=4 {
+        for sx in -4..=4 {
             let cx = base_x + sx;
             let cz = base_z + sz;
             let Some(cell) = minimap_cell(view, stride, cx, cz) else {
@@ -612,7 +694,7 @@ fn smoothed_corner_explored(
             let sample_x = cx as f32 + 0.5;
             let sample_z = cz as f32 + 0.5;
             let dist = ((sample_x - corner_x).powi(2) + (sample_z - corner_z).powi(2)).sqrt();
-            let weight = smoothstep(1.0 - dist / 2.55);
+            let weight = smoothstep(1.0 - dist / 4.15);
             if weight <= 0.0 {
                 continue;
             }
@@ -673,12 +755,12 @@ fn pos_visible(view: &MinimapView<'_>, stride: usize, pos: (f32, f32)) -> bool {
         .unwrap_or(false)
 }
 
-fn tile_rect(inner_x: f32, inner_y: f32, cell: f32, x: u32, z: u32) -> Rect {
+fn tile_rect(inner_x: f32, inner_y: f32, cell_x: f32, cell_z: f32, x: u32, z: u32) -> Rect {
     Rect::from_xywh(
-        inner_x + x as f32 * cell,
-        inner_y + z as f32 * cell,
-        cell,
-        cell,
+        inner_x + x as f32 * cell_x,
+        inner_y + z as f32 * cell_z,
+        cell_x,
+        cell_z,
     )
 }
 
@@ -691,6 +773,13 @@ fn is_wall_or_oob(view: &MinimapView<'_>, stride: usize, x: i32, z: i32) -> bool
         .get(idx)
         .map(|c| c.kind == MinimapTileKind::Wall)
         .unwrap_or(true)
+}
+
+fn is_undiscovered_open(view: &MinimapView<'_>, stride: usize, x: i32, z: i32) -> bool {
+    let Some(cell) = minimap_cell(view, stride, x, z) else {
+        return false;
+    };
+    cell.kind != MinimapTileKind::Wall && !cell.explored
 }
 
 fn elevation_changes(
@@ -1033,21 +1122,134 @@ fn draw_stair(ui: &mut Ui<'_>, rect: Rect, dir: Option<MinimapStairDir>, cell: f
 }
 
 fn draw_prop_marker(ui: &mut Ui<'_>, mx: f32, my: f32, cell: f32, kind: MinimapPropKind) {
-    let (size, col) = match kind {
-        MinimapPropKind::Chest => ((cell * 2.0).max(5.0), Color::rgba(0.95, 0.72, 0.25, 0.95)),
-        MinimapPropKind::Light => ((cell * 1.25).max(3.0), Color::rgba(1.0, 0.72, 0.28, 0.72)),
-        MinimapPropKind::LargeSolid => {
-            ((cell * 1.45).max(3.5), Color::rgba(0.12, 0.10, 0.08, 0.55))
-        }
-        MinimapPropKind::SmallSolid => {
-            ((cell * 1.0).max(2.5), Color::rgba(0.10, 0.085, 0.07, 0.42))
-        }
-        MinimapPropKind::Decoration => return,
-    };
+    match kind {
+        MinimapPropKind::Chest => draw_chest_marker(ui, mx, my, (cell * 2.15).max(6.5)),
+        MinimapPropKind::Light => draw_light_marker(ui, mx, my, (cell * 1.75).max(5.0)),
+        MinimapPropKind::LargeSolid => draw_solid_marker(ui, mx, my, (cell * 1.55).max(4.0), 0.46),
+        MinimapPropKind::SmallSolid => draw_solid_marker(ui, mx, my, (cell * 1.10).max(3.0), 0.32),
+        MinimapPropKind::Decoration => {}
+    }
+}
+
+fn draw_chest_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
+    let glow = size * 2.25;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - glow * 0.5, my - glow * 0.5, glow, glow),
+        glow * 0.5,
+        Color::rgba(1.0, 0.62, 0.16, 0.16),
+    );
+    let body = Rect::from_xywh(mx - size * 0.5, my - size * 0.38, size, size * 0.76);
+    ui.draw_rounded_rect(
+        body,
+        (size * 0.16).max(1.0),
+        Color::rgba(0.98, 0.66, 0.22, 0.96),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            body.x(),
+            my - size * 0.05,
+            body.width(),
+            (size * 0.12).max(1.0),
+        ),
+        Color::rgba(0.38, 0.19, 0.07, 0.72),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            mx - size * 0.10,
+            body.y(),
+            (size * 0.20).max(1.0),
+            body.height(),
+        ),
+        Color::rgba(1.0, 0.84, 0.42, 0.86),
+    );
+}
+
+fn draw_light_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
+    let glow = size * 2.8;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - glow * 0.5, my - glow * 0.5, glow, glow),
+        glow * 0.5,
+        Color::rgba(1.0, 0.58, 0.20, 0.18),
+    );
     ui.draw_rounded_rect(
         Rect::from_xywh(mx - size * 0.5, my - size * 0.5, size, size),
-        (size * 0.28).max(1.0),
-        col,
+        size * 0.5,
+        Color::rgba(1.0, 0.76, 0.28, 0.78),
+    );
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - size * 0.18, my - size * 0.18, size * 0.36, size * 0.36),
+        size * 0.18,
+        Color::rgba(1.0, 0.96, 0.62, 0.95),
+    );
+}
+
+fn draw_portal_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
+    let halo = size * 2.5;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - halo * 0.5, my - halo * 0.5, halo, halo),
+        halo * 0.5,
+        Color::rgba(0.22, 0.70, 1.0, 0.22),
+    );
+    let outer = Rect::from_xywh(mx - size * 0.5, my - size * 0.5, size, size);
+    ui.draw_rounded_outline(outer, size * 0.5, 2.0, Color::rgba(0.46, 0.88, 1.0, 0.96));
+    let inner = size * 0.44;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - inner * 0.5, my - inner * 0.5, inner, inner),
+        inner * 0.5,
+        Color::rgba(0.78, 0.96, 1.0, 0.92),
+    );
+}
+
+fn draw_boss_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
+    let halo = size * 2.25;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - halo * 0.5, my - halo * 0.5, halo, halo),
+        halo * 0.5,
+        Color::rgba(1.0, 0.28, 0.06, 0.26),
+    );
+    let half = size * 0.5;
+    ui.draw_line(
+        Pos2::new(mx, my - half),
+        Pos2::new(mx + half, my),
+        2.0,
+        Color::rgba(1.0, 0.66, 0.18, 0.96),
+    );
+    ui.draw_line(
+        Pos2::new(mx + half, my),
+        Pos2::new(mx, my + half),
+        2.0,
+        Color::rgba(1.0, 0.66, 0.18, 0.96),
+    );
+    ui.draw_line(
+        Pos2::new(mx, my + half),
+        Pos2::new(mx - half, my),
+        2.0,
+        Color::rgba(1.0, 0.66, 0.18, 0.96),
+    );
+    ui.draw_line(
+        Pos2::new(mx - half, my),
+        Pos2::new(mx, my - half),
+        2.0,
+        Color::rgba(1.0, 0.66, 0.18, 0.96),
+    );
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - size * 0.18, my - size * 0.18, size * 0.36, size * 0.36),
+        size * 0.18,
+        Color::rgba(1.0, 0.86, 0.32, 0.98),
+    );
+}
+
+fn draw_solid_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32, alpha: f32) {
+    ui.draw_rounded_rect(
+        Rect::from_xywh(mx - size * 0.5, my - size * 0.5, size, size),
+        (size * 0.20).max(1.0),
+        Color::rgba(0.04, 0.035, 0.030, alpha),
+    );
+    ui.draw_rounded_outline(
+        Rect::from_xywh(mx - size * 0.5, my - size * 0.5, size, size),
+        (size * 0.20).max(1.0),
+        1.0,
+        Color::rgba(0.18, 0.15, 0.11, alpha * 0.8),
     );
 }
 
@@ -1069,4 +1271,72 @@ fn draw_pip(ui: &mut Ui<'_>, mx: f32, my: f32, core_size: f32, core_col: Color, 
         core_size * 0.5,
         core_col,
     );
+}
+
+fn draw_player_marker(
+    ui: &mut Ui<'_>,
+    mx: f32,
+    my: f32,
+    cell: f32,
+    facing: (f32, f32),
+    fill: Color,
+    halo: Color,
+) {
+    let len_sq = facing.0 * facing.0 + facing.1 * facing.1;
+    let (dir_x, dir_y) = if len_sq > 1e-4 {
+        let inv = 1.0 / len_sq.sqrt();
+        (facing.0 * inv, facing.1 * inv)
+    } else {
+        (0.0, 1.0)
+    };
+    let side_x = -dir_y;
+    let side_y = dir_x;
+    let size = (cell * 2.55).clamp(10.0, 18.0);
+    let outline = (size * 0.24).max(2.6);
+    let inner = (outline - 1.45).max(1.15);
+
+    let tip = Pos2::new(mx + dir_x * size * 0.62, my + dir_y * size * 0.62);
+    let neck = Pos2::new(mx + dir_x * size * 0.06, my + dir_y * size * 0.06);
+    let left = Pos2::new(
+        mx - dir_x * size * 0.20 + side_x * size * 0.43,
+        my - dir_y * size * 0.20 + side_y * size * 0.43,
+    );
+    let right = Pos2::new(
+        mx - dir_x * size * 0.20 - side_x * size * 0.43,
+        my - dir_y * size * 0.20 - side_y * size * 0.43,
+    );
+    let base = Pos2::new(mx - dir_x * size * 0.52, my - dir_y * size * 0.52);
+    let diamond_tip = Pos2::new(base.x + dir_x * size * 0.30, base.y + dir_y * size * 0.30);
+    let diamond_back = Pos2::new(base.x - dir_x * size * 0.30, base.y - dir_y * size * 0.30);
+    let diamond_left = Pos2::new(base.x + side_x * size * 0.31, base.y + side_y * size * 0.31);
+    let diamond_right = Pos2::new(base.x - side_x * size * 0.31, base.y - side_y * size * 0.31);
+
+    let halo_size = size * 1.45;
+    ui.draw_rounded_rect(
+        Rect::from_xywh(
+            mx - halo_size * 0.5,
+            my - halo_size * 0.5,
+            halo_size,
+            halo_size,
+        ),
+        halo_size * 0.5,
+        halo,
+    );
+
+    let outline_col = Color::rgba(0.0, 0.0, 0.0, 0.95);
+    for thickness in [outline, inner] {
+        let color = if thickness == outline {
+            outline_col
+        } else {
+            fill
+        };
+        ui.draw_line(tip, left, thickness, color);
+        ui.draw_line(tip, right, thickness, color);
+        ui.draw_line(tip, neck, thickness, color);
+        ui.draw_line(neck, base, thickness, color);
+        ui.draw_line(diamond_tip, diamond_left, thickness, color);
+        ui.draw_line(diamond_left, diamond_back, thickness, color);
+        ui.draw_line(diamond_back, diamond_right, thickness, color);
+        ui.draw_line(diamond_right, diamond_tip, thickness, color);
+    }
 }

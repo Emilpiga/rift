@@ -526,7 +526,7 @@ impl OverlayBatch {
         // Helper: emit a quad whose 4 corners get their colour
         // from the callback. The four corners are passed in the
         // order TL, TR, BR, BL.
-        let mut quad = |verts: &mut Vec<OverlayVertex>,
+        let quad = |verts: &mut Vec<OverlayVertex>,
                         indices: &mut Vec<u32>,
                         p0: (f32, f32),
                         p1: (f32, f32),
@@ -921,7 +921,7 @@ impl OverlayBatch {
         // Sentinel UV — fragment shader treats UV.x < 0 as
         // "apply procedural noise + sample white".
         const NOISE_UV: [f32; 2] = [-1.0, -1.0];
-        let mut quad = |verts: &mut Vec<OverlayVertex>,
+        let quad = |verts: &mut Vec<OverlayVertex>,
                         indices: &mut Vec<u32>,
                         p0: (f32, f32),
                         p1: (f32, f32),

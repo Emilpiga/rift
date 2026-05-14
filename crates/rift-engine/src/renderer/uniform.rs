@@ -39,6 +39,8 @@ pub struct UniformData {
     /// x = number of point lights that currently have a shadow slot
     /// (0..=MAX_POINT_SHADOWS). The main fragment shader iterates over
     /// just this many entries when computing point-light occlusion.
+    /// y = 1 when realtime shadow sampling is enabled, 0 when disabled.
+    /// z = 1 when PBR texture-height-aware shadow lookups are enabled.
     pub point_shadow_meta: Vec4,
     /// x = seconds since renderer start (used for blood-field aging
     /// and any future time-driven shader effects). yzw reserved.

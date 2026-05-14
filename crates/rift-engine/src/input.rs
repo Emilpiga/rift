@@ -195,7 +195,7 @@ impl Input {
 
     /// Call at end of frame to snapshot key state.
     pub fn end_frame(&mut self) {
-        self.prev_keys_held = self.keys_held.clone();
+        self.prev_keys_held.clone_from(&self.keys_held);
         self.chars_typed.clear();
         self.backspace_pressed = 0;
         self.delete_pressed = 0;

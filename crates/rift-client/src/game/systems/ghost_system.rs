@@ -64,16 +64,23 @@ pub fn is_dead(world: &World, local_ghost_cached: bool) -> bool {
 ///
 /// `prev_hp` is the caller-owned previous-frame HP latch
 /// (typically `GameState::prev_player_hp`); this fn refreshes
-/// it in place. `floor` is mixed into the candidate-clip pick
-/// so adjacent floors alternate Hit_Chest / Hit_Head for
-/// variety.
-pub fn tick_hit_react(world: &mut World, prev_hp: &mut Option<f32>, floor: u32) {
+/// it in place. `damage_flash` is bumped for non-lethal HP
+/// drops so the screen-edge vignette accompanies the hit even
+/// if the avatar has no matching hit-react clip. `floor` is
+/// mixed into the candidate-clip pick so adjacent floors
+/// alternate Hit_Chest / Hit_Head for variety.
+pub fn tick_hit_react(
+    world: &mut World,
+    prev_hp: &mut Option<f32>,
+    damage_flash: &mut f32,
+    floor: u32,
+) {
     let Some(pid) = player_id(world) else {
         *prev_hp = None;
         return;
     };
-    let cur_hp = match world.get::<&Health>(pid) {
-        Ok(h) => h.current,
+    let (cur_hp, max_hp) = match world.get::<&Health>(pid) {
+        Ok(h) => (h.current, h.max.max(0.001)),
         Err(_) => return,
     };
     let prev = *prev_hp;
@@ -86,6 +93,10 @@ pub fn tick_hit_react(world: &mut World, prev_hp: &mut Option<f32>, floor: u32) 
     if cur_hp <= 0.001 {
         return;
     }
+
+    let damage_frac = ((prev - cur_hp) / max_hp).clamp(0.0, 1.0);
+    let flash = (0.18 + damage_frac * 0.70).min(0.48);
+    *damage_flash = (*damage_flash).max(flash);
 
     // Pick a chest/head hit at random for variety. The asset
     // pack ships `Hit_Chest` and `Hit_Head`; either is fine.

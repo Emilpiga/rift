@@ -6,8 +6,9 @@
 //! and the current selection.
 
 use rift_ui_im::{
-    widgets::{label, text_field, title},
-    Button, ButtonSize, Color, Column, Frame, Id, Pad, Pos2, Rect, Row, Sized, Stroke, Ui, Vec2,
+    widgets::{label, text_field},
+    Button, ButtonSize, Color, Column, Frame, Id, Pad, PanelHeader, Pos2, Rect, Row, Sized, Stroke,
+    Ui, Vec2,
 };
 use rift_ui_types::character_select::{
     CreateAction, CreateFormView, DeleteAction, DeleteConfirmView, LoadingRosterView, RosterAction,
@@ -34,7 +35,12 @@ pub fn frame_loading_roster(ui: &mut Ui<'_>, view: &LoadingRosterView<'_>) {
 
     Frame::stone(&theme).show(ui, panel, |ui, body| {
         let s = theme.scale;
-        let _ = title(ui, body.min, "ACCOUNT");
+        let header_h = 44.0 * s;
+        let header = Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h);
+        let (_, content) = body.split_off_top(header_h);
+        PanelHeader::new("ACCOUNT")
+            .subtitle("Retrieving roster")
+            .show(ui, header);
 
         let dots = match (view.anim_time * 1.5) as i32 % 4 {
             0 => "",
@@ -42,11 +48,30 @@ pub fn frame_loading_roster(ui: &mut Ui<'_>, view: &LoadingRosterView<'_>) {
             2 => "..",
             _ => "...",
         };
-        label(
-            ui,
-            body.min + Vec2::new(0.0, 44.0 * s),
-            &format!("Loading roster for '{}'{dots}", view.account_name),
+        let card = Rect::from_xywh(
+            content.x() + 8.0 * s,
+            content.y() + 24.0 * s,
+            content.width() - 16.0 * s,
+            112.0 * s,
         );
+        Frame::inset(&theme)
+            .with_fill(Color::rgba(0.03, 0.025, 0.022, 0.44))
+            .with_stroke(Stroke::new(1.0, Color::rgba(0.70, 0.48, 0.22, 0.55)))
+            .with_padding(Pad::all(0.0))
+            .show_only(ui, card);
+
+        let label_text = format!("Loading roster for '{}'{dots}", view.account_name);
+        let label_w = ui.measure_text(&label_text, theme.fonts.size_md);
+        ui.draw_text(
+            Pos2::new(
+                card.x() + (card.width() - label_w) * 0.5,
+                card.y() + 24.0 * s,
+            ),
+            &label_text,
+            theme.fonts.size_md,
+            theme.colors.text,
+        );
+        draw_loading_runes(ui, card, view.anim_time);
     });
 }
 
@@ -70,11 +95,8 @@ fn render_filled_row(
     let hovered = ui.interact_hover(id, rect);
     let clicked = hovered && ui.input().left_clicked();
 
-    // Row background — slightly lighter stone, with a soft
-    // hover lift so the user knows the row is interactive
-    // even before they read the selection state.
     let row_fill = if selected {
-        theme.colors.bg_stone_alt
+        Color::rgba(0.25, 0.055, 0.050, 0.92)
     } else if hovered {
         Color::rgba(
             theme.colors.bg_stone_alt.0[0],
@@ -87,9 +109,28 @@ fn render_filled_row(
     };
     Frame::inset(&theme)
         .with_fill(row_fill)
-        .with_stroke(Stroke::new(1.0, theme.colors.border_stone))
+        .with_stroke(Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                Color::rgba(0.86, 0.58, 0.25, 0.86)
+            } else {
+                theme.colors.border_stone
+            },
+        ))
         .with_padding(Pad::all(0.0))
         .show_only(ui, rect);
+    if selected || hovered {
+        ui.draw_gradient_rect(
+            Rect::from_xywh(
+                rect.x() + 2.0 * s,
+                rect.y() + 2.0 * s,
+                (rect.width() - 4.0 * s).max(0.0),
+                rect.height() * 0.40,
+            ),
+            Color::rgba(1.0, 0.75, 0.36, if selected { 0.12 } else { 0.07 }),
+            Color::rgba(1.0, 0.75, 0.36, 0.0),
+        );
+    }
 
     // Internal layout: pad → level badge → gap → name.
     let pad = 10.0 * s;
@@ -100,15 +141,22 @@ fn render_filled_row(
     let cy = rect.y() + pad;
     let inner_h = rect.height() - pad * 2.0;
 
-    // Level badge: small dark stone container with the level
-    // number centred. Uses bg_stone (darker) so it sits as a
-    // recess against the row's bg_stone_alt fill.
     let badge_rect = Rect::from_xywh(cx, cy, badge_w, inner_h);
     Frame::inset(&theme)
-        .with_fill(theme.colors.bg_stone)
-        .with_stroke(Stroke::new(1.0, theme.colors.border_stone))
+        .with_fill(Color::rgba(0.115, 0.070, 0.035, 0.96))
+        .with_stroke(Stroke::new(1.0, Color::rgba(0.92, 0.62, 0.28, 0.66)))
         .with_padding(Pad::all(0.0))
         .show_only(ui, badge_rect);
+    ui.draw_gradient_rect(
+        Rect::from_xywh(
+            badge_rect.x() + 1.0 * s,
+            badge_rect.y() + 1.0 * s,
+            (badge_rect.width() - 2.0 * s).max(0.0),
+            badge_rect.height() * 0.45,
+        ),
+        Color::rgba(1.0, 0.74, 0.34, 0.16),
+        Color::rgba(1.0, 0.74, 0.34, 0.0),
+    );
     let lvl_text = format!("{}", profile.level);
     let lvl_size = theme.fonts.size_lg;
     let lvl_w = ui.measure_text(&lvl_text, lvl_size);
@@ -129,26 +177,52 @@ fn render_filled_row(
         theme.colors.text_muted,
     );
 
-    // Name container: fills remaining width. Red surface when
-    // selected — same palette as the panel-level Play button
-    // so the link reads visually.
     let name_x = badge_rect.max.x + gap;
     let name_rect = Rect::from_xywh(name_x, cy, (rect.max.x - pad) - name_x, inner_h);
-    if selected {
-        // Stronger fill + dark border to match the Red button
-        // chrome the user clicks next.
-        Frame::inset(&theme)
-            .with_fill(theme.colors.red)
-            .with_stroke(Stroke::new(2.0, theme.colors.border_stone))
-            .with_padding(Pad::all(0.0))
-            .show_only(ui, name_rect);
-    } else {
-        Frame::inset(&theme)
-            .with_fill(theme.colors.bg_stone)
-            .with_stroke(Stroke::new(1.0, theme.colors.border_stone))
-            .with_padding(Pad::all(0.0))
-            .show_only(ui, name_rect);
-    }
+    Frame::inset(&theme)
+        .with_fill(if selected {
+            Color::rgba(0.30, 0.055, 0.045, 0.94)
+        } else {
+            Color::rgba(0.050, 0.043, 0.036, 0.92)
+        })
+        .with_stroke(Stroke::new(
+            1.0,
+            if selected {
+                Color::rgba(0.96, 0.67, 0.28, 0.72)
+            } else {
+                Color::rgba(0.58, 0.42, 0.24, 0.52)
+            },
+        ))
+        .with_padding(Pad::all(0.0))
+        .show_only(ui, name_rect);
+    ui.draw_gradient_rect(
+        Rect::from_xywh(
+            name_rect.x() + 1.0 * s,
+            name_rect.y() + 1.0 * s,
+            (name_rect.width() - 2.0 * s).max(0.0),
+            name_rect.height() * 0.46,
+        ),
+        if selected {
+            Color::rgba(1.0, 0.58, 0.28, 0.15)
+        } else {
+            Color::rgba(0.82, 0.60, 0.34, 0.10)
+        },
+        Color::rgba(0.0, 0.0, 0.0, 0.0),
+    );
+    let gender_band = Rect::from_xywh(
+        name_rect.x() + 1.0 * s,
+        name_rect.max.y - 20.0 * s,
+        (name_rect.width() - 2.0 * s).max(0.0),
+        19.0 * s,
+    );
+    ui.draw_rect(
+        gender_band,
+        if selected {
+            Color::rgba(0.12, 0.030, 0.026, 0.45)
+        } else {
+            Color::rgba(0.0, 0.0, 0.0, 0.20)
+        },
+    );
 
     // Name text (left-aligned, vertical centre). Sub-line
     // below: gender label in a muted tone so the row reads
@@ -185,7 +259,13 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
 
     Frame::stone(&theme).show(ui, panel, |ui, body| {
         let s = theme.scale;
-        let _ = title(ui, body.min, "CHARACTERS");
+        let header_h = 46.0 * s;
+        let header = Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h);
+        let (_, body) = body.split_off_top(header_h);
+        PanelHeader::new("CHARACTERS")
+            .subtitle("Select a hero")
+            .right_text(&format!("{}/{}", view.entries.len(), MAX_CHARACTER_SLOTS))
+            .show(ui, header);
 
         // Single vertical Column owning the whole panel body
         // below the title gutter. Items: 5 roster rows + Play
@@ -194,14 +274,13 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
         // between every element and stops the rows from
         // expanding into the Play button when the panel grows
         // tall \u2014 row height is fixed.
-        let title_gutter_h = 48.0 * s;
         let row_h = 60.0 * s;
         let play_h = 64.0 * s;
         let secondary_h = 36.0 * s;
         let gap = 10.0 * s;
 
-        let (_, body_below_title) = body.split_off_top(title_gutter_h);
-        let mut col = Column::new(body_below_title).gap(gap);
+        let (_, body_below_header) = body.split_off_top(14.0 * s);
+        let mut col = Column::new(body_below_header).gap(gap);
         for _ in 0..MAX_CHARACTER_SLOTS {
             col = col.item(Sized::fixed(row_h));
         }
@@ -238,7 +317,7 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
                 // Empty / locked slot \u2014 dashed placeholder.
                 Frame::inset(&theme)
                     .with_fill(Color::rgba(0.0, 0.0, 0.0, 0.18))
-                    .with_stroke(Stroke::new(1.0, theme.colors.border_stone))
+                    .with_stroke(Stroke::new(1.0, Color::rgba(0.62, 0.46, 0.28, 0.34)))
                     .with_padding(Pad::all(0.0))
                     .show_only(ui, row_rect);
                 ui.draw_text(
@@ -265,7 +344,7 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
         }
 
         let secondary = Row::new(secondary_row).gap(gap).equal(2).layout();
-        let del = Button::danger("Delete")
+        let del = Button::red("Delete")
             .small()
             .enabled(has_selection)
             .show_with_id(ui, Id::root("char_select").child("delete"), secondary[0]);
@@ -293,7 +372,12 @@ pub fn frame_create(ui: &mut Ui<'_>, view: &mut CreateFormView<'_>) -> CreateAct
 
     Frame::stone(&theme).show(ui, panel, |ui, body| {
         let s = theme.scale;
-        let _ = title(ui, body.min, "CREATE CHARACTER");
+        let header_h = 46.0 * s;
+        let header = Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h);
+        let (_, body) = body.split_off_top(header_h);
+        PanelHeader::new("CREATE CHARACTER")
+            .subtitle("Forge a new hero")
+            .show(ui, header);
 
         // Reserve the title gutter at the top *and* the
         // footer at the bottom up front, then lay the form
@@ -303,9 +387,8 @@ pub fn frame_create(ui: &mut Ui<'_>, view: &mut CreateFormView<'_>) -> CreateAct
         // adapts to scale automatically. Without splitting
         // off the title gutter the form's first cell would
         // start at body.min and overlap the title text.
-        let title_gutter_h = 48.0 * s;
         let footer_h = 56.0 * s;
-        let (_, after_title) = body.split_off_top(title_gutter_h);
+        let (_, after_title) = body.split_off_top(20.0 * s);
         let (form_area, footer_area) = after_title.split_off_bottom(footer_h);
 
         let label_h = 22.0 * s;
@@ -405,10 +488,16 @@ pub fn frame_delete_confirm(ui: &mut Ui<'_>, view: &DeleteConfirmView<'_>) -> De
         Frame::stone(&theme)
             .with_padding(Pad::all(20.0 * sc))
             .show(ui, modal_rect, |ui, body| {
-                let _ = title(ui, body.min, "Delete character?");
+                let header_h = 42.0 * sc;
+                let header =
+                    Rect::from_xywh(modal_rect.x(), modal_rect.y(), modal_rect.width(), header_h);
+                let (_, body) = body.split_off_top(header_h);
+                PanelHeader::new("DELETE CHARACTER")
+                    .title_color(Color::rgba(1.0, 0.64, 0.45, 1.0))
+                    .show(ui, header);
                 label(
                     ui,
-                    body.min + Vec2::new(0.0, 40.0 * sc),
+                    body.min + Vec2::new(0.0, 22.0 * sc),
                     &format!("\"{}\" will be permanently removed.", view.character_name),
                 );
                 // Modal footer: matched-size Delete (red) and
@@ -418,7 +507,7 @@ pub fn frame_delete_confirm(ui: &mut Ui<'_>, view: &DeleteConfirmView<'_>) -> De
                 let btn_h = 50.0 * sc;
                 let footer = body.bottom(btn_h);
                 let cells = Row::new(footer).gap(12.0 * sc).equal(2).layout();
-                let yes = Button::red("Delete").size(ButtonSize::Large).show_with_id(
+                let yes = Button::red("DELETE").size(ButtonSize::Large).show_with_id(
                     ui,
                     Id::root("char_select").child("del_yes"),
                     cells[0],
@@ -436,4 +525,23 @@ pub fn frame_delete_confirm(ui: &mut Ui<'_>, view: &DeleteConfirmView<'_>) -> De
             });
     });
     action
+}
+
+fn draw_loading_runes(ui: &mut Ui<'_>, rect: Rect, anim_time: f32) {
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let count = 9;
+    let dot = 8.0 * s;
+    let gap = 8.0 * s;
+    let total_w = count as f32 * dot + (count - 1) as f32 * gap;
+    let start_x = rect.x() + (rect.width() - total_w) * 0.5;
+    let y = rect.max.y - 34.0 * s;
+    let active = ((anim_time * 8.0) as usize) % count;
+    for i in 0..count {
+        let alpha = if i == active { 0.95 } else { 0.22 };
+        let x = start_x + i as f32 * (dot + gap);
+        let r = Rect::from_xywh(x, y, dot, dot);
+        ui.draw_rect(r, Color::rgba(0.96, 0.67, 0.28, alpha));
+        ui.draw_outline(r, 1.0, Color::rgba(0.08, 0.04, 0.02, 0.80));
+    }
 }

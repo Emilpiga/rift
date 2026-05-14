@@ -67,6 +67,67 @@ pub const ELEVATION_STEP: f32 = 0.5;
 /// needs.
 pub type Elevation = i8;
 
+/// Deterministic floor-level identity. This intentionally
+/// sits above individual room themes: a floor can still have
+/// mixed rooms, but one mood biases the palette strongly
+/// enough that the run reads as a place rather than a grab bag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorMood {
+    Sanctuary,
+    Crypt,
+    Armory,
+    Archive,
+    Shrine,
+    Prison,
+    Infernal,
+}
+
+impl FloorMood {
+    pub fn for_seed(floor: u32, seed: u64) -> Self {
+        let mixed = seed
+            ^ (floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ seed.rotate_left((floor % 31) + 1);
+        match mixed % 6 {
+            0 => Self::Crypt,
+            1 => Self::Armory,
+            2 => Self::Archive,
+            3 => Self::Shrine,
+            4 => Self::Prison,
+            _ => Self::Infernal,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Sanctuary => "SANCTUARY",
+            Self::Crypt => "CRYPT DEPTH",
+            Self::Armory => "WAR VAULT",
+            Self::Archive => "FORGOTTEN ARCHIVE",
+            Self::Shrine => "RIFT CHAPEL",
+            Self::Prison => "BONE CELLS",
+            Self::Infernal => "EMBER RIFT",
+        }
+    }
+
+    pub fn theme_bonus(self, theme: RoomTheme) -> u32 {
+        match (self, theme) {
+            (Self::Crypt, RoomTheme::Crypt) => 7,
+            (Self::Crypt, RoomTheme::Prison) => 3,
+            (Self::Armory, RoomTheme::Barracks) => 7,
+            (Self::Armory, RoomTheme::Storage) => 4,
+            (Self::Archive, RoomTheme::Library) => 8,
+            (Self::Archive, RoomTheme::Crypt) => 2,
+            (Self::Shrine, RoomTheme::Shrine) => 8,
+            (Self::Shrine, RoomTheme::Library) => 2,
+            (Self::Prison, RoomTheme::Prison) => 8,
+            (Self::Prison, RoomTheme::Storage) => 3,
+            (Self::Infernal, RoomTheme::Crypt) => 5,
+            (Self::Infernal, RoomTheme::Shrine) => 4,
+            _ => 0,
+        }
+    }
+}
+
 /// A fully generated dungeon floor.
 pub struct Floor {
     pub width: usize,
@@ -83,6 +144,7 @@ pub struct Floor {
     /// about elevation read this grid directly.
     pub elevation: Vec<Elevation>,
     pub rooms: Vec<Room>,
+    pub mood: FloorMood,
     pub spawn_pos: Vec3,
     pub boss_room_center: Vec3,
     /// World positions of the two post-boss portals (descend
@@ -308,7 +370,7 @@ impl Floor {
         let depth = config.depth;
         let mut tiles = vec![Tile::Wall; width * depth];
 
-        let (rooms, corridors) = bsp::generate_bsp(&config, seed);
+        let (rooms, corridors, mood) = bsp::generate_bsp(&config, seed);
 
         // Carve rooms into the tile grid
         for room in &rooms {
@@ -412,6 +474,7 @@ impl Floor {
             tiles,
             elevation,
             rooms,
+            mood,
             spawn_pos,
             boss_room_center,
             portal_anchors,
@@ -814,6 +877,7 @@ impl Floor {
             tiles,
             elevation,
             rooms: vec![room],
+            mood: FloorMood::Sanctuary,
             spawn_pos,
             boss_room_center: Vec3::ZERO,
             portal_anchors: None,

@@ -114,18 +114,23 @@ pub fn render_stash_panel(
     } else {
         0.0
     };
-    let avail_w = body.width() - plus_w;
+    let sort_lbl = "Sort";
+    let sort_w = ui.measure_text(sort_lbl, theme.fonts.size_sm) + 20.0 * fit;
+    let sort_gap = 6.0 * fit;
+    let add_gap = if plus_w > 0.0 { tab_gap } else { 0.0 };
+    let avail_w = body.width() - plus_w - add_gap - sort_w - sort_gap;
     let tab_w = ((avail_w - tab_gap * (owned_tabs as f32 - 1.0).max(0.0))
         / owned_tabs.max(1) as f32)
         .max(48.0 * fit);
     let mut picker_anchor: Option<Rect> = None;
     let mut color_button_clicked = false;
+    let mut rename_field_rect: Option<Rect> = None;
     for (i, tab) in view.tabs.iter().enumerate() {
         let tx = body.x() + i as f32 * (tab_w + tab_gap);
         let trect = Rect::from_xywh(tx, body.y(), tab_w, tab_h);
         let id = Id::root("inv").child(("stash_tab", i));
         let active = i == active_idx;
-        let (tab_clicked, color_clicked) = draw_stash_tab_button(
+        let (tab_clicked, color_clicked, rename_clicked, label_rect) = draw_stash_tab_button(
             ui,
             id,
             trect,
@@ -133,6 +138,7 @@ pub fn render_stash_panel(
             tab.color,
             active,
             *color_picker_tab == Some(i as u8),
+            *rename.target_tab == Some(i as u8),
             fit,
         );
         if tab_clicked {
@@ -149,10 +155,16 @@ pub fn render_stash_panel(
         if *color_picker_tab == Some(i as u8) {
             picker_anchor = Some(trect);
         }
+        if rename_clicked {
+            pressed_rename.set(true);
+        }
+        if *rename.target_tab == Some(i as u8) {
+            rename_field_rect = Some(label_rect);
+        }
     }
+    let mut tab_controls_x = body.x() + owned_tabs as f32 * (tab_w + tab_gap);
     if owned_tabs < view.max_tabs {
-        let bx = body.x() + owned_tabs as f32 * (tab_w + tab_gap);
-        let brect = Rect::from_xywh(bx, body.y(), plus_w, tab_h);
+        let brect = Rect::from_xywh(tab_controls_x, body.y(), plus_w, tab_h);
         let buy_id = Id::root("inv").child(("stash_tab_buy", owned_tabs));
         let resp = Button::new("+")
             .size(ButtonSize::Small)
@@ -196,6 +208,18 @@ pub fn render_stash_panel(
                 .anchor_to(brect)
                 .show(ui, Pos2::new(brect.max.x, brect.y()), &lines);
         }
+        tab_controls_x = brect.max.x + tab_gap;
+    }
+    let sort_rect = Rect::from_xywh(tab_controls_x, body.y(), sort_w, tab_h);
+    let sort_btn = Button::new(sort_lbl).size(ButtonSize::Small).show_with_id(
+        ui,
+        Id::root("inv").child(("stash_sort", active_idx)),
+        sort_rect,
+    );
+    if sort_btn.clicked {
+        out_actions.push(InventoryAction::SortStashTab {
+            tab_index: active_tab_u8,
+        });
     }
 
     if let Some(anchor) = picker_anchor {
@@ -207,65 +231,21 @@ pub fn render_stash_panel(
         }
     }
 
-    // ── Header row ───────────────────────────
+    // ── Summary row ──────────────────────────
     let header_y = body.y() + tab_h + 8.0 * fit;
-    let active_name = view.tabs.get(active_idx).map(|t| t.name).unwrap_or("STASH");
-    ui.draw_text(
-        Pos2::new(body.x(), header_y),
-        active_name,
-        theme.fonts.size_lg,
-        theme.colors.text,
-    );
     let counts = format!(
         "{}/{}",
         active_items.iter().filter(|s| s.is_some()).count(),
         view.slots_per_tab,
     );
     let cw = ui.measure_text(&counts, theme.fonts.size_md);
-    let rename_lbl = "Rename";
-    let rename_w = ui.measure_text(rename_lbl, theme.fonts.size_sm) + 20.0 * fit;
-    let rename_h = 28.0 * fit;
-    let sort_lbl = "Sort";
-    let sort_w = ui.measure_text(sort_lbl, theme.fonts.size_sm) + 20.0 * fit;
-    let sort_rect = Rect::from_xywh(
-        body.max.x - cw - 14.0 * fit - rename_w - 6.0 * fit - sort_w,
-        header_y,
-        sort_w,
-        rename_h,
-    );
-    let sort_btn = Button::new(sort_lbl).size(ButtonSize::Small).show_with_id(
-        ui,
-        Id::root("inv").child(("stash_sort", active_idx)),
-        sort_rect,
-    );
-    if sort_btn.clicked {
-        out_actions.push(InventoryAction::SortStashTab {
-            tab_index: active_tab_u8,
-        });
-    }
-    let rename_rect = Rect::from_xywh(
-        body.max.x - cw - 14.0 * fit - rename_w,
-        header_y,
-        rename_w,
-        rename_h,
-    );
-    let rename_btn = Button::new(rename_lbl)
-        .size(ButtonSize::Small)
-        .show_with_id(
-            ui,
-            Id::root("inv").child(("stash_rename", active_idx)),
-            rename_rect,
-        );
-    if rename_btn.clicked {
-        pressed_rename.set(true);
-    }
     ui.draw_text(
         Pos2::new(body.max.x - cw, header_y + 2.0),
         &counts,
         theme.fonts.size_md,
         theme.colors.text_dim,
     );
-    let div_y = header_y + theme.fonts.size_lg + 8.0 * fit;
+    let div_y = header_y + theme.fonts.size_md + 8.0 * fit;
     ui.draw_rect(
         Rect::from_xywh(body.x(), div_y, body.width(), 1.0),
         theme.colors.border,
@@ -587,9 +567,14 @@ pub fn render_stash_panel(
 
     // ── Inline rename overlay ────────────────
     if *rename.target_tab == Some(active_tab_u8) {
-        let field_h = theme.fonts.size_md + 8.0 * fit;
-        let field_w = body.width().min(220.0 * fit);
-        let field_rect = Rect::from_xywh(body.x(), header_y - 2.0 * fit, field_w, field_h);
+        let field_rect = rename_field_rect.unwrap_or_else(|| {
+            Rect::from_xywh(
+                body.x() + 48.0 * fit,
+                body.y() + 4.0 * fit,
+                (tab_w - 54.0 * fit).max(60.0 * fit),
+                tab_h - 8.0 * fit,
+            )
+        });
         ui.draw_rect(field_rect, Color::rgba(0.10, 0.10, 0.13, 0.95));
         let resp = text_field(
             ui,
@@ -656,10 +641,12 @@ fn draw_stash_tab_button(
     packed_color: u32,
     active: bool,
     picker_open: bool,
+    editing: bool,
     fit: f32,
-) -> (bool, bool) {
+) -> (bool, bool, bool, Rect) {
     let theme = *ui.theme();
     let color_id = id.child("color");
+    let rename_id = id.child("rename");
     let swatch_size = (rect.height() - 10.0 * fit).max(10.0 * fit);
     let swatch = Rect::from_xywh(
         rect.x() + 5.0 * fit,
@@ -667,10 +654,19 @@ fn draw_stash_tab_button(
         swatch_size,
         swatch_size,
     );
+    let edit_w = if active { (32.0 * fit).max(24.0) } else { 0.0 };
+    let edit_rect = Rect::from_xywh(
+        swatch.max.x + 4.0 * fit,
+        rect.y() + 4.0 * fit,
+        edit_w,
+        rect.height() - 8.0 * fit,
+    );
     let swatch_hover = ui.interact_hover(color_id, swatch);
     let color_clicked = swatch_hover && ui.input().left_clicked();
+    let rename_hover = active && ui.interact_hover(rename_id, edit_rect);
+    let rename_clicked = rename_hover && ui.input().left_clicked();
     let hovered = ui.interact_hover(id, rect);
-    let tab_clicked = hovered && !color_clicked && ui.input().left_clicked();
+    let tab_clicked = hovered && !color_clicked && !rename_clicked && ui.input().left_clicked();
 
     let tab_color = packed_to_color(packed_color, 1.0);
     let active_lift = if active { 1.22 } else { 0.92 };
@@ -728,26 +724,45 @@ fn draw_stash_tab_button(
         },
     );
 
+    if active {
+        let edit_resp = Button::new("Edit")
+            .size(ButtonSize::Small)
+            .show_with_id(ui, rename_id, edit_rect);
+        let _ = edit_resp;
+    }
+
     let text_size = theme.fonts.size_sm;
-    let text_x = swatch.max.x + 6.0 * fit;
+    let text_x = if active {
+        edit_rect.max.x + 6.0 * fit
+    } else {
+        swatch.max.x + 6.0 * fit
+    };
     let max_w = (rect.max.x - text_x - 5.0 * fit).max(1.0);
     let text_y = rect.y() + (rect.height() - text_size) * 0.5;
-    ui.draw_text_ellipsized(
-        Pos2::new(text_x + 1.0, text_y + 1.0),
-        label,
-        text_size,
+    let label_rect = Rect::from_xywh(
+        text_x,
+        rect.y() + 4.0 * fit,
         max_w,
-        Color::rgba(0.0, 0.0, 0.0, 0.55),
+        rect.height() - 8.0 * fit,
     );
-    ui.draw_text_ellipsized(
-        Pos2::new(text_x, text_y),
-        label,
-        text_size,
-        max_w,
-        theme.colors.text,
-    );
+    if !editing {
+        ui.draw_text_ellipsized(
+            Pos2::new(text_x + 1.0, text_y + 1.0),
+            label,
+            text_size,
+            max_w,
+            Color::rgba(0.0, 0.0, 0.0, 0.55),
+        );
+        ui.draw_text_ellipsized(
+            Pos2::new(text_x, text_y),
+            label,
+            text_size,
+            max_w,
+            theme.colors.text,
+        );
+    }
 
-    (tab_clicked, color_clicked)
+    (tab_clicked, color_clicked, rename_clicked, label_rect)
 }
 
 fn draw_stash_color_dropdown(

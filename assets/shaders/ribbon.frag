@@ -93,6 +93,7 @@ void main() {
     float tile = max(vParams.w, 0.001);
 
     float n = 1.0;
+    float edgeBreak = 1.0;
     if (strength > 0.0) {
         // We don't have world-space length here — use uv length as
         // a proxy. Ribbons of length L produce uv.y in [0, 1] but
@@ -100,11 +101,19 @@ void main() {
         vec2 np = vec2(u * 2.5, v / tile - vTime * scroll);
         int oct = clamp(int(floor(vFlags.x + 0.5)), 1, 4);
         float fbm_val = fbm(np, oct);
-        n = mix(1.0, fbm_val * 1.6, strength);
+        float flow = smoothstep(0.18, 0.92, fbm_val);
+        float filament = smoothstep(0.72, 1.0, fbm(vec2(u * 7.0 + vTime * 0.35, v / tile * 1.7 - vTime * scroll * 1.35), oct));
+        n = mix(1.0, 0.65 + flow * 1.35 + filament * 0.45, strength);
+
+        float edge = smoothstep(0.22, 0.50, abs(u - 0.5));
+        float edgeNoise = fbm(vec2(u * 11.0 + 4.7, v / tile * 2.2 + vTime * scroll * 0.55), oct);
+        edgeBreak = mix(1.0, mix(1.0, smoothstep(0.18, 0.82, edgeNoise), edge), strength * 0.55);
     }
 
-    vec3 rgb = crossCol.rgb * lengthVal.rgb * brightness * n;
-    float a  = crossCol.a * lengthVal.a * gauss;
+    float pulse = 0.88 + 0.12 * sin(v * 32.0 - vTime * max(scroll, 1.0) * 7.0);
+
+    vec3 rgb = crossCol.rgb * lengthVal.rgb * brightness * n * pulse;
+    float a  = crossCol.a * lengthVal.a * gauss * edgeBreak;
 
     outColor = vec4(rgb * a, a);
 }

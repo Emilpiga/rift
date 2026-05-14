@@ -5,7 +5,9 @@
 use anyhow::Result;
 use ash::vk;
 use glam::Mat4;
+use gpu_allocator::vulkan::Allocator;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::renderer::forward::Renderer;
 use crate::renderer::gpu_skin::SkinHandle;
@@ -67,6 +69,52 @@ pub struct RenderObject {
     /// geometric pass would only matter at shallow grazing
     /// angles that our gameplay camera never reaches.
     pub casts_shadow: bool,
+}
+
+struct TextureUploadGuard<'a> {
+    textures: Vec<Texture>,
+    device: &'a ash::Device,
+    allocator: &'a Arc<Mutex<Allocator>>,
+    armed: bool,
+}
+
+impl<'a> TextureUploadGuard<'a> {
+    fn new(device: &'a ash::Device, allocator: &'a Arc<Mutex<Allocator>>) -> Self {
+        Self {
+            textures: Vec::new(),
+            device,
+            allocator,
+            armed: true,
+        }
+    }
+
+    fn with_capacity(
+        device: &'a ash::Device,
+        allocator: &'a Arc<Mutex<Allocator>>,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            textures: Vec::with_capacity(capacity),
+            device,
+            allocator,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self) -> Vec<Texture> {
+        self.armed = false;
+        std::mem::take(&mut self.textures)
+    }
+}
+
+impl Drop for TextureUploadGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            for tex in &mut self.textures {
+                tex.cleanup(self.device, self.allocator);
+            }
+        }
+    }
 }
 
 impl Renderer {
@@ -393,16 +441,20 @@ impl Renderer {
         if obj_idx >= self.objects.len() {
             return Ok(());
         }
-        let texture = Texture::load(
+        let mut texture = Texture::load(
             &self.device.device,
             &self.allocator,
             self.device.graphics_queue,
             self.command_pool,
             src,
         )?;
-        let set = self
-            .material_pool
-            .alloc_set(&self.device.device, &texture)?;
+        let set = match self.material_pool.alloc_set(&self.device.device, &texture) {
+            Ok(set) => set,
+            Err(e) => {
+                texture.cleanup(&self.device.device, &self.allocator);
+                return Err(e);
+            }
+        };
         let obj = &mut self.objects[obj_idx];
         // Only stall the GPU when there's an existing per-object
         // texture to free; first-time binding can skip the wait
@@ -437,16 +489,20 @@ impl Renderer {
         &mut self,
         src: TextureSource<'_>,
     ) -> Result<(Texture, vk::DescriptorSet)> {
-        let texture = Texture::load(
+        let mut texture = Texture::load(
             &self.device.device,
             &self.allocator,
             self.device.graphics_queue,
             self.command_pool,
             src,
         )?;
-        let set = self
-            .material_pool
-            .alloc_set(&self.device.device, &texture)?;
+        let set = match self.material_pool.alloc_set(&self.device.device, &texture) {
+            Ok(set) => set,
+            Err(e) => {
+                texture.cleanup(&self.device.device, &self.allocator);
+                return Err(e);
+            }
+        };
         Ok((texture, set))
     }
 
@@ -469,7 +525,7 @@ impl Renderer {
         // index 0 is the basecolor and the optional channel
         // indices (`normal_idx`, `mr_idx`, `ao_idx`, `height_idx`)
         // re-borrow into `owned` after every push has settled.
-        let (owned, normal_idx, mr_idx, ao_idx, height_idx) = match src {
+        let (mut owned, normal_idx, mr_idx, ao_idx, height_idx) = match src {
             PbrSource::Files {
                 basecolor,
                 normal,
@@ -484,7 +540,8 @@ impl Renderer {
                     self.command_pool,
                     basecolor,
                 )?;
-                let mut owned: Vec<Texture> = vec![basecolor];
+                let mut guard = TextureUploadGuard::new(&self.device.device, &self.allocator);
+                guard.textures.push(basecolor);
                 let mut load_linear = |path: Option<&Path>| -> Result<Option<usize>> {
                     let Some(p) = path else { return Ok(None) };
                     let t = Texture::from_file_linear(
@@ -494,14 +551,14 @@ impl Renderer {
                         self.command_pool,
                         p,
                     )?;
-                    owned.push(t);
-                    Ok(Some(owned.len() - 1))
+                    guard.textures.push(t);
+                    Ok(Some(guard.textures.len() - 1))
                 };
                 let normal_idx = load_linear(normal)?;
                 let mr_idx = load_linear(metallic_roughness)?;
                 let ao_idx = load_linear(ao)?;
                 let height_idx = load_linear(height)?;
-                (owned, normal_idx, mr_idx, ao_idx, height_idx)
+                (guard.finish(), normal_idx, mr_idx, ao_idx, height_idx)
             }
             PbrSource::FilesSplitMr {
                 basecolor,
@@ -518,7 +575,8 @@ impl Renderer {
                     self.command_pool,
                     basecolor,
                 )?;
-                let mut owned: Vec<Texture> = vec![basecolor];
+                let mut guard = TextureUploadGuard::new(&self.device.device, &self.allocator);
+                guard.textures.push(basecolor);
                 let mut load_linear = |path: Option<&Path>| -> Result<Option<usize>> {
                     let Some(p) = path else { return Ok(None) };
                     let t = Texture::from_file_linear(
@@ -528,8 +586,8 @@ impl Renderer {
                         self.command_pool,
                         p,
                     )?;
-                    owned.push(t);
-                    Ok(Some(owned.len() - 1))
+                    guard.textures.push(t);
+                    Ok(Some(guard.textures.len() - 1))
                 };
                 let normal_idx = load_linear(normal)?;
                 let ao_idx = load_linear(ao)?;
@@ -585,12 +643,12 @@ impl Renderer {
                         &packed,
                         vk::Format::R8G8B8A8_UNORM,
                     )?;
-                    owned.push(tex);
-                    Some(owned.len() - 1)
+                    guard.textures.push(tex);
+                    Some(guard.textures.len() - 1)
                 } else {
                     None
                 };
-                (owned, normal_idx, mr_idx, ao_idx, height_idx)
+                (guard.finish(), normal_idx, mr_idx, ao_idx, height_idx)
             }
             PbrSource::Decoded(pack) => {
                 let crate::renderer::asset_decode::DecodedPbrPack {
@@ -612,34 +670,46 @@ impl Renderer {
                         &d,
                     )
                 };
-                let mut owned: Vec<Texture> = Vec::with_capacity(5);
-                owned.push(upload(self, basecolor)?);
+                let mut guard = TextureUploadGuard::with_capacity(
+                    &self.device.device,
+                    &self.allocator,
+                    5,
+                );
+                guard.textures.push(upload(self, basecolor)?);
                 let push_opt =
-                    |opt: Option<_>, owned: &mut Vec<Texture>| -> Result<Option<usize>> {
+                    |opt: Option<_>, owned: &mut TextureUploadGuard<'_>| -> Result<Option<usize>> {
                         if let Some(d) = opt {
-                            owned.push(upload(self, d)?);
-                            Ok(Some(owned.len() - 1))
+                            owned.textures.push(upload(self, d)?);
+                            Ok(Some(owned.textures.len() - 1))
                         } else {
                             Ok(None)
                         }
                     };
-                let normal_idx = push_opt(normal, &mut owned)?;
-                let mr_idx = push_opt(mr, &mut owned)?;
-                let ao_idx = push_opt(ao, &mut owned)?;
-                let height_idx = push_opt(height, &mut owned)?;
-                (owned, normal_idx, mr_idx, ao_idx, height_idx)
+                let normal_idx = push_opt(normal, &mut guard)?;
+                let mr_idx = push_opt(mr, &mut guard)?;
+                let ao_idx = push_opt(ao, &mut guard)?;
+                let height_idx = push_opt(height, &mut guard)?;
+                (guard.finish(), normal_idx, mr_idx, ao_idx, height_idx)
             }
         };
 
         let basecolor_ref = &owned[0];
-        let set = self.material_pool.alloc_pbr_set(
+        let set = match self.material_pool.alloc_pbr_set(
             &self.device.device,
             basecolor_ref,
             normal_idx.map(|i| &owned[i]),
             mr_idx.map(|i| &owned[i]),
             ao_idx.map(|i| &owned[i]),
             height_idx.map(|i| &owned[i]),
-        )?;
+        ) {
+            Ok(set) => set,
+            Err(e) => {
+                for tex in &mut owned {
+                    tex.cleanup(&self.device.device, &self.allocator);
+                }
+                return Err(e);
+            }
+        };
         Ok((owned, set))
     }
 

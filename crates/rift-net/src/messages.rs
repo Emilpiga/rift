@@ -1478,6 +1478,18 @@ pub enum WorldEvent {
     /// without waiting for the next snapshot.
     Hit { target: NetId, start_tick: NetTick },
 
+    /// A projectile detonated or was consumed by a wall / target.
+    /// Sent reliably because very close casts can spawn and die
+    /// between snapshot ticks; clients would otherwise never see
+    /// a projectile row to despawn and therefore never play the
+    /// impact effect.
+    ProjectileImpact {
+        projectile: NetId,
+        ability: u16,
+        position: [f32; 3],
+        dir: [f32; 3],
+    },
+
     /// Loot dropped at `position`. Replicated as a normal entity in
     /// the next snapshot too — the event just lets the client
     /// pre-spawn the visual without waiting.
@@ -1613,6 +1625,8 @@ pub mod telegraph_kind {
     pub const RANGED_WINDUP: u8 = 1;
     /// Stalker dash wind-up — sharp inhale / hiss cue.
     pub const DASH_WINDUP: u8 = 2;
+    /// Wraith cone scream wind-up — breathy rising cue.
+    pub const SCREAM_WINDUP: u8 = 3;
 }
 
 /// Maximum UTF-8 character count of a [`ClientMsg::ChatSend::text`]

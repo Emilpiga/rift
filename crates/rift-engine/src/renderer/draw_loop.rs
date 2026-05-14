@@ -66,8 +66,8 @@ impl Renderer {
             // match the shader's fog math — otherwise zooming
             // the camera out would pop in geometry the player
             // can still see.
-            let dist_to_fog_origin = (center - self.fog_origin).length();
-            if dist_to_fog_origin - obj.bounds_radius > fog_cull_dist {
+            let fog_limit = fog_cull_dist + obj.bounds_radius;
+            if (center - self.fog_origin).length_squared() > fog_limit * fog_limit {
                 continue;
             }
             // Pick the GPU-skinner output VB if present, then fall
@@ -93,6 +93,7 @@ impl Renderer {
                 descriptor_set: self.uniforms.descriptor_sets[frame],
                 material_set: obj.material_set,
                 model_matrix: obj.model_matrix,
+                center,
                 bounds_radius: obj.bounds_radius,
                 tint: obj.tint,
                 material_params: obj.material_params,
@@ -108,8 +109,11 @@ impl Renderer {
             // every shadow pass entirely \u2014 they're a major
             // chunk of triangles and contribute no visible
             // cast shadows worth the GPU time.
-            if obj.casts_shadow {
-                shadow_draws.push(cmd.clone());
+            let height_shadow_surface = self.height_shadows_enabled
+                && obj.material_params[1] > 0.001
+                && (obj.material_params[2].to_bits() & 1) != 0;
+            if obj.casts_shadow || height_shadow_surface {
+                shadow_draws.push(cmd);
             }
             // Visible-draw list: also gate on the camera
             // frustum so we don't rasterise off-screen geometry
@@ -286,11 +290,11 @@ impl Renderer {
             // `6*K` sphere tests + `6*K` draws as before.
             light_draws.clear();
             for draw in shadow_draws.iter() {
-                let center = draw.model_matrix.w_axis.truncate();
-                if (center - lpos).length() > lrad + draw.bounds_radius {
+                let light_limit = lrad + draw.bounds_radius;
+                if (draw.center - lpos).length_squared() > light_limit * light_limit {
                     continue;
                 }
-                light_draws.push(draw.clone());
+                light_draws.push(*draw);
             }
             // ---- Dirty check ----
             // Hash the current frame's slot inputs (light
@@ -332,10 +336,16 @@ impl Renderer {
                     }
                     h ^= d.bounds_radius.to_bits() as u64;
                     h = h.wrapping_mul(FNV_PRIME);
+                    for word in d.material_params.iter().map(|v| v.to_bits()) {
+                        h ^= word as u64;
+                        h = h.wrapping_mul(FNV_PRIME);
+                    }
                     if d.dynamic_vertices {
                         force_dirty = true;
                     }
                 }
+                h ^= u64::from(self.height_shadows_enabled);
+                h = h.wrapping_mul(FNV_PRIME);
                 if force_dirty {
                     // Stagger shadow updates across frames.
                     // Each dynamic-caster light re-renders
@@ -434,16 +444,6 @@ impl Renderer {
                     })
                     .clear_values(&psh_clear);
                 device.cmd_begin_render_pass(cmd, &rp_begin, vk::SubpassContents::INLINE);
-                if let Some(first) = light_draws.first() {
-                    device.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.point_shadow_atlas.pipeline_layout,
-                        0,
-                        &[first.descriptor_set],
-                        &[],
-                    );
-                }
                 for draw in light_draws.iter() {
                     // Sphere-vs-cube-face cone test. For a
                     // 90° FOV view down `face_axis`, a point
@@ -453,37 +453,45 @@ impl Renderer {
                     // sphere, we extend the test by `r` to
                     // get a conservative include. Skip if the
                     // entire sphere is outside the cone.
-                    let center = draw.model_matrix.w_axis.truncate();
-                    let d = center - lpos;
+                    let d = draw.center - lpos;
                     let along = d.dot(face_axis);
                     let r = draw.bounds_radius;
                     if along + r < 0.0 {
                         continue; // entirely behind face
                     }
-                    let perp_sq = d.length_squared() - along * along;
-                    let perp = perp_sq.max(0.0).sqrt();
+                    let perp_sq = (d.length_squared() - along * along).max(0.0);
                     // Cone half-angle is 45° → tan = 1, so
                     // sphere fits inside cone when `perp <=
                     // along + r * sqrt(2)`. The sqrt(2)
                     // factor is the conservative inflation
                     // for a sphere-vs-plane test on the
                     // 45° side planes.
-                    if perp > along + r * std::f32::consts::SQRT_2 {
+                    let cone_limit = along + r * std::f32::consts::SQRT_2;
+                    if cone_limit < 0.0 || perp_sq > cone_limit * cone_limit {
                         continue;
                     }
                     device.cmd_bind_vertex_buffers(cmd, 0, &[draw.vertex_buffer], &[0]);
                     device.cmd_bind_index_buffer(cmd, draw.index_buffer, 0, vk::IndexType::UINT32);
-                    // Push the model + indices payload as
-                    // a single 80-byte block. The vert
+                    device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.point_shadow_atlas.pipeline_layout,
+                        0,
+                        &[draw.descriptor_set, draw.material_set],
+                        &[],
+                    );
+                    // Push the model + indices + material payload as
+                    // a single 96-byte block. The vert
                     // shader reads `mat4 model` at offset
                     // 0; the frag reads `uvec4 indices` at
-                    // offset 64. One push call instead of
+                    // offset 64 and material params at 80. One push call instead of
                     // two saves a command-buffer entry per
                     // draw.
-                    let mut bytes = [0u8; 80];
+                    let mut bytes = [0u8; 96];
                     bytes[..64].copy_from_slice(bytemuck::bytes_of(&draw.model_matrix));
                     let indices: [u32; 4] = [face_slot as u32, light_idx as u32, 0, 0];
-                    bytes[64..].copy_from_slice(bytemuck::bytes_of(&indices));
+                    bytes[64..80].copy_from_slice(bytemuck::bytes_of(&indices));
+                    bytes[80..].copy_from_slice(bytemuck::bytes_of(&draw.material_params));
                     device.cmd_push_constants(
                         cmd,
                         self.point_shadow_atlas.pipeline_layout,
@@ -766,11 +774,11 @@ impl Renderer {
         // depth. Inverting on CPU once per frame is essentially
         // free vs. doing it per pixel.
         let inv_proj = self.camera.projection_matrix().inverse().to_cols_array_2d();
-        // SSAO strength baked at moderate level. The final
-        // composite applies AO multiplicatively to the shaded
-        // HDR, so we keep this gentle to avoid crushing
-        // direct-lit pixels in deep crevices.
-        let ssao_strength = 0.7;
+        // The final composite applies AO multiplicatively to
+        // the shaded HDR. Gameplay uses a moderate default,
+        // while preview scenes can reduce this to avoid visible
+        // low-sample screen-space noise on smooth surfaces.
+        let ssao_strength = self.ssao_strength;
 
         // ---- Record command buffer ----
         unsafe {
@@ -788,8 +796,17 @@ impl Renderer {
                 &self.allocator,
             );
 
-            self.record_dir_shadow_pass(cmd, &shadow_draws);
-            self.record_point_shadow_pass(cmd, point_shadow_count, &merged_lights, &shadow_draws);
+            if self.shadows_enabled {
+                self.record_dir_shadow_pass(cmd, &shadow_draws);
+                self.record_point_shadow_pass(
+                    cmd,
+                    point_shadow_count,
+                    &merged_lights,
+                    &shadow_draws,
+                );
+            } else {
+                self.point_shadow_state = [None; shadow_point::MAX_POINT_SHADOWS];
+            }
 
             // Blood-field splat pass: drains kill splats queued
             // during the gameplay frame into this frame's instance
@@ -797,7 +814,8 @@ impl Renderer {
             // Also handles the initial clear when a new floor is
             // bound. No-op when no floor is active or no splats
             // are pending.
-            self.blood_field.record(&self.device.device, cmd, frame);
+            self.blood_field
+                .record(&self.device.device, cmd, frame, self.elapsed_secs());
 
             self.record_scene_pass(cmd, image_index, &draws);
             self.record_translucent_pass(cmd, image_index, frame);

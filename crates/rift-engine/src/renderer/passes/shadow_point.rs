@@ -104,6 +104,7 @@ impl PointShadowAtlas {
         device: &ash::Device,
         allocator: &Arc<Mutex<Allocator>>,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        material_set_layout: vk::DescriptorSetLayout,
         shader_dir: &Path,
     ) -> Result<Self> {
         let layer_count = (MAX_POINT_SHADOWS * 6) as u32;
@@ -298,8 +299,13 @@ impl PointShadowAtlas {
         }
 
         // ---- Pipeline ----
-        let (pipeline, pipeline_layout) =
-            create_point_shadow_pipeline(device, render_pass, descriptor_set_layout, shader_dir)?;
+        let (pipeline, pipeline_layout) = create_point_shadow_pipeline(
+            device,
+            render_pass,
+            descriptor_set_layout,
+            material_set_layout,
+            shader_dir,
+        )?;
 
         Ok(Self {
             color_image,
@@ -321,12 +327,14 @@ impl PointShadowAtlas {
         &mut self,
         device: &ash::Device,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        material_set_layout: vk::DescriptorSetLayout,
         shader_dir: &Path,
     ) -> Result<()> {
         let (pipeline, pipeline_layout) = create_point_shadow_pipeline(
             device,
             self.render_pass,
             descriptor_set_layout,
+            material_set_layout,
             shader_dir,
         )?;
         unsafe {
@@ -410,6 +418,7 @@ fn create_point_shadow_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    material_set_layout: vk::DescriptorSetLayout,
     shader_dir: &Path,
 ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
     let vert_path = shader_dir.join("shadow_point.vert");
@@ -503,16 +512,18 @@ fn create_point_shadow_pipeline(
     let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(std::slice::from_ref(&blend_attachment));
 
-    let set_layouts = [descriptor_set_layout];
-    // Push: mat4 model (64) + uvec4 indices (16) = 80 bytes. Indices.x
+    let set_layouts = [descriptor_set_layout, material_set_layout];
+    // Push: mat4 model (64) + uvec4 indices (16) + vec4 materialParams
+    // (16) = 96 bytes. Indices.x
     // is the global face slot (0 .. MAX_POINT_SHADOWS*6) used by the
     // vertex shader to fetch the right face VP from the UBO; indices.y
     // is the light index used by the fragment shader to fetch the
-    // corresponding light position+radius.
+    // corresponding light position+radius. `materialParams` mirrors the
+    // forward pass so the shadow fragment can sample height maps.
     let push_constant_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
         offset: 0,
-        size: 80,
+        size: 96,
     };
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)

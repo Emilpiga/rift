@@ -5,20 +5,17 @@
 //! decides when to call the widget; the widget itself is
 //! state-less.
 
-/// One of the three player choices on the pause menu, plus the
+/// One of the player choices on the pause menu, plus the
 /// implicit "close the menu and resume" return path.
-///
-/// `ExitToCharacterSelect` and `ExitGame` are intentionally
-/// distinct even though both currently terminate the process —
-/// the design intent is that `ExitToCharacterSelect` will later
-/// gracefully tear down the net session and route back into the
-/// roster screen without restarting the binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PauseMenuAction {
     /// Close the menu and return to gameplay.
     Resume,
     /// Open the settings sub-screen.
     OpenSettings,
+    /// Leave the current rift unsafely and return to the hub.
+    /// The server shatters unstable inventory/equipment on this path.
+    ExitToHub,
     /// Leave the running session and surface the character-
     /// select screen.
     ExitToCharacterSelect,

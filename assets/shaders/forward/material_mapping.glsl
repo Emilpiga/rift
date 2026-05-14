@@ -115,9 +115,60 @@ void applyHeightMaterialDetail(
     roughness = clamp(roughness + crevice * 0.10 - ridge * 0.025, 0.045, 1.0);
 }
 
-// Parallax self-shadowing was removed: the visual gain from
-// bending shadow boundaries along sub-mm height ripples did
-// not justify the per-fragment heightmap march and, in
-// practice, the dithered self-occlusion read as noise rather
-// than relief. The cast-shadow path uses straight world-space
-// depth comparison and that is what we want.
+bool heightShadowsEnabled(float scale) {
+    return ubo.pointShadowMeta.z > 0.5 && scale > 0.001;
+}
+
+vec3 heightShadowWorldPos(vec3 worldPos, vec3 normal, vec2 uv, float scale) {
+    if (!heightShadowsEnabled(scale)) return worldPos;
+    float h = texture(heightMap, uv).r;
+    float displacement = (h - 0.5) * scale * 2.20;
+    return worldPos + normal * displacement;
+}
+
+vec3 heightPointShadowWorldPos(
+    vec3 worldPos,
+    vec3 normal,
+    mat3 TBN,
+    vec2 uv,
+    vec3 lightTS,
+    float scale
+) {
+    if (!heightShadowsEnabled(scale)) return worldPos;
+
+    float h = texture(heightMap, uv).r;
+    float centeredHeight = h - 0.5;
+    float normalDisplacement = centeredHeight * scale * 2.35;
+
+    float grazing = 1.0 - smoothstep(0.18, 0.78, lightTS.z);
+    vec2 projectedRay = -lightTS.xy / max(lightTS.z, 0.18);
+    vec3 tangentOffset = TBN * vec3(projectedRay * centeredHeight * scale * 0.85 * grazing, 0.0);
+
+    return worldPos + normal * normalDisplacement + tangentOffset;
+}
+
+float heightTextureSelfShadow(vec2 uv, vec3 lightTS, float scale, float strength) {
+    if (!heightShadowsEnabled(scale) || lightTS.z <= 0.12) return 1.0;
+
+    float relief = smoothstep(0.004, 0.020, scale);
+    float baseHeight = texture(heightMap, uv).r;
+    vec2 ray = lightTS.xy / max(lightTS.z, 0.12) * scale * 2.20;
+    float occlusion = 0.0;
+
+    for (int i = 1; i <= 4; i++) {
+        float t = float(i) / 4.0;
+        float sampleHeight = texture(heightMap, uv + ray * t).r;
+        float blocker = sampleHeight - baseHeight - t * 0.035;
+        occlusion = max(occlusion, smoothstep(0.010, 0.070, blocker));
+    }
+
+    return mix(1.0, 1.0 - strength, occlusion * relief);
+}
+
+float heightDirectionalSelfShadow(vec2 uv, vec3 lightTS, float scale) {
+    return heightTextureSelfShadow(uv, lightTS, scale, 0.36);
+}
+
+float heightPointSelfShadow(vec2 uv, vec3 lightTS, float scale) {
+    return heightTextureSelfShadow(uv, lightTS, scale, 0.28);
+}
