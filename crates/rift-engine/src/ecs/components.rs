@@ -582,6 +582,14 @@ pub struct Enemy {
     pub kind: EnemyKind,
 }
 
+/// Marker for enemy entities driven by server snapshots. Stores the
+/// stable network id so clients can detect stale `hecs::Entity` handles
+/// after `World::new()` reuses ids across hub/rift transitions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemoteEnemy {
+    pub net_id: u32,
+}
+
 /// Engine-side mirror of `rift_net::messages::ActiveEffect`.
 /// Duplicated here so this crate doesn't need to depend on
 /// `rift-net`; the client converts at sync time.

@@ -2,8 +2,8 @@ use glam::{Mat4, Vec3};
 use rift_dungeon::{FloorMood, NavGrid, RoomTheme};
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::{
-    Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, Renderable, Skinned,
-    Static, Transform, Velocity,
+    Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, RemoteEnemy,
+    Renderable, Skinned, Static, Transform, Velocity,
 };
 use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 
@@ -1583,6 +1583,7 @@ pub fn spawn_remote_enemy_entity(
     world: &mut hecs::World,
     renderer: &mut Renderer,
     monsters: &mut MonsterCache,
+    net_id: rift_net::NetId,
     role: MonsterRole,
     position: Vec3,
     hp_max: f32,
@@ -1644,6 +1645,7 @@ pub fn spawn_remote_enemy_entity(
         object_index: obj_index,
     });
     builder.add(NetControlled);
+    builder.add(RemoteEnemy { net_id: net_id.0 });
     // Tag as `Enemy` so the HUD pass picks it up for floating health
     // bars + boss arrow. Speed/progress_value are server-authoritative
     // so we leave them at safe defaults; only `kind` matters visually.

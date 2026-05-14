@@ -15,7 +15,7 @@ use glam::{Mat4, Quat, Vec3};
 use rift_engine::animation::Animator;
 use rift_engine::ecs::components::{
     AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
-    RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform, Velocity,
+    RemoteEnemy, RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform, Velocity,
 };
 use rift_engine::Renderer;
 use rift_net::{
@@ -49,6 +49,13 @@ fn enemy_arrival_scale(role: MonsterRole) -> f32 {
         MonsterRole::Mindbinder => 1.1,
         MonsterRole::Stalker | MonsterRole::Caster | MonsterRole::Wraith => 1.0,
     }
+}
+
+fn remote_enemy_entity_matches(world: &hecs::World, entity: hecs::Entity, net_id: NetId) -> bool {
+    world
+        .get::<&RemoteEnemy>(entity)
+        .map(|remote| remote.net_id == net_id.0)
+        .unwrap_or(false)
 }
 
 fn spawn_enemy_arrival(renderer: &mut Renderer, net_id: NetId, role: MonsterRole, pos: Vec3) {
@@ -540,11 +547,15 @@ impl NetClient {
         let stale: Vec<NetId> = self
             .enemy_entities
             .iter()
-            .filter(|(nid, _)| !self.remote.contains_key(nid))
+            .filter(|(nid, entity)| {
+                !self.remote.contains_key(nid)
+                    || !remote_enemy_entity_matches(world, **entity, **nid)
+            })
             .map(|(nid, _)| *nid)
             .collect();
         for net_id in stale {
             if let Some(&entity) = self.enemy_entities.get(&net_id) {
+                let entity_matches = remote_enemy_entity_matches(world, entity, net_id);
                 // Decide whether this despawn is a *real death*
                 // or just a view-cull. The snapshot is view-
                 // culled server-side (see
@@ -568,20 +579,22 @@ impl NetClient {
                 }
                 self.enemy_death_cues.remove(&net_id);
                 self.enemy_entities.remove(&net_id);
-                if let Ok(r) = world.get::<&Renderable>(entity) {
-                    let idx = r.object_index;
-                    if idx < renderer.objects.len() {
-                        // Reclaim the GPU skinning slot — the
-                        // dispatch queue, output VB and palette
-                        // UBOs free up after MAX_FRAMES_IN_FLIGHT
-                        // frames and become available for the next
-                        // spawn. Critical for endless-density
-                        // floors where hundreds of monsters die
-                        // before the floor wipes.
-                        renderer.free_skinned_mesh(idx);
+                if entity_matches {
+                    if let Ok(r) = world.get::<&Renderable>(entity) {
+                        let idx = r.object_index;
+                        if idx < renderer.objects.len() {
+                            // Reclaim the GPU skinning slot — the
+                            // dispatch queue, output VB and palette
+                            // UBOs free up after MAX_FRAMES_IN_FLIGHT
+                            // frames and become available for the next
+                            // spawn. Critical for endless-density
+                            // floors where hundreds of monsters die
+                            // before the floor wipes.
+                            renderer.free_skinned_mesh(idx);
+                        }
                     }
+                    let _ = world.despawn(entity);
                 }
-                let _ = world.despawn(entity);
             }
         }
 
@@ -635,7 +648,9 @@ impl NetClient {
             // frame anyway.
             let hp_max = 100.0_f32;
             let hp = hp_max * hp_pct;
-            match spawn_remote_enemy_entity(world, renderer, monsters, role, position, hp_max) {
+            match spawn_remote_enemy_entity(
+                world, renderer, monsters, net_id, role, position, hp_max,
+            ) {
                 Ok(entity) => {
                     if let Ok(mut h) = world.get::<&mut Health>(entity) {
                         h.current = hp;
@@ -1076,6 +1091,28 @@ impl NetClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_enemy_match_rejects_reused_entity_without_tag() {
+        let mut world = hecs::World::new();
+        let entity = world.spawn((Transform::from_position(Vec3::ZERO),));
+
+        assert!(!remote_enemy_entity_matches(&world, entity, NetId(7)));
+    }
+
+    #[test]
+    fn remote_enemy_match_requires_expected_net_id() {
+        let mut world = hecs::World::new();
+        let entity = world.spawn((RemoteEnemy { net_id: 7 },));
+
+        assert!(remote_enemy_entity_matches(&world, entity, NetId(7)));
+        assert!(!remote_enemy_entity_matches(&world, entity, NetId(8)));
     }
 }
 
