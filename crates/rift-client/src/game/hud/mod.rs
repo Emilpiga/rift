@@ -123,12 +123,13 @@ pub fn render_hud(
 
     // Active buff / debuff strip — anchored above the vitals
     // plaque.
-    let local_effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
+    let mut local_effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
         .query::<(&Effects, &LocalPlayer)>()
         .iter()
         .map(|(_, (e, _))| e.effects.clone())
         .next()
         .unwrap_or_default();
+    local_effects.extend(player_state.summon_effects.iter().copied());
     if !local_effects.is_empty() {
         // Local HUD pips: bigger so the icon reads at a glance
         // and the rect is comfortably hoverable. Bumped from

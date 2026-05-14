@@ -111,7 +111,7 @@ id,route,lane,tier,name,kind,status,prereqs,x,y,optimized_x,optimized_y,descript
 3051,Healer,harmony,6,Grace Under Fire,Stat,Ready,3050,-40.0,1600.0,85.0,1220.0,+4% healing and +4% armor per rank.
 3060,Healer,battle,8,Tempered Zeal,Stat,NeedsSystem,3017,260.0,1560.0,-213.1,1481.9,+3% holy damage per rank after healing.
 3061,Healer,restoration,8,Dawn Discipline,Stat,NeedsSystem,3037,-460.0,1560.0,306.9,1481.9,+3% healing per rank on low-HP targets.
-4000,Summoner,spine,0,Void Familiar,Unlock,NeedsAbility,411,-520.0,0.0,-470.0,0.0,Unlock a small void familiar summon.
+4000,Summoner,spine,0,Void Familiar,Unlock,Ready,411,-520.0,0.0,-470.0,0.0,Unlock a small void familiar summon.
 4001,Summoner,void,1,Pet Mastery,Stat,NeedsSystem,4000,-650.0,-130.0,-595.0,-260.0,+5% minion damage per rank.
 4002,Summoner,corpse,1,Binder's Focus,Stat,NeedsSystem,4000,-650.0,130.0,-595.0,260.0,+3% minion health per rank.
 4003,Summoner,spine,1,Unstable Sympathy,PassiveProc,NeedsSystem,4000,-780.0,0.0,-595.0,0.0,Your crits briefly empower your active minions.

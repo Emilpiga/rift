@@ -495,6 +495,9 @@ pub struct DispatchSinks<'a> {
     /// `Sim::step` to drain into entities. Net-id allocation
     /// stays in `Sim`.
     pub summons: &'a mut Vec<(Vec3, rift_game::monsters::MonsterRole, f32)>,
+    /// Player-owned minion spawn/refresh requests. Drained by
+    /// `Sim::step` or `ability_ops` into `ServerMinion` entities.
+    pub minion_summons: &'a mut Vec<super::minions::MinionSpawnRequest>,
     /// Live `(entity, position)` rows for every player. Read
     /// by `DelayedAoe` to find who's inside the slam disc.
     pub player_targets: &'a [(Entity, Vec3)],
@@ -996,6 +999,37 @@ pub fn dispatch(
                 let pos = accepted.origin + Vec3::new(theta.cos(), 0.0, theta.sin()) * ring_radius;
                 sinks.summons.push((pos, role, hp_mult));
             }
+        }
+        AbilityKind::MinionSummon {
+            role,
+            duration,
+            hp,
+            follow_distance,
+            attack_range,
+            attack_interval,
+            attack_damage,
+            projectile_speed,
+            projectile_ttl,
+        } => {
+            let Some(owner) = accepted.caster_entity else {
+                return;
+            };
+            sinks
+                .minion_summons
+                .push(super::minions::MinionSpawnRequest {
+                    owner,
+                    owner_net_id: accepted.caster,
+                    origin: accepted.origin,
+                    role,
+                    duration,
+                    hp,
+                    follow_distance,
+                    attack_range,
+                    attack_interval,
+                    attack_damage,
+                    projectile_speed,
+                    projectile_ttl,
+                });
         }
         // ── Friendly support kinds ─────────────────────────────
         AbilityKind::HealTarget { amount } => {

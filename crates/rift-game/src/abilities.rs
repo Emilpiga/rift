@@ -707,6 +707,7 @@ pub mod id {
     /// loadout slot 0 by default but can be swapped out like
     /// any other ability. Never gated by the talent tree.
     pub const PUNCH: AbilityWireId = AbilityWireId::new(14);
+    pub const VOID_FAMILIAR: AbilityWireId = AbilityWireId::new(15);
 
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
@@ -757,6 +758,12 @@ pub mod id {
     /// Visual-only Mindbinder sigil impact event. Same payload
     /// convention as [`VOID_SIGIL_WINDUP`].
     pub const VOID_SIGIL_IMPACT: AbilityWireId = AbilityWireId::new(75);
+    /// Hidden player-team projectile fired by the Void Familiar's
+    /// server-side AI. It lives in the non-loadout wire range so
+    /// the spellbook never offers it as a direct player cast, but
+    /// clients can still look up projectile visuals and meters can
+    /// attribute familiar damage cleanly.
+    pub const VOID_FAMILIAR_BOLT: AbilityWireId = AbilityWireId::new(76);
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -847,6 +854,21 @@ pub enum AbilityKind {
         ring_radius: f32,
         windup: f32,
     },
+    /// Spawn or refresh a player-owned minion. The authoritative
+    /// follow / target / attack behaviour lives in `rift-server`,
+    /// but the tuning is registry data so talents, tooltips, and
+    /// server dispatch all agree on the same ability surface.
+    MinionSummon {
+        role: crate::monsters::MonsterRole,
+        duration: f32,
+        hp: f32,
+        follow_distance: f32,
+        attack_range: f32,
+        attack_interval: f32,
+        attack_damage: f32,
+        projectile_speed: f32,
+        projectile_ttl: f32,
+    },
     /// Player melee swing — a short forward arc resolved server-side
     /// on the cast tick. Every enemy whose XZ hit disc overlaps the
     /// `radius` reach and half-`arc_radians` cone around the aim
@@ -921,6 +943,8 @@ pub const HEAL_OVER_TIME_TARGET: AbilityId = AbilityId("heal_over_time_target");
 pub const FROST_SHATTER_SHARD: AbilityId = AbilityId("frost_shatter_shard");
 pub const MELEE_ATTACK: AbilityId = AbilityId("melee_attack");
 pub const PUNCH: AbilityId = AbilityId("punch");
+pub const VOID_FAMILIAR: AbilityId = AbilityId("void_familiar");
+pub const VOID_FAMILIAR_BOLT: AbilityId = AbilityId("void_familiar_bolt");
 
 /// Master ability table. Server cast dispatch and client cooldown
 /// UI both read from here. Order is purely cosmetic — `lookup`
@@ -1324,6 +1348,85 @@ pub static REGISTRY: &[Ability] = &[
             arc_radians: 1.885,
         },
         visuals: AbilityVisuals::NONE,
+        effects: &[],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: VOID_FAMILIAR,
+        wire_id: id::VOID_FAMILIAR,
+        name: "Void Familiar",
+        description: "Summon a short-lived void familiar that follows you and harasses nearby enemies.",
+        icon: Some("Necromancer_10"),
+        cooldown: 18.0,
+        resource_cost: 20.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 0.0,
+        damage_mult: 0.0,
+        range: 0.0,
+        unlock_level: 1,
+        element: Element::None,
+        archetype: Archetype::Utility,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::MinionSummon {
+            role: crate::monsters::MonsterRole::Wraith,
+            duration: 28.0,
+            hp: 45.0,
+            follow_distance: 2.4,
+            attack_range: 8.5,
+            attack_interval: 1.25,
+            attack_damage: 6.0,
+            projectile_speed: 15.0,
+            projectile_ttl: 1.2,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: Some(VfxKind::CastSpark {
+                rgb: [0.48, 0.28, 1.0],
+            }),
+            shape: ShapeVisuals::None,
+        },
+        effects: &[AbilityEffect::SpawnEmitterAtCaster {
+            visual: VfxKind::CastSpark {
+                rgb: [0.48, 0.28, 1.0],
+            },
+            height: 0.8,
+        }],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: VOID_FAMILIAR_BOLT,
+        wire_id: id::VOID_FAMILIAR_BOLT,
+        name: "Void Familiar Bolt",
+        description: "A familiar's void bolt.",
+        icon: None,
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 6.0,
+        damage_mult: 1.0,
+        range: 8.5,
+        unlock_level: 0,
+        element: Element::Lightning,
+        archetype: Archetype::Projectile,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::Projectiles {
+            count: 1,
+            spread: 0.0,
+            speed: 15.0,
+            ttl: 1.2,
+            pierce: 0,
+            apply_debuff: None,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: None,
+            shape: ShapeVisuals::Projectile {
+                mesh: MeshKind::ArcaneBolt,
+                trail: VfxKind::ArcaneBoltTrail,
+                impact: VfxKind::ArcaneBoltImpact,
+                scale: 0.5,
+            },
+        },
         effects: &[],
         audio: AbilityAudio::SILENT,
     },

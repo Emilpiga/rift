@@ -379,12 +379,12 @@ Fantasy: void summons and necromancy. Avoid generic animal pets. The route shoul
 
 ### Summoner Shared Entry
 
-| Id   | Ring | Group | Name              | Type    | Effect                                         | Prereq | Status        |
-| ---- | ---- | ----- | ----------------- | ------- | ---------------------------------------------- | ------ | ------------- |
-| 4000 | 1    | Entry | Void Familiar     | Unlock  | Unlock a small void familiar summon            | 411    | Needs Ability |
-| 4001 | 1    | Entry | Pet Mastery       | Stat x3 | +5% minion damage per rank                     | 4000   | Needs System  |
-| 4002 | 1    | Entry | Binder's Focus    | Stat x3 | +3% minion health per rank                     | 4000   | Needs System  |
-| 4003 | 1    | Entry | Unstable Sympathy | Proc    | Your crits briefly empower your active minions | 4000   | Needs System  |
+| Id   | Ring | Group | Name              | Type    | Effect                                         | Prereq | Status       |
+| ---- | ---- | ----- | ----------------- | ------- | ---------------------------------------------- | ------ | ------------ |
+| 4000 | 1    | Entry | Void Familiar     | Unlock  | Unlock a small void familiar summon            | 411    | Ready        |
+| 4001 | 1    | Entry | Pet Mastery       | Stat x3 | +5% minion damage per rank                     | 4000   | Needs System |
+| 4002 | 1    | Entry | Binder's Focus    | Stat x3 | +3% minion health per rank                     | 4000   | Needs System |
+| 4003 | 1    | Entry | Unstable Sympathy | Proc    | Your crits briefly empower your active minions | 4000   | Needs System |
 
 ### Voidcaller Lane
 

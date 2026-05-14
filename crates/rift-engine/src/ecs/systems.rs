@@ -2,8 +2,8 @@ use glam::{Quat, Vec3};
 use hecs::World;
 
 use super::components::{
-    AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, Health, LocalPlayer,
-    Player, Renderable, Skinned, Transform, Velocity,
+    AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, FloatingVisual, Health,
+    LocalPlayer, Player, RemoteMinion, Renderable, Skinned, Transform, Velocity,
 };
 use crate::animation::{self, Animator};
 use crate::input::Input;
@@ -233,14 +233,15 @@ pub fn movement_system(world: &mut World, dt: f32, floor: Option<&rift_dungeon::
         }
     }
 
-    for (_id, (transform, velocity, enemy, player)) in world.query_mut::<(
+    for (_id, (transform, velocity, enemy, player, floating)) in world.query_mut::<(
         &mut Transform,
         &Velocity,
         Option<&super::components::Enemy>,
         Option<&Player>,
+        Option<&FloatingVisual>,
     )>() {
         // Skip players — already handled above.
-        if player.is_some() {
+        if player.is_some() || floating.is_some() {
             continue;
         }
         if velocity.linear.length_squared() > 0.001 {
@@ -312,15 +313,18 @@ pub fn locomotion_anim_system(world: &mut World) {
     const WALK_NAMES: &[&str] = &["Walk_Loop", "Walk", "Walk_Fwd", "Walk_Forward_Loop"];
     const IDLE_NAMES: &[&str] = &["Idle_Loop", "Idle"];
 
-    for (_id, (vel, set, animator, enemy_anim, health, player, ghost)) in world.query_mut::<(
-        &Velocity,
-        &AnimationSet,
-        &mut Animator,
-        Option<&EnemyAnim>,
-        Option<&super::components::Health>,
-        Option<&Player>,
-        Option<&super::components::Ghost>,
-    )>() {
+    for (_id, (vel, set, animator, enemy_anim, health, player, ghost, remote_minion)) in world
+        .query_mut::<(
+            &Velocity,
+            &AnimationSet,
+            &mut Animator,
+            Option<&EnemyAnim>,
+            Option<&super::components::Health>,
+            Option<&Player>,
+            Option<&super::components::Ghost>,
+            Option<&RemoteMinion>,
+        )>()
+    {
         // Skip locomotion overrides while a one-shot reaction (Death,
         // HitRecieve, Bite_Front) is locked.
         if let Some(ea) = enemy_anim {
@@ -351,7 +355,7 @@ pub fn locomotion_anim_system(world: &mut World) {
         let walk_clip = set.find_any(WALK_NAMES).or_else(|| jog_clip.clone());
         let idle_clip = set.find_any(IDLE_NAMES);
 
-        let (want_clip, target_speed_mult) = if !moving {
+        let (want_clip, target_speed_mult) = if remote_minion.is_some() || !moving {
             (idle_clip, 1.0)
         } else if speed >= JOG_SPRINT_THRESHOLD && sprint_clip.is_some() {
             (sprint_clip, (speed / SPRINT_REF_SPEED).clamp(0.7, 1.5))

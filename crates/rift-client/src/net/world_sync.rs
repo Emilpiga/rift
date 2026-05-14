@@ -15,7 +15,8 @@ use glam::{Mat4, Quat, Vec3};
 use rift_engine::animation::Animator;
 use rift_engine::ecs::components::{
     AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
-    RemoteEnemy, RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform, Velocity,
+    RemoteEnemy, RemoteMinion, RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform,
+    Velocity,
 };
 use rift_engine::Renderer;
 use rift_net::{
@@ -27,7 +28,9 @@ use rift_game::character::Gender as GameGender;
 use rift_game::monsters::MonsterRole;
 
 use crate::game::character_spawn::{spawn_character_entity, AnimLibraryCache, CharacterSpawn};
-use crate::game::floor::spawn_remote_enemy_entity;
+use crate::game::floor::{
+    minion_hover_height, spawn_remote_enemy_entity, spawn_remote_minion_entity,
+};
 use crate::game::monster_assets::MonsterCache;
 
 use super::snapshot::RemoteProfile;
@@ -58,6 +61,13 @@ fn remote_enemy_entity_matches(world: &hecs::World, entity: hecs::Entity, net_id
         .unwrap_or(false)
 }
 
+fn remote_minion_entity_matches(world: &hecs::World, entity: hecs::Entity, net_id: NetId) -> bool {
+    world
+        .get::<&RemoteMinion>(entity)
+        .map(|remote| remote.net_id == net_id.0)
+        .unwrap_or(false)
+}
+
 fn spawn_enemy_arrival(renderer: &mut Renderer, net_id: NetId, role: MonsterRole, pos: Vec3) {
     let scale = enemy_arrival_scale(role);
     let eid = renderer.vfx_system.spawn(
@@ -67,6 +77,14 @@ fn spawn_enemy_arrival(renderer: &mut Renderer, net_id: NetId, role: MonsterRole
     log::trace!(
         "vfx: spawned enemy_summon_arrival net_id={net_id:?} role={role:?} pos={pos:?} eid={eid:?}"
     );
+}
+
+fn spawn_minion_despawn(renderer: &mut Renderer, net_id: NetId, pos: Vec3) {
+    let eid = renderer.vfx_system.spawn(
+        rift_engine::renderer::vfx::presets::summon_despawn(0.55),
+        pos + Vec3::new(0.0, 0.35, 0.0),
+    );
+    log::trace!("vfx: spawned summon_despawn net_id={net_id:?} pos={pos:?} eid={eid:?}");
 }
 
 impl NetClient {
@@ -350,6 +368,11 @@ impl NetClient {
             if let Ok(mut t) = world.get::<&mut Transform>(entity) {
                 t.position = display_pos;
                 t.rotation = Quat::from_rotation_y(display_yaw);
+                if let EntityKind::Minion { role, .. } = re.kind {
+                    if let Some(role) = MonsterRole::from_wire_byte(role) {
+                        t.scale = Vec3::splat(role.scale() * 0.30);
+                    }
+                }
             }
             // Foot-IK reference plane for remote avatars. The
             // server sends position with the resolved ground Y
@@ -714,6 +737,159 @@ impl NetClient {
             if enemy_dead {
                 self.remove_enemy_visual_for_death(world, renderer, net_id, "on dead snapshot");
                 continue;
+            }
+            sync_effects(world, entity, &re.effects);
+        }
+    }
+
+    /// Reconcile server-replicated friendly minions. They reuse
+    /// animated monster assets, but carry `RemoteMinion` instead
+    /// of `RemoteEnemy` / `Enemy` so HUD and target helpers keep
+    /// hostile and friendly rows separate.
+    pub fn sync_minions(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        monsters: &mut MonsterCache,
+        dt: f32,
+    ) {
+        if self.our_net_id.is_none() {
+            return;
+        }
+        self.minion_hover_time = (self.minion_hover_time + dt).rem_euclid(10_000.0);
+
+        let stale: Vec<NetId> = self
+            .minion_entities
+            .iter()
+            .filter(|(nid, entity)| {
+                !self.remote.contains_key(nid)
+                    || !remote_minion_entity_matches(world, **entity, **nid)
+            })
+            .map(|(nid, _)| *nid)
+            .collect();
+        for net_id in stale {
+            if let Some(entity) = self.minion_entities.remove(&net_id) {
+                self.minion_visual_positions.remove(&net_id);
+                if remote_minion_entity_matches(world, entity, net_id) {
+                    let pos = world
+                        .get::<&Transform>(entity)
+                        .ok()
+                        .map(|t| t.position)
+                        .or_else(|| self.last_positions.get(&net_id).copied())
+                        .or_else(|| self.remote.get(&net_id).map(|row| row.position));
+                    if let Some(pos) = pos {
+                        spawn_minion_despawn(renderer, net_id, pos);
+                    }
+                    if let Ok(r) = world.get::<&Renderable>(entity) {
+                        let idx = r.object_index;
+                        if idx < renderer.objects.len() {
+                            renderer.free_skinned_mesh(idx);
+                        }
+                    }
+                    let _ = world.despawn(entity);
+                }
+            }
+        }
+
+        const MAX_SPAWNS_PER_FRAME: usize = 8;
+        let to_spawn: Vec<(NetId, NetId, u8, Vec3, f32)> = self
+            .remote
+            .iter()
+            .filter(|(nid, _)| !self.minion_entities.contains_key(nid))
+            .filter_map(|(nid, re)| match re.kind {
+                EntityKind::Minion { role, owner, .. } => {
+                    Some((*nid, owner, role, re.position, re.health_pct))
+                }
+                _ => None,
+            })
+            .take(MAX_SPAWNS_PER_FRAME)
+            .collect();
+        for (net_id, owner, role_byte, position, hp_pct) in to_spawn {
+            let role = match MonsterRole::from_wire_byte(role_byte) {
+                Some(r) => r,
+                None => continue,
+            };
+            let hp_max = 100.0_f32;
+            match spawn_remote_minion_entity(
+                world, renderer, monsters, net_id, owner, role, position, hp_max,
+            ) {
+                Ok(entity) => {
+                    if let Ok(mut h) = world.get::<&mut Health>(entity) {
+                        h.current = h.max * hp_pct;
+                    }
+                    self.minion_entities.insert(net_id, entity);
+                    self.minion_visual_positions.insert(net_id, position);
+                    let eid = renderer.vfx_system.spawn(
+                        rift_engine::renderer::vfx::presets::enemy_summon_arrival(0.45),
+                        position + Vec3::new(0.0, 0.08, 0.0),
+                    );
+                    log::trace!(
+                        "vfx: spawned minion_arrival net_id={net_id:?} role={role:?} pos={position:?} eid={eid:?}"
+                    );
+                    log::info!(
+                        "net: spawned remote minion {net_id:?} owner={owner:?} role={role:?} at {position:?}"
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "net: failed to spawn remote minion {net_id:?} role={role:?}: {e:?}"
+                    );
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let active_minions: Vec<(NetId, hecs::Entity)> = self
+            .minion_entities
+            .iter()
+            .map(|(&net_id, &entity)| (net_id, entity))
+            .collect();
+        for (net_id, entity) in active_minions {
+            let Some(re) = self.remote.get(&net_id) else {
+                continue;
+            };
+            let (display_pos, display_yaw) = match self.interp_sample(net_id, now) {
+                Some(s) => (s.position, s.yaw),
+                None => (re.position, re.yaw),
+            };
+            let target_base = display_pos + re.velocity * dt.min(1.0 / 30.0);
+            let visual_base = self
+                .minion_visual_positions
+                .entry(net_id)
+                .or_insert(target_base);
+            let correction = target_base - *visual_base;
+            if correction.length_squared() > 25.0 {
+                *visual_base = target_base;
+            } else {
+                let alpha = 1.0 - (-(dt.max(1.0e-4) / 0.09)).exp();
+                *visual_base += correction * alpha;
+            }
+            if let Ok(mut t) = world.get::<&mut Transform>(entity) {
+                let hover_height = match re.kind {
+                    EntityKind::Minion { role, .. } => MonsterRole::from_wire_byte(role)
+                        .and_then(minion_hover_height)
+                        .unwrap_or(0.0),
+                    _ => 0.0,
+                };
+                let bob = if hover_height > 0.0 {
+                    let bob_phase = self.minion_hover_time * 3.4 + net_id.0 as f32 * 0.37;
+                    bob_phase.sin() * 0.18
+                } else {
+                    0.0
+                };
+                t.position = *visual_base + Vec3::new(0.0, hover_height + bob, 0.0);
+                t.rotation = Quat::from_rotation_y(display_yaw);
+                if let EntityKind::Minion { role, .. } = re.kind {
+                    if let Some(role) = MonsterRole::from_wire_byte(role) {
+                        t.scale = Vec3::splat(role.scale() * 0.30);
+                    }
+                }
+            }
+            if let Ok(mut v) = world.get::<&mut Velocity>(entity) {
+                v.linear = re.velocity;
+            }
+            if let Ok(mut h) = world.get::<&mut Health>(entity) {
+                h.current = h.max * re.health_pct;
             }
             sync_effects(world, entity, &re.effects);
         }

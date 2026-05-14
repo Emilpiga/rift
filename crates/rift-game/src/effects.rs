@@ -35,6 +35,11 @@ pub mod id {
     /// enemy caster's arcane bolt — pressures support play
     /// by punishing top-up casts on a chip-damaged ally.
     pub const NECROTIC: u8 = 5;
+    /// HUD-only timer for an active Void Familiar summon. It has
+    /// no mechanical [`EffectKind`]; the client synthesizes it
+    /// from owned minion snapshot rows so summons share the same
+    /// duration-pip language as buffs.
+    pub const VOID_FAMILIAR: u8 = 6;
 }
 
 /// One mechanical effect a debuff applies while it is active. A
@@ -153,6 +158,14 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         color: [0.55, 0.20, 0.55],
         icon: Some("Necromancer_18"),
     };
+    static VOID_FAMILIAR_DEF: EffectDef = EffectDef {
+        id: VOID_FAMILIAR,
+        name: "Void Familiar",
+        default_duration: 28.0,
+        effects: &[],
+        color: [0.55, 0.75, 1.00],
+        icon: Some("Necromancer_14"),
+    };
     Some(match effect_id {
         SLOW => &SLOW_DEF,
         BURN => &BURN_DEF,
@@ -160,6 +173,7 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         CHILL => &CHILL_DEF,
         REJUVENATION => &REJUVENATION_DEF,
         NECROTIC => &NECROTIC_DEF,
+        VOID_FAMILIAR => &VOID_FAMILIAR_DEF,
         _ => return None,
     })
 }

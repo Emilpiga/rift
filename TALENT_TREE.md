@@ -300,10 +300,10 @@ Names are placeholder. Numbers are tuning placeholders.
 
 | Ring | Node             | Type     | Effect                                             |
 | ---- | ---------------- | -------- | -------------------------------------------------- |
-| 1    | Summon Wolf      | Unlock   | New pet ability (to author).                       |
+| 1    | Void Familiar    | Unlock   | Summon a short-lived void familiar.                |
 | 1    | Pet Mastery (×3) | Stat     | +5% pet damage per rank.                           |
-| 2    | Pack Tactics     | Modifier | Summon Wolf summons +1 wolf.                       |
-| 3    | Summon Golem     | Unlock   | New larger, tankier pet (to author).               |
+| 2    | Riftling Swarm   | Unlock   | Multi-minion void summon follow-up.                |
+| 3    | Void Gate        | Unlock   | Portal that periodically spawns void entities.     |
 | 3    | Bonded           | Keystone | Pets inherit your crit chance.                     |
 | 4    | Necromancer      | Keystone | Killed enemies have X% chance to rise as a minion. |
 

@@ -176,6 +176,12 @@ pub struct NetClient {
     /// stops shipping it (death / floor change). Skinned mesh
     /// comes from the shared `MonsterCache` on `FloorManager`.
     pub(super) enemy_entities: HashMap<NetId, hecs::Entity>,
+    /// ECS entity per replicated friendly minion. Uses monster
+    /// assets like enemies, but remains separate so UI/targeting
+    /// never treats summons as hostile.
+    pub(super) minion_entities: HashMap<NetId, hecs::Entity>,
+    pub(super) minion_visual_positions: HashMap<NetId, Vec3>,
+    pub(super) minion_hover_time: f32,
     /// Explicit client-side death/despawn cue per enemy. Reliable
     /// death events and DEAD snapshots create the entry; the same
     /// visual-removal operation spawns the soul-return poof and
@@ -482,6 +488,9 @@ impl NetClient {
             avatar_entities: HashMap::new(),
             prev_action_byte: HashMap::new(),
             enemy_entities: HashMap::new(),
+            minion_entities: HashMap::new(),
+            minion_visual_positions: HashMap::new(),
+            minion_hover_time: 0.0,
             enemy_death_cues: HashMap::new(),
             projectile_objects: HashMap::new(),
             projectile_trails: HashMap::new(),
@@ -901,6 +910,8 @@ impl NetClient {
                 // write through stale entity ids.
                 self.avatar_entities.clear();
                 self.enemy_entities.clear();
+                self.minion_entities.clear();
+                self.minion_visual_positions.clear();
                 // Projectile renderer slots from the previous floor
                 // are about to be invalidated by the world wipe;
                 // drop them so the next floor's projectile rows
@@ -1357,6 +1368,28 @@ impl NetClient {
             return 1.0;
         };
         self.remote.get(&nid).map(|r| r.resource_pct).unwrap_or(1.0)
+    }
+
+    pub fn local_summon_effects(&self) -> Vec<rift_engine::ecs::components::ActiveEffect> {
+        let Some(owner_id) = self.our_net_id else {
+            return Vec::new();
+        };
+        let duration = rift_game::effects::lookup(rift_game::effects::id::VOID_FAMILIAR)
+            .map(|def| def.default_duration)
+            .unwrap_or(28.0);
+        self.remote
+            .values()
+            .filter_map(|entity| match entity.kind {
+                rift_net::messages::EntityKind::Minion { owner, .. } if owner == owner_id => {
+                    Some(rift_engine::ecs::components::ActiveEffect {
+                        id: rift_game::effects::id::VOID_FAMILIAR,
+                        remaining: (entity.resource_pct.clamp(0.0, 1.0) * duration).max(0.0),
+                        duration,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Look up a remote player's display name by `NetId`. Returns

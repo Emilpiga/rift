@@ -1295,6 +1295,14 @@ pub enum EntityKind {
         role: u8,
         anim: u8,
     },
+    Minion {
+        /// Stable monster-role id reused for minion visuals.
+        role: u8,
+        /// Owning player's net id. Lets clients style the row as
+        /// friendly and gives future commands a stable owner link.
+        owner: NetId,
+        anim: u8,
+    },
     Projectile {
         /// Ability id that spawned it; clients use this to pick the
         /// right visual + particle preset.

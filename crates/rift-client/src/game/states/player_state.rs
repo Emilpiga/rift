@@ -48,6 +48,11 @@ pub struct PlayerState {
     /// `resource_pct` each frame in `world_sync`. The HUD reads
     /// this directly; the canonical scalar is server-side.
     pub resource_pct: f32,
+    /// HUD-only summon timers synthesized from owned minion
+    /// snapshot rows. Rendered beside regular buffs so summons
+    /// advertise remaining duration without becoming mechanical
+    /// status effects on the player.
+    pub summon_effects: Vec<rift_engine::ecs::components::ActiveEffect>,
     /// Last server-reported salvage currency balance. Mirrored
     /// from [`rift_net::ServerMsg::ShardsSync`] in `main.rs`.
     /// The HUD reads this for the shard counter; the canonical
@@ -82,8 +87,8 @@ impl PlayerState {
         let config = HERO.clone();
         let attributes = Attributes::for_class(config.primary_attribute);
 
-        let abilities = loadout.materialize();
         let talents = talents::fresh_character_tree();
+        let abilities = materialize_unlocked(&loadout, &talents);
 
         let experience = Experience::new();
         let default_equipment = rift_game::loot::Equipment::default();
@@ -107,6 +112,7 @@ impl PlayerState {
             cached_stats,
             cached_ability_mods,
             resource_pct: 1.0,
+            summon_effects: Vec::new(),
             shards: 0,
             punch_jab_next: true,
             last_punch_at: None,
@@ -123,7 +129,15 @@ impl PlayerState {
         wire_id: rift_game::abilities::AbilityWireId,
     ) {
         self.loadout.set_slot(slot_index, wire_id);
-        self.abilities = self.loadout.materialize();
+        self.refresh_abilities();
+    }
+
+    /// Rebuild the runtime action bar from the persisted loadout,
+    /// hiding abilities whose `UnlockAbility` talent is no longer
+    /// invested. The loadout itself is left untouched so relearning
+    /// the talent can reveal the remembered slot again.
+    pub fn refresh_abilities(&mut self) {
+        self.abilities = materialize_unlocked(&self.loadout, &self.talents);
     }
 
     /// Recompute the cached character sheet from the supplied
@@ -158,4 +172,17 @@ impl PlayerState {
     pub fn max_hp(&self) -> f32 {
         self.cached_stats.max_hp
     }
+}
+
+fn materialize_unlocked(loadout: &Loadout, talents: &TalentTree) -> AbilitySlot {
+    let mut bar = AbilitySlot::new();
+    for (index, &wire_id) in loadout.slots.iter().enumerate() {
+        if !rift_game::loadout::is_ability_unlocked(wire_id, talents) {
+            continue;
+        }
+        if let Some(ability) = rift_game::abilities::lookup(wire_id) {
+            bar.slots[index] = Some(rift_game::abilities::AbilityState::new(ability.clone()));
+        }
+    }
+    bar
 }

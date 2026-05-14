@@ -35,6 +35,7 @@ pub mod inventory_ops;
 pub mod loot;
 pub mod loot_ops;
 pub mod meters;
+pub mod minions;
 pub mod player;
 pub mod player_ops;
 pub mod procs;

@@ -1,13 +1,11 @@
 //! Summoner route - void summons and necromancy.
 
-use crate::abilities::AbilityId;
-
 use super::{
     node, stat_node, AbilityModifier, KeystoneId, PrerequisiteMode, Route, TalentEffect,
     TalentNode, TalentStat, TalentStatus,
 };
+use crate::abilities::AbilityId;
 
-const VOID_FAMILIAR: AbilityId = AbilityId("void_familiar");
 const RIFTLING_SWARM: AbilityId = AbilityId("riftling_swarm");
 const VOID_GATE: AbilityId = AbilityId("void_gate");
 const RAISE_HUSK: AbilityId = AbilityId("raise_husk");
@@ -19,7 +17,7 @@ pub fn nodes() -> Vec<TalentNode> {
     use TalentStatus::*;
 
     vec![
-        node(4000, "Void Familiar", "Unlock a small void familiar summon.", 1, Route::Summoner, &[411], All, NeedsAbility, (-520.0, 0.0), TalentEffect::UnlockAbility { ability: VOID_FAMILIAR }),
+        node(4000, "Void Familiar", "Unlock a small void familiar summon.", 1, Route::Summoner, &[411], All, Ready, (-520.0, 0.0), TalentEffect::UnlockAbility { ability: crate::abilities::VOID_FAMILIAR }),
         stat_node(4001, "Pet Mastery", "+5% minion damage per rank.", Route::Summoner, Damage, 0.05, 3, &[4000], All, NeedsSystem, (-650.0, -130.0)),
         stat_node(4002, "Binder's Focus", "+3% minion health per rank.", Route::Summoner, MaxHp, 0.03, 3, &[4000], All, NeedsSystem, (-650.0, 130.0)),
         node(4003, "Unstable Sympathy", "Your crits briefly empower your active minions.", 1, Route::Summoner, &[4000], All, NeedsSystem, (-780.0, 0.0), TalentEffect::PassiveProc { description: "Your crits briefly empower your active minions.", chance: 1.0, per_rank: 0.0 }),

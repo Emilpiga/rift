@@ -279,6 +279,86 @@ pub fn enemy_soul_return() -> Effect {
     }
 }
 
+/// Friendly summon dismissal — a compact violet/teal collapse used
+/// when player-owned minions expire, are unsummoned, or disappear on
+/// floor changes. Smaller and cooler than `enemy_soul_return` so it
+/// reads as a controlled arcane release rather than a hostile corpse.
+pub fn summon_despawn(scale: f32) -> Effect {
+    let s = scale.max(0.25);
+    Effect {
+        duration: 0.05,
+        layers: vec![
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Sphere,
+                emission: EmissionMode::Burst { count: 14 },
+                speed: (0.4 * s, 1.8 * s),
+                lifetime: (0.22, 0.42),
+                forces: vec![
+                    ForceField::Drag { coefficient: 4.4 },
+                    ForceField::Curl {
+                        frequency: 1.5,
+                        strength: 2.8 * s,
+                    },
+                ],
+                size: Curve::from_stops([(0.00, 0.30 * s), (0.45, 0.72 * s), (1.00, 0.0)]),
+                color: Gradient::from_stops([
+                    (0.00, [1.80, 3.20, 4.60, 0.78]),
+                    (0.40, [1.60, 0.70, 3.80, 0.58]),
+                    (1.00, [0.06, 0.08, 0.18, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Ring {
+                    radius: 0.35 * s,
+                    thickness: 0.18 * s,
+                },
+                emission: EmissionMode::Burst { count: 28 },
+                speed: (1.6 * s, 3.8 * s),
+                lifetime: (0.28, 0.56),
+                forces: vec![
+                    ForceField::Drag { coefficient: 1.2 },
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 2.4 * s,
+                    },
+                    ForceField::Orbit {
+                        axis: Vec3::Y,
+                        speed: -3.2,
+                    },
+                ],
+                size: Curve::from_stops([(0.00, 0.08 * s), (0.70, 0.05 * s), (1.00, 0.0)]),
+                color: Gradient::from_stops([
+                    (0.00, [2.20, 4.40, 5.20, 0.92]),
+                    (0.45, [2.20, 0.90, 4.40, 0.76]),
+                    (1.00, [0.08, 0.12, 0.26, 0.00]),
+                ]),
+                sprite: SpriteShape::Streak,
+                blend: BlendMode::Additive,
+                opacity: 1.0,
+            }),
+            Layer::Particles(ParticleSpec {
+                spawn: SpawnShape::Point,
+                emission: EmissionMode::Burst { count: 1 },
+                speed: (0.0, 0.0),
+                lifetime: (0.34, 0.34),
+                forces: vec![],
+                size: Curve::from_stops([(0.00, 1.10 * s), (0.35, 1.55 * s), (1.00, 0.65 * s)]),
+                color: Gradient::from_stops([
+                    (0.00, [0.08, 0.05, 0.18, 0.56]),
+                    (0.60, [0.04, 0.03, 0.10, 0.34]),
+                    (1.00, [0.01, 0.01, 0.03, 0.00]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Alpha,
+                opacity: 1.0,
+            }),
+        ],
+    }
+}
+
 /// Enemy arrival cue — played when a replicated enemy mesh is
 /// first materialised on the client. The goal is to hide the
 /// snap-in frame and sell the spawn as a deliberate rift/summon:

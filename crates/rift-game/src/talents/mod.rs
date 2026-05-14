@@ -705,4 +705,24 @@ mod tests {
             "Evasive Roll is always unlocked and must not appear as a talent gate"
         );
     }
+
+    #[test]
+    fn void_familiar_is_ready_and_registered() {
+        let tree = fresh_character_tree();
+        let node = tree
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(
+                    n.effect,
+                    TalentEffect::UnlockAbility {
+                        ability: crate::abilities::VOID_FAMILIAR
+                    }
+                )
+            })
+            .expect("Void Familiar talent node missing");
+        assert_eq!(node.status, TalentStatus::Ready);
+        assert!(crate::abilities::lookup_by_id(crate::abilities::VOID_FAMILIAR).is_some());
+        assert!(crate::abilities::lookup(crate::abilities::id::VOID_FAMILIAR_BOLT).is_some());
+    }
 }

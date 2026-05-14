@@ -2,8 +2,8 @@ use glam::{Mat4, Vec3};
 use rift_dungeon::{FloorMood, NavGrid, RoomTheme};
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::{
-    Collider, Enemy, EnemyAnim, EnemyKind, Health, LocalPlayer, NetControlled, RemoteEnemy,
-    Renderable, Skinned, Static, Transform, Velocity,
+    Collider, Enemy, EnemyAnim, EnemyKind, FloatingVisual, Health, LocalPlayer, NetControlled,
+    RemoteEnemy, RemoteMinion, Renderable, Skinned, Static, Transform, Velocity,
 };
 use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 
@@ -1600,7 +1600,7 @@ pub fn spawn_remote_enemy_entity(
         .ok_or_else(|| anyhow::anyhow!("monster role {role:?} not loaded"))?;
 
     let scaled = Mat4::from_scale_rotation_translation(
-        Vec3::splat(role.scale()),
+        Vec3::splat(role.scale() * 0.34),
         glam::Quat::IDENTITY,
         position,
     );
@@ -1672,4 +1672,87 @@ pub fn spawn_remote_enemy_entity(
         builder.add(rift_engine::ecs::components::Boss);
     }
     Ok(world.spawn(builder.build()))
+}
+
+pub fn spawn_remote_minion_entity(
+    world: &mut hecs::World,
+    renderer: &mut Renderer,
+    monsters: &mut MonsterCache,
+    net_id: rift_net::NetId,
+    owner_net_id: rift_net::NetId,
+    role: MonsterRole,
+    position: Vec3,
+    hp_max: f32,
+) -> anyhow::Result<hecs::Entity> {
+    const MINION_VISUAL_SCALE: f32 = 0.30;
+    let hover_height = minion_hover_height(role).unwrap_or(0.0);
+
+    let shared_set = monsters
+        .slot_mut(role)
+        .as_mut()
+        .and_then(|a| a.ensure_shared_material(renderer));
+    let asset = monsters
+        .get(role)
+        .ok_or_else(|| anyhow::anyhow!("monster role {role:?} not loaded"))?;
+    let scaled = Mat4::from_scale_rotation_translation(
+        Vec3::splat(role.scale() * MINION_VISUAL_SCALE),
+        glam::Quat::IDENTITY,
+        position + Vec3::Y * hover_height,
+    );
+    let obj_index = renderer.add_skinned_mesh(
+        &asset.mesh.bind_vertices,
+        &asset.mesh.vertex_skin,
+        &asset.mesh.indices,
+        scaled,
+        0.0,
+    )?;
+    if let Some(set) = shared_set {
+        renderer.set_object_shared_material(obj_index, set);
+    }
+    renderer.set_object_casts_shadow(obj_index, false);
+    if let Some(obj) = renderer.objects.get_mut(obj_index) {
+        obj.tint = [0.62, 0.78, 1.45, 0.62];
+    }
+    let skinned = Skinned {
+        mesh: asset.mesh.clone(),
+        scratch: Vec::new(),
+        joint_worlds: Vec::new(),
+    };
+    let initial_clip = asset
+        .anims
+        .find_any(&["Idle", "Idle_Loop"])
+        .or_else(|| asset.anims.find_any(&["Walk", "Walk_Loop"]))
+        .or_else(|| asset.anims.clips.values().next().cloned());
+    let animator = initial_clip.map(rift_engine::animation::Animator::new);
+
+    let mut builder = hecs::EntityBuilder::new();
+    let mut transform = Transform::from_position(position + Vec3::Y * hover_height);
+    transform.scale = Vec3::splat(role.scale() * MINION_VISUAL_SCALE);
+    builder.add(transform);
+    builder.add(Velocity::default());
+    builder.add(Health::new(hp_max));
+    builder.add(Renderable {
+        object_index: obj_index,
+    });
+    builder.add(NetControlled);
+    builder.add(RemoteMinion {
+        net_id: net_id.0,
+        owner_net_id: owner_net_id.0,
+    });
+    if hover_height > 0.0 {
+        builder.add(FloatingVisual { hover_height });
+    }
+    builder.add(skinned);
+    builder.add(asset.anims.clone());
+    if let Some(a) = animator {
+        builder.add(a);
+    }
+    Ok(world.spawn(builder.build()))
+}
+
+pub fn minion_hover_height(role: MonsterRole) -> Option<f32> {
+    match role {
+        MonsterRole::Wraith => Some(1.15),
+        _ => None,
+    }
 }

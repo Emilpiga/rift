@@ -590,6 +590,25 @@ pub struct RemoteEnemy {
     pub net_id: u32,
 }
 
+/// Marker for player-owned minions driven by server snapshots.
+/// Kept distinct from [`RemoteEnemy`] so HUD, targeting, and
+/// client-only combat helpers do not mistake friendly summons for
+/// hostile monsters.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemoteMinion {
+    pub net_id: u32,
+    pub owner_net_id: u32,
+}
+
+/// Marker for entities whose visual transform should float above
+/// the navigation/collision plane. Grounded summons should not
+/// carry this component, so they continue through normal movement
+/// ground-follow logic.
+#[derive(Clone, Copy, Debug)]
+pub struct FloatingVisual {
+    pub hover_height: f32,
+}
+
 /// Engine-side mirror of `rift_net::messages::ActiveEffect`.
 /// Duplicated here so this crate doesn't need to depend on
 /// `rift-net`; the client converts at sync time.

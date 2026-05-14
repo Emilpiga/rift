@@ -11,7 +11,7 @@ use rift_net::{NetId, NetTick};
 
 use super::actor::Vitals;
 use super::player::ServerPlayer;
-use super::{ability, channel, combat_ctx, effect, player, shrine, Sim};
+use super::{ability, channel, combat_ctx, effect, minions, player, shrine, Sim};
 
 impl Sim {
     /// Set the player's revive-shrine channel intent. `Some`
@@ -170,10 +170,10 @@ impl Sim {
             target: accepted.placed_target.map(|t| t.to_array()),
             start_tick: tick,
         });
-        // Player casts don't currently produce summons or
-        // player-damage rows, but the kernel sinks need valid
-        // references regardless.
+        // Player casts can produce player-owned minion requests;
+        // enemy-shaped summons remain disallowed on this path.
         let mut summons: Vec<(Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
+        let mut minion_summons: Vec<minions::MinionSpawnRequest> = Vec::new();
         let mut player_damage: Vec<combat_ctx::PlayerHit> = Vec::new();
         let mut player_heals: Vec<(Entity, f32)> = Vec::new();
         let no_targets: [(Entity, Vec3); 0] = [];
@@ -184,6 +184,7 @@ impl Sim {
             player_damage: &mut player_damage,
             player_heals: &mut player_heals,
             summons: &mut summons,
+            minion_summons: &mut minion_summons,
             player_targets: &no_targets,
             melee_swings: &mut self.pending_melee_swings,
         };
@@ -192,6 +193,9 @@ impl Sim {
             summons.is_empty() && player_damage.is_empty(),
             "player cast emitted enemy-shaped effects",
         );
+        for request in minion_summons {
+            minions::spawn_or_refresh(&mut self.world, request, &mut self.next_enemy_net_id);
+        }
         // Apply queued heals — clamped at hp_max. Healing is
         // scaled by the target's healing-received multiplier
         // (Necrotic ⇒ 0.5×) so direct heals honour the same

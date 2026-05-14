@@ -15,6 +15,7 @@ use rift_net::{
 use super::actor::{NetIdentity, Vitals};
 use super::enemies::{enemy_anim, ServerEnemy};
 use super::loot::ServerLoot;
+use super::minions::{self, ServerMinion};
 use super::player::ServerPlayer;
 use super::projectile::ServerProjectile;
 use super::shrine::ServerReviveShrine;
@@ -124,6 +125,37 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             health_pct: vitals.health_pct(),
             resource_pct: 1.0,
             flags,
+            effects,
+        });
+    }
+
+    // View-culled friendly minions. They use monster visuals on
+    // the client, but stay a distinct wire kind so UI/targeting
+    // never mistakes them for enemies.
+    for (_e, (minion, identity, vitals, kinematic)) in world
+        .query::<(&ServerMinion, &NetIdentity, &Vitals, &Kinematic)>()
+        .iter()
+    {
+        if !in_view(viewer_pos, kinematic.position) {
+            continue;
+        }
+        let effects = world
+            .get::<&super::effect::EffectStack>(_e)
+            .map(|s| s.to_snapshot())
+            .unwrap_or_default();
+        entities.push(EntitySnapshot {
+            net_id: identity.net_id,
+            kind: EntityKind::Minion {
+                role: minion.role.to_wire_byte(),
+                owner: minion.owner_net_id,
+                anim: minions::anim_byte(minion, kinematic),
+            },
+            position: kinematic.position.to_array(),
+            yaw: kinematic.yaw,
+            velocity: kinematic.velocity.to_array(),
+            health_pct: vitals.health_pct(),
+            resource_pct: minion.lifetime_remaining / 28.0,
+            flags: 0,
             effects,
         });
     }

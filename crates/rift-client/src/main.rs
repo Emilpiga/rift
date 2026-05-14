@@ -269,6 +269,12 @@ impl RiftApp {
             &mut state.floor_mgr.monsters,
             dt,
         );
+        net.sync_minions(
+            &mut state.world,
+            renderer,
+            &mut state.floor_mgr.monsters,
+            dt,
+        );
         net.sync_projectiles(renderer, state.audio.as_mut(), dt);
 
         // Spawn loot-pillar visuals from snapshot rows. The
@@ -1404,9 +1410,9 @@ impl RiftApp {
             state.loot.equipment = equip;
             state.player_state.recompute_stats(&state.loot.equipment);
             // Equipment changed — weapons are stat-sticks only and
-            // don't affect ability bindings, so just re-materialize
-            // the action bar from the persisted loadout.
-            state.player_state.abilities = state.player_state.loadout.materialize();
+            // don't affect ability bindings, so just refresh the
+            // runtime bar from persisted loadout + current talents.
+            state.player_state.refresh_abilities();
 
             // Refresh the local player's modular outfit attachments
             // so anything with a `BaseItem::model_path` shows up
@@ -1505,7 +1511,7 @@ impl RiftApp {
         // re-materialize the runtime `AbilitySlot`.
         if let Some(slots) = net.drain_loadout() {
             state.player_state.loadout = rift_game::loadout::Loadout::from_slots(slots);
-            state.player_state.abilities = state.player_state.loadout.materialize();
+            state.player_state.refresh_abilities();
         }
 
         // Authoritative talent-tree snapshots. The server's
@@ -1528,6 +1534,7 @@ impl RiftApp {
             }
             tree.total_spent = total_spent;
             tree.unspent_points = unspent;
+            state.player_state.refresh_abilities();
         }
 
         // Authoritative shard balance. Pushed by the server on
@@ -1610,6 +1617,7 @@ impl RiftApp {
         // server and is round-tripped via the snapshot's
         // `resource_pct` field.
         state.player_state.resource_pct = net.local_resource_pct();
+        state.player_state.summon_effects = net.local_summon_effects();
 
         // Deferred local-equipment visual apply: the first
         // `EquipmentSync` arrives before the local avatar has

@@ -89,6 +89,7 @@ impl Sim {
         //     Summons go through a local queue so net-id
         //     allocation stays owned by Sim.
         let mut summon_queue: Vec<(glam::Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
+        let mut minion_summons_from_ai: Vec<minions::MinionSpawnRequest> = Vec::new();
         let mut melee_from_resolves: Vec<combat_ctx::PlayerHit> = Vec::new();
         // Stand-in tables for the AI submit gate — AI casts
         // don't read sessions / cooldowns but the kernel
@@ -159,6 +160,7 @@ impl Sim {
                         player_damage: &mut melee_from_resolves,
                         player_heals: &mut player_heals_unused,
                         summons: &mut summon_queue,
+                        minion_summons: &mut minion_summons_from_ai,
                         player_targets: &player_targets,
                         melee_swings: &mut self.pending_melee_swings,
                     };
@@ -184,6 +186,10 @@ impl Sim {
                 &mut self.next_enemy_net_id,
             );
         }
+        debug_assert!(
+            minion_summons_from_ai.is_empty(),
+            "enemy cast emitted player-owned minion summon"
+        );
         // Merge the two damage queues (AI melee + cast
         // resolves) into one for the player-damage pass.
         let mut melee_damage = melee_damage;
@@ -238,6 +244,14 @@ impl Sim {
         //    direct kills both run through `loot::finalise_kills`
         //    (which emits `Death`, rolls drops, and despawns).
         let enemies = enemies::snapshot_for_collision(&self.world);
+        minions::tick_ai(
+            &mut self.world,
+            &self.floor,
+            &enemies,
+            &mut self.next_projectile_net_id,
+            dt,
+        );
+        minions::integrate_motion(&mut self.world, &self.floor, dt);
 
         let mut kills: Vec<combat_ctx::KillInfo> = Vec::new();
         // Sinks for the elite-affix flow. `thorns_back` is
@@ -422,6 +436,7 @@ impl Sim {
         // meter row.
         if !proc_cast_queue.is_empty() {
             let mut proc_summons: Vec<(Vec3, rift_game::monsters::MonsterRole, f32)> = Vec::new();
+            let mut proc_minion_summons: Vec<minions::MinionSpawnRequest> = Vec::new();
             let mut proc_player_damage: Vec<combat_ctx::PlayerHit> = Vec::new();
             let mut proc_player_heals: Vec<(Entity, f32)> = Vec::new();
             for (caster, request) in proc_cast_queue.drain(..) {
@@ -432,6 +447,7 @@ impl Sim {
                     player_damage: &mut proc_player_damage,
                     player_heals: &mut proc_player_heals,
                     summons: &mut proc_summons,
+                    minion_summons: &mut proc_minion_summons,
                     player_targets: &player_targets,
                     melee_swings: &mut self.pending_melee_swings,
                 };
@@ -470,6 +486,9 @@ impl Sim {
                 proc_summons.is_empty(),
                 "proc cast queued summons; not yet routed",
             );
+            for request in proc_minion_summons {
+                minions::spawn_or_refresh(&mut self.world, request, &mut self.next_enemy_net_id);
+            }
         }
 
         // Fold meter events queued during the CombatCtx scope
