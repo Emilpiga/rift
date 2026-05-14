@@ -17,6 +17,8 @@ pub enum TalentRouteView {
     Mage,
     Healer,
     Summoner,
+    Synergy,
+    Fifth,
 }
 
 /// Coarse classification of a node, used for shape / glow.
@@ -34,6 +36,8 @@ pub enum TalentNodeKind {
     Proc,
     /// `Keystone` — keystone glow flourish.
     Keystone,
+    /// Cross-route hybrid payoff node.
+    Synergy,
     /// Hub→route connector. Rendered slimmer / dimmer.
     Connector,
 }
@@ -56,6 +60,13 @@ pub struct TalentNodeView<'a> {
     pub kind: TalentNodeKind,
     pub current_rank: u8,
     pub max_rank: u8,
+    /// Blueprint graph coordinate. When present, the panel uses
+    /// it directly instead of the legacy auto-layout fallback.
+    pub position: Option<(f32, f32)>,
+    /// Human-readable implementation status, e.g. "Ready" or
+    /// "Needs System". Display-only; investability is still the
+    /// authoritative gate.
+    pub status: &'a str,
     /// Indices (into `TalentTreeView::nodes`) of prerequisite
     /// nodes. Empty for hub roots / connectors at the centre.
     pub prereq_indices: Vec<u16>,

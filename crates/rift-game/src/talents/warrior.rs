@@ -1,196 +1,462 @@
-//! Warrior route — melee, sword swings, charges, parries.
-//!
-//! See `TALENT_TREE.md` §8.1.
-//!
-//! Reserved `TalentId` range: **1000 .. 1999**.
-//!
-//! The §8.1 sample lists a "Charge" ability that hasn't been
-//! authored yet (`AbilityId` would be dangling); we ship the
-//! route without it for now. Keystones reference variants already
-//! reserved in [`super::KeystoneId`].
+//! Warrior route - direct physical combat with Berserker and Vanguard lanes.
 
-use super::hub::CONNECTOR_WARRIOR_TAIL;
-use super::{AbilityModifier, KeystoneId, Route, TalentEffect, TalentId, TalentNode, TalentStat};
+use crate::abilities::AbilityId;
+
+use super::{
+    node, stat_node, AbilityModifier, KeystoneId, PrerequisiteMode, Route, TalentEffect,
+    TalentNode, TalentStat, TalentStatus,
+};
+
+const CHARGE: AbilityId = AbilityId("charge");
+const SHIELD_BASH: AbilityId = AbilityId("shield_bash");
+const GROUND_SLAM: AbilityId = AbilityId("ground_slam");
+const BANNER_OF_WAR: AbilityId = AbilityId("banner_of_war");
 
 pub fn nodes() -> Vec<TalentNode> {
-    let mut out = Vec::new();
+    use PrerequisiteMode::{All, Any};
+    use TalentStat::*;
+    use TalentStatus::*;
 
-    // ─── Ring 1: Sword Slash + its support cluster ────────────────────
-    // Entry ability — every other warrior pick walks through it.
-    // Its support cluster (Heavy Strikes, Reach) hangs directly
-    // off it so the UI can lay them out as satellites; one
-    // generic progression stat (Toughness) hangs off it as the
-    // gateway to Whirlwind.
-    out.push(TalentNode {
-        id: TalentId(1000),
-        name: "Sword Slash",
-        description: "Unlock the Melee Attack ability.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![CONNECTOR_WARRIOR_TAIL],
-        effect: TalentEffect::UnlockAbility {
-            ability: crate::abilities::MELEE_ATTACK,
-        },
-    });
-    // ─── Sword Slash support cluster ───
-    out.push(TalentNode {
-        id: TalentId(1011),
-        name: "Heavy Strikes",
-        description: "Melee Attack deals +15% damage.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1000)],
-        effect: TalentEffect::AbilityMod {
-            ability: crate::abilities::MELEE_ATTACK,
-            modifier: AbilityModifier::DamageBonus(0.15),
-        },
-    });
-    // "Reach": §8.1 lists "MELEE_ATTACK arc radius +10%". No
-    // arc-radius `AbilityModifier` variant exists yet, so this
-    // ships as a +10 % melee damage bonus on the same ability —
-    // a tuning placeholder that still scales the same build
-    // axis. Replace with a proper arc modifier when the
-    // `AbilityModifier` enum grows one.
-    out.push(TalentNode {
-        id: TalentId(1012),
-        name: "Reach",
-        description: "Melee Attack deals +10% damage.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1000)],
-        effect: TalentEffect::AbilityMod {
-            ability: crate::abilities::MELEE_ATTACK,
-            modifier: AbilityModifier::DamageBonus(0.10),
-        },
-    });
-
-    // ─── Progression toward Whirlwind ────────────────────────────────
-    // Two small stat nodes the player must traverse before
-    // Whirlwind opens up — the §8.1 sketch had Whirlwind hang
-    // directly off the entry ability which made the spine read
-    // as "ability → ability" with no investment between.
-    out.push(stat(
-        1001,
-        "Toughness",
-        "+5% maximum health per rank.",
-        TalentStat::MaxHp,
-        0.05,
-        3,
-        &[TalentId(1000)],
-    ));
-    out.push(stat(
-        1002,
-        "Conditioning",
-        "+5% damage per rank.",
-        TalentStat::Damage,
-        0.05,
-        2,
-        &[TalentId(1001)],
-    ));
-
-    // ─── Ring 2: Whirlwind + its support cluster ──────────────────────
-    out.push(TalentNode {
-        id: TalentId(1010),
-        name: "Whirlwind",
-        description: "Unlock the Whirlwind ability.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1002)],
-        effect: TalentEffect::UnlockAbility {
-            ability: crate::abilities::WHIRLWIND,
-        },
-    });
-    // ─── Whirlwind support cluster ───
-    out.push(TalentNode {
-        id: TalentId(1013),
-        name: "Wider Spin",
-        description: "Whirlwind deals +15% damage.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1010)],
-        effect: TalentEffect::AbilityMod {
-            ability: crate::abilities::WHIRLWIND,
-            modifier: AbilityModifier::DamageBonus(0.15),
-        },
-    });
-    out.push(TalentNode {
-        id: TalentId(1014),
-        name: "Endless Rotation",
-        description: "Whirlwind cooldown reduced by 0.5s.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1010)],
-        effect: TalentEffect::AbilityMod {
-            ability: crate::abilities::WHIRLWIND,
-            modifier: AbilityModifier::CooldownReduction(0.5),
-        },
-    });
-
-    // ─── Progression toward Berserker ────────────────────────────────
-    out.push(stat(
-        1015,
-        "War Trance",
-        "+5% damage per rank.",
-        TalentStat::Damage,
-        0.05,
-        2,
-        &[TalentId(1010)],
-    ));
-
-    // ─── Ring 3 ────────────────────────────────────────────────────────
-    out.push(TalentNode {
-        id: TalentId(1020),
-        name: "Berserker",
-        description: "Below 50% HP: +30% melee damage, −15% defense.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1015)],
-        effect: TalentEffect::Keystone {
-            keystone: KeystoneId::Berserker,
-        },
-    });
-
-    // ─── Ring 4 ────────────────────────────────────────────────────────
-    out.push(TalentNode {
-        id: TalentId(1030),
-        name: "Executioner",
-        description: "Melee crits below 30% HP execute the target.",
-        max_rank: 1,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: vec![TalentId(1020)],
-        effect: TalentEffect::Keystone {
-            keystone: KeystoneId::Executioner,
-        },
-    });
-
-    out
-}
-
-fn stat(
-    id: u16,
-    name: &'static str,
-    description: &'static str,
-    stat: TalentStat,
-    per_rank: f32,
-    max_rank: u8,
-    prerequisites: &[TalentId],
-) -> TalentNode {
-    TalentNode {
-        id: TalentId(id),
-        name,
-        description,
-        max_rank,
-        current_rank: 0,
-        route: Route::Warrior,
-        prerequisites: prerequisites.to_vec(),
-        effect: TalentEffect::PercentBonus { stat, per_rank },
-    }
+    vec![
+        node(
+            1000,
+            "Sword Slash",
+            "Unlock Melee Attack.",
+            1,
+            Route::Warrior,
+            &[111],
+            All,
+            Ready,
+            (520.0, 0.0),
+            TalentEffect::UnlockAbility {
+                ability: crate::abilities::MELEE_ATTACK,
+            },
+        ),
+        node(
+            1001,
+            "Heavy Strikes",
+            "Melee Attack +15% damage.",
+            1,
+            Route::Warrior,
+            &[1000],
+            All,
+            Ready,
+            (650.0, 120.0),
+            TalentEffect::AbilityMod {
+                ability: crate::abilities::MELEE_ATTACK,
+                modifier: AbilityModifier::DamageBonus(0.15),
+            },
+        ),
+        node(
+            1002,
+            "Reach",
+            "Melee Attack +10% arc/range.",
+            1,
+            Route::Warrior,
+            &[1000],
+            All,
+            NeedsSystem,
+            (650.0, -120.0),
+            TalentEffect::AbilityMod {
+                ability: crate::abilities::MELEE_ATTACK,
+                modifier: AbilityModifier::DamageBonus(0.10),
+            },
+        ),
+        stat_node(
+            1003,
+            "Battle Tempo",
+            "+3% attack speed per rank.",
+            Route::Warrior,
+            AttackSpeed,
+            0.03,
+            3,
+            &[1000],
+            All,
+            Ready,
+            (600.0, -260.0),
+        ),
+        stat_node(
+            1010,
+            "Blood Rush",
+            "+4% damage per rank while above 80% stamina/energy.",
+            Route::Warrior,
+            Damage,
+            0.04,
+            3,
+            &[1003],
+            All,
+            NeedsSystem,
+            (740.0, -330.0),
+        ),
+        node(
+            1011,
+            "Charge",
+            "Unlock Charge gap closer.",
+            1,
+            Route::Warrior,
+            &[1010],
+            All,
+            NeedsAbility,
+            (900.0, -470.0),
+            TalentEffect::UnlockAbility { ability: CHARGE },
+        ),
+        node(
+            1012,
+            "Momentum",
+            "Charge cooldown -0.8s.",
+            1,
+            Route::Warrior,
+            &[1011],
+            All,
+            NeedsAbility,
+            (1060.0, -560.0),
+            TalentEffect::AbilityMod {
+                ability: CHARGE,
+                modifier: AbilityModifier::CooldownReduction(0.8),
+            },
+        ),
+        node(
+            1013,
+            "Shoulder Break",
+            "Charge staggers first enemy hit.",
+            1,
+            Route::Warrior,
+            &[1011],
+            All,
+            NeedsSystem,
+            (1060.0, -410.0),
+            TalentEffect::AbilityMod {
+                ability: CHARGE,
+                modifier: AbilityModifier::DamageBonus(0.0),
+            },
+        ),
+        node(
+            1014,
+            "Whirlwind",
+            "Unlock Whirlwind.",
+            1,
+            Route::Warrior,
+            &[1010],
+            All,
+            Ready,
+            (900.0, -230.0),
+            TalentEffect::UnlockAbility {
+                ability: crate::abilities::WHIRLWIND,
+            },
+        ),
+        node(
+            1015,
+            "Wider Spin",
+            "Whirlwind +15% damage/radius.",
+            1,
+            Route::Warrior,
+            &[1014],
+            All,
+            Tuning,
+            (1060.0, -280.0),
+            TalentEffect::AbilityMod {
+                ability: crate::abilities::WHIRLWIND,
+                modifier: AbilityModifier::DamageBonus(0.15),
+            },
+        ),
+        node(
+            1016,
+            "Endless Rotation",
+            "Whirlwind cooldown -0.5s.",
+            1,
+            Route::Warrior,
+            &[1014],
+            All,
+            Ready,
+            (1060.0, -160.0),
+            TalentEffect::AbilityMod {
+                ability: crate::abilities::WHIRLWIND,
+                modifier: AbilityModifier::CooldownReduction(0.5),
+            },
+        ),
+        stat_node(
+            1017,
+            "Wounded Fury",
+            "+6% damage per rank below 50% HP.",
+            Route::Warrior,
+            Damage,
+            0.06,
+            3,
+            &[1014],
+            All,
+            NeedsSystem,
+            (1120.0, -40.0),
+        ),
+        node(
+            1018,
+            "Berserker",
+            "Below 50% HP: +30% melee damage.",
+            1,
+            Route::Warrior,
+            &[1017],
+            All,
+            NeedsSystem,
+            (1300.0, -40.0),
+            TalentEffect::Keystone {
+                keystone: KeystoneId::Berserker,
+            },
+        ),
+        node(
+            1019,
+            "Executioner",
+            "Melee crits against enemies below 30% HP execute or deal massive bonus damage.",
+            1,
+            Route::Warrior,
+            &[1060],
+            All,
+            NeedsSystem,
+            (1500.0, -150.0),
+            TalentEffect::Keystone {
+                keystone: KeystoneId::Executioner,
+            },
+        ),
+        node(
+            1020,
+            "No Retreat",
+            "Taking lethal damage once per floor leaves you at 1 HP and grants 3s fury.",
+            1,
+            Route::Warrior,
+            &[1018],
+            All,
+            NeedsSystem,
+            (1500.0, 70.0),
+            TalentEffect::PassiveProc {
+                description: "Once per floor cheat death into a short fury window.",
+                chance: 1.0,
+                per_rank: 0.0,
+            },
+        ),
+        stat_node(
+            1030,
+            "Iron Posture",
+            "+5% armor per rank.",
+            Route::Warrior,
+            Defense,
+            0.05,
+            3,
+            &[1001],
+            All,
+            Ready,
+            (740.0, 330.0),
+        ),
+        node(
+            1031,
+            "Shield Bash",
+            "Unlock Shield Bash.",
+            1,
+            Route::Warrior,
+            &[1030],
+            All,
+            NeedsAbility,
+            (900.0, 170.0),
+            TalentEffect::UnlockAbility {
+                ability: SHIELD_BASH,
+            },
+        ),
+        node(
+            1032,
+            "Crumple",
+            "Shield Bash applies stronger stagger.",
+            1,
+            Route::Warrior,
+            &[1031],
+            All,
+            NeedsSystem,
+            (1060.0, 90.0),
+            TalentEffect::AbilityMod {
+                ability: SHIELD_BASH,
+                modifier: AbilityModifier::DamageBonus(0.0),
+            },
+        ),
+        node(
+            1033,
+            "Guard Break",
+            "Shield Bash deals +25% damage to armored/staggered enemies.",
+            1,
+            Route::Warrior,
+            &[1031],
+            All,
+            NeedsSystem,
+            (1060.0, 250.0),
+            TalentEffect::AbilityMod {
+                ability: SHIELD_BASH,
+                modifier: AbilityModifier::DamageBonus(0.25),
+            },
+        ),
+        node(
+            1034,
+            "Ground Slam",
+            "Unlock Ground Slam cone/AoE melee attack.",
+            1,
+            Route::Warrior,
+            &[1030],
+            All,
+            NeedsAbility,
+            (900.0, 500.0),
+            TalentEffect::UnlockAbility {
+                ability: GROUND_SLAM,
+            },
+        ),
+        node(
+            1035,
+            "Aftershock",
+            "Ground Slam leaves a delayed second hit.",
+            1,
+            Route::Warrior,
+            &[1034],
+            All,
+            NeedsSystem,
+            (1060.0, 430.0),
+            TalentEffect::AbilityMod {
+                ability: GROUND_SLAM,
+                modifier: AbilityModifier::DamageBonus(0.0),
+            },
+        ),
+        node(
+            1036,
+            "Shockwave",
+            "Ground Slam range +20%.",
+            1,
+            Route::Warrior,
+            &[1034],
+            All,
+            NeedsAbility,
+            (1060.0, 570.0),
+            TalentEffect::AbilityMod {
+                ability: GROUND_SLAM,
+                modifier: AbilityModifier::DamageBonus(0.0),
+            },
+        ),
+        node(
+            1037,
+            "Hold the Line",
+            "Standing still briefly grants armor and stagger resistance.",
+            1,
+            Route::Warrior,
+            &[1034],
+            All,
+            NeedsSystem,
+            (1180.0, 500.0),
+            TalentEffect::PassiveProc {
+                description: "Standing still briefly grants armor and stagger resistance.",
+                chance: 1.0,
+                per_rank: 0.0,
+            },
+        ),
+        stat_node(
+            1060,
+            "Killer Instinct",
+            "+3% crit damage per rank while injured.",
+            Route::Warrior,
+            CritDamage,
+            0.03,
+            2,
+            &[1018],
+            All,
+            NeedsSystem,
+            (1420.0, -100.0),
+        ),
+        node(
+            1038,
+            "Unbreakable",
+            "+25% armor and stagger immunity during commits.",
+            1,
+            Route::Warrior,
+            &[1037],
+            All,
+            NeedsSystem,
+            (1360.0, 500.0),
+            TalentEffect::Keystone {
+                keystone: KeystoneId::Named("Unbreakable"),
+            },
+        ),
+        node(
+            1039,
+            "Retaliation",
+            "Blocking or mitigating a heavy hit releases a cone counterattack.",
+            1,
+            Route::Warrior,
+            &[1061],
+            All,
+            NeedsSystem,
+            (1560.0, 390.0),
+            TalentEffect::Keystone {
+                keystone: KeystoneId::Named("Retaliation"),
+            },
+        ),
+        stat_node(
+            1061,
+            "Braced Counter",
+            "+3% armor per rank after using a defensive ability.",
+            Route::Warrior,
+            Defense,
+            0.03,
+            2,
+            &[1038],
+            All,
+            NeedsSystem,
+            (1460.0, 445.0),
+        ),
+        node(
+            1040,
+            "Banner of War",
+            "Unlock a short-lived banner that buffs allies and taunts enemies.",
+            1,
+            Route::Warrior,
+            &[1062],
+            All,
+            NeedsAbility,
+            (1560.0, 610.0),
+            TalentEffect::UnlockAbility {
+                ability: BANNER_OF_WAR,
+            },
+        ),
+        stat_node(
+            1062,
+            "War Standard Drill",
+            "+2% attack speed per rank after taking a hit.",
+            Route::Warrior,
+            AttackSpeed,
+            0.02,
+            2,
+            &[1038],
+            All,
+            NeedsSystem,
+            (1460.0, 555.0),
+        ),
+        stat_node(
+            1050,
+            "Blood and Steel",
+            "+4% damage and +4% armor per rank.",
+            Route::Warrior,
+            Damage,
+            0.04,
+            2,
+            &[1017, 1037],
+            Any,
+            Ready,
+            (1240.0, 230.0),
+        ),
+        node(
+            1051,
+            "Brutal Discipline",
+            "Crits reduce defensive ability cooldowns slightly.",
+            1,
+            Route::Warrior,
+            &[1050],
+            All,
+            NeedsSystem,
+            (1420.0, 230.0),
+            TalentEffect::PassiveProc {
+                description: "Crits reduce defensive ability cooldowns slightly.",
+                chance: 1.0,
+                per_rank: 0.0,
+            },
+        ),
+    ]
 }

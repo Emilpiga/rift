@@ -45,13 +45,13 @@ Design goals, in priority order:
 
 A fresh character at level 1 has:
 
-| Thing              | Value                                                                                                                               |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Abilities unlocked | **Punch** only                                                                                                                      |
-| Talent points      | **1** (spendable immediately)                                                                                                       |
-| Loadout slots      | 6 total, gated by `SLOT_UNLOCK_LEVELS`                                                                                              |
-| Default loadout    | Slot 0 = Punch (swappable), rest empty                                                                                              |
-| Dodge roll         | _Open question — currently `EVASIVE_ROLL` is talent-gated like everything else; recommended: keep it locked behind a tier-1 talent_ |
+| Thing              | Value                                                             |
+| ------------------ | ----------------------------------------------------------------- |
+| Abilities unlocked | **Punch** and **Evasive Roll**                                    |
+| Talent points      | **1** (spendable immediately)                                     |
+| Loadout slots      | 6 total, gated by `SLOT_UNLOCK_LEVELS`                            |
+| Default loadout    | Slot 0 = Punch (swappable), rest empty                            |
+| Dodge roll         | Always available as the baseline Space passive; not talent-gated. |
 
 ### 2.1 Punch — the neutral ability
 
@@ -409,10 +409,9 @@ fundamentally changes shape).
 These were open questions in an earlier draft and have been
 answered:
 
-1. **Dodge roll (`EVASIVE_ROLL`)**: gated behind a **tier-1 hub
-   talent** in the movement cluster of the hub. Not always-available
-   like Punch. Costs 1 point, single rank, unlocks the existing
-   `EVASIVE_ROLL` ability for casting.
+1. **Dodge roll (`EVASIVE_ROLL`)**: always available as the baseline
+   Space passive, alongside Punch. It is not represented as an
+   `UnlockAbility` node in the talent tree.
 2. **Tree scope**: **per-character**. `TalentTree` continues to
    live on the character entity. No account-shared progression.
 3. **AbilityVariant ↔ talents**: ability variants
@@ -423,7 +422,7 @@ answered:
    Players must lesser-respec leaves before interior nodes, or
    use a Greater token.
 5. **Hub size**: **6-10 generic-passive nodes** in the hub,
-   small cheap bonuses, plus the dodge-roll unlock and connector
+   small cheap bonuses, a movement passive spur, and connector
    chains into each route.
 
 ## 12. Legendary Item Synergy

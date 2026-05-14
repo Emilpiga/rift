@@ -235,10 +235,8 @@ pub fn is_player_ability(wire_id: AbilityWireId) -> bool {
 /// `true` if `wire_id` is unlocked for the player whose talent
 /// tree is `talents`. Empty / enemy / unknown ids are never
 /// unlocked. The always-on neutrals — `PUNCH`
-/// (`TALENT_TREE.md` §2.1) and `EVASIVE_ROLL` (gated by the Hub
-/// dodge-roll node and surfaced on Space; the spellbook treats
-/// it as ever-available so the dodge tile is never greyed out
-/// even before the talent is taken) — bypass the talent check.
+/// (`TALENT_TREE.md` §2.1) and `EVASIVE_ROLL` (baseline passive
+/// surfaced on Space) — bypass the talent check.
 /// Every other player ability is castable iff its
 /// `UnlockAbility` talent node has rank ≥ 1.
 pub fn is_ability_unlocked(wire_id: AbilityWireId, talents: &crate::talents::TalentTree) -> bool {

@@ -59,6 +59,8 @@ fn route_tint(route: TalentRouteView) -> Color {
         TalentRouteView::Mage => Color::rgba(0.32, 0.55, 0.90, 1.0),
         TalentRouteView::Healer => Color::rgba(0.42, 0.82, 0.50, 1.0),
         TalentRouteView::Summoner => Color::rgba(0.70, 0.45, 0.90, 1.0),
+        TalentRouteView::Synergy => Color::rgba(0.92, 0.70, 0.34, 1.0),
+        TalentRouteView::Fifth => Color::rgba(0.48, 0.82, 0.86, 1.0),
     }
 }
 
@@ -80,6 +82,8 @@ fn route_centre_angle(route: TalentRouteView) -> f32 {
         TalentRouteView::Mage => -FRAC_PI_2,
         TalentRouteView::Healer => FRAC_PI_2,
         TalentRouteView::Summoner => PI,
+        TalentRouteView::Synergy => 0.0,
+        TalentRouteView::Fifth => -FRAC_PI_2 * 0.5,
     }
 }
 
@@ -187,12 +191,12 @@ pub fn frame_talent_panel(
         //   * Connects the bands with stepped rungs at the
         //     exact angles where nodes live (4 cardinals for
         //     route spines, 8 π/8-offset slots for hub
-        //     passives, the diagonal for the dodge cluster).
+        //     passives).
         //
         // Everything draws at low alpha in a warm-stone tint
         // so the engravings recede behind the chips.
         {
-            use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_8, TAU};
+            use std::f32::consts::{FRAC_PI_2, FRAC_PI_8, TAU};
             let hub_centre = transform.world_to_screen(Pos2::new(0.0, 0.0));
             let s = |v: f32| transform.scale(v);
 
@@ -337,6 +341,8 @@ pub fn frame_talent_panel(
                 stone_dim,
             );
 
+            draw_route_ornaments(ui, transform);
+
             // ── Rungs: route spines ──
             //
             // Bright I-bar ladders along each route's cardinal
@@ -382,16 +388,6 @@ pub fn frame_talent_panel(
             for k in 0..8 {
                 let a = FRAC_PI_8 + (k as f32) * (TAU / 8.0);
                 i_bar(ui, b1_out, b2_in, a, s(5.0), 1.0, stone);
-            }
-
-            // ── Dodge cluster rung ──
-            //
-            // Diagonal stone rung from the centrepiece out
-            // to the dodge chain at -π/4, anchoring it the
-            // same way the cardinals are anchored.
-            {
-                let a = -FRAC_PI_4;
-                i_bar(ui, s(HUB_RING_RADIUS * 0.60), b2_in, a, s(5.0), 1.0, stone);
             }
 
             // ── Sun-stone centrepiece ──
@@ -508,48 +504,23 @@ pub fn frame_talent_panel(
             }
         }
 
-        // ── Edges first (so nodes draw on top) ──────────
-        // Active edges (prereq invested) glow in the route
-        // tint via a single shader-rasterised quad —
-        // `Ui::draw_glow_line` produces the bloom falloff
-        // perpendicular to the segment. Locked edges fall
-        // back to a thin dim plain line so they read as
-        // topology without competing for attention.
-        for (idx, node) in view.nodes.iter().enumerate() {
-            let to = transform.world_to_screen(layout[idx]);
-            for prereq_idx in &node.prereq_indices {
-                let i = *prereq_idx as usize;
-                if i >= view.nodes.len() {
-                    continue;
-                }
-                let from = transform.world_to_screen(layout[i]);
-                let edge_active = view.nodes[i].current_rank >= 1;
-                let core = transform.scale(EDGE_THICKNESS);
-                if edge_active {
-                    let tint = route_tint(node.route);
-                    let halo = transform.scale(EDGE_THICKNESS * 4.0);
-                    ui.draw_glow_line(from, to, core, halo, tint.with_alpha(0.95));
-                } else {
-                    ui.draw_line(from, to, core, Color::rgba(0.30, 0.30, 0.36, 0.50));
-                }
-            }
-        }
-
-        // ── Nodes ───────────────────────────────────────
-        // Two-pass: hit-test in screen space first (so the
-        // tooltip / click only fires for the topmost node
-        // under the cursor), then draw.
+        // ── Hit-test first ─────────────────────────────
+        // We need hover context before drawing edges because
+        // synergy prerequisite links are intentionally hidden
+        // until the synergy node or one of its parents is under
+        // inspection. They represent cross-route attunements,
+        // not ordinary walkable path segments.
         let (mx, my) = ui.input().mouse_pos();
         let cursor = Pos2::new(mx, my);
         let left_click = ui.input().left_clicked();
         let right_click = ui.input().right_clicked();
+        let mut hover_idx: Option<usize> = None;
 
-        // Find topmost node under cursor (iterate in reverse so
-        // later-drawn nodes shadow earlier ones on overlap).
         for (idx, node) in view.nodes.iter().enumerate().rev() {
             let screen_pos = transform.world_to_screen(layout[idx]);
             let r = transform.scale(node_radius(node.kind));
             if dist2(cursor, screen_pos) <= r * r && viewport.contains(cursor) {
+                hover_idx = Some(idx);
                 hover_id = Some(node.id);
                 hover_screen = Some(screen_pos);
                 if left_click && node.investable {
@@ -568,6 +539,45 @@ pub fn frame_talent_panel(
             }
         }
 
+        // ── Edges first (so nodes draw on top) ──────────
+        // Active edges (prereq invested) glow in the route
+        // tint via a single shader-rasterised quad —
+        // `Ui::draw_glow_line` produces the bloom falloff
+        // perpendicular to the segment. Locked edges fall
+        // back to a thin dim plain line so they read as
+        // topology without competing for attention.
+        for (idx, node) in view.nodes.iter().enumerate() {
+            if matches!(node.kind, TalentNodeKind::Synergy) {
+                let in_context = hover_idx == Some(idx)
+                    || node
+                        .prereq_indices
+                        .iter()
+                        .any(|&parent| hover_idx == Some(parent as usize));
+                if !in_context {
+                    continue;
+                }
+            }
+            let to_world = layout[idx];
+            for prereq_idx in &node.prereq_indices {
+                let i = *prereq_idx as usize;
+                if i >= view.nodes.len() {
+                    continue;
+                }
+                let from_world = layout[i];
+                let edge_active = view.nodes[i].current_rank >= 1;
+                draw_prereq_edge(
+                    ui,
+                    transform,
+                    from_world,
+                    to_world,
+                    node.route,
+                    false,
+                    edge_active,
+                );
+            }
+        }
+
+        // ── Nodes ───────────────────────────────────────
         // Draw every node.
         for (idx, node) in view.nodes.iter().enumerate() {
             let screen_pos = transform.world_to_screen(layout[idx]);
@@ -664,7 +674,7 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
     // for the canonical layout) and place each group on its
     // own ring:
     //
-    //   * Dodge cluster (ids 100, 101) — inner ring, top.
+    //   * Movement spur (ids 100..=109) — small side spur.
     //   * Connector chains (ids 110+, 210+, 310+, 410+) —
     //     radial spokes per target route, two nodes deep.
     //   * Generic passives (ids 1..=8) — outer ring, slotted
@@ -677,7 +687,7 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
     // right level of detail (versus a generic force-directed
     // graph layout that would still need anchor hints to read
     // cleanly).
-    // Dodge cluster radii are inlined below; see that block
+    // Movement-spur radii are inlined below; see that block
     // for the reasoning behind the choice.
     const HUB_CONNECTOR_R1: f32 = HUB_RING_RADIUS * 0.62;
     const HUB_CONNECTOR_R2: f32 = HUB_RING_RADIUS * 1.05;
@@ -738,7 +748,7 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
     }
 
     // First pass: bucket every hub node.
-    let mut dodge: Vec<usize> = Vec::new();
+    let mut movement_spur: Vec<usize> = Vec::new();
     let mut connectors_by_route: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
     let mut generic_passives: Vec<usize> = Vec::new();
     for (i, node) in view.nodes.iter().enumerate() {
@@ -747,7 +757,7 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
         }
         let id = node.id;
         if matches!(id, 100..=109) {
-            dodge.push(i);
+            movement_spur.push(i);
         } else if let Some(route) = connector_target(id) {
             // Use the route discriminant as the BTreeMap key so
             // chain ordering is deterministic across runs.
@@ -757,6 +767,8 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
                 TalentRouteView::Healer => 2,
                 TalentRouteView::Summoner => 3,
                 TalentRouteView::Hub => 4,
+                TalentRouteView::Synergy => 5,
+                TalentRouteView::Fifth => 6,
             };
             connectors_by_route.entry(key).or_default().push(i);
         } else {
@@ -788,33 +800,20 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
         }
     }
 
-    // Dodge cluster: a short radial chain along the top-right
-    // diagonal (-π/4). All four route spokes run on cardinal
-    // axes, so the diagonal is the maximum-distance direction
-    // from every connector chain — the chips can't touch the
-    // Mage or Warrior R1 nodes regardless of inner-ring size.
-    //
-    // Laid out as a chain along the diagonal rather than as
-    // an arc, so Tumbler → Evasive Roll reads as a short
-    // spoke of its own and the chips never bunch up against
-    // each other (Evasive Roll is an Unlock chip with a
-    // larger radius — fanning along an arc had them tangent
-    // even at narrow arc width).
-    if !dodge.is_empty() {
-        let mut sorted = dodge.clone();
+    // Movement spur: lightweight mobility passives live in a
+    // small side pocket. Evasive Roll itself is baseline and
+    // intentionally absent from this tree.
+    if !movement_spur.is_empty() {
+        let mut sorted = movement_spur.clone();
         sorted.sort_by_key(|&i| view.nodes[i].id);
-        let dodge_angle = -std::f32::consts::FRAC_PI_4;
-        // Two radii: first at the inner hub band, second
-        // out past the connector R1 ring so the Unlock chip
-        // has room without colliding with anything on the
-        // adjacent cardinal spokes.
-        let dodge_radii = [HUB_RING_RADIUS * 0.55, HUB_RING_RADIUS * 0.95];
+        let movement_angle = std::f32::consts::PI * 0.78;
+        let movement_radii = [HUB_RING_RADIUS * 1.35, HUB_RING_RADIUS * 1.75];
         for (k, &i) in sorted.iter().enumerate() {
-            let r = dodge_radii
+            let r = movement_radii
                 .get(k)
                 .copied()
-                .unwrap_or(HUB_RING_RADIUS * 0.95);
-            positions[i] = Pos2::new(dodge_angle.cos() * r, dodge_angle.sin() * r);
+                .unwrap_or(HUB_RING_RADIUS * 1.75);
+            positions[i] = Pos2::new(movement_angle.cos() * r, movement_angle.sin() * r);
         }
     }
 
@@ -913,6 +912,12 @@ fn layout_nodes(view: &TalentTreeView<'_>) -> Vec<Pos2> {
         }
     }
 
+    for (i, node) in view.nodes.iter().enumerate() {
+        if let Some((x, y)) = node.position {
+            positions[i] = Pos2::new(x, y);
+        }
+    }
+
     positions
 }
 
@@ -991,6 +996,7 @@ fn node_radius(kind: TalentNodeKind) -> f32 {
     match kind {
         TalentNodeKind::Unlock => UNLOCK_NODE_RADIUS,
         TalentNodeKind::Keystone => KEYSTONE_NODE_RADIUS,
+        TalentNodeKind::Synergy => KEYSTONE_NODE_RADIUS * 0.9,
         TalentNodeKind::Connector => NODE_RADIUS * 0.8,
         _ => NODE_RADIUS,
     }
@@ -1000,6 +1006,206 @@ fn dist2(a: Pos2, b: Pos2) -> f32 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     dx * dx + dy * dy
+}
+
+fn quadratic_point(a: Pos2, control: Pos2, b: Pos2, t: f32) -> Pos2 {
+    let inv = 1.0 - t;
+    Pos2::new(
+        inv * inv * a.x + 2.0 * inv * t * control.x + t * t * b.x,
+        inv * inv * a.y + 2.0 * inv * t * control.y + t * t * b.y,
+    )
+}
+
+fn synergy_edge_control(from: Pos2, to: Pos2) -> Pos2 {
+    let mid = Pos2::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
+    let to_len = (to.x * to.x + to.y * to.y).sqrt();
+    let mid_len = (mid.x * mid.x + mid.y * mid.y).sqrt();
+    let (dx, dy) = if to_len > 1.0 {
+        (to.x / to_len, to.y / to_len)
+    } else if mid_len > 1.0 {
+        (mid.x / mid_len, mid.y / mid_len)
+    } else {
+        (1.0, 0.0)
+    };
+    let radius = to_len.max(mid_len).max(900.0) + 560.0;
+    Pos2::new(dx * radius, dy * radius)
+}
+
+fn draw_prereq_edge(
+    ui: &mut Ui<'_>,
+    transform: PanZoomTransform,
+    from_world: Pos2,
+    to_world: Pos2,
+    route: TalentRouteView,
+    curved: bool,
+    active: bool,
+) {
+    let core = transform.scale(EDGE_THICKNESS);
+    let draw_segment = |ui: &mut Ui<'_>, from: Pos2, to: Pos2| {
+        if active {
+            let tint = route_tint(route);
+            let halo = transform.scale(EDGE_THICKNESS * 4.0);
+            ui.draw_glow_line(from, to, core, halo, tint.with_alpha(0.95));
+        } else {
+            ui.draw_line(from, to, core, Color::rgba(0.30, 0.30, 0.36, 0.50));
+        }
+    };
+
+    if !curved {
+        draw_segment(
+            ui,
+            transform.world_to_screen(from_world),
+            transform.world_to_screen(to_world),
+        );
+        return;
+    }
+
+    let control = synergy_edge_control(from_world, to_world);
+    let mut prev = transform.world_to_screen(from_world);
+    for step in 1..=18 {
+        let t = step as f32 / 18.0;
+        let world = quadratic_point(from_world, control, to_world, t);
+        let next = transform.world_to_screen(world);
+        draw_segment(ui, prev, next);
+        prev = next;
+    }
+}
+
+fn draw_route_ornaments(ui: &mut Ui<'_>, transform: PanZoomTransform) {
+    draw_route_causeway(ui, transform, TalentRouteView::Warrior, (1.0, 0.0));
+    draw_route_causeway(ui, transform, TalentRouteView::Mage, (0.0, -1.0));
+    draw_route_causeway(ui, transform, TalentRouteView::Healer, (0.0, 1.0));
+    draw_route_causeway(ui, transform, TalentRouteView::Summoner, (-1.0, 0.0));
+}
+
+fn route_point(dir: (f32, f32), distance: f32, offset: f32) -> Pos2 {
+    let normal = (-dir.1, dir.0);
+    Pos2::new(
+        dir.0 * distance + normal.0 * offset,
+        dir.1 * distance + normal.1 * offset,
+    )
+}
+
+fn draw_world_line(
+    ui: &mut Ui<'_>,
+    transform: PanZoomTransform,
+    a: Pos2,
+    b: Pos2,
+    width: f32,
+    color: Color,
+) {
+    ui.draw_line(
+        transform.world_to_screen(a),
+        transform.world_to_screen(b),
+        width,
+        color,
+    );
+}
+
+fn draw_route_causeway(
+    ui: &mut Ui<'_>,
+    transform: PanZoomTransform,
+    route: TalentRouteView,
+    dir: (f32, f32),
+) {
+    let tint = route_tint(route);
+    let rail = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.22);
+    let rail_dim = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.13);
+    let stone = Color::rgba(0.52, 0.45, 0.32, 0.20);
+    let start = 360.0;
+    let end = 2040.0;
+
+    for offset in [-112.0, -76.0, 76.0, 112.0] {
+        draw_world_line(
+            ui,
+            transform,
+            route_point(dir, start, offset),
+            route_point(dir, end, offset),
+            1.0,
+            if offset.abs() > 100.0 { rail_dim } else { rail },
+        );
+    }
+
+    draw_world_line(
+        ui,
+        transform,
+        route_point(dir, start, 0.0),
+        route_point(dir, end, 0.0),
+        1.0,
+        rail_dim,
+    );
+
+    let mut distance = start + 80.0;
+    let mut flip = false;
+    while distance < end - 80.0 {
+        draw_world_line(
+            ui,
+            transform,
+            route_point(dir, distance, -112.0),
+            route_point(dir, distance, 112.0),
+            1.0,
+            stone,
+        );
+
+        for side in [-1.0, 1.0] {
+            let inner = side * 58.0;
+            let outer = side * if flip { 112.0 } else { 86.0 };
+            draw_world_line(
+                ui,
+                transform,
+                route_point(dir, distance - 58.0, inner),
+                route_point(dir, distance + 18.0, inner),
+                1.0,
+                rail,
+            );
+            draw_world_line(
+                ui,
+                transform,
+                route_point(dir, distance + 18.0, inner),
+                route_point(dir, distance + 18.0, outer),
+                1.0,
+                rail,
+            );
+            draw_world_line(
+                ui,
+                transform,
+                route_point(dir, distance + 18.0, outer),
+                route_point(dir, distance + 92.0, outer),
+                1.0,
+                rail,
+            );
+        }
+
+        distance += 180.0;
+        flip = !flip;
+    }
+
+    for distance in [start, end] {
+        draw_world_line(
+            ui,
+            transform,
+            route_point(dir, distance, -132.0),
+            route_point(dir, distance, 132.0),
+            1.2,
+            rail,
+        );
+        draw_world_line(
+            ui,
+            transform,
+            route_point(dir, distance - 28.0, -96.0),
+            route_point(dir, distance, -132.0),
+            1.0,
+            rail,
+        );
+        draw_world_line(
+            ui,
+            transform,
+            route_point(dir, distance - 28.0, 96.0),
+            route_point(dir, distance, 132.0),
+            1.0,
+            rail,
+        );
+    }
 }
 
 // ─── Node drawing ───────────────────────────────────────────
@@ -1071,7 +1277,10 @@ fn draw_node(
     // read as "build-defining" without changing the chip
     // itself. Drawn behind (lower in queue) so it bleeds
     // around the disc, not over it.
-    if matches!(node.kind, TalentNodeKind::Keystone) {
+    if matches!(
+        node.kind,
+        TalentNodeKind::Keystone | TalentNodeKind::Synergy
+    ) {
         ui.draw_glow_disc(
             centre,
             radius * 1.15,
@@ -1079,6 +1288,15 @@ fn draw_node(
             tint.with_alpha(0.50 * search_alpha),
         );
         ui.draw_glow_disc(centre, radius, halo, tint.with_alpha(alpha));
+    }
+
+    if matches!(node.kind, TalentNodeKind::Synergy) {
+        let marker = Color::rgba(0.98, 0.78, 0.34, 0.72 * search_alpha);
+        let dot_r = (radius * 0.10).max(2.0);
+        let offset = radius * 0.72;
+        for (dx, dy) in [(offset, 0.0), (-offset, 0.0), (0.0, offset), (0.0, -offset)] {
+            ui.draw_circle(Pos2::new(centre.x + dx, centre.y + dy), dot_r, marker);
+        }
     }
 
     // Hover halo — bright white disc behind the chip so the
@@ -1101,12 +1319,22 @@ fn draw_node(
         let s = ui.theme().fonts.size_sm;
         let label = format!("{}/{}", node.current_rank, node.max_rank);
         let w = ui.measure_text(&label, s);
+        let pos = Pos2::new(centre.x - w * 0.5, centre.y - s * 0.5);
+        let shadow_offset = (radius * 0.07).clamp(1.0, 2.5);
+        let shadow = Color::rgba(0.0, 0.0, 0.0, 0.88 * alpha);
         ui.draw_text(
-            Pos2::new(centre.x - w * 0.5, centre.y - s * 0.5),
+            Pos2::new(pos.x + shadow_offset, pos.y + shadow_offset),
             &label,
             s,
-            Color::rgba(1.0, 1.0, 1.0, alpha),
+            shadow,
         );
+        ui.draw_text(
+            Pos2::new(pos.x - shadow_offset * 0.5, pos.y + shadow_offset * 0.5),
+            &label,
+            s,
+            shadow.with_alpha(0.55 * alpha),
+        );
+        ui.draw_text(pos, &label, s, Color::rgba(1.0, 1.0, 1.0, alpha));
     }
 }
 
@@ -1258,6 +1486,8 @@ fn route_label(r: TalentRouteView) -> &'static str {
         TalentRouteView::Mage => "Mage",
         TalentRouteView::Healer => "Healer",
         TalentRouteView::Summoner => "Summoner",
+        TalentRouteView::Synergy => "Synergy",
+        TalentRouteView::Fifth => "Fifth",
     }
 }
 
@@ -1268,6 +1498,7 @@ fn kind_label(k: TalentNodeKind) -> &'static str {
         TalentNodeKind::Unlock => "Unlock",
         TalentNodeKind::Proc => "Proc",
         TalentNodeKind::Keystone => "Keystone",
+        TalentNodeKind::Synergy => "Synergy",
         TalentNodeKind::Connector => "Connector",
     }
 }

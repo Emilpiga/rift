@@ -1,0 +1,155 @@
+id,route,lane,tier,name,kind,status,prereqs,x,y,optimized_x,optimized_y,description
+1,Hub,core,0,Vigor,Stat,Ready,,0.0,-120.0,0.0,-120.0,+3% max HP per rank.
+2,Hub,core,0,Might,Stat,Ready,,190.0,-115.0,190.0,-115.0,+3% damage per rank.
+3,Hub,core,0,Keen Edge,Stat,Ready,,0.0,-190.0,0.0,-190.0,+1% crit chance per rank.
+4,Hub,core,0,Focus,Stat,Ready,,45.0,125.0,45.0,125.0,+2% cooldown reduction per rank.
+5,Hub,core,0,Toughness,Stat,Ready,,-45.0,125.0,-45.0,125.0,+3% armor per rank.
+6,Hub,core,0,Swift Step,Stat,Ready,,-125.0,45.0,-125.0,45.0,+2% move speed per rank.
+7,Hub,core,0,Reflexes,Stat,Ready,,125.0,45.0,125.0,45.0,+2% attack speed per rank.
+8,Hub,core,0,Precision,Stat,Ready,,-125.0,-45.0,-125.0,-45.0,+5% crit damage per rank.
+9,Hub,core,0,Recovery,Stat,NeedsSystem,,185.0,75.0,185.0,75.0,+2% health recovery or potion value per rank.
+10,Hub,core,0,Discipline,Stat,NeedsSystem,,-260.0,50.0,-260.0,50.0,+2% control resistance per rank.
+100,Hub,movement,0,Tumbler,Stat,Ready,6,-230.0,130.0,-230.0,130.0,+3% move speed per rank.
+110,Hub,warrior-connector,0,Strength,Stat,Ready,2,230.0,-35.0,230.0,-35.0,+2% damage.
+111,Hub,warrior-connector,0,Endurance,Stat,Ready,110,330.0,-15.0,330.0,-15.0,+2% max HP.
+210,Hub,mage-connector,0,Insight,Stat,Ready,3,70.0,-260.0,70.0,-260.0,+1% crit chance.
+211,Hub,mage-connector,0,Channeling,Stat,Ready,210,30.0,-360.0,30.0,-360.0,+2% cooldown reduction.
+310,Hub,healer-connector,0,Compassion,Stat,Ready,1,0.0,250.0,0.0,250.0,+2% max HP.
+311,Hub,healer-connector,0,Devotion,Stat,Ready,310,0.0,350.0,0.0,350.0,+2% cooldown reduction.
+410,Hub,summoner-connector,0,Ominous Bond,Stat,Ready,8,-250.0,-35.0,-250.0,-35.0,+2% damage.
+411,Hub,summoner-connector,0,Rift Sympathy,Stat,Ready,410,-360.0,-15.0,-360.0,-15.0,+1% crit chance.
+1000,Warrior,spine,0,Sword Slash,Unlock,Ready,111,520.0,0.0,470.0,0.0,Unlock Melee Attack.
+1001,Warrior,vanguard,1,Heavy Strikes,Modifier,Ready,1000,650.0,120.0,619.0,230.0,Melee Attack +15% damage.
+1002,Warrior,berserker,1,Reach,Modifier,NeedsSystem,1000,650.0,-120.0,624.8,-147.0,Melee Attack +10% arc/range.
+1003,Warrior,berserker,1,Battle Tempo,Stat,Ready,1000,600.0,-260.0,589.2,-233.0,+3% attack speed per rank.
+1010,Warrior,berserker,2,Blood Rush,Stat,NeedsSystem,1003,740.0,-330.0,720.0,-190.0,+4% damage per rank while above 80% stamina/energy.
+1011,Warrior,berserker,3,Charge,Unlock,NeedsAbility,1010,900.0,-470.0,845.0,-236.3,Unlock Charge gap closer.
+1012,Warrior,berserker,4,Momentum,Modifier,NeedsAbility,1011,1060.0,-560.0,981.5,-298.6,Charge cooldown -0.8s.
+1013,Warrior,berserker,4,Shoulder Break,Modifier,NeedsSystem,1011,1060.0,-410.0,1034.5,-223.9,Charge staggers first enemy hit.
+1014,Warrior,berserker,3,Whirlwind,Unlock,Ready,1010,900.0,-230.0,845.0,-143.7,Unlock Whirlwind.
+1015,Warrior,berserker,4,Wider Spin,Modifier,Tuning,1014,1060.0,-280.0,962.9,-170.8,Whirlwind +15% damage/radius.
+1016,Warrior,berserker,4,Endless Rotation,Modifier,Ready,1014,1060.0,-160.0,1021.3,-99.5,Whirlwind cooldown -0.5s.
+1017,Warrior,spine,4,Wounded Fury,Stat,NeedsSystem,1014,1120.0,-40.0,949.2,-41.9,+6% damage per rank below 50% HP.
+1018,Warrior,spine,5,Berserker,Keystone,NeedsSystem,1017,1300.0,-40.0,1152.9,-1.7,Below 50% HP: +30% melee damage.
+1019,Warrior,berserker,7,Executioner,Keystone,NeedsSystem,1060,1500.0,-150.0,1425.0,-190.0,Melee crits against enemies below 30% HP execute or deal massive bonus damage.
+1020,Warrior,spine,6,No Retreat,PassiveProc,NeedsSystem,1018,1500.0,70.0,1244.3,-3.9,Taking lethal damage once per floor leaves you at 1 HP and grants 3s fury.
+1030,Warrior,vanguard,2,Iron Posture,Stat,Ready,1001,740.0,330.0,720.0,230.0,+5% armor per rank.
+1031,Warrior,vanguard,3,Shield Bash,Unlock,NeedsAbility,1030,900.0,170.0,845.0,183.7,Unlock Shield Bash.
+1032,Warrior,spine,4,Crumple,Modifier,NeedsSystem,1031,1060.0,90.0,967.8,47.2,Shield Bash applies stronger stagger.
+1033,Warrior,vanguard,4,Guard Break,Modifier,NeedsSystem,1031,1060.0,250.0,1021.3,119.8,Shield Bash deals +25% damage to armored/staggered enemies.
+1034,Warrior,vanguard,3,Ground Slam,Unlock,NeedsAbility,1030,900.0,500.0,845.0,276.3,Unlock Ground Slam cone/AoE melee attack.
+1035,Warrior,vanguard,4,Aftershock,Modifier,NeedsSystem,1034,1060.0,430.0,987.7,197.7,Ground Slam leaves a delayed second hit.
+1036,Warrior,vanguard,4,Shockwave,Modifier,NeedsAbility,1034,1060.0,570.0,958.2,276.8,Ground Slam range +20%.
+1037,Warrior,vanguard,4,Hold the Line,PassiveProc,NeedsSystem,1034,1180.0,500.0,982.3,360.6,Standing still briefly grants armor and stagger resistance.
+1038,Warrior,vanguard,5,Unbreakable,Keystone,NeedsSystem,1037,1360.0,500.0,1151.2,230.0,+25% armor and stagger immunity during commits.
+1039,Warrior,vanguard,7,Retaliation,Keystone,NeedsSystem,1061,1560.0,390.0,1425.0,201.0,Blocking or mitigating a heavy hit releases a cone counterattack.
+1040,Warrior,vanguard,7,Banner of War,Unlock,NeedsAbility,1062,1560.0,610.0,1345.0,259.0,Unlock a short-lived banner that buffs allies and taunts enemies.
+1050,Warrior,bridge,5,Blood and Steel,Stat,Ready,1017|1037,1240.0,230.0,1106.3,81.7,+4% damage and +4% armor per rank.
+1051,Warrior,bridge,6,Brutal Discipline,PassiveProc,NeedsSystem,1050,1420.0,230.0,1219.1,88.1,Crits reduce defensive ability cooldowns slightly.
+1060,Warrior,berserker,6,Killer Instinct,Stat,NeedsSystem,1018,1420.0,-100.0,1220.0,-190.0,+3% crit damage per rank while injured.
+1061,Warrior,vanguard,6,Braced Counter,Stat,NeedsSystem,1038,1460.0,445.0,1232.0,183.2,+3% armor per rank after using a defensive ability.
+1062,Warrior,vanguard,6,War Standard Drill,Stat,NeedsSystem,1038,1460.0,555.0,1231.9,277.0,+2% attack speed per rank after taking a hit.
+2000,Mage,spine,0,Fireball,Unlock,Ready,211,0.0,-520.0,0.0,-470.0,Unlock Fireball.
+2001,Mage,fire,1,Intellect,Stat,Ready,2000,-130.0,-650.0,-340.2,-583.1,+5% spell damage per rank.
+2002,Mage,frost,1,Arcane Focus,Stat,Ready,2000,130.0,-650.0,260.0,-595.0,+3% crit chance per rank.
+2003,Mage,spine,1,Quick Casting,Stat,Ready,2000,0.0,-740.0,0.0,-595.0,+2% cooldown reduction per rank.
+2010,Mage,fire,1,Fireball Volley,Modifier,Ready,2000,-320.0,-560.0,-259.8,-626.0,Fireball fires +2 projectiles.
+2011,Mage,fire,1,Kindling,Modifier,Ready,2000,-520.0,-780.0,-169.3,-640.1,Fireball +15% damage.
+2012,Mage,fire,2,Ignite,PassiveProc,NeedsSystem,2011,-620.0,-920.0,-260.0,-721.7,Spell crits have a chance to apply Burn.
+2013,Mage,fire,3,Fire Wave,Unlock,Ready,2012,-500.0,-1080.0,-260.0,-845.0,Unlock Fire Wave.
+2014,Mage,fire,4,Wave Rider,Modifier,Ready,2013,-670.0,-1160.0,-306.3,-994.0,Fire Wave +15% damage.
+2015,Mage,fire,4,Backdraft,Modifier,NeedsSystem,2013,-330.0,-1160.0,-213.7,-994.0,Fire Wave pulls burning enemies slightly inward.
+2016,Mage,fire,5,Combustion,PassiveProc,NeedsSystem,2015,-500.0,-1280.0,-260.0,-1095.0,Burning enemies explode on death for area fire damage.
+2017,Mage,fire,6,Burning Crits,Keystone,NeedsSystem,2016,-500.0,-1460.0,-260.0,-1276.2,Crits apply Burn.
+2018,Mage,fire,8,Inferno Heart,Keystone,NeedsSystem,2060,-670.0,-1620.0,-289.0,-1550.0,"Burning enemies take ramping damage, but your non-fire damage is reduced."
+2019,Mage,fire,8,Phoenix Spark,PassiveProc,NeedsSystem,2063,-330.0,-1620.0,-231.0,-1470.0,"Once per floor, lethal damage detonates nearby enemies and restores some HP."
+2030,Mage,frost,2,Frost Ray,Unlock,Ready,2002,360.0,-820.0,260.0,-720.0,Unlock Frost Ray.
+2031,Mage,frost,3,Piercing Frost,Modifier,Ready,2030,540.0,-890.0,166.6,-871.2,Frost Ray pierces +1 target.
+2032,Mage,frost,3,Glacial Edge,Modifier,Ready,2030,700.0,-620.0,255.5,-864.9,Frost Ray +15% damage.
+2033,Mage,frost,3,Chill,PassiveProc,NeedsSystem,2030,360.0,-980.0,342.2,-837.1,Frost hits slow enemies. Starts lightweight; data should leave room for Brittle and Freeze later.
+2034,Mage,frost,4,Ice Lance,Unlock,NeedsAbility,2033,360.0,-1140.0,260.0,-970.0,Unlock Ice Lance single-target projectile.
+2035,Mage,frost,5,Splinter,Modifier,NeedsSystem,2034,540.0,-1230.0,213.7,-1119.0,Ice Lance splits on chilled targets.
+2036,Mage,frost,5,Deep Freeze,Modifier,NeedsSystem,2034,180.0,-1230.0,306.3,-1119.0,Ice Lance can freeze brittle enemies.
+2037,Mage,frost,6,Brittle,PassiveProc,NeedsSystem,2036,360.0,-1380.0,260.0,-1220.0,Repeated cold hits apply Brittle; next heavy hit shatters.
+2038,Mage,frost,7,Absolute Zero,Keystone,NeedsSystem,2037,360.0,-1540.0,260.0,-1401.2,Frozen enemies take greatly increased damage.
+2039,Mage,frost,9,Shatterstorm,Keystone,NeedsSystem,2061,190.0,-1700.0,213.7,-1675.0,Shattering an enemy launches ice shards at nearby enemies.
+2040,Mage,frost,9,Beam Conduit,Keystone,NeedsSystem,2062,530.0,-1700.0,306.3,-1675.0,Fireball can become a beam-style spell if no Fireball projectile modifiers are active.
+2050,Mage,elemental,7,Thermal Shock,PassiveProc,NeedsSystem,2016|2037,0.0,-1380.0,0.0,-1345.0,"Fire damage against chilled enemies, or frost damage against burning enemies, deals bonus damage."
+2051,Mage,elemental,8,Elemental Savant,Stat,Ready,2050,0.0,-1540.0,0.0,-1470.0,+4% fire and frost damage per rank.
+2052,Mage,elemental,9,Unstable Elements,Keystone,NeedsSystem,2051,0.0,-1720.0,0.0,-1675.0,"Alternating fire and frost spells grants stacking damage, but repeating the same element consumes the stacks."
+2060,Mage,fire,7,Cinder Theory,Stat,NeedsSystem,2017,-620.0,-1540.0,-306.9,-1356.9,+3% fire damage per rank against burning enemies.
+2061,Mage,frost,8,Fracture Study,Stat,NeedsSystem,2038,240.0,-1620.0,213.1,-1481.9,+3% crit damage per rank against chilled enemies.
+2062,Mage,frost,8,Crystal Lens,Stat,NeedsSystem,2038,480.0,-1620.0,306.9,-1481.9,+2% projectile speed per rank for cold spells.
+2063,Mage,fire,7,Banked Ember,Stat,NeedsSystem,2017,-380.0,-1540.0,-213.1,-1356.9,+2% cooldown reduction per rank after a fire crit.
+3000,Healer,spine,0,Mend,Unlock,Ready,311,0.0,520.0,0.0,470.0,Unlock Heal Target.
+3001,Healer,restoration,1,Vitality,Stat,Ready,3000,-130.0,650.0,260.0,595.0,+5% max HP per rank.
+3002,Healer,battle,1,Faith,Stat,Tuning,3000,130.0,650.0,-260.0,595.0,+5% healing/holy damage per rank.
+3003,Healer,spine,1,Quick Mend,Modifier,Ready,3000,0.0,740.0,0.0,619.0,Heal Target cooldown -0.5s.
+3010,Healer,battle,2,Smite,Unlock,NeedsAbility,3002,360.0,820.0,-260.0,720.0,Unlock Smite holy projectile/strike.
+3011,Healer,battle,3,Consecrated Force,Modifier,NeedsAbility,3010,700.0,620.0,-213.7,869.0,Smite +20% damage against damaged enemies.
+3012,Healer,battle,3,Radiant Splash,Modifier,NeedsSystem,3010,540.0,900.0,-306.3,869.0,Smite splashes healing to you or lowest ally.
+3013,Healer,battle,4,Zeal,Stat,NeedsSystem,3012,360.0,1040.0,-260.0,970.0,+3% attack/cast speed per rank after healing.
+3014,Healer,battle,5,Holy Nova,Unlock,NeedsAbility,3013,360.0,1220.0,-260.0,1095.0,Unlock point-blank holy AoE that damages enemies and heals allies.
+3015,Healer,battle,6,Blinding Light,Modifier,NeedsSystem,3014,540.0,1320.0,-213.7,1244.0,Holy Nova briefly blinds or disorients enemies.
+3016,Healer,battle,6,Overflow,Modifier,NeedsSystem,3014,180.0,1320.0,-306.3,1244.0,Overhealing with Holy Nova becomes a short shield.
+3017,Healer,battle,7,Battle Prayer,Keystone,NeedsSystem,3016,360.0,1480.0,-260.0,1401.2,Heals grant +10% damage for 4s.
+3018,Healer,battle,9,Wrathful Benediction,Keystone,NeedsSystem,3060,190.0,1640.0,-260.0,1662.7,"Your offensive holy spells also heal you, but direct heals cost longer cooldowns."
+3019,Healer,battle,8,Martyr's Flame,PassiveProc,NeedsSystem,3017,530.0,1640.0,-306.9,1481.9,Taking damage charges your next heal or Smite.
+3020,Healer,battle,10,Judgement Day,Modifier,NeedsSystem,3018,190.0,1820.0,-260.0,1756.3,Smite and Holy Nova deal bonus damage to enemies recently healed by your enemies or affected by shields.
+3030,Healer,restoration,2,Regeneration,Unlock,Ready,3001,-360.0,820.0,260.0,720.0,Unlock Heal over Time.
+3031,Healer,restoration,3,Lingering Mend,Modifier,Ready,3030,-540.0,750.0,306.3,869.0,Heal over Time +15% effect.
+3032,Healer,restoration,3,Steady Flow,Modifier,Ready,3030,-540.0,900.0,213.7,869.0,Heal over Time cooldown -0.5s.
+3033,Healer,restoration,4,Safeguard,Unlock,NeedsAbility,3031,-360.0,1040.0,260.0,970.0,Unlock a targeted shield.
+3034,Healer,restoration,5,Reinforced Ward,Modifier,NeedsSystem,3033,-540.0,1140.0,306.3,1119.0,Safeguard shield +20%.
+3035,Healer,restoration,5,Shared Shelter,Modifier,NeedsSystem,3033,-180.0,1140.0,213.7,1119.0,Safeguard grants a smaller shield to nearby allies.
+3036,Healer,restoration,6,Sanctuary Field,Unlock,NeedsAbility,3035,-360.0,1320.0,260.0,1220.0,Unlock ground zone that heals allies over time.
+3037,Healer,restoration,7,Sanctuary,Keystone,NeedsSystem,3036,-360.0,1480.0,260.0,1401.2,Healed targets gain a small shield equal to 10% of the heal.
+3038,Healer,restoration,9,Second Sunrise,Keystone,NeedsSystem,3061,-530.0,1640.0,260.0,1662.7,"Once per floor, your heal prevents death on an ally or yourself."
+3039,Healer,restoration,8,Warden's Circle,PassiveProc,NeedsSystem,3037,-190.0,1640.0,213.1,1481.9,Standing in your healing zone grants damage reduction.
+3040,Healer,restoration,10,Wellspring,Modifier,NeedsSystem,3038,-530.0,1820.0,260.0,1756.3,Sanctuary Field pulses faster on low-HP allies.
+3050,Healer,harmony,5,Harmonic Prayer,PassiveProc,NeedsSystem,3013|3032,-220.0,1400.0,85.0,1095.0,"Healing after dealing damage, or dealing damage after healing, grants a small bonus."
+3051,Healer,harmony,6,Grace Under Fire,Stat,Ready,3050,-40.0,1600.0,85.0,1220.0,+4% healing and +4% armor per rank.
+3060,Healer,battle,8,Tempered Zeal,Stat,NeedsSystem,3017,260.0,1560.0,-213.1,1481.9,+3% holy damage per rank after healing.
+3061,Healer,restoration,8,Dawn Discipline,Stat,NeedsSystem,3037,-460.0,1560.0,306.9,1481.9,+3% healing per rank on low-HP targets.
+4000,Summoner,spine,0,Void Familiar,Unlock,NeedsAbility,411,-520.0,0.0,-470.0,0.0,Unlock a small void familiar summon.
+4001,Summoner,void,1,Pet Mastery,Stat,NeedsSystem,4000,-650.0,-130.0,-595.0,-260.0,+5% minion damage per rank.
+4002,Summoner,corpse,1,Binder's Focus,Stat,NeedsSystem,4000,-650.0,130.0,-595.0,260.0,+3% minion health per rank.
+4003,Summoner,spine,1,Unstable Sympathy,PassiveProc,NeedsSystem,4000,-780.0,0.0,-595.0,0.0,Your crits briefly empower your active minions.
+4010,Summoner,void,2,Riftling Swarm,Unlock,FirstSliceWip,4001,-820.0,-360.0,-720.0,-260.0,Unlock multiple short-lived void riftlings. First slice should ship this as a true multi-minion ability.
+4011,Summoner,void,3,Many Mouths,Modifier,NeedsSystem,4010,-980.0,-500.0,-869.0,-213.7,Riftling Swarm summons +1 riftling.
+4012,Summoner,void,3,Hungering Riftlings,Modifier,NeedsSystem,4010,-980.0,-260.0,-869.0,-306.3,Riftlings deal bonus damage to low-HP enemies.
+4013,Summoner,void,4,Void Gate,Unlock,NeedsAbility,4011,-1160.0,-500.0,-970.0,-260.0,Unlock a portal that periodically spawns void entities.
+4014,Summoner,void,5,Wide Aperture,Modifier,NeedsSystem,4013,-1340.0,-600.0,-1112.8,-211.8,Void Gate spawns faster but lasts slightly shorter.
+4015,Summoner,void,5,Collapse,Modifier,NeedsSystem,4013,-1340.0,-400.0,-1120.2,-304.5,Void Gate explodes when it expires.
+4016,Summoner,void,6,Bonded,Keystone,NeedsSystem,4015,-1520.0,-400.0,-1276.2,-260.0,Your minions inherit your crit chance.
+4017,Summoner,void,8,Beyond the Veil,Keystone,NeedsSystem,4060,-1700.0,-550.0,-1526.2,-260.0,"You can maintain one extra summon, but your own direct damage is reduced."
+4018,Summoner,void,7,Event Horizon,PassiveProc,NeedsSystem,4016,-1700.0,-250.0,-1356.9,-306.9,Minion hits have a small chance to pull enemies toward their target.
+4019,Summoner,void,10,Rift Sovereign,Keystone,NeedsSystem,4061,-1880.0,-680.0,-1800.0,-260.0,"Void Gate becomes permanent until recast, but reserves part of your max HP."
+4020,Summoner,void,9,Starved Threshold,PassiveProc,NeedsSystem,4017,-1880.0,-430.0,-1606.9,-306.9,"When a void minion expires, it briefly weakens nearby enemies."
+4030,Summoner,corpse,2,Raise Husk,Unlock,NeedsAbility,4002,-820.0,360.0,-720.0,260.0,Raise a temporary corpse husk from a slain enemy.
+4031,Summoner,corpse,3,Bone Memory,Modifier,NeedsSystem,4030,-980.0,260.0,-869.0,306.3,Raised husks inherit a small part of the slain enemy's damage.
+4032,Summoner,corpse,3,Grave Pace,Modifier,NeedsSystem,4030,-980.0,500.0,-869.0,213.7,Raised husks move faster and decay slower.
+4033,Summoner,corpse,4,Corpse Burst,Unlock,NeedsAbility,4031,-1160.0,260.0,-970.0,260.0,Detonate a corpse or husk for area damage.
+4034,Summoner,corpse,5,Black Powder,Modifier,NeedsSystem,4033,-1340.0,160.0,-1119.0,306.3,Corpse Burst radius +20%.
+4035,Summoner,corpse,5,Bone Shrapnel,Modifier,NeedsSystem,4033,-1340.0,360.0,-1119.0,213.7,Corpse Burst fires fragments at nearby enemies.
+4036,Summoner,corpse,6,Death Tax,PassiveProc,NeedsSystem,4035,-1520.0,360.0,-1220.0,260.0,Enemies killed by minions have a chance to leave a usable corpse.
+4037,Summoner,corpse,7,Necromancer,Keystone,NeedsSystem,4036,-1700.0,360.0,-1401.2,260.0,Slain enemies have a chance to rise as minions.
+4038,Summoner,corpse,9,Army of the Hollow,Keystone,NeedsSystem,4062,-1880.0,220.0,-1651.8,260.0,"Raised minions last much longer, but individual minions deal less damage."
+4039,Summoner,corpse,8,Last Rites,PassiveProc,NeedsSystem,4037,-1880.0,500.0,-1481.9,213.1,Consuming a corpse heals your minions and damages nearby enemies.
+4040,Summoner,corpse,11,Black Communion,PassiveProc,NeedsSystem,4063,-2060.0,220.0,-1845.0,260.0,"When a raised minion dies, nearby raised minions gain attack speed briefly."
+4050,Summoner,pact,7,Empty Choir,PassiveProc,NeedsSystem,4015|4036,-1540.0,0.0,-1345.0,0.0,"When a void minion dies near a corpse, it can raise a weak husk."
+4051,Summoner,pact,8,Pact Mathematics,Stat,NeedsSystem,4050,-1720.0,0.0,-1470.0,0.0,+4% minion damage and +4% minion health per rank.
+4060,Summoner,void,7,Thin Veil,Stat,NeedsSystem,4016,-1620.0,-500.0,-1356.9,-213.1,+3% minion health per rank while a void summon is active.
+4061,Summoner,void,9,Gatekeeper's Tax,Stat,NeedsSystem,4017,-1800.0,-620.0,-1606.9,-213.1,+2% cooldown reduction per rank for summon abilities.
+4062,Summoner,corpse,8,Bone Ledger,Stat,NeedsSystem,4037,-1800.0,280.0,-1481.9,306.9,+3% minion damage per rank while a raised minion is active.
+4063,Summoner,corpse,10,Hollow Cadence,Stat,NeedsSystem,4038,-1980.0,280.0,-1743.2,260.0,+2% attack speed per rank for raised minions.
+6100,Synergy,synergy,0,Flame Reaver,Synergy,NeedsSystem,1014|2012,1700.0,-1250.0,694.7,-804.3,Melee hits against burning enemies create a small fire cleave; Fire Wave empowers your next melee commit.
+6101,Synergy,synergy,0,Frostbreaker,Synergy,NeedsSystem,1032|2033,1560.0,90.0,829.8,-720.2,Staggering a chilled or brittle enemy triggers a small shatter burst.
+6200,Synergy,synergy,0,Cold Star Pact,Synergy,FirstSliceWip,2033|4010,-1100.0,-1600.0,-804.3,-694.7,Void minions deal bonus damage to chilled enemies and can extend Chill on hit.
+6201,Synergy,synergy,0,Rift Combustion,Synergy,NeedsSystem,2016|4013,-1020.0,-1160.0,-720.2,-829.8,Burning enemies killed near a void summon collapse into a small unstable rift.
+6300,Synergy,synergy,0,Grave Mercy,Synergy,NeedsSystem,3031|4030,-1020.0,1040.0,-694.7,804.3,Healing a raised minion splashes a smaller heal to you; overhealing minions briefly shields them.
+6301,Synergy,synergy,0,Last Blessing,Synergy,NeedsSystem,3037|4037,-1560.0,1120.0,-829.8,720.2,"When a raised minion expires, it releases a small heal or damage pulse based on nearby allies/enemies."
+6400,Synergy,synergy,0,Consecrated Steel,Synergy,NeedsSystem,1034|3030,1320.0,1180.0,804.3,694.7,Melee commits inside your healing effects gain armor and deal minor holy splash damage.
+6401,Synergy,synergy,0,Frontline Prayer,Synergy,NeedsSystem,1031|3003,1260.0,760.0,720.2,829.8,"Shielding or healing yourself briefly empowers the next Shield Bash, Ground Slam, or Melee Attack."
+6500,Synergy,synergy,0,Bloodbound Legion,Synergy,NeedsSystem,1017|4003,-1500.0,-920.0,-954.6,954.6,Your low-HP melee bonuses also empower nearby minions at reduced value.
+6600,Synergy,synergy,0,Radiant Frost,Synergy,NeedsSystem,2030|3010,2600.0,0.0,954.6,-954.6,Frost hits against enemies recently damaged by holy spells can create a small protective shield on you.

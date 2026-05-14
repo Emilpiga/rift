@@ -1,6 +1,6 @@
 //! Talents — declarative tree shape + content.
 //!
-//! See `TALENT_TREE.md` for the design doc. The tree is a single
+//! See `TALENT_TREE_BLUEPRINT.md` for the current design blueprint. The tree is a single
 //! shared graph with a central **Hub** and four (extensible)
 //! routes (Warrior / Mage / Healer / Summoner). Gating is purely
 //! topological: a node is investable iff every prerequisite node
@@ -24,6 +24,7 @@ pub mod healer;
 pub mod hub;
 pub mod mage;
 pub mod summoner;
+pub mod synergy;
 pub mod warrior;
 
 /// Unique identifier for a talent node.
@@ -41,6 +42,53 @@ pub enum Route {
     Mage,
     Healer,
     Summoner,
+    Synergy,
+    Fifth,
+}
+
+/// Implementation/readiness status from the blueprint. The full
+/// tree is visible in-game, but only statuses that are currently
+/// backed by gameplay are spendable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TalentStatus {
+    Ready,
+    NeedsAbility,
+    NeedsSystem,
+    Tuning,
+    FirstSliceWip,
+    Placeholder,
+}
+
+impl TalentStatus {
+    pub fn is_spendable(self) -> bool {
+        matches!(self, Self::Ready | Self::Tuning)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::NeedsAbility => "Needs Ability",
+            Self::NeedsSystem => "Needs System",
+            Self::Tuning => "Tuning",
+            Self::FirstSliceWip => "First Slice WIP",
+            Self::Placeholder => "Placeholder",
+        }
+    }
+}
+
+/// Prerequisite expression mode for the current flat prerequisite
+/// list. `All` is the existing model; `Any` covers either-lane
+/// bridge nodes from the blueprint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrerequisiteMode {
+    All,
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TalentPosition {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Identifier for a rule-changing keystone effect. Each variant
@@ -62,6 +110,7 @@ pub enum KeystoneId {
     // Summoner
     Bonded,
     Necromancer,
+    Named(&'static str),
 }
 
 /// A single node in the talent tree.
@@ -78,6 +127,9 @@ pub struct TalentNode {
     pub route: Route,
     /// Prerequisites — IDs of nodes that must have at least 1 rank.
     pub prerequisites: Vec<TalentId>,
+    pub prerequisite_mode: PrerequisiteMode,
+    pub status: TalentStatus,
+    pub position: Option<TalentPosition>,
     /// Effect per rank (additive where stackable).
     pub effect: TalentEffect,
 }
@@ -115,6 +167,10 @@ pub enum TalentEffect {
     /// positive effect and any paired drawback (see
     /// `TALENT_TREE.md` §13).
     Keystone { keystone: KeystoneId },
+    /// Cross-route hybrid payoff from the blueprint. Most of these
+    /// are authored before their underlying gameplay systems exist,
+    /// so status usually controls whether they are spendable.
+    Synergy { description: &'static str },
 }
 
 /// Stats that talents can modify.
@@ -147,6 +203,67 @@ pub enum AbilityModifier {
     Chain(u32),
 }
 
+pub(crate) fn ids(values: &[u16]) -> Vec<TalentId> {
+    values.iter().copied().map(TalentId).collect()
+}
+
+pub(crate) fn node(
+    id: u16,
+    name: &'static str,
+    description: &'static str,
+    max_rank: u8,
+    route: Route,
+    prerequisites: &[u16],
+    prerequisite_mode: PrerequisiteMode,
+    status: TalentStatus,
+    position: (f32, f32),
+    effect: TalentEffect,
+) -> TalentNode {
+    TalentNode {
+        id: TalentId(id),
+        name,
+        description,
+        max_rank,
+        current_rank: 0,
+        route,
+        prerequisites: ids(prerequisites),
+        prerequisite_mode,
+        status,
+        position: Some(TalentPosition {
+            x: position.0,
+            y: position.1,
+        }),
+        effect,
+    }
+}
+
+pub(crate) fn stat_node(
+    id: u16,
+    name: &'static str,
+    description: &'static str,
+    route: Route,
+    stat: TalentStat,
+    per_rank: f32,
+    max_rank: u8,
+    prerequisites: &[u16],
+    prerequisite_mode: PrerequisiteMode,
+    status: TalentStatus,
+    position: (f32, f32),
+) -> TalentNode {
+    node(
+        id,
+        name,
+        description,
+        max_rank,
+        route,
+        prerequisites,
+        prerequisite_mode,
+        status,
+        position,
+        TalentEffect::PercentBonus { stat, per_rank },
+    )
+}
+
 /// The full talent tree for a character.
 #[derive(Clone, Debug)]
 pub struct TalentTree {
@@ -177,16 +294,26 @@ impl TalentTree {
             return false;
         }
 
-        for prereq in &node.prerequisites {
-            let Some(prereq_node) = self.nodes.iter().find(|n| n.id == *prereq) else {
-                return false;
-            };
-            if prereq_node.current_rank == 0 {
-                return false;
-            }
+        if !node.status.is_spendable() {
+            return false;
         }
 
-        true
+        self.prerequisites_met(node)
+    }
+
+    pub fn prerequisites_met(&self, node: &TalentNode) -> bool {
+        if node.prerequisites.is_empty() {
+            return true;
+        }
+        let is_met = |id: &TalentId| {
+            self.nodes
+                .iter()
+                .any(|n| n.id == *id && n.current_rank >= 1)
+        };
+        match node.prerequisite_mode {
+            PrerequisiteMode::All => node.prerequisites.iter().all(is_met),
+            PrerequisiteMode::Any => node.prerequisites.iter().any(is_met),
+        }
     }
 
     /// Invest a point in a talent. Returns false if not possible.
@@ -277,6 +404,7 @@ impl TalentTree {
                 TalentEffect::PassiveProc { .. } => {}
                 TalentEffect::UnlockAbility { .. } => {}
                 TalentEffect::Keystone { .. } => {}
+                TalentEffect::Synergy { .. } => {}
             }
         }
         bonuses
@@ -524,6 +652,7 @@ pub fn fresh_character_tree() -> TalentTree {
     nodes.extend(mage::nodes());
     nodes.extend(healer::nodes());
     nodes.extend(summoner::nodes());
+    nodes.extend(synergy::nodes());
 
     let tree = TalentTree {
         nodes,
@@ -561,29 +690,19 @@ mod tests {
         }
     }
 
-    /// Hub authoring sanity: the dodge-roll unlock must exist and
-    /// must list its movement-cluster lead-in as a prereq, matching
-    /// `TALENT_TREE.md` §11 resolved-decision #1 ("costs 1 point,
-    /// single rank" — but reached via the cluster, never freely).
+    /// Evasive Roll is a baseline passive ability. The talent tree
+    /// should never gate it behind a spendable unlock node.
     #[test]
-    fn hub_dodge_roll_is_gated() {
+    fn evasive_roll_is_not_talent_gated() {
         let tree = fresh_character_tree();
-        let dodge = tree
-            .nodes
-            .iter()
-            .find(|n| {
-                matches!(
-                    n.effect,
-                    TalentEffect::UnlockAbility {
-                        ability: crate::abilities::EVASIVE_ROLL
-                    }
-                )
-            })
-            .expect("hub must define an EVASIVE_ROLL unlock node");
-        assert_eq!(dodge.max_rank, 1, "dodge roll is a single-rank unlock");
         assert!(
-            !dodge.prerequisites.is_empty(),
-            "dodge roll must not be free — needs a movement-cluster prereq"
+            !tree.nodes.iter().any(|n| matches!(
+                n.effect,
+                TalentEffect::UnlockAbility {
+                    ability: crate::abilities::EVASIVE_ROLL
+                }
+            )),
+            "Evasive Roll is always unlocked and must not appear as a talent gate"
         );
     }
 }
