@@ -103,6 +103,16 @@ float fbm2(vec2 p) {
     return v;
 }
 
+float aaStep(float edge, float x) {
+    float w = max(fwidth(x), 0.0015);
+    return smoothstep(edge - w, edge + w, x);
+}
+
+float aaBand(float x, float centre, float width) {
+    float w = max(fwidth(x), 0.0015);
+    return 1.0 - smoothstep(width - w, width + w, abs(x - centre));
+}
+
 // ---- Flow / temporal helpers ---------------------------------
 
 // Cheap pseudo-curl: take the gradient of `valueNoise` at two
@@ -130,9 +140,15 @@ vec2 curl2(vec2 p) {
 float softGlow(vec2 uv) {
     vec2 c = uv - 0.5;
     float d2 = dot(c, c) * 4.0;          // 0 at centre, 1 at edge
+    float r = sqrt(d2);
+    float theta = atan(c.y, c.x);
     float core = exp(-d2 * 11.0);         // tight bright core
     float halo = exp(-d2 * 3.6) * 0.30;   // wider faint halo
-    return core + halo;
+    float pin = exp(-d2 * 58.0) * 0.38;   // tiny HDR catchlight
+    float rays = pow(0.5 + 0.5 * sin(theta * 6.0 + vSeed * 6.2831853), 6.0)
+               * exp(-r * 3.2) * 0.10;
+    float innerRing = aaBand(r, 0.46, 0.035) * 0.10;
+    return core + halo + pin + rays + innerRing;
 }
 
 // Spark: oriented motion streak along `vStretchDir` if the
@@ -144,7 +160,7 @@ float softGlow(vec2 uv) {
 float spark(vec2 uv) {
     vec2 c = (uv - 0.5) * 2.0;       // [-1, 1]
     float d = length(c);
-    float core = exp(-d * d * 28.0);
+    float core = exp(-d * d * 34.0);
 
     // Motion-aligned streak: project onto velocity direction.
     // `vStretchDir` length up to 2.0 means the geometry has
@@ -156,20 +172,24 @@ float spark(vec2 uv) {
         vec2 across = vec2(-along.y, along.x);
         float a = dot(c, along);
         float t = dot(c, across);
-        streakAniso = exp(-t * t * 80.0) * exp(-abs(a) * 1.6);
+        streakAniso = exp(-t * t * 110.0) * exp(-abs(a) * 1.55);
+        float sideFilaments = exp(-pow(abs(t) - 0.135, 2.0) * 520.0)
+                            * exp(-abs(a) * 2.05) * 0.22;
+        streakAniso += sideFilaments;
     }
 
     // Static cross (visible when not moving): two perpendicular
     // hairlines along the rotated billboard axes.
-    float crossX = exp(-c.y * c.y * 110.0) * exp(-abs(c.x) * 3.2);
-    float crossY = exp(-c.x * c.x * 110.0) * exp(-abs(c.y) * 3.2);
+    float crossX = exp(-c.y * c.y * 140.0) * exp(-abs(c.x) * 3.2);
+    float crossY = exp(-c.x * c.x * 140.0) * exp(-abs(c.y) * 3.2);
     float crossLines = (crossX + crossY) * 0.5;
 
     // Blend cross into streak as motion increases.
     float motionBlend = smoothstep(0.10, 0.80, length(vStretchDir));
     float streak = mix(crossLines, streakAniso, motionBlend);
 
-    return clamp(core + 0.7 * streak, 0.0, 2.5);
+    float glint = exp(-d * d * 120.0) * (0.72 + 0.28 * valueNoise(uv * 22.0 + vSeed));
+    return clamp(core + 0.76 * streak + glint * 0.36, 0.0, 2.9);
 }
 
 // Smoke: billowing puff with a flow-mapped, temporally
@@ -231,7 +251,8 @@ vec2 smokePuff(vec2 uv, float seed) {
     // as a hard intersection.
     float n_edge = fbm2(noiseUV * 3.0 + vec2(seed * 17.0, seed * 5.0));
     float r_eroded = r + (n_edge - 0.5) * 0.18;
-    float disc = 1.0 - smoothstep(0.28, 0.50, r_eroded);
+    float disc = 1.0 - smoothstep(0.28, 0.50 + max(fwidth(r_eroded), 0.001), r_eroded);
+    float rim = aaBand(r_eroded, 0.43, 0.050) * 0.12;
 
     // Internal billows — faster temporal scroll so the inside
     // visibly churns even when the silhouette is still.
@@ -250,7 +271,7 @@ vec2 smokePuff(vec2 uv, float seed) {
     float density = mix(0.45, 1.10, n_billow);
     density *= mix(0.85, 1.05, n_fine);
 
-    float alpha = disc * density;
+    float alpha = (disc + rim) * density;
 
     // Emissive fraction: where billows + fine grain align,
     // there's a hot pocket (ember). Sharpened with a power so
@@ -265,28 +286,38 @@ vec2 smokePuff(vec2 uv, float seed) {
     return vec2(alpha, emissive);
 }
 
-// Shard: diamond SDF with a bright rim highlight. The rim is
-// a thin band where the SDF crosses 0.34..0.36, brightened
-// 1.6×. Reads as a crystal facet rather than a flat polygon.
+// Shard: diamond SDF with derivative-smoothed edges, a bright
+// rim, and a subtle internal facet line. Reads as a crystal
+// chip rather than a flat polygon.
 float shard(vec2 uv, float seed) {
     float ang = seed * 6.2831853;
     vec2 c = uv - 0.5;
     float ca = cos(ang), sa = sin(ang);
     vec2 r = vec2(ca * c.x - sa * c.y, sa * c.x + ca * c.y);
     float d = abs(r.x) + abs(r.y) * 1.6;     // diamond, slightly tall
-    float body = 1.0 - smoothstep(0.30, 0.40, d);
-    // Rim highlight: a thin bright band right at the silhouette.
-    float rim = exp(-pow((d - 0.36) * 60.0, 2.0)) * 0.7;
-    return body + rim;
+    float body = 1.0 - aaStep(0.38, d);
+    float rim = aaBand(d, 0.34, 0.035) * 0.72;
+    float facet = aaBand(abs(r.x - r.y * 0.42), 0.0, 0.018)
+                * (1.0 - aaStep(0.31, d)) * 0.25;
+    float secondaryFacet = aaBand(abs(r.x + r.y * 0.58), 0.0, 0.014)
+                         * (1.0 - aaStep(0.28, d)) * 0.16;
+    return body + rim + facet + secondaryFacet;
 }
 
-// Ring: antialiased annular band. Single Gaussian centred at
-// r = 0.40, falloff width 24× — narrow enough that the ring
-// reads as a hoop rather than a smear.
+// Ring: antialiased annular band with separate inner/outer
+// rim accents so expanding impact hoops hold a crisp contour
+// instead of becoming a soft smear.
 float ring(vec2 uv) {
     vec2 c = uv - 0.5;
     float r = length(c);
-    return exp(-pow((r - 0.40) * 24.0, 2.0));
+    float theta = atan(c.y, c.x);
+    float band = aaBand(r, 0.40, 0.045);
+    float innerRim = aaBand(r, 0.355, 0.015) * 0.30;
+    float outerRim = aaBand(r, 0.445, 0.014) * 0.22;
+    float angular = 0.84 + 0.16 * valueNoise(vec2(theta * 2.6 + vSeed * 9.0, vSeed * 3.0));
+    float hotArc = pow(0.5 + 0.5 * sin(theta * 5.0 + vSeed * 6.2831853), 10.0)
+                 * aaBand(r, 0.405, 0.028) * 0.22;
+    return clamp((band * 0.88 + innerRim + outerRim) * angular + hotArc, 0.0, 1.62);
 }
 
 // Streak: pure motion line. Always anisotropic, even at low
@@ -304,13 +335,15 @@ float streak(vec2 uv) {
     float t = dot(c, across);
     // Tight across-axis (line thickness), gentle along-axis
     // taper at the ends.
-    float line = exp(-t * t * 90.0) * (1.0 - smoothstep(0.85, 1.05, abs(a)));
+    float line = exp(-t * t * 128.0) * (1.0 - aaStep(0.98, abs(a)));
+    float filament = exp(-pow(abs(t) - 0.075, 2.0) * 720.0)
+                   * (1.0 - aaStep(0.82, abs(a))) * 0.20;
     // Bright pinprick at the head, time-modulated so embers
     // in a continuous trail shimmer at different phases.
     float headPhase = ubo.timeData.x * 14.0 + vSeed * 6.28318;
     float headMod   = 0.85 + 0.15 * sin(headPhase);
-    float head = exp(-pow(a - 0.85, 2.0) * 60.0) * exp(-t * t * 220.0);
-    return clamp(line + head * 1.4 * headMod, 0.0, 2.0);
+    float head = exp(-pow(a - 0.85, 2.0) * 68.0) * exp(-t * t * 260.0);
+    return clamp(line + filament + head * 1.45 * headMod, 0.0, 2.15);
 }
 
 // Wisp: ethereal strand, not a straight light column. The vertex
@@ -613,14 +646,12 @@ void main() {
     float a = clamp(vColor.a * mask, 0.0, 1.0);
 
     // ----- Soft-particle fade -----
-    // Compare this fragment's eye-space depth to the scene
-    // depth (sampled from the opaque scene pass). When the
-    // particle is just in front of geometry, fade alpha so
-    // the intersection silhouette goes away smoothly instead
-    // of cutting hard against the surface. Eye-space units
-    // are world units, so a 0.5 m fade band feels natural for
-    // smoke/glow puffs at typical sizes.
-    {
+    // Only broad volumetric sprites need the scene-depth soft
+    // intersection. Sparks/shards/rings/streaks are small crisp
+    // accents; skipping the depth texture sample on those cuts a
+    // lot of rift-combat overdraw cost without visible popping.
+    bool softParticle = (vSprite == 0u || vSprite == 2u || vSprite == 6u || vSprite == 7u || vSprite == 8u);
+    if (softParticle) {
         vec2 screenSize = vec2(textureSize(sceneDepth, 0));
         vec2 screenUV = gl_FragCoord.xy / screenSize;
         float scene_z_ndc = texture(sceneDepth, screenUV).r;
@@ -652,6 +683,27 @@ void main() {
     if (emissive > 0.0) {
         float boost = 1.0 + emissive * 1.6 * (1.0 - vFogFactor);
         rgb *= boost;
+    }
+
+    // Shader-only HD pass: tiny luminance variation and core
+    // tightening on HDR particles. Kept deliberately subtle so
+    // alpha smoke stays soft while additive glows/sparks gain
+    // a crisper bloom-catching centre instead of reading like
+    // flat blurry discs.
+    float maxRgb = max(max(rgb.r, rgb.g), rgb.b);
+    float hdrWeight = smoothstep(0.85, 2.25, maxRgb) * (1.0 - vFogFactor);
+    bool crispSprite = (vSprite == 0u || vSprite == 1u || vSprite == 3u || vSprite == 4u || vSprite == 5u);
+    vec2 maskGrad = vec2(dFdx(mask), dFdy(mask));
+    float edgeCatch = smoothstep(0.018, 0.115, length(maskGrad));
+    if (crispSprite && hdrWeight > 0.001) {
+        float grain = valueNoise(vUv * 74.0 + vec2(vSeed * 17.3, ubo.timeData.x * 0.35));
+        float coreWeight = smoothstep(0.22, 1.05, mask);
+        rgb *= 1.0 + hdrWeight * coreWeight * (0.035 + grain * 0.035);
+
+        vec2 uvLight = normalize(vec2(-0.55, 0.83));
+        vec2 fromCentre = normalize(vUv - 0.5 + vec2(1e-4));
+        float facing = 0.45 + 0.55 * max(dot(fromCentre, uvLight), 0.0);
+        rgb += rgb * edgeCatch * facing * hdrWeight * 0.105;
     }
 
     // Pull alpha down with fog so additive embers don't punch

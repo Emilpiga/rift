@@ -951,14 +951,14 @@ impl FloorManager {
         // without going through the network layer.
         self.dungeon = Some(floor);
 
-        // Spawn the crimson void-ember field. Anchor is set
-        // every frame in `render_phase` ~10 m below the
-        // player so embers rise from the abyss past the
-        // floor's outer edges. Initial anchor is the spawn
-        // point at the same depth so a player who pauses on
-        // step zero still sees a populated field.
+        // Spawn the mood-tinted void particle field. Anchor is
+        // set every frame in `render_phase` ~10 m below the
+        // player so particles rise from the abyss past the
+        // floor's outer edges. Initial anchor is the spawn point
+        // at the same depth so a player who pauses on step zero
+        // still sees a populated field.
         self.void_embers = Some(renderer.vfx_system.spawn(
-            rift_engine::renderer::vfx::presets::rift_void_embers(),
+            rift_engine::renderer::vfx::presets::rift_void_embers_tinted(atmosphere.fog_color),
             self.spawn_pos - Vec3::new(0.0, 10.0, 0.0),
         ));
 
@@ -1540,24 +1540,24 @@ fn rift_sky_for_atmosphere(atmosphere: &MoodAtmosphere) -> rift_engine::SkyConfi
     );
     let peak = fog.max_element().max(0.001);
     let chroma = fog / peak;
-    let mood_zenith = fog * 1.85 + chroma * 0.050;
-    let mood_horizon = fog * 0.88 + chroma * 0.014;
-    let mood_ground = fog * 0.46 + chroma * 0.004;
+    let mood_zenith = fog * 2.15 + chroma * 0.070;
+    let mood_horizon = fog * 1.12 + chroma * 0.020;
+    let mood_ground = fog * 0.72 + chroma * 0.008;
 
     sky.zenith = mix_rgb(
         sky.zenith,
         [mood_zenith.x, mood_zenith.y, mood_zenith.z],
-        0.56,
+        0.78,
     );
     sky.horizon = mix_rgb(
         sky.horizon,
         [mood_horizon.x, mood_horizon.y, mood_horizon.z],
-        0.74,
+        0.92,
     );
     sky.ground = mix_rgb(
         sky.ground,
         [mood_ground.x, mood_ground.y, mood_ground.z],
-        0.70,
+        0.88,
     );
     sky
 }
@@ -1613,11 +1613,16 @@ pub fn spawn_remote_enemy_entity(
     if let Some(set) = shared_set {
         renderer.set_object_shared_material(obj_index, set);
     }
+    // Ordinary animated enemies are numerous and constantly re-skinned.
+    // Letting each one cast point-light cube shadows makes nearby torch
+    // slots dirty whenever combat starts, which scales terribly once packs
+    // get large. Bosses keep their silhouette shadow; minions are lit by
+    // the room but do not force repeated 6-face shadow refreshes.
+    renderer.set_object_casts_shadow(obj_index, matches!(role, MonsterRole::Boss));
     if matches!(role, MonsterRole::Wraith) {
         if let Some(obj) = renderer.objects.get_mut(obj_index) {
             obj.tint = [0.72, 1.20, 1.35, 0.48];
         }
-        renderer.set_object_casts_shadow(obj_index, false);
     }
     let skinned = Skinned {
         mesh: asset.mesh.clone(),

@@ -127,18 +127,12 @@ pub fn frame_talent_panel(
     let section_gap = theme.spacing.section_gap();
     let row_gap = theme.spacing.row_gap();
 
-    // ── Header ───────────────────────────────────────────
+    // ── Header geometry ──────────────────────────────────
     let pill_text = format!("{} unspent", view.unspent_points);
     let header_h = inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
-    PanelHeader::new("TALENTS")
-        .subtitle("Left-click to spend. Right-click to refund. Drag to pan, scroll to zoom.")
-        .right_text(&pill_text)
-        .show(
-            ui,
-            Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h),
-        );
+    let header_rect = Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h);
 
-    // ── Search field (top, below header text) ───────────
+    // ── Search field geometry (top, below header text) ───
     let search_w = 240.0 * theme.scale;
     let search_h = 28.0 * theme.scale;
     let search_rect = Rect::from_xywh(
@@ -148,10 +142,6 @@ pub fn frame_talent_panel(
         search_h,
     );
     let search_id = Id::root("rift::talents::search");
-    let search_resp = TextField::new(search_id)
-        .placeholder("Filter…")
-        .max_chars(24)
-        .show(ui, search_rect, &mut state.search, 0.0);
     let search_norm = state.search.to_ascii_lowercase();
     // ESC behaviour is owned by the host (see `ui_phase.rs`):
     // when the panel is open it routes Esc / N to
@@ -160,7 +150,6 @@ pub fn frame_talent_panel(
     // hotbar) doesn't also swallow the close hotkey. The
     // widget itself stays out of keyboard close-routing to
     // avoid open-frame double-toggling.
-    let _ = search_resp;
 
     // ── Canvas viewport ─────────────────────────────────
     let viewport = Rect::from_xywh(
@@ -604,6 +593,19 @@ pub fn frame_talent_panel(
             );
         }
     });
+
+    // Draw the fixed panel chrome after the zoomable canvas.
+    // `Ui::with_clip` currently clips hit-testing only, so this
+    // top pass masks graph nodes/glow halos that pan or zoom past
+    // the viewport edge.
+    PanelHeader::new("TALENTS")
+        .subtitle("Left-click to spend. Right-click to refund. Drag to pan, scroll to zoom.")
+        .right_text(&pill_text)
+        .show(ui, header_rect);
+    let _search_resp = TextField::new(search_id)
+        .placeholder("Filter…")
+        .max_chars(24)
+        .show(ui, search_rect, &mut state.search, 0.0);
 
     // ── Hover tooltip ────────────────────────────────────
     state.last_hover_id = hover_id;

@@ -1,6 +1,6 @@
 #version 450
 
-// Final composite + tonemap. Reads heat-distorted HDR, blurred bloom,
+// Final composite + tonemap. Reads HDR, blurred bloom,
 // graph-produced AO and volumetrics, then tonemaps to the swapchain (sRGB).
 
 layout(location = 0) in  vec2 v_uv;

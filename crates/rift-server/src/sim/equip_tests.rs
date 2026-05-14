@@ -114,3 +114,39 @@ fn equip_one_under_required_level_fails() {
         "boundary req - 1 should reject",
     );
 }
+
+#[test]
+fn occupied_ring2_drop_replaces_ring2_not_ring1() {
+    let equipped_ring = rolled("ring_basic", 5, 10);
+    let bag_ring = rolled("ring_basic", 8, 11);
+    let (mut sim, client) = setup(30, bag_ring);
+    let entity = *sim.sessions.get(&client).unwrap();
+    {
+        let mut p = sim.world.get::<&mut ServerPlayer>(entity).unwrap();
+        p.equipment
+            .set(rift_game::loot::EquipSlot::Ring2, Some(equipped_ring));
+    }
+
+    assert!(sim.unequip_to_bag_slot(client, rift_game::loot::EquipSlot::Ring2, 0));
+
+    let p = sim.world.get::<&ServerPlayer>(entity).unwrap();
+    assert!(
+        p.equipment.get(rift_game::loot::EquipSlot::Ring1).is_none(),
+        "ring 1 should not be touched when replacing ring 2",
+    );
+    assert_eq!(
+        p.equipment
+            .get(rift_game::loot::EquipSlot::Ring2)
+            .map(|item| item.ilvl),
+        Some(8),
+        "bag ring should land in ring 2",
+    );
+    assert_eq!(
+        p.inventory
+            .get(0)
+            .and_then(|slot| slot.as_ref())
+            .map(|item| item.ilvl),
+        Some(5),
+        "old ring 2 item should land back in the original bag cell",
+    );
+}

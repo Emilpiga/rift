@@ -1,18 +1,21 @@
 //! Dev-issuer signer. Mints fresh opaque tickets in the
 //! [`rift_net::auth_dev`] format on demand from a shared HMAC
-//! key plus a per-process identity.
+//! key plus a stable identity.
 //!
 //! Identity selection rule (first match wins):
 //!
 //! 1. `$RIFT_DEV_USER` if set and non-empty (after trimming).
 //!    Lets a developer pin a stable identity for save-data
 //!    continuity across runs.
-//! 2. A randomized `dev-XXXXXX` (six lowercase hex chars)
-//!    chosen once at signer construction. Two clients launched
-//!    on the same machine without `RIFT_DEV_USER` therefore
-//!    end up on different accounts, which is the whole point
-//!    of dev auth.
+//! 2. `rift-playtest-user.txt` next to the executable, generated
+//!    on first run if missing. Launcher/playtest builds therefore
+//!    keep the same account across restarts without asking players
+//!    to pass a username flag.
+//! 3. A per-process randomized `playtest-XXXXXXXX` only if the
+//!    identity file cannot be read or written.
 
+use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rift_net::auth_dev::{encode_dev_ticket, sign, MAX_DEV_IDENTITY_CHARS};
@@ -25,8 +28,9 @@ pub struct DevSigner {
     /// Shared HMAC-SHA256 key (32 bytes). Decoded once from
     /// `RIFT_DEV_AUTH_KEY`.
     key: [u8; 32],
-    /// Identity this client logs in as. Either
-    /// `RIFT_DEV_USER` or a randomized `dev-XXXXXX`.
+    /// Identity this client logs in as. Either `RIFT_DEV_USER`,
+    /// the persisted playtest identity file, or a generated
+    /// fallback if the file cannot be used.
     identity: String,
 }
 
@@ -99,38 +103,71 @@ fn decode_key(hex_str: &str) -> Result<[u8; 32], String> {
 }
 
 /// Pick the identity string this signer will use. Prefers
-/// `RIFT_DEV_USER` when set; otherwise mints a `dev-XXXXXX`
-/// once per process. Caps to [`MAX_DEV_IDENTITY_CHARS`] so
-/// the server-side validator doesn't reject us.
+/// `RIFT_DEV_USER` when set; otherwise reads or creates a
+/// small identity file next to the executable. Caps to
+/// [`MAX_DEV_IDENTITY_CHARS`] so the server-side validator
+/// doesn't reject us.
 fn pick_identity() -> String {
     if let Ok(raw) = std::env::var("RIFT_DEV_USER") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            // Strip control characters, refuse the reserved
-            // issuer separator `:`, truncate to the server's
-            // max so the round-trip doesn't reject us. Iterate
-            // by char (Unicode scalar) rather than byte to
-            // avoid splitting multibyte characters in the
-            // middle. If sanitization leaves us with nothing
-            // we fall through to the random `dev-XXXXXX` path
-            // instead of shipping an empty identity (which the
-            // server would reject anyway).
-            let cleaned: String = trimmed
-                .chars()
-                .filter(|c| !c.is_control() && *c != ':')
-                .take(MAX_DEV_IDENTITY_CHARS)
-                .collect();
-            if !cleaned.is_empty() {
-                return cleaned;
-            }
+        if let Some(cleaned) = sanitize_identity(&raw) {
+            return cleaned;
         }
     }
-    // Six hex chars = 16.7 M possibilities — collision-free
-    // for any realistic single-machine playtest. The `dev-`
-    // prefix makes randomly-minted identities easy to spot in
-    // logs vs. an explicit `RIFT_DEV_USER`.
-    let suffix = random_u64() & 0x00FF_FFFF; // 24 bits → exactly 6 hex chars
-    format!("dev-{suffix:06x}")
+
+    if let Some(identity) = persisted_playtest_identity() {
+        return identity;
+    }
+
+    random_playtest_identity()
+}
+
+fn sanitize_identity(raw: &str) -> Option<String> {
+    // Strip control characters, refuse the reserved issuer
+    // separator `:`, truncate to the server's max so the
+    // round-trip doesn't reject us. Iterate by char (Unicode
+    // scalar) rather than byte to avoid splitting multibyte
+    // characters in the middle.
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() && *c != ':')
+        .take(MAX_DEV_IDENTITY_CHARS)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn persisted_playtest_identity() -> Option<String> {
+    let path = playtest_identity_path()?;
+
+    if let Ok(raw) = fs::read_to_string(&path) {
+        if let Some(identity) = sanitize_identity(&raw) {
+            return Some(identity);
+        }
+    }
+
+    let identity = random_playtest_identity();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::write(&path, format!("{identity}\n")).is_ok() {
+        Some(identity)
+    } else {
+        None
+    }
+}
+
+fn playtest_identity_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.parent()
+        .map(|parent| parent.join("rift-playtest-user.txt"))
+}
+
+fn random_playtest_identity() -> String {
+    // Eight hex chars = 4.3 B possibilities. The full string is
+    // 17 chars (`playtest-XXXXXXXX`), under the server's 18-char
+    // dev identity cap.
+    let suffix = random_u64() as u32;
+    format!("playtest-{suffix:08x}")
 }
 
 /// Wall-clock seconds since the Unix epoch.
@@ -183,22 +220,32 @@ mod tests {
     }
 
     #[test]
-    fn random_identity_is_six_hex_chars() {
+    fn fallback_identity_is_playtest_shape() {
         // Force the no-RIFT_DEV_USER path. We can't reliably
         // unset env vars in a test (parallel runs share the
         // env), so just assert pick_identity always returns
-        // either an explicit override or our `dev-XXXXXX`
+        // either an explicit override or our playtest fallback
         // shape.
         let id = pick_identity();
-        if !id.starts_with("dev-") {
+        if !id.starts_with("playtest-") {
             // RIFT_DEV_USER is set in this test run; nothing
-            // to assert about its value beyond it being non-
-            // empty.
+            // to assert about its value beyond it being non-empty.
             assert!(!id.is_empty());
             return;
         }
-        assert_eq!(id.len(), 4 + 6);
-        assert!(id["dev-".len()..].chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(id.len(), "playtest-".len() + 8);
+        assert!(id["playtest-".len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn sanitize_identity_strips_reserved_chars() {
+        assert_eq!(
+            sanitize_identity("  alice:debug\n"),
+            Some("alicedebug".into())
+        );
+        assert_eq!(sanitize_identity(":"), None);
     }
 
     #[test]

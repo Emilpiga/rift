@@ -463,6 +463,5 @@ pub fn ground_slam_impact(radius: f32) -> EffectBundle {
         flicker_hz: 18.0,
         offset: Vec3::new(0.0, 0.35, 0.0),
         follow_particles: true,
-        heat_haze: false,
     })
 }

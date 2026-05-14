@@ -10,6 +10,9 @@
 .env.*
 !.env.example
 
+# Local developer tools downloaded on demand
+/tools/rclone*
+
 # Editor / OS cruft
 .vscode/
 .idea/

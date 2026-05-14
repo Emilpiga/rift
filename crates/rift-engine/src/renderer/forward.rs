@@ -38,9 +38,9 @@ use crate::vulkan::{
 };
 
 // Backwards-compat re-exports: external code imports these as
-// `rift_engine::renderer::forward::{KeyLight, PointLight, HeatSource}`.
+// `rift_engine::renderer::forward::{KeyLight, PointLight}`.
 // The types themselves now live in the `uniforms` sibling module.
-pub use crate::renderer::uniforms::{HeatSource, KeyLight, PointLight};
+pub use crate::renderer::uniforms::{KeyLight, PointLight};
 
 pub struct Renderer {
     // Fields drop in declaration order — keep instance/device/surface LAST
@@ -190,15 +190,6 @@ pub struct Renderer {
     /// Game code clears + republishes this every frame
     /// (typically from `RiftRuntime::collect_lights`).
     pub vfx_lights: Vec<PointLight>,
-    /// Heat-distortion sources, written each frame by VFX
-    /// effects that opt in via `EffectLight::heat_haze`. The
-    /// composite pass picks the strongest one and applies a
-    /// noise-driven UV warp around its screen position. This
-    /// is intentionally separate from `point_lights` so that
-    /// ambient warm lights (torches, braziers, the
-    /// character-select scene) don't shimmer the air — only
-    /// gameplay-driven explosions / breath weapons do.
-    pub heat_sources: Vec<HeatSource>,
     /// Procedural sky-dome configuration. Drawn before the
     /// scene each frame when `sky.enabled` is true (typically
     /// only outdoors). Game code mutates this field per biome.
@@ -481,7 +472,6 @@ impl Renderer {
             player_room_aabb: Vec4::ZERO,
             point_lights: Vec::new(),
             vfx_lights: Vec::new(),
-            heat_sources: Vec::new(),
             sky: SkyConfig::default(),
             sky_renderer,
             bloom: BloomConfig::default(),

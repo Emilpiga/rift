@@ -178,6 +178,22 @@ pub trait DrawList {
         screen_h: f32,
     );
 
+    /// Filled triangle with pixel-space vertices. Useful for
+    /// directional indicators and compact geometric UI marks.
+    #[allow(clippy::too_many_arguments)]
+    fn triangle_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    );
+
     /// Bevelled stone-coloured disc with an indented dark→tint
     /// radial gradient core and a shader-rasterised glow halo
     /// outside the solid disc. One draw call per node; the

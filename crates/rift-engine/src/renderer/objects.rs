@@ -401,6 +401,13 @@ impl Renderer {
         self.skin_system.update_palette(frame, handle, palette);
     }
 
+    /// Monotonic render-frame counter. Gameplay-side render systems use
+    /// this for deterministic visual LOD staggering without owning their
+    /// own global frame state.
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
     /// Release the GPU skinning resources backing this object's
     /// mesh. Buffers are deferred for `MAX_FRAMES_IN_FLIGHT` frames
     /// before destruction so any in-flight pass that already
@@ -670,11 +677,8 @@ impl Renderer {
                         &d,
                     )
                 };
-                let mut guard = TextureUploadGuard::with_capacity(
-                    &self.device.device,
-                    &self.allocator,
-                    5,
-                );
+                let mut guard =
+                    TextureUploadGuard::with_capacity(&self.device.device, &self.allocator, 5);
                 guard.textures.push(upload(self, basecolor)?);
                 let push_opt =
                     |opt: Option<_>, owned: &mut TextureUploadGuard<'_>| -> Result<Option<usize>> {

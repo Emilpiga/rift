@@ -497,10 +497,11 @@ pub fn spawn(database_url: String) -> anyhow::Result<PersistenceHandle> {
 }
 
 /// Drain `rx` until shutdown, dispatching each message to the
-/// matching SQL operation. Each request runs on the runtime's
-/// thread pool via `tokio::spawn` so a slow query can't block the
-/// next-message dispatch — important for the unbounded fire-and-
-/// forget save path.
+/// matching SQL operation in queue order. The server intentionally
+/// posts inventory/stash rewrites and later blocking loads through
+/// this same worker, so preserving FIFO semantics is part of the
+/// durability contract: a reconnect must not observe rows from
+/// before an already-queued reset.
 async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMsg>) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -512,44 +513,33 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                 gender,
                 reply,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    let res = load_or_create(
-                        &pool,
-                        &account_key,
-                        &display_name,
-                        &character_name,
-                        &class_id,
-                        gender,
-                    )
-                    .await;
-                    let _ = reply.send(res);
-                });
+                let res = load_or_create(
+                    &pool,
+                    &account_key,
+                    &display_name,
+                    &character_name,
+                    &class_id,
+                    gender,
+                )
+                .await;
+                let _ = reply.send(res);
             }
             PersistenceMsg::Save { record } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = save(&pool, &record).await {
-                        log::warn!("persistence: save failed for {}: {e}", record.name);
-                    }
-                });
+                if let Err(e) = save(&pool, &record).await {
+                    log::warn!("persistence: save failed for {}: {e}", record.name);
+                }
             }
             PersistenceMsg::ListAccountCharacters {
                 account_key,
                 display_name,
                 reply,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    let res = list_account_characters(&pool, &account_key, &display_name).await;
-                    let _ = reply.send(res);
-                });
+                let res = list_account_characters(&pool, &account_key, &display_name).await;
+                let _ = reply.send(res);
             }
             PersistenceMsg::Shutdown { reply } => {
-                // Stop pulling new work. Already-spawned tasks
-                // continue to completion thanks to the runtime's
-                // own shutdown semantics below; we close the pool
-                // explicitly to wait for them.
+                // Stop pulling new work. All previously-received
+                // messages have completed by construction.
                 pool.close().await;
                 let _ = reply.send(());
                 return;
@@ -558,53 +548,37 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                 character_id,
                 reply,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    let res = load_inventory(&pool, character_id).await;
-                    let _ = reply.send(res);
-                });
+                let res = load_inventory(&pool, character_id).await;
+                let _ = reply.send(res);
             }
             PersistenceMsg::AppendInventoryItem { character_id, item } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = append_inventory_item(&pool, character_id, &item).await {
-                        log::warn!("persistence: append item failed for {character_id}: {e}");
-                    }
-                });
+                if let Err(e) = append_inventory_item(&pool, character_id, &item).await {
+                    log::warn!("persistence: append item failed for {character_id}: {e}");
+                }
             }
             PersistenceMsg::ResetCharacterInventory {
                 character_id,
                 items,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = reset_character_inventory(&pool, character_id, &items).await {
-                        log::warn!("persistence: reset inventory failed for {character_id}: {e}");
-                    }
-                });
+                if let Err(e) = reset_character_inventory(&pool, character_id, &items).await {
+                    log::warn!("persistence: reset inventory failed for {character_id}: {e}");
+                }
             }
             PersistenceMsg::LoadStash {
                 character_id,
                 reply,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    let res = load_stash(&pool, character_id).await;
-                    let _ = reply.send(res);
-                });
+                let res = load_stash(&pool, character_id).await;
+                let _ = reply.send(res);
             }
             PersistenceMsg::ResetCharacterStash {
                 character_id,
                 tabs,
                 items,
             } => {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = reset_character_stash(&pool, character_id, &tabs, &items).await
-                    {
-                        log::warn!("persistence: reset stash failed for {character_id}: {e}");
-                    }
-                });
+                if let Err(e) = reset_character_stash(&pool, character_id, &tabs, &items).await {
+                    log::warn!("persistence: reset stash failed for {character_id}: {e}");
+                }
             }
         }
     }

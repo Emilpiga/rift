@@ -159,6 +159,18 @@ float samplePointShadowBiased(
     float NdotL = max(dot(N, -dir), 0.0);
     float bias = max(0.0040 * (1.0 - NdotL), 0.0010);
 
+    // Cheap path for low-value samples. Near a torch's falloff edge
+    // or at a grazing receiver, the light contribution is already
+    // small and a broad rotated PCF kernel is not worth five cube
+    // lookups plus sin/cos/hash setup. A single softened compare keeps
+    // the occlusion stable while preserving the restored light count.
+    float distFade = smoothstep(0.24, 0.90, normFrag);
+    float grazing = 1.0 - clamp(NdotL, 0.0, 1.0);
+    if (normFrag > 0.78 || NdotL < 0.18) {
+        float fastSoftness = mix(0.00035, 0.00175, distFade) * (1.0 + grazing * 0.25);
+        return pointShadowCompare(lightIdx, dir, normFrag, bias, fastSoftness);
+    }
+
     // Small cross PCF over an orthonormal basis built from `dir`.
     // The earlier 12-tap disk looked a little softer, but the cost
     // was paid once per affecting shadowed point light, per fragment.
@@ -177,8 +189,6 @@ float samplePointShadowBiased(
     vec3 tu = tuRaw * rcs + tvRaw * rsn;
     vec3 tv = -tuRaw * rsn + tvRaw * rcs;
 
-    float distFade = smoothstep(0.24, 0.90, normFrag);
-    float grazing = 1.0 - clamp(NdotL, 0.0, 1.0);
     // Keep nearby contacts tight, then broaden the angular
     // kernel as the receiver approaches the light's range.
     float k = mix(0.0030, 0.0075, distFade) * (1.0 + grazing * 0.20);

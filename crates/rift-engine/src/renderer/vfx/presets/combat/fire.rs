@@ -443,7 +443,6 @@ pub fn fireball_trail() -> EffectBundle {
         // this, the light went from full intensity to zero
         // in a single frame and read as a hard pop.
         follow_particles: true,
-        heat_haze: false,
     })
 }
 
@@ -641,11 +640,6 @@ pub fn fireball_explosion() -> EffectBundle {
         flicker_hz: 24.0,
         offset: Vec3::new(0.0, 0.4, 0.0),
         follow_particles: true,
-        // Heat-haze opt-in is wired through the engine but
-        // disabled — the warp didn't read as "radiant heat",
-        // it read as "the screen broke". Leave the plumbing
-        // in place for future tuning.
-        heat_haze: false,
     })
 }
 
@@ -759,12 +753,11 @@ pub fn fire_beam() -> EffectBundle {
         flicker_hz: 9.0,
         offset: Vec3::new(0.0, 0.15, 0.0),
         follow_particles: true,
-        heat_haze: false,
     })
     // Tip light pinned to the beam's far endpoint —
     // brightens whatever the beam is currently scorching so
     // the gap between per-tick impact flashes still reads as
-    // a continuous heat source.
+    // continuous radiant energy.
     .with_tip_light(EffectLight {
         color: Vec3::new(4.2, 2.0, 0.6),
         radius: 3.5,
@@ -775,7 +768,6 @@ pub fn fire_beam() -> EffectBundle {
         flicker_hz: 11.0,
         offset: Vec3::ZERO,
         follow_particles: true,
-        heat_haze: false,
     })
 }
 
@@ -952,6 +944,5 @@ pub fn proc_explosion() -> EffectBundle {
         flicker_hz: 10.0,
         offset: Vec3::new(0.0, 0.4, 0.0),
         follow_particles: false,
-        heat_haze: false,
     })
 }

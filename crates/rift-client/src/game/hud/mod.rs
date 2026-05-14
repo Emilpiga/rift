@@ -240,12 +240,11 @@ fn render_portal_ready_banner(ui: &mut Ui<'_>) {
         Color::rgba(1.0, 0.82, 0.42, 0.16),
     );
 
-    let sweep_x = rect.x() + rect.width() * flow;
-    ui.draw_gradient_rect(
-        Rect::from_xywh(sweep_x - 34.0 * s, rect.y(), 68.0 * s, rect.height()),
-        Color::rgba(1.0, 0.50, 0.24, 0.00),
-        Color::rgba(1.0, 0.70, 0.34, 0.14),
-    );
+    let sweep_w = 68.0 * s;
+    let sweep_x = rect.x() - sweep_w * 0.5 + rect.width() * flow;
+    draw_portal_ready_sweep(ui, rect, sweep_x, sweep_w);
+    draw_portal_ready_sweep(ui, rect, sweep_x - rect.width(), sweep_w);
+    draw_portal_ready_sweep(ui, rect, sweep_x + rect.width(), sweep_w);
 
     let title = "PORTAL OPEN";
     let subtitle = "ENTER THE PORTAL";
@@ -271,21 +270,30 @@ fn render_portal_ready_banner(ui: &mut Ui<'_>) {
         subtitle_size,
         Color::rgba(1.0, 0.38, 0.25, 0.92),
     );
+}
 
-    let tick_y = rect.y() + rect.height() - 5.0 * s;
-    for i in 0..9 {
-        let t = i as f32 / 8.0;
-        let alpha = 0.18 + (1.0 - (t - flow).abs().min(1.0)) * 0.12;
-        ui.draw_rect(
-            Rect::from_xywh(
-                rect.x() + 26.0 * s + t * (rect.width() - 52.0 * s),
-                tick_y,
-                14.0 * s,
-                1.0 * s,
-            ),
-            Color::rgba(1.0, 0.65, 0.30, alpha),
-        );
+fn draw_portal_ready_sweep(ui: &mut Ui<'_>, rect: Rect, sweep_x: f32, sweep_w: f32) {
+    let sweep = Rect::from_xywh(sweep_x, rect.y(), sweep_w, rect.height());
+    let clipped = sweep.intersect(rect);
+    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
+        return;
     }
+
+    let left_t = ((clipped.x() - sweep_x) / sweep_w).clamp(0.0, 1.0);
+    let right_t = ((clipped.max.x - sweep_x) / sweep_w).clamp(0.0, 1.0);
+    let left = portal_ready_sweep_color(left_t);
+    let right = portal_ready_sweep_color(right_t);
+    ui.draw_grad4_rect(clipped, left, right, left.fade(0.55), right.fade(0.55));
+}
+
+fn portal_ready_sweep_color(t: f32) -> Color {
+    let peak = (1.0 - (t * 2.0 - 1.0).abs()).clamp(0.0, 1.0);
+    Color::rgba(
+        1.0,
+        0.42 + 0.26 * peak,
+        0.20 + 0.14 * peak,
+        0.01 + 0.16 * peak,
+    )
 }
 
 fn render_rift_progress_bar(
@@ -448,25 +456,109 @@ pub fn render_loot_prompt(ui: &mut Ui<'_>, text: &str, color: Color) {
 /// `strength` is in [0, 1]; the centre stays clear so combat readability
 /// is preserved.
 pub fn render_damage_flash(ui: &mut Ui<'_>, strength: f32) {
-    let s = strength.clamp(0.0, 1.0);
-    if s <= 0.001 {
+    let raw = strength.clamp(0.0, 1.0);
+    if raw <= 0.001 {
         return;
     }
     let screen = ui.screen_size();
     let sw = screen.x;
     let sh = screen.y;
-    let t = 22.0 + 28.0 * s;
-    const STEPS: i32 = 4;
-    for i in 0..STEPS {
-        let f = 1.0 - (i as f32 / STEPS as f32);
-        let alpha = (0.22 * s * f).clamp(0.0, 0.32);
-        let band = t * (1.0 - i as f32 / STEPS as f32);
-        let col = Color::rgba(0.78, 0.05, 0.05, alpha);
-        ui.draw_rect(Rect::from_xywh(0.0, 0.0, sw, band), col);
-        ui.draw_rect(Rect::from_xywh(0.0, sh - band, sw, band), col);
-        ui.draw_rect(Rect::from_xywh(0.0, 0.0, band, sh), col);
-        ui.draw_rect(Rect::from_xywh(sw - band, 0.0, band, sh), col);
-    }
+    let theme = *ui.theme();
+    let scale = theme.scale;
+    let soft = raw.sqrt();
+    let hot = raw * raw * (3.0 - 2.0 * raw);
+    let edge = (64.0 + 88.0 * soft) * scale;
+    let side = (46.0 + 70.0 * soft) * scale;
+    let corner = (118.0 + 110.0 * soft) * scale;
+    let edge_alpha = (0.13 * soft + 0.11 * hot).clamp(0.0, 0.28);
+    let corner_alpha = (0.17 * soft + 0.16 * hot).clamp(0.0, 0.36);
+    let wash_alpha = (0.020 * soft + 0.018 * hot).clamp(0.0, 0.055);
+
+    let clear = Color::rgba(0.50, 0.00, 0.00, 0.0);
+    let edge_red = Color::rgba(0.78, 0.025, 0.030, edge_alpha);
+    let edge_warm = Color::rgba(1.00, 0.12, 0.055, edge_alpha * 0.62);
+    let corner_red = Color::rgba(0.74, 0.010, 0.020, corner_alpha);
+    let corner_hot = Color::rgba(1.00, 0.16, 0.060, corner_alpha * 0.72);
+
+    ui.draw_rect(
+        ui.screen_rect(),
+        Color::rgba(0.52, 0.010, 0.014, wash_alpha),
+    );
+
+    ui.draw_grad4_rect(
+        Rect::from_xywh(0.0, 0.0, sw, edge),
+        edge_red,
+        edge_red,
+        clear,
+        clear,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(0.0, sh - edge, sw, edge),
+        clear,
+        clear,
+        edge_red,
+        edge_red,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(0.0, 0.0, side, sh),
+        edge_warm,
+        clear,
+        edge_warm,
+        clear,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(sw - side, 0.0, side, sh),
+        clear,
+        edge_warm,
+        clear,
+        edge_warm,
+    );
+
+    ui.draw_grad4_rect(
+        Rect::from_xywh(0.0, 0.0, corner, corner),
+        corner_hot,
+        corner_red,
+        corner_red,
+        clear,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(sw - corner, 0.0, corner, corner),
+        corner_red,
+        corner_hot,
+        clear,
+        corner_red,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(0.0, sh - corner, corner, corner),
+        corner_red,
+        clear,
+        corner_hot,
+        corner_red,
+    );
+    ui.draw_grad4_rect(
+        Rect::from_xywh(sw - corner, sh - corner, corner, corner),
+        clear,
+        corner_red,
+        corner_red,
+        corner_hot,
+    );
+
+    let inner_pad = 78.0 * scale;
+    let inner = Rect::from_xywh(
+        inner_pad,
+        inner_pad,
+        (sw - inner_pad * 2.0).max(1.0),
+        (sh - inner_pad * 2.0).max(1.0),
+    );
+    ui.draw_outline(
+        inner,
+        1.0 * scale,
+        Color::rgba(1.0, 0.10, 0.06, 0.035 * hot),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(0.0, 0.0, sw, 1.0 * scale),
+        Color::rgba(1.0, 0.22, 0.08, 0.22 * hot),
+    );
 }
 
 /// Render the ability bar (bottom-center) via the immediate-mode UI.

@@ -142,7 +142,6 @@ pub fn frost_ray() -> EffectBundle {
         // across the caster's mesh.
         offset: Vec3::new(0.0, 0.15, 0.0),
         follow_particles: true,
-        heat_haze: false,
     })
     // Persistent tip light pinned to the beam's *tip*
     // endpoint by the engine. Without this the only
@@ -170,7 +169,6 @@ pub fn frost_ray() -> EffectBundle {
         // emitting means envelope at peak. On `despawn` the
         // exponential decay fades both lights together.
         follow_particles: true,
-        heat_haze: false,
     })
 }
 

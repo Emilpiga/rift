@@ -94,20 +94,21 @@ void applyBloodField(
                 && fragWorldPos.y < floorYMax + 2.50;
     if (!isFloor && !isWall) return;
 
-    // ----- Time-evolving advection (floor only) -----
-    // Sample the field once at the un-warped UV to read the splat's
-    // age, then re-sample at a small upstream offset so the body of
-    // each pool drifts along its impact direction over the first few
-    // seconds. Subtle (capped at ~3 cm in world space) and tapers
-    // off as the splat ages — fresh blood pulls forward; old blood
-    // is locked in place. Walls don't get this because gravity drag
-    // is already baked into the wall composite.
     vec2 sampleUV = uv;
-    if (isFloor) {
+    vec2 bloodSample = texture(bloodField, sampleUV).rg;
+    float coverage = bloodSample.r;
+    if (coverage < 0.01) return;
+
+    // ----- Time-evolving advection (floor only) -----
+    // Only blood-covered pixels pay the second field sample and
+    // flow-vector math. Clean floor/wall fragments are the common
+    // case in combat-heavy rooms, so the early return above keeps
+    // the active blood field from taxing every floor fragment.
+    if (isFloor && coverage > 0.04) {
         // Read centre to get spawn time, derive age, then build a
         // small forward-axis warp from a low-frequency hash of the
         // splat's spawn time so each kill drifts its own way.
-        float t0 = texture(bloodField, uv).g;
+        float t0 = bloodSample.g;
         float age0 = max(0.0, ubo.timeData.x - t0);
         // Direction is a hash of spawn time → stable per-splat.
         float hashDir = fract(sin(t0 * 12.713) * 4321.7);
@@ -121,178 +122,42 @@ void applyBloodField(
         // Convert metres → UV using inv extent.
         vec2 invExtent = ubo.bloodFieldXform.zw;
         sampleUV = uv - flowDir * flowAmt * invExtent;
+        bloodSample = texture(bloodField, sampleUV).rg;
+        coverage = bloodSample.r;
+        if (coverage < 0.01) return;
     }
 
-    vec2 bloodSample = texture(bloodField, sampleUV).rg;
-    float coverage = bloodSample.r;
-    if (coverage < 0.01) return;
-
     // ----- Wall composite -----
-    // Walls share the same 2D field as the floor. Naively
-    // extruding the field signal upward gives painted stripes;
-    // scattering pure cells gives "polka-dot balls". The right
-    // structure is *splatter blobs with drip trails*: a few
-    // organically-shaped masses with FBM-warped outlines, each
-    // shedding thin vertical streaks below it. Existence of each
-    // blob is gated by `coverage` so blobs only appear in
-    // columns where the field actually has blood, but their
-    // *shape* is generated procedurally so the wall reads as
-    // splatter rather than a stripe of the field signal.
-    //
-    // Two splat scales (big body splats + smaller satellite
-    // splats) plus per-splat drip trails. No vertical falloff
-    // multiplier, no cell grid — the silhouette comes from the
-    // blobs themselves.
+    // Walls share the same 2D field as the floor, but the wall path
+    // must stay cheap: combat can make many blood-covered columns.
+    // Use a contact strip plus sparse vertical streaks instead of
+    // building procedural splat blobs per wall fragment.
     float heightMask = 0.0;
     if (isWall) {
-        // 1D coord along the wall surface. For an axis-aligned
-        // wall the tangent is whichever of X/Z is *not* the
-        // dominant component of the geometric normal.
+        // Cheap wall projection. The earlier version built wall
+        // splatter from nested procedural blob/drip loops per wall
+        // fragment; that looked nice in screenshots but scaled badly
+        // once combat painted many blood columns. Keep the important
+        // read: blood climbs a little from the floor contact and forms
+        // sparse vertical streaks, all gated by the floor-field signal.
         float u = abs(Ngeo.x) > abs(Ngeo.z) ? fragWorldPos.z : fragWorldPos.x;
         float yA = yAbove;
 
-        #define H11(n) fract(sin((n) * 12.9898) * 43758.5453)
         #define H21(p) fract(sin(dot((p), vec2(127.1, 311.7))) * 43758.5453)
-
-        // Multi-octave value noise — used to warp blob outlines
-        // (irregular silhouettes, not circles) and to break up
-        // the body of each splat with internal texture.
-        vec2 nP = vec2(u, yA);
-        float n1 = H21(nP * 4.5);
-        float n2 = H21(nP * 11.0 + 17.3);
-        float n3 = H21(nP * 26.0 + 5.7);
-        float fbm = n1 * 0.55 + n2 * 0.30 + n3 * 0.15;
-
-        // ---- Splat blobs ----
-        // Two passes at different cell pitches. Big splats sit
-        // at ~30 cm pitch (one major impact per stride along
-        // the wall), small satellites at ~12 cm. Each pass
-        // examines its three nearest cells along the u axis,
-        // so blobs straddle cell boundaries naturally.
-        float blobAcc = 0.0;
-        float dripAcc = 0.0;
-
-        // Pass 0: big splats. radius 0.10–0.22 m.
-        // Pass 1: small splats. radius 0.04–0.09 m.
-        for (int pass = 0; pass < 2; pass++) {
-            float cellSize = pass == 0 ? 0.30 : 0.12;
-            float rMin     = pass == 0 ? 0.10 : 0.04;
-            float rVar     = pass == 0 ? 0.12 : 0.05;
-            float covGate  = pass == 0 ? 1.40 : 1.60;
-            // Drip strength scales by pass; big blobs drip
-            // hard, small blobs barely.
-            float dripStrength = pass == 0 ? 1.0 : 0.45;
-            float seed     = pass == 0 ? 13.0 : 91.0;
-
-            float baseCellId = floor(u / cellSize);
-            for (int i = -1; i <= 1; i++) {
-                float cellId = baseCellId + float(i);
-                vec2 cc = vec2(cellId, seed);
-
-                // Existence gate: coverage at this fragment must
-                // clear a hashed threshold for the cell to host
-                // a blob. This ties blob density to the field
-                // signal strength — a heavy splatter column
-                // hosts many blobs, a light one hosts few.
-                float pres = step(H21(cc * 5.7), coverage * covGate);
-                if (pres < 0.5) continue;
-
-                // Blob centre. u offset within the cell + Y
-                // hashed around chest height ±35 cm (so blobs
-                // don't all line up at the same height).
-                float cu = (cellId + 0.18 + H21(cc * 1.7) * 0.64) * cellSize;
-                float cy = 0.95 + (H21(cc * 2.3) - 0.5) * 0.70;
-
-                // Radius hashed.
-                float r = rMin + H21(cc * 3.1) * rVar;
-                // Aspect — slight vertical stretch (gravity pull
-                // before drying) to taste.
-                float aspectY = 0.85 + H21(cc * 4.7) * 0.40;
-
-                // Distance to centre with FBM-driven warp so the
-                // outline is irregular, not a perfect ellipse.
-                vec2 d = vec2(u - cu, (yA - cy) / aspectY);
-                float warp = (fbm - 0.5) * r * 0.55;
-                float dist = length(d) + warp;
-                float body = 1.0 - smoothstep(r * 0.65, r * 1.10, dist);
-                // Internal texture — slightly thinner inside the
-                // blob so it doesn't read as a flat fill.
-                body *= 0.75 + 0.25 * fbm;
-                blobAcc = max(blobAcc, body);
-
-                // ---- Drip trails from this blob ----
-                // Drips emerge from the *bottom* of the blob.
-                // belowDist measures how far the fragment sits
-                // below blob centre.
-                float belowDist = cy - yA;
-                if (belowDist > 0.0 && belowDist < 0.80) {
-                    // Each blob spawns up to ~3 narrow drip
-                    // streaks within ±r of its centre. Streaks
-                    // live in fine 8 mm columns.
-                    float colId = floor((u - cu) / 0.008);
-                    float colCenter = (colId + 0.5) * 0.008 + cu;
-                    // Per-streak hashed length and presence.
-                    vec2 sc = vec2(colId, seed * 3.7);
-                    float dripLen = 0.18 + H21(sc * 7.3) * 0.50;
-                    // Presence: streak only fires if it sits
-                    // within the blob's lateral footprint AND
-                    // clears a coverage-modulated threshold AND
-                    // its column hash is above a sparsity gate
-                    // (so we don't get a continuous curtain).
-                    float lateralFromCenter = abs(colCenter - cu);
-                    float lateralOK = step(lateralFromCenter, r * 0.85);
-                    float streakPres = step(H21(sc * 11.1),
-                                            coverage * 0.55 * dripStrength);
-                    if (lateralOK > 0.5
-                        && streakPres > 0.5
-                        && belowDist < dripLen) {
-                        // Width: tapers from ~half a column at
-                        // the top to ~third at the bottom.
-                        float dripT = belowDist / max(dripLen, 1e-3);
-                        float taper = mix(1.0, 0.45, dripT);
-                        float streakW = 0.0035 * taper;
-                        // Wobble: gentle horizontal drift.
-                        float wobble = sin((colId * 0.71)
-                                           + dripT * 11.0) * 0.0012;
-                        float streakDist = abs(u - colCenter - wobble);
-                        float streakBody = 1.0 - smoothstep(
-                            streakW, streakW * 1.6, streakDist);
-                        // Bead at the leading edge.
-                        float bead = 1.0 - smoothstep(
-                            0.0, 0.06, abs(dripT - 0.92));
-                        bead *= 1.0 - smoothstep(0.005, 0.010,
-                                                 streakDist);
-                        // Fade in just below blob, fade out at
-                        // tail.
-                        float aliveY = smoothstep(0.0, 0.020,
-                                                  belowDist)
-                                     * (1.0 - smoothstep(
-                                         dripLen - 0.020,
-                                         dripLen, belowDist));
-                        float drip = (streakBody + bead * 0.6)
-                                    * aliveY * dripStrength;
-                        dripAcc = max(dripAcc, drip);
-                    }
-                }
-            }
-        }
-
-        heightMask = max(blobAcc, dripAcc);
-
-        // ----- Capillary contact pooling -----
-        // Where the wall meets a bloodied floor, real fluids
-        // climb the wall via surface tension and gather along
-        // the join. We add a thin, very wet, slightly darkened
-        // strip at the bottom of the wall whose intensity is
-        // gated by the floor's coverage in this column. Reads
-        // as a wet line tracing the corner where wall touches
-        // bloody floor — exactly the contact cue real fluids
-        // produce.
-        float contactPool = (1.0 - smoothstep(0.0, 0.06, yA))
-                          * smoothstep(0.0, 0.005, yA);
-        // Modulate by base coverage so dry columns stay clean.
-        contactPool *= clamp(coverage * 0.9, 0.0, 1.0);
-        heightMask = max(heightMask, contactPool);
+        float contactPool = (1.0 - smoothstep(0.0, 0.075, yA))
+                          * smoothstep(0.0, 0.006, yA)
+                          * clamp(coverage * 1.1, 0.0, 1.0);
+        float col = floor(u / 0.026);
+        float streakSeed = H21(vec2(col, floor(uv.x * 128.0)));
+        float streakLen = mix(0.18, 1.10, streakSeed) * coverage;
+        float colCenter = (col + 0.5) * 0.026;
+        float width = mix(0.0025, 0.0065, H21(vec2(col, 17.0)));
+        float lateral = 1.0 - smoothstep(width, width * 2.2, abs(u - colCenter));
+        float vertical = smoothstep(0.02, 0.08, yA)
+                       * (1.0 - smoothstep(streakLen * 0.75, streakLen, yA));
+        float streakGate = step(0.42, coverage + H21(vec2(col, 41.0)) * 0.45);
+        float drip = lateral * vertical * streakGate;
+        heightMask = max(contactPool, drip);
 
         // Hard upper cap: nothing above 2.0 m.
         heightMask *= 1.0 - smoothstep(1.85, 2.05, yA);
@@ -305,7 +170,6 @@ void applyBloodField(
         // with the pool below it.
         coverage = clamp(coverage * 1.4, 0.0, 1.0);
 
-        #undef H11
         #undef H21
     } else {
         heightMask = 1.0;

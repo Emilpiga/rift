@@ -1848,18 +1848,14 @@ impl Mesh {
     }
     /// Doctor-Strange-style portal frame.
     ///
-    /// Geometry is intentionally minimal — the iconic look comes
-    /// from the [`portal_vortex`](crate::renderer::vfx::presets::portal_vortex)
-    /// VFX preset, which orbits a dense halo of golden sparks
-    /// around the rim. The mesh just provides:
+    /// Geometry is intentionally minimal. The iconic look comes
+    /// from the rift surface shader and the cool fracture VFX;
+    /// the mesh just provides:
     ///
-    ///   * a thin outer torus frame in molten copper,
-    ///   * a brighter inner rim in white-hot gold,
-    ///   * a dimmed inner disc with a near-black core fading to
-    ///     a hint of orange at the rim — reads as "burning hole
-    ///     through space" rather than a glowing plate. Mirrored
-    ///     on the back face so the portal reads from any camera
-    ///     angle.
+    ///   * a wobbly disc silhouette,
+    ///   * polar UVs for the shader's counter-rotating fields,
+    ///   * mirrored front/back faces so the portal reads from
+    ///     any camera angle.
     pub fn portal() -> Self {
         // Default = the "destination unknown" gold-on-black look.
         // Spawn sites that know where the portal leads should
@@ -1875,7 +1871,7 @@ impl Mesh {
     ///
     /// Geometry intentionally provides only **polar UVs** and a
     /// **wobbly silhouette**; all the visual content (swirling
-    /// depth, chromatic veins, edge tendrils) is generated in
+    /// depth, chromatic veins, event-horizon shadow collar) is generated in
     /// `assets/shaders/forward/rift_surface.glsl::shadeRift` at
     /// fragment time. The mesh's job is to:
     ///
@@ -1888,14 +1884,14 @@ impl Mesh {
     ///     can layer rotating noise fields without needing a
     ///     model-inverse matrix,
     ///   * fill the disc with enough subdivisions that the
-    ///     procedural detail (veins, tendrils, parallax swirls)
+    ///     procedural detail (veins, fractures, parallax swirls)
     ///     reads smoothly across the surface.
     ///
     /// **No frame torus.** The original gold-ring frame read as
     /// "fantasy MMO loot portal"; the rift look pushes the
-    /// boundary into the disc's own shader-driven tendrils and
-    /// chromatic edge-bleed. The thin bright aperture is
-    /// reconstituted at fragment time by the rim ember band in
+    /// boundary into the disc's own shader-driven shadow collar
+    /// and chromatic edge-bleed. The thin aperture is
+    /// reconstituted at fragment time by the cool rim fracture in
     /// `shadeRift`.
     ///
     /// **Vertex colors are intentionally zero.** The portal
@@ -1913,10 +1909,10 @@ impl Mesh {
         let disc_segments: u32 = 96;
         let disc_r = 1.20_f32;
 
-        // Per-angle silhouette wobble. Sum of three low-freq
+        // Per-angle aperture wobble. Sum of three low-freq
         // sines with prime-ish multipliers and irrational phase
         // offsets gives a non-repeating, organic "torn paper"
-        // contour. Magnitude tuned so the outermost ring breaks
+        // contour. Magnitude tuned so the visible rim breaks
         // its perfect-circle shape by ~6–10% radius without
         // becoming spiky. The shader layers an additional
         // *animated* wobble on top of this static baseline; the
@@ -1927,34 +1923,23 @@ impl Mesh {
                 + 0.020 * (a * 11.0 + 2.4).sin()
         };
 
-        // Ring radii (as a fraction of `disc_r`). Inner rings
-        // are *not* wobbled — only the outermost contour
-        // distorts, otherwise the inner rings would clip
-        // through the silhouette and produce visible seams.
+        // Ring radii (as a fraction of `disc_r`). `1.0` is the
+        // visible torn aperture.
         let ring_ts: [f32; 6] = [0.0, 0.18, 0.40, 0.62, 0.82, 1.0];
-
-        // Centre vertex — uv = (0, 0) so the shader maps it to
-        // the deepest "core" of the rift.
-        let center_idx = vertices.len() as u32;
-        vertices.push(Vertex {
-            position: Vec3::new(0.0, cy_offset, 0.0),
-            normal: Vec3::Z,
-            color: Vec3::ZERO,
-            uv: Vec2::new(0.0, 0.0),
-        });
 
         // Push a ring of vertices at radial fraction `t`. UVs
         // carry polar coords for the fragment shader: `uv.x` =
         // radial fraction (0 at core, 1 at silhouette), `uv.y`
-        // = angle / TAU (0..1 around the ring).
+        // = angle / TAU (0..1 around the ring). The seam vertex
+        // is duplicated at `uv.y = 1`, so no triangle interpolates
+        // from ~1 back to 0 and creates a radial tear.
         let push_ring = |vertices: &mut Vec<Vertex>, t: f32, normal: Vec3| -> u32 {
             let r_base = disc_r * t;
             let r_y_base = height * 0.45 * t;
             let start = vertices.len() as u32;
-            for i in 0..disc_segments {
+            for i in 0..=disc_segments {
                 let a = (i as f32 / disc_segments as f32) * std::f32::consts::TAU;
-                // Wobble only on the outermost ring so inner
-                // rings don't clip the contour.
+                // Wobble only on the visible aperture.
                 let w = if (t - 1.0).abs() < 1e-3 {
                     wobble(a)
                 } else {
@@ -1979,56 +1964,61 @@ impl Mesh {
             front_starts[i] = push_ring(&mut vertices, t, Vec3::Z);
         }
 
-        // Core fan: centre → first ring.
+        // Core fan: per-segment centre vertices. A single shared
+        // centre with one angular UV would pull a visible seam from
+        // the rim to the core on the closing wedge.
         for i in 0..disc_segments {
-            let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[center_idx, front_starts[0] + i, front_starts[0] + next]);
+            let center_idx = vertices.len() as u32;
+            vertices.push(Vertex {
+                position: Vec3::new(0.0, cy_offset, 0.0),
+                normal: Vec3::Z,
+                color: Vec3::ZERO,
+                uv: Vec2::new(0.0, (i as f32 + 0.5) / disc_segments as f32),
+            });
+            indices.extend_from_slice(&[center_idx, front_starts[0] + i, front_starts[0] + i + 1]);
         }
         // Outer bands: ring[k] → ring[k+1] quads.
         for k in 0..(front_starts.len() - 1) {
             let inner = front_starts[k];
             let outer = front_starts[k + 1];
             for i in 0..disc_segments {
-                let next = (i + 1) % disc_segments;
                 indices.extend_from_slice(&[
                     inner + i,
                     outer + i,
-                    outer + next,
+                    outer + i + 1,
                     inner + i,
-                    outer + next,
-                    inner + next,
+                    outer + i + 1,
+                    inner + i + 1,
                 ]);
             }
         }
 
         // Back face mirror so the rift reads from behind too.
-        let back_center = vertices.len() as u32;
-        vertices.push(Vertex {
-            position: Vec3::new(0.0, cy_offset, 0.0),
-            normal: -Vec3::Z,
-            color: Vec3::ZERO,
-            uv: Vec2::new(0.0, 0.0),
-        });
         let mut back_starts: [u32; 5] = [0; 5];
         for (i, &t) in ring_ts[1..].iter().enumerate() {
             back_starts[i] = push_ring(&mut vertices, t, -Vec3::Z);
         }
         for i in 0..disc_segments {
-            let next = (i + 1) % disc_segments;
-            indices.extend_from_slice(&[back_center, back_starts[0] + next, back_starts[0] + i]);
+            let center_idx = vertices.len() as u32;
+            vertices.push(Vertex {
+                position: Vec3::new(0.0, cy_offset, 0.0),
+                normal: -Vec3::Z,
+                color: Vec3::ZERO,
+                uv: Vec2::new(0.0, (i as f32 + 0.5) / disc_segments as f32),
+            });
+            indices.extend_from_slice(&[center_idx, back_starts[0] + i + 1, back_starts[0] + i]);
         }
         for k in 0..(back_starts.len() - 1) {
             let inner = back_starts[k];
             let outer = back_starts[k + 1];
             for i in 0..disc_segments {
-                let next = (i + 1) % disc_segments;
                 indices.extend_from_slice(&[
                     inner + i,
-                    outer + next,
+                    outer + i + 1,
                     outer + i,
                     inner + i,
-                    inner + next,
-                    outer + next,
+                    inner + i + 1,
+                    outer + i + 1,
                 ]);
             }
         }

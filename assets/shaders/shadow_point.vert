@@ -45,28 +45,10 @@ layout(push_constant) uniform PushConstants {
     vec4 materialParams;
 } pc;
 
-layout(set = 1, binding = 4) uniform sampler2D heightMap;
-
 layout(location = 0) out vec3 worldPos;
-layout(location = 1) out vec3 worldNormal;
-layout(location = 2) out vec2 shadowUV;
 
 void main() {
     vec4 wp = pc.model * vec4(inPosition, 1.0);
-    vec3 n = transpose(inverse(mat3(pc.model))) * inNormal;
-    uint flags = floatBitsToUint(pc.materialParams.z);
-    bool usePbrHeight = (flags & 1u) != 0u
-        && ubo.pointShadowMeta.z > 0.5
-        && pc.materialParams.y > 0.001;
-    shadowUV = inUV * max(pc.materialParams.x, 1e-3);
-    if (usePbrHeight) {
-        float h = texture(heightMap, shadowUV).r;
-        vec3 N = normalize(n);
-        if (!any(isnan(N))) {
-            wp.xyz += N * ((h - 0.5) * pc.materialParams.y * 14.0);
-        }
-    }
     worldPos = wp.xyz;
-    worldNormal = n;
     gl_Position = ubo.pointShadowFaceVP[pc.indices.x] * wp;
 }

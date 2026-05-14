@@ -9,8 +9,7 @@
 //! 2. **Post graph**: fullscreen intermediate effects write
 //!    small, focused render targets. `post_ssao.frag` writes a
 //!    single-channel AO term from depth; `post_volumetrics.frag`
-//!    writes HDR god-rays from HDR + depth; `post_heat.frag`
-//!    writes the heat-distorted HDR scene.
+//!    writes HDR god-rays from HDR + depth.
 //! 3. **Bright pass** (`bloom_pass` instance, framebuffer A):
 //!    samples `hdr` → outputs energy above the threshold to
 //!    `bloom_a`.
@@ -18,8 +17,8 @@
 //!    `bloom_a` → writes horizontally-blurred `bloom_b`.
 //! 5. **Blur V** (`bloom_pass` instance, framebuffer A): samples
 //!    `bloom_b` → writes vertically-blurred `bloom_a` (final).
-//! 6. **Composite pass** (`composite_pass`): samples heat-distorted
-//!    HDR, AO, volumetrics and `bloom_a`, tonemaps, writes to the
+//! 6. **Composite pass** (`composite_pass`): samples HDR, AO,
+//!    volumetrics and `bloom_a`, tonemaps, writes to the
 //!    swapchain. Overlay/UI is recorded into this same pass so
 //!    it stays crisp and isn't tonemapped a second time.
 //!
@@ -32,14 +31,12 @@
 //! ```text
 //!   per swapchain image:
 //!     hdr     — full-res RGBA16F, COLOR_ATTACHMENT | SAMPLED
-//!     heat    — full-res RGBA16F, COLOR_ATTACHMENT | SAMPLED
 //!     ssao    — full-res R8,      COLOR_ATTACHMENT | SAMPLED
 //!     rays    — half-res RGBA16F, COLOR_ATTACHMENT | SAMPLED
 //!     bloom_a — half-res RGBA16F, COLOR_ATTACHMENT | SAMPLED
 //!     bloom_b — half-res RGBA16F, COLOR_ATTACHMENT | SAMPLED
 //!   per swapchain image:
 //!     scene_fb     [hdr_view, depth_view]      → scene_pass
-//!     heat_fb      [heat_view]                 → post graph
 //!     ssao_fb      [ssao_view]                 → post graph
 //!     rays_fb      [rays_view]                 → post graph
 //!     bright_fb    [bloom_a_view]              → bloom_pass
@@ -61,7 +58,7 @@
 //!   order-critical and tightly coupled to frame presentation.
 //! - The **post graph** owns optional fullscreen effects that
 //!   produce intermediate textures consumed by the fixed stack.
-//!   Today that is SSAO, volumetrics, and heat distortion.
+//!   Today that is SSAO and volumetrics.
 //!
 //! If the final image looks wrong, debug in that order: first
 //! verify graph outputs, then verify bloom, then verify the final
@@ -226,7 +223,6 @@ pub struct PostProcessing {
     bloom_extent: vk::Extent2D,
 
     hdr: Vec<OffscreenImage>,
-    heat: Vec<OffscreenImage>,
     ssao: Vec<OffscreenImage>,
     volumetrics: Vec<OffscreenImage>,
     bloom_a: Vec<OffscreenImage>,
@@ -245,7 +241,7 @@ pub struct PostProcessing {
     pub composite_framebuffers: Vec<vk::Framebuffer>,
 
     /// Default linear clamp sampler for colour-like post targets
-    /// (HDR, bloom, heat, volumetrics). If an effect needs custom
+    /// (HDR, bloom, volumetrics). If an effect needs custom
     /// filtering, bias, or mips, promote this to a small sampler
     /// table keyed by graph resource/effect.
     sampler: vk::Sampler,
@@ -321,7 +317,6 @@ impl PostProcessing {
 
         // ---- Offscreen images ----
         let mut hdr = Vec::with_capacity(image_count);
-        let mut heat = Vec::with_capacity(image_count);
         let mut ssao = Vec::with_capacity(image_count);
         let mut volumetrics = Vec::with_capacity(image_count);
         let mut bloom_a = Vec::with_capacity(image_count);
@@ -329,13 +324,6 @@ impl PostProcessing {
         for _ in 0..image_count {
             hdr.push(OffscreenImage::new(
                 device, allocator, extent, HDR_FORMAT, "post_hdr",
-            )?);
-            heat.push(OffscreenImage::new(
-                device,
-                allocator,
-                extent,
-                HDR_FORMAT,
-                "post_heat",
             )?);
             ssao.push(OffscreenImage::new(
                 device,
@@ -466,7 +454,6 @@ impl PostProcessing {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            // Heat-distorted HDR target produced by the post graph.
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -506,7 +493,6 @@ impl PostProcessing {
             PostGraphViews {
                 ssao: &ssao.iter().map(|i| i.view).collect::<Vec<_>>(),
                 volumetrics: &volumetrics.iter().map(|i| i.view).collect::<Vec<_>>(),
-                heat: &heat.iter().map(|i| i.view).collect::<Vec<_>>(),
             },
             bloom_extent,
         )?;
@@ -563,7 +549,7 @@ impl PostProcessing {
             write_combined(device, bright_in_sets[i], 0, hdr[i].view, sampler);
             write_combined(device, blur_h_in_sets[i], 0, bloom_a[i].view, sampler);
             write_combined(device, blur_v_in_sets[i], 0, bloom_b[i].view, sampler);
-            write_combined(device, composite_in_sets[i], 0, heat[i].view, sampler);
+            write_combined(device, composite_in_sets[i], 0, hdr[i].view, sampler);
             write_combined(device, composite_in_sets[i], 1, bloom_a[i].view, sampler);
             write_combined(device, composite_in_sets[i], 2, ssao[i].view, sampler);
             write_combined(
@@ -639,7 +625,6 @@ impl PostProcessing {
             extent,
             bloom_extent,
             hdr,
-            heat,
             ssao,
             volumetrics,
             bloom_a,
@@ -711,9 +696,6 @@ impl PostProcessing {
         for img in self.hdr.iter_mut() {
             img.cleanup(device, allocator);
         }
-        for img in self.heat.iter_mut() {
-            img.cleanup(device, allocator);
-        }
         for img in self.ssao.iter_mut() {
             img.cleanup(device, allocator);
         }
@@ -727,7 +709,6 @@ impl PostProcessing {
             img.cleanup(device, allocator);
         }
         self.hdr.clear();
-        self.heat.clear();
         self.ssao.clear();
         self.volumetrics.clear();
         self.bloom_a.clear();
@@ -763,7 +744,6 @@ impl PostProcessing {
             self.blur_v_framebuffers.len(),
             self.composite_framebuffers.len(),
             self.hdr.len(),
-            self.heat.len(),
             self.ssao.len(),
             self.volumetrics.len(),
             self.bloom_a.len(),
@@ -826,13 +806,6 @@ impl PostProcessing {
                 self.extent,
                 HDR_FORMAT,
                 "post_hdr",
-            )?);
-            self.heat.push(OffscreenImage::new(
-                device,
-                allocator,
-                self.extent,
-                HDR_FORMAT,
-                "post_heat",
             )?);
             self.ssao.push(OffscreenImage::new(
                 device,
@@ -914,7 +887,6 @@ impl PostProcessing {
             PostGraphViews {
                 ssao: &self.ssao.iter().map(|i| i.view).collect::<Vec<_>>(),
                 volumetrics: &self.volumetrics.iter().map(|i| i.view).collect::<Vec<_>>(),
-                heat: &self.heat.iter().map(|i| i.view).collect::<Vec<_>>(),
             },
             self.bloom_extent,
         )?;
@@ -985,7 +957,7 @@ impl PostProcessing {
                 device,
                 self.composite_in_sets[i],
                 0,
-                self.heat[i].view,
+                self.hdr[i].view,
                 self.sampler,
             );
             write_combined(
@@ -1051,7 +1023,6 @@ impl PostProcessing {
         ssao_strength: f32,
         sun_screen: [f32; 4],
         sun_color: [f32; 4],
-        heat_source: [f32; 4],
     ) {
         self.post_graph.record(
             device,
@@ -1064,7 +1035,6 @@ impl PostProcessing {
                 ssao_strength,
                 sun_screen,
                 sun_color,
-                heat_source,
             },
         );
     }
@@ -1142,7 +1112,7 @@ impl PostProcessing {
     /// Recompile the bright / blur / composite pipelines from
     /// the on-disk shader sources and atomically swap them in.
     /// Used by the editor hot-reload path so that edits to
-    /// `post_ssao.frag`, `post_volumetrics.frag`, `post_heat.frag`,
+    /// `post_ssao.frag`, `post_volumetrics.frag`,
     /// `post_bright.frag`, `post_blur.frag`, `post_composite.frag`
     /// (or the shared `post.vert`) take effect without a
     /// process restart. The descriptor set layouts, render

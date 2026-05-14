@@ -9,8 +9,8 @@ use rift_net::ids::ClientId;
 use super::actor::Vitals;
 use super::player::ServerPlayer;
 use super::{
-    build_bag_occupancy, footprint_fits, place_inventory_item, place_inventory_item_at,
-    sort_grid_items, trim_trailing_none, Sim,
+    build_bag_occupancy, footprint_fits, move_grid_item_to_anchor, place_inventory_item,
+    place_inventory_item_at, sort_grid_items, trim_trailing_none, Sim,
 };
 
 impl Sim {
@@ -200,65 +200,8 @@ impl Sim {
         if p.inventory.len() < INVENTORY_CAPACITY {
             p.inventory.resize_with(INVENTORY_CAPACITY, || None);
         }
-        let item_a = p.inventory[a].take();
-        let item_b = p.inventory[b].take();
-
-        // Build occupancy WITHOUT a and b, then test that
-        // each item fits at the destination's anchor. Both
-        // must fit — partial swaps would visually corrupt the
-        // grid — otherwise we restore the originals.
-        let occ = build_bag_occupancy(&p.inventory);
-        let a_fits_b = item_a
-            .as_ref()
-            .map(|it| {
-                let (w, h) = it.footprint();
-                footprint_fits(&occ, b, w, h)
-            })
-            .unwrap_or(true);
-        let b_fits_a = item_b
-            .as_ref()
-            .map(|it| {
-                let (w, h) = it.footprint();
-                footprint_fits(&occ, a, w, h)
-            })
-            .unwrap_or(true);
-
-        if a_fits_b && b_fits_a {
-            // Cells we're about to fill don't conflict with
-            // each other because a != b and each footprint
-            // was tested against the same occ snapshot. The
-            // only remaining risk is that one item's
-            // footprint covers the other's anchor cell. Test
-            // explicitly:
-            let cross_clash = item_a
-                .as_ref()
-                .zip(item_b.as_ref())
-                .map(|(ia, ib)| {
-                    let (aw, ah) = ia.footprint();
-                    let (bw, bh) = ib.footprint();
-                    use rift_net::messages::BAG_COLS;
-                    let bx = b % BAG_COLS;
-                    let by = b / BAG_COLS;
-                    let ax = a % BAG_COLS;
-                    let ay = a / BAG_COLS;
-                    let a_covers_a_anchor =
-                        ax >= bx && ax < bx + aw as usize && ay >= by && ay < by + ah as usize;
-                    let b_covers_b_anchor =
-                        bx >= ax && bx < ax + bw as usize && by >= ay && by < ay + bh as usize;
-                    a_covers_a_anchor || b_covers_b_anchor
-                })
-                .unwrap_or(false);
-            if !cross_clash {
-                p.inventory[b] = item_a;
-                p.inventory[a] = item_b;
-                return true;
-            }
-        }
-
-        // Restore originals on any failure.
-        p.inventory[a] = item_a;
-        p.inventory[b] = item_b;
-        false
+        use rift_net::messages::{BAG_COLS, BAG_ROWS};
+        move_grid_item_to_anchor(&mut p.inventory, a, b, BAG_COLS, BAG_ROWS)
     }
 
     /// Swap two stash slots within `tab_index`, used by the

@@ -258,17 +258,11 @@ impl TorchSystem {
         let cutoff = fog_end + 2.0;
         let max_d2 = cutoff * cutoff;
 
-        // Number of candidates to consider; we'll rank-fade
-        // anything above `RANK_FULL` and drop everything past
-        // `RANK_CAP`. Stays under the renderer's
-        // `MAX_POINT_LIGHTS = 16` to leave headroom for the
-        // portal system's per-frame light pushes (descend +
-        // extract portal can each grab a slot in the boss
-        // room corridor) and for the lightning-storm flash
-        // light in the hub. VFX-driven projectile lights live
-        // in a separate `vfx_lights` pool that's packed first
-        // in the renderer merge, so torches don't need to
-        // leave room for those.
+        // Number of candidates to upload to the forward shader.
+        // Keep this in sync with `update_visuals`; a lower upload
+        // budget makes torch meshes/halos stay visible while their
+        // actual light contribution drops out, which reads as random
+        // lighting pop while moving around dense rift rooms.
         const RANK_CAP: usize = 14;
         const RANK_FULL: usize = 12;
 

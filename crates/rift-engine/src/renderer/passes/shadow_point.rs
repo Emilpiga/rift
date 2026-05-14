@@ -1,6 +1,6 @@
 //! Point-light shadow atlas (omnidirectional cube shadows).
 //!
-//! Single image of format `R32_SFLOAT`, dimensions `512 × 512 × (6 ×
+//! Single image of format `R32_SFLOAT`, dimensions `384 × 384 × (6 ×
 //! MAX_POINT_SHADOWS)`, with `CUBE_COMPATIBLE` flags so it can be sampled
 //! as a `samplerCubeArray` in the main fragment shader. Each face stores
 //! a *linear distance* from the light, normalized to the light's radius
@@ -34,8 +34,8 @@ use crate::vulkan::pipeline as pipe;
 
 /// Maximum number of simultaneous shadow-casting point lights. The atlas
 /// allocates `6 * MAX_POINT_SHADOWS` cube-face layers, so increasing this
-/// scales memory and worst-case render cost linearly. At 512² R32 + D32,
-/// 8 lights uses ~48 MiB color + 1 MiB depth.
+/// scales memory and worst-case render cost linearly. At 384² R32 + D32,
+/// 8 lights uses ~27 MiB color + 1 MiB depth.
 ///
 /// Sized to comfortably fit every torch within the typical dungeon
 /// fog radius (~24 m × ~6 m torch spacing). Below this number the
@@ -43,21 +43,15 @@ use crate::vulkan::pipeline as pipe;
 /// and off as the player walks past sconces.
 pub const MAX_POINT_SHADOWS: usize = 8;
 
-/// Per-face resolution of the cube atlas. 512² is the sweet
-/// spot for our gameplay camera: each texel covers ~10 mm at 5 m
-/// with the 90° per-face FoV, which is well below a screen pixel
-/// at any reasonable display resolution. The single-tap PCF in
-/// `samplePointShadow` plus the per-pixel basis-rotation jitter
-/// hide the residual stepping at the silhouette, so visually the
-/// 512² atlas is indistinguishable from 1024² but renders **4×
-/// fewer fragments per cube face**. Skinned characters force-
-/// re-render all 6 faces every frame for every shadow-casting
-/// light they're in range of, so this is the single biggest win
-/// for in-dungeon framerate.
+/// Per-face resolution of the cube atlas. Rift rooms can have
+/// several torch/portal shadows active while skinned monsters keep
+/// nearby slots dirty, so this pass can dominate in-dungeon frame
+/// time. 384² keeps contact shadows readable at the gameplay camera
+/// while rendering ~44% fewer fragments than 512² per cube face.
 ///
-/// Memory cost: 8 lights × 6 faces × 512² × 4 bytes ≈ 48 MiB
+/// Memory cost: 8 lights × 6 faces × 384² × 4 bytes ≈ 27 MiB
 /// color + 1 MiB depth.
-pub const POINT_SHADOW_SIZE: u32 = 512;
+pub const POINT_SHADOW_SIZE: u32 = 384;
 
 /// Color attachment format. R32_SFLOAT gives floating-point precision
 /// for normalized distances and is universally supported as a color

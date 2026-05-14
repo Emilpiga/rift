@@ -21,7 +21,7 @@ pub use gpu_allocator;
 pub use input::Input;
 pub use renderer::camera::Camera;
 pub use renderer::forward::KeyLight;
-pub use renderer::forward::{HeatSource, PointLight};
+pub use renderer::forward::PointLight;
 pub use renderer::mesh::Mesh;
 pub use renderer::post::BloomConfig;
 pub use renderer::sky::SkyConfig;

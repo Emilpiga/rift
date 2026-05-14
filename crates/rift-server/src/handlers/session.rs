@@ -46,6 +46,25 @@ fn validate_name(value: &str, max_chars: usize, what: &str) -> Result<String, St
     Ok(trimmed.to_string())
 }
 
+fn place_stash_row_at_slot_index(
+    slots: &mut Vec<Option<rift_game::loot::Item>>,
+    slot_index: i32,
+    item: rift_game::loot::Item,
+) -> bool {
+    let idx = slot_index.max(0) as usize;
+    if idx >= slots.len() {
+        slots.resize_with(idx + 1, || None);
+    }
+    if slots[idx].is_some() {
+        log::warn!(
+            "persistence: duplicate stash row for slot_index={idx}; keeping first row and ignoring duplicate"
+        );
+        return false;
+    }
+    slots[idx] = Some(item);
+    true
+}
+
 impl Server {
     /// Handle a fresh client's `Hello`: validate protocol, resolve
     /// the auth credential into an account identity, look up that
@@ -433,8 +452,9 @@ impl Server {
                             .map(|(id, v, d)| (id.as_str(), *v, *d)),
                     );
                     let tab_idx = (r.tab_index as usize).min(tabs.len().saturating_sub(1));
-                    place_at_slot_index(&mut tabs[tab_idx].items, r.slot_index, item);
-                    total_items += 1;
+                    if place_stash_row_at_slot_index(&mut tabs[tab_idx].items, r.slot_index, item) {
+                        total_items += 1;
+                    }
                 }
                 log::info!(
                     "{} loaded {} stash item(s) across {} tab(s)",

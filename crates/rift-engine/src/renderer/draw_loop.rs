@@ -768,7 +768,6 @@ impl Renderer {
 
         // ---- Compute screen-space post inputs (CPU math) ----
         let (sun_screen, sun_color) = self.compute_sun_screen_uv();
-        let heat_source = self.compute_heat_source_uv();
         // Inverse projection matrix is needed by the SSAO graph
         // node to reconstruct view-space positions from sampled
         // depth. Inverting on CPU once per frame is essentially
@@ -827,7 +826,6 @@ impl Renderer {
                 ssao_strength,
                 sun_screen,
                 sun_color,
-                heat_source,
             );
             self.post
                 .record_bloom(&self.device.device, cmd, image_index, &self.bloom);

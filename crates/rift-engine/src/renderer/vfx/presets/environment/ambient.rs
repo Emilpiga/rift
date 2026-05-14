@@ -266,8 +266,8 @@ pub fn sandstorm_haze() -> Effect {
 }
 
 /// Rift-floor void embers — a slow, continuous field of
-/// crimson glowing motes rising from below the dungeon
-/// floor. Anchored on the player (set via `set_anchor` each
+/// mood-tinted motes rising from below the dungeon floor.
+/// Anchored on the player (set via `set_anchor` each
 /// frame) so the field travels with the camera and the
 /// player always sees fresh embers around them regardless of
 /// where they walk on the floor.
@@ -284,27 +284,49 @@ pub fn sandstorm_haze() -> Effect {
 ///
 /// Two layers compose the look:
 ///
-/// 1. **Bulk embers** — wide disc of soft-glow motes at a
-///    low emission rate. The mass of the effect. HDR
-///    crimson at birth fading through orange to nothing.
-///    Long lifetime + slow rise so the field is always
-///    populated.
+/// 1. **Bulk motes** — wide disc of soft-glow particles at a
+///    low emission rate. The mass of the effect. HDR colour is
+///    derived from the active floor fog so crypt floors glow
+///    blue, archive floors violet, prison floors green, etc.
 ///
 /// 2. **Hot sparks** — sparse, brighter, faster-rising
 ///    streaks born in the same disc. Gives the eye
 ///    something to track and adds high-frequency motion on
 ///    top of the slow bulk drift.
 ///
-/// Both layers are additive — the goal is glow, not
-/// occlusion. Far/fading embers are dim enough that they
-/// blend into the crimson void rather than reading as a
-/// hard particle pop. Infinite duration; despawned by the
-/// floor regen sweep.
+/// Additive layers provide glow; alpha ash provides occlusion.
+/// All chroma is pulled from the same fog colour that themes
+/// the abyss shader so the background particles belong to the
+/// floor mood instead of always reading as infernal.
 pub fn rift_void_embers() -> Effect {
+    rift_void_embers_tinted([0.090, 0.012, 0.008])
+}
+
+pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
+    let fog = Vec3::from(fog_color);
+    let peak = fog.max_element().max(0.001);
+    let chroma = fog / peak;
+
+    let mote_core = fog * 14.0 + chroma * 1.55;
+    let mote_mid = fog * 8.0 + chroma * 0.70;
+    let mote_tail = fog * 2.2 + chroma * 0.10;
+
+    let spark_core = fog * 20.0 + chroma * 2.60;
+    let spark_mid = fog * 10.0 + chroma * 0.90;
+    let spark_tail = fog * 2.6 + chroma * 0.12;
+
+    let ash_core = (fog * 3.6 + Vec3::splat(0.055)).min(Vec3::splat(0.52));
+    let ash_mid = (fog * 2.8 + Vec3::splat(0.040)).min(Vec3::splat(0.42));
+    let ash_tail = (fog * 1.8 + Vec3::splat(0.025)).min(Vec3::splat(0.30));
+
+    let wisp_core = fog * 15.0 + chroma * 0.90;
+    let wisp_mid = fog * 9.0 + chroma * 0.42;
+    let wisp_tail = fog * 2.5 + chroma * 0.08;
+
     Effect {
         duration: 0.0,
         layers: vec![
-            // Bulk embers — wide soft glow field.
+            // Bulk motes — wide soft glow field.
             Layer::Particles(ParticleSpec {
                 // Disc radius spans the visible play arena
                 // around the player. A bit beyond the
@@ -346,16 +368,15 @@ pub fn rift_void_embers() -> Effect {
                 // size keeps individual embers reading as
                 // discrete motes, not soft clouds.
                 size: Curve::from_stops([(0.00, 0.04), (0.30, 0.10), (1.00, 0.02)]),
-                // HDR crimson at birth (drives bloom),
-                // through deep orange, fading to oxblood-
-                // black. Alpha ramps in over the first
+                // HDR mood colour at birth (drives bloom),
+                // fading back toward the floor fog. Alpha ramps in over the first
                 // ~15 % so embers don't pop into existence
                 // — they "ignite" as they rise into view.
                 color: Gradient::from_stops([
-                    (0.00, [3.0, 0.35, 0.10, 0.00]),
-                    (0.15, [3.5, 0.55, 0.15, 0.90]),
-                    (0.55, [2.0, 0.25, 0.06, 0.70]),
-                    (1.00, [0.30, 0.02, 0.01, 0.00]),
+                    (0.00, [mote_core.x, mote_core.y, mote_core.z, 0.00]),
+                    (0.15, [mote_core.x, mote_core.y, mote_core.z, 0.90]),
+                    (0.55, [mote_mid.x, mote_mid.y, mote_mid.z, 0.70]),
+                    (1.00, [mote_tail.x, mote_tail.y, mote_tail.z, 0.00]),
                 ]),
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
@@ -385,15 +406,15 @@ pub fn rift_void_embers() -> Effect {
                     },
                 ],
                 size: Curve::from_stops([(0.00, 0.05), (0.40, 0.09), (1.00, 0.01)]),
-                // Hotter palette — pure white-orange core
-                // at birth, fades to dark crimson. Higher
-                // HDR boost so individual sparks read as
-                // bright pinpricks against the bulk glow.
+                // Hotter mood palette. Higher HDR boost so
+                // individual sparks read as bright pinpricks
+                // against the bulk glow without turning orange
+                // on non-infernal floors.
                 color: Gradient::from_stops([
-                    (0.00, [5.0, 1.4, 0.30, 0.00]),
-                    (0.12, [5.5, 1.8, 0.40, 1.00]),
-                    (0.55, [2.6, 0.40, 0.08, 0.70]),
-                    (1.00, [0.40, 0.03, 0.01, 0.00]),
+                    (0.00, [spark_core.x, spark_core.y, spark_core.z, 0.00]),
+                    (0.12, [spark_core.x, spark_core.y, spark_core.z, 1.00]),
+                    (0.55, [spark_mid.x, spark_mid.y, spark_mid.z, 0.70]),
+                    (1.00, [spark_tail.x, spark_tail.y, spark_tail.z, 0.00]),
                 ]),
                 sprite: SpriteShape::Streak,
                 blend: BlendMode::Additive,
@@ -451,19 +472,18 @@ pub fn rift_void_embers() -> Effect {
                 // shouldn't shrink to nothing because the
                 // alpha curve already handles the fade.
                 size: Curve::from_stops([(0.00, 0.06), (0.20, 0.14), (1.00, 0.10)]),
-                // Warm dim grey, no HDR — alpha-blended so
+                // Mood-tinted dim grey, no HDR — alpha-blended so
                 // the ash *occludes* the void instead of
-                // glowing. RGB tinted faintly orange so the
-                // flakes pick up the surrounding ember
-                // light rather than reading as cool snow.
+                // glowing. The tint follows the same fog chroma
+                // as the abyss instead of defaulting warm.
                 // Alpha tops out around 0.35 so the flakes
                 // are visible against the dark void but
                 // never fight the embers for attention.
                 color: Gradient::from_stops([
-                    (0.00, [0.45, 0.38, 0.30, 0.00]),
-                    (0.15, [0.50, 0.42, 0.32, 0.35]),
-                    (0.70, [0.40, 0.32, 0.24, 0.28]),
-                    (1.00, [0.28, 0.22, 0.16, 0.00]),
+                    (0.00, [ash_core.x, ash_core.y, ash_core.z, 0.00]),
+                    (0.15, [ash_core.x, ash_core.y, ash_core.z, 0.35]),
+                    (0.70, [ash_mid.x, ash_mid.y, ash_mid.z, 0.28]),
+                    (1.00, [ash_tail.x, ash_tail.y, ash_tail.z, 0.00]),
                 ]),
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
@@ -512,15 +532,15 @@ pub fn rift_void_embers() -> Effect {
                 // the first 25 % so they fade in rather
                 // than pop, then taper for the long fade.
                 size: Curve::from_stops([(0.00, 0.20), (0.25, 0.80), (1.00, 0.30)]),
-                // Dim HDR crimson — bright enough to glow
-                // against the void backdrop, dim enough
-                // that they read as distant. Alpha curve
-                // ramps in/out for soft births and deaths.
+                // Dim HDR mood colour — bright enough to glow
+                // against the void backdrop, dim enough that
+                // they read as distant. Alpha curve ramps in/out
+                // for soft births and deaths.
                 color: Gradient::from_stops([
-                    (0.00, [1.2, 0.10, 0.04, 0.00]),
-                    (0.20, [1.6, 0.18, 0.05, 0.55]),
-                    (0.70, [1.0, 0.10, 0.03, 0.45]),
-                    (1.00, [0.20, 0.02, 0.01, 0.00]),
+                    (0.00, [wisp_core.x, wisp_core.y, wisp_core.z, 0.00]),
+                    (0.20, [wisp_core.x, wisp_core.y, wisp_core.z, 0.55]),
+                    (0.70, [wisp_mid.x, wisp_mid.y, wisp_mid.z, 0.45]),
+                    (1.00, [wisp_tail.x, wisp_tail.y, wisp_tail.z, 0.00]),
                 ]),
                 sprite: SpriteShape::Wisp,
                 blend: BlendMode::Additive,

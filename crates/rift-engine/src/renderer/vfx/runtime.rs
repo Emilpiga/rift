@@ -31,7 +31,7 @@ use super::spec::{
     Effect, EffectBundle, EffectLight, EmissionMode, ForceField, Layer, ParticleSpec, RibbonSpec,
     SpawnShape, SpriteShape,
 };
-use crate::renderer::forward::{HeatSource, PointLight};
+use crate::renderer::forward::PointLight;
 
 /// Stable handle for one active effect. Wraps a generational
 /// index so freed slots can be reused without aliasing old IDs.
@@ -461,12 +461,7 @@ impl VfxSystem {
     /// Persistent effects (`duration == 0`) sample the curve at
     /// `t = 0` so the curve is effectively a constant — use
     /// `flicker_amp` to add liveliness instead.
-    pub fn collect_lights(
-        &self,
-        time_secs: f32,
-        out: &mut Vec<PointLight>,
-        heat_out: &mut Vec<HeatSource>,
-    ) {
+    pub fn collect_lights(&self, time_secs: f32, out: &mut Vec<PointLight>) {
         for inst in &self.instances {
             let Some(spec) = inst.spec.as_ref() else {
                 continue;
@@ -497,7 +492,7 @@ impl VfxSystem {
 
             if let Some(light) = inst.light.as_ref() {
                 let pos = anchor_for(inst) + light.offset;
-                push_effect_light(inst, light, pos, envelope, time_secs, out, heat_out);
+                push_effect_light(inst, light, pos, envelope, time_secs, out);
             }
             if let Some(light) = inst.tip_light.as_ref() {
                 // Tip lights live at `inst.tip` (the second
@@ -509,7 +504,7 @@ impl VfxSystem {
                 // ribbon-based beams, so this case shouldn't
                 // arise in practice.
                 let pos = inst.tip + light.offset;
-                push_effect_light(inst, light, pos, envelope, time_secs, out, heat_out);
+                push_effect_light(inst, light, pos, envelope, time_secs, out);
             }
         }
     }
@@ -1245,11 +1240,10 @@ fn compute_envelope(inst: &EffectInstance, spec: &Effect, light: &EffectLight) -
     }
 }
 
-/// Push a single [`PointLight`] (and optional [`HeatSource`])
-/// for an effect's anchor or tip light. Shared between the
-/// primary `light` and the optional `tip_light` so the two
-/// stay perfectly in lockstep through fades, flicker, and the
-/// `follow_particles` envelope.
+/// Push a single [`PointLight`] for an effect's anchor or tip
+/// light. Shared between the primary `light` and the optional
+/// `tip_light` so the two stay perfectly in lockstep through
+/// fades, flicker, and the `follow_particles` envelope.
 fn push_effect_light(
     inst: &EffectInstance,
     light: &EffectLight,
@@ -1257,7 +1251,6 @@ fn push_effect_light(
     curve_t: f32,
     time_secs: f32,
     out: &mut Vec<PointLight>,
-    heat_out: &mut Vec<HeatSource>,
 ) {
     let curve_mul = if let Some(curve) = light.intensity_curve.as_ref() {
         curve.sample(curve_t)
@@ -1288,16 +1281,6 @@ fn push_effect_light(
         radius: light.radius,
         intensity,
     });
-    if light.heat_haze {
-        let strength = (curve_mul * flicker).clamp(0.0, 1.0);
-        if strength > 1e-3 {
-            heat_out.push(HeatSource {
-                position: pos,
-                radius: light.radius,
-                strength,
-            });
-        }
-    }
 }
 
 fn hash_u32(a: u32, b: u32) -> u32 {

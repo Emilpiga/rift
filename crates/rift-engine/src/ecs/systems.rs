@@ -474,7 +474,8 @@ pub fn skinning_system(
     let frustum = renderer.camera.frustum_planes();
 
     let mut palette: Vec<glam::Mat4> = Vec::new();
-    for (_id, (renderable, skinned, animator, transform, mut cast, player, atts, foot_ik)) in world
+    let render_frame = renderer.frame_count();
+    for (id, (renderable, skinned, animator, transform, mut cast, player, atts, foot_ik)) in world
         .query_mut::<(
             &Renderable,
             &mut Skinned,
@@ -487,11 +488,13 @@ pub fn skinning_system(
         )>()
     {
         let is_player = player.is_some();
+        let mut anim_dt = dt;
         if !is_player {
             // Distance cull.
             let dx = transform.position.x - fog_origin.x;
             let dz = transform.position.z - fog_origin.z;
-            if dx * dx + dz * dz > skin_cull_dist_sq {
+            let dist_sq = dx * dx + dz * dz;
+            if dist_sq > skin_cull_dist_sq {
                 continue;
             }
             // Frustum cull. Use a generous radius so loose-fitting bind
@@ -502,9 +505,30 @@ pub fn skinning_system(
             {
                 continue;
             }
+
+            // Animation LOD for enemy-scale crowds. Close enemies keep
+            // full-rate pose updates; mid/far visible enemies are
+            // staggered across frames and advanced by the accumulated
+            // time when their phase comes up. This cuts palette uploads
+            // and GPU skinning dispatches for large visible packs while
+            // preserving animation speed.
+            let stride = if dist_sq > 18.0 * 18.0 {
+                4u64
+            } else if dist_sq > 9.0 * 9.0 {
+                2u64
+            } else {
+                1u64
+            };
+            if stride > 1 {
+                let phase = id.to_bits().get() % stride;
+                if render_frame % stride != phase {
+                    continue;
+                }
+                anim_dt *= stride as f32;
+            }
         }
 
-        animator.advance(dt);
+        animator.advance(anim_dt);
         if animator.clip.joint_count != skinned.mesh.joints.len() {
             continue; // mismatch — skip skinning, render bind pose
         }

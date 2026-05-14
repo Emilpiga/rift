@@ -142,9 +142,9 @@ pub fn blood_splatter(up: Vec3) -> Effect {
     }
 }
 
-/// Smaller blood spurt for non-fatal hits — fewer droplets, no
-/// mist, lower velocity than [`blood_splatter`]. Cheap enough
-/// to fire on every damage tick without overwhelming the screen.
+/// Smaller blood spurt for non-fatal hits — few droplets, no
+/// mist, lower velocity than [`blood_splatter`]. Kept deliberately
+/// lean because combat can emit many damage events in one frame.
 ///
 /// `up` is the spew axis (typically `Vec3::Y`).
 pub fn blood_hit_spurt(up: Vec3) -> Effect {
@@ -160,9 +160,9 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
                 axis,
                 half_angle: 0.85,
             },
-            emission: EmissionMode::Burst { count: 12 },
+            emission: EmissionMode::Burst { count: 6 },
             speed: (2.5, 5.5),
-            lifetime: (0.25, 0.45),
+            lifetime: (0.20, 0.34),
             forces: vec![
                 ForceField::Drag { coefficient: 1.4 },
                 ForceField::Gravity {

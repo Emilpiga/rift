@@ -186,6 +186,42 @@ impl OverlayBatch {
         self.rect(ndc_x, ndc_y, ndc_w, ndc_h, color);
     }
 
+    /// Filled triangle with pixel coordinates (top-left origin).
+    pub fn triangle_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let uv = Self::white_uv();
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / screen_w) * 2.0 - 1.0, (y / screen_h) * 2.0 - 1.0]
+        };
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x0, y0),
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x1, y1),
+            color,
+            uv,
+        });
+        self.vertices.push(OverlayVertex {
+            position: to_ndc(x2, y2),
+            color,
+            uv,
+        });
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
     /// Vertical-gradient pixel-space rect. `top` is sampled
     /// along the upper edge, `bot` along the lower edge.
     /// Linear interpolation across the quad gives a smooth
@@ -527,12 +563,12 @@ impl OverlayBatch {
         // from the callback. The four corners are passed in the
         // order TL, TR, BR, BL.
         let quad = |verts: &mut Vec<OverlayVertex>,
-                        indices: &mut Vec<u32>,
-                        p0: (f32, f32),
-                        p1: (f32, f32),
-                        p2: (f32, f32),
-                        p3: (f32, f32),
-                        color_at: &mut F| {
+                    indices: &mut Vec<u32>,
+                    p0: (f32, f32),
+                    p1: (f32, f32),
+                    p2: (f32, f32),
+                    p3: (f32, f32),
+                    color_at: &mut F| {
             let base = verts.len() as u32;
             verts.push(OverlayVertex {
                 position: to_ndc(p0.0, p0.1),
@@ -922,11 +958,11 @@ impl OverlayBatch {
         // "apply procedural noise + sample white".
         const NOISE_UV: [f32; 2] = [-1.0, -1.0];
         let quad = |verts: &mut Vec<OverlayVertex>,
-                        indices: &mut Vec<u32>,
-                        p0: (f32, f32),
-                        p1: (f32, f32),
-                        p2: (f32, f32),
-                        p3: (f32, f32)| {
+                    indices: &mut Vec<u32>,
+                    p0: (f32, f32),
+                    p1: (f32, f32),
+                    p2: (f32, f32),
+                    p3: (f32, f32)| {
             let base = verts.len() as u32;
             verts.push(OverlayVertex {
                 position: to_ndc(p0.0, p0.1),
@@ -2483,6 +2519,21 @@ impl rift_ui_im::DrawList for OverlayBatch {
         screen_h: f32,
     ) {
         OverlayBatch::line_px(self, x0, y0, x1, y1, thickness, color, screen_w, screen_h);
+    }
+
+    fn triangle_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::triangle_px(self, x0, y0, x1, y1, x2, y2, color, screen_w, screen_h);
     }
 
     fn glow_disc(

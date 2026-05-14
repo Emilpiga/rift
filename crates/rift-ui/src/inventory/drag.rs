@@ -16,7 +16,10 @@ pub enum DropTarget {
     /// Drop onto a specific bag slot (filled or empty
     /// rectangle the user clearly aimed at).
     Bag(u32),
-    Equip(EquipSlotIdx),
+    Equip {
+        slot: EquipSlotIdx,
+        occupied: bool,
+    },
     Stash(u32),
 }
 
@@ -55,7 +58,7 @@ pub fn route_slot(
     if r.clicked {
         let src = match target {
             DropTarget::Bag(idx) => DragSource::Bag(idx),
-            DropTarget::Equip(slot) => DragSource::Equip(slot),
+            DropTarget::Equip { slot, .. } => DragSource::Equip(slot),
             DropTarget::Stash(idx) => DragSource::Stash(idx),
         };
         handle_click(src, stash_open, ctrl, active_tab, out);
@@ -63,7 +66,7 @@ pub fn route_slot(
     if r.right_clicked {
         let src = match target {
             DropTarget::Bag(idx) => DragSource::Bag(idx),
-            DropTarget::Equip(slot) => DragSource::Equip(slot),
+            DropTarget::Equip { slot, .. } => DragSource::Equip(slot),
             DropTarget::Stash(idx) => DragSource::Stash(idx),
         };
         // Consumables hijack right-click: instead of the
@@ -200,10 +203,17 @@ pub fn handle_drop(
         (DragSource::Bag(a), DropTarget::Bag(b)) if a != b => {
             out.push(InventoryAction::SwapBag { a, b });
         }
-        (DragSource::Bag(idx), DropTarget::Equip(_)) => {
-            out.push(InventoryAction::Equip {
-                inventory_index: idx,
-            });
+        (DragSource::Bag(idx), DropTarget::Equip { slot, occupied }) => {
+            if occupied {
+                out.push(InventoryAction::UnequipToSlot {
+                    slot: slot.0,
+                    inventory_index: idx,
+                });
+            } else {
+                out.push(InventoryAction::Equip {
+                    inventory_index: idx,
+                });
+            }
         }
         (DragSource::Bag(a), DropTarget::Stash(b)) if stash_open => {
             out.push(InventoryAction::DepositToStashSlot {
@@ -218,7 +228,7 @@ pub fn handle_drop(
                 inventory_index: idx,
             });
         }
-        (DragSource::Equip(a), DropTarget::Equip(b)) if a != b => {
+        (DragSource::Equip(a), DropTarget::Equip { slot: b, .. }) if a != b => {
             // Only ring1 ↔ ring2 is a legal equip-to-equip
             // swap; every other pair would either be a no-op
             // (same slot) or violate `Equipment::accepts`.
@@ -244,11 +254,19 @@ pub fn handle_drop(
                 inventory_index: b,
             });
         }
-        (DragSource::Stash(idx), DropTarget::Equip(_)) if stash_open => {
-            out.push(InventoryAction::EquipFromStash {
-                tab_index: active_tab,
-                stash_index: idx,
-            });
+        (DragSource::Stash(idx), DropTarget::Equip { slot, occupied }) if stash_open => {
+            if occupied {
+                out.push(InventoryAction::UnequipToStashSlot {
+                    slot: slot.0,
+                    tab_index: active_tab,
+                    stash_index: idx,
+                });
+            } else {
+                out.push(InventoryAction::EquipFromStash {
+                    tab_index: active_tab,
+                    stash_index: idx,
+                });
+            }
         }
         (DragSource::Stash(a), DropTarget::Stash(b)) if stash_open && a != b => {
             out.push(InventoryAction::SwapStash {
@@ -258,5 +276,80 @@ pub fn handle_drop(
             });
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bag_drop_on_occupied_ring2_replaces_that_exact_slot() {
+        let mut out = Vec::new();
+
+        handle_drop(
+            DragSource::Bag(4),
+            DropTarget::Equip {
+                slot: EquipSlotIdx(7),
+                occupied: true,
+            },
+            false,
+            0,
+            &mut out,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [InventoryAction::UnequipToSlot {
+                slot: 7,
+                inventory_index: 4
+            }]
+        ));
+    }
+
+    #[test]
+    fn bag_drop_on_empty_equipment_slot_keeps_generic_equip() {
+        let mut out = Vec::new();
+
+        handle_drop(
+            DragSource::Bag(4),
+            DropTarget::Equip {
+                slot: EquipSlotIdx(7),
+                occupied: false,
+            },
+            false,
+            0,
+            &mut out,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [InventoryAction::Equip { inventory_index: 4 }]
+        ));
+    }
+
+    #[test]
+    fn stash_drop_on_occupied_ring2_replaces_that_exact_slot() {
+        let mut out = Vec::new();
+
+        handle_drop(
+            DragSource::Stash(3),
+            DropTarget::Equip {
+                slot: EquipSlotIdx(7),
+                occupied: true,
+            },
+            true,
+            2,
+            &mut out,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [InventoryAction::UnequipToStashSlot {
+                slot: 7,
+                tab_index: 2,
+                stash_index: 3
+            }]
+        ));
     }
 }

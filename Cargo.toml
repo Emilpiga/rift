@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence", "crates/rift-audio", "crates/rift-ui-im", "crates/rift-ui-types", "crates/rift-ui"]
+members = ["crates/rift-engine", "crates/rift-math", "crates/rift-game", "crates/rift-client", "crates/rift-net", "crates/rift-server", "crates/rift-dungeon", "crates/rift-persistence", "crates/rift-audio", "crates/rift-ui-im", "crates/rift-ui-types", "crates/rift-ui", "crates/rift-launcher"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -45,6 +45,7 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
+ureq = "2"
 
 # Steamworks Game Server / Client SDK bindings, used by the
 # production Steam auth path. Opt-in via the `steam-auth`

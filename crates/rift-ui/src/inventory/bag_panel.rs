@@ -259,7 +259,10 @@ pub fn render_paperdoll(
         let hovered = r.response.hovered;
         route_slot_capture(
             r,
-            DropTarget::Equip(slot),
+            DropTarget::Equip {
+                slot,
+                occupied: item.is_some(),
+            },
             bag_in.stash_open,
             false,
             bag_in.active_tab_u8,
@@ -357,8 +360,14 @@ pub fn render_bag_grid(
             DragSource::Bag(i) => Some(i),
             _ => None,
         };
+        let grid_rect = Rect::from_xywh(
+            layout.bag_origin.x,
+            layout.bag_origin.y,
+            layout.bag_cell * cols as f32,
+            layout.bag_cell * rows as f32,
+        );
         let grid = GridSpec {
-            rect: layout.bag,
+            rect: grid_rect,
             cell_px: layout.bag_cell,
             cols,
             rows,

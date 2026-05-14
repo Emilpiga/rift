@@ -78,6 +78,17 @@ float fbm2(vec2 p) {
     return v;
 }
 
+float fbm2_fast(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 3; ++i) {
+        v += a * vnoise2(p);
+        p *= 2.03;
+        a *= 0.5;
+    }
+    return v;
+}
+
 mat2 rot2(float a) {
     float c = cos(a);
     float s = sin(a);
@@ -171,16 +182,12 @@ void main() {
         vec2 p = flow_dir * mix(1.65, 4.2, depth) + vec2(7.13, -3.71);
         p = rot2(depth * 1.15 + t * 0.018) * p;
         vec2 warp = vec2(
-            fbm2(p * 1.55 + vec2(t * 0.012, -1.7)),
-            fbm2(rot2(0.83) * p * 1.55 + vec2(3.1, -t * 0.010))
+            fbm2_fast(p * 1.55 + vec2(t * 0.012, -1.7)),
+            fbm2_fast(rot2(0.83) * p * 1.55 + vec2(3.1, -t * 0.010))
         ) - 0.5;
         vec2 flow = p + warp * (0.72 + depth * 0.45);
-        float body_a = fbm2(flow * 1.55 + vec2(0.0, -t * 0.018));
-        float body_b = fbm2(rot2(1.19) * flow * 2.10 + vec2(4.2, t * 0.014));
-        float body = mix(body_a, body_b, 0.38);
-        float detail_a = fbm2(flow * 4.20 + vec2(5.2, t * 0.027));
-        float detail_b = fbm2(rot2(0.51) * flow * 5.40 + vec2(-2.6, -t * 0.019));
-        float detail = mix(detail_a, detail_b, 0.34);
+        float body = fbm2_fast(flow * 1.65 + vec2(0.0, -t * 0.018));
+        float detail = fbm2_fast(rot2(0.51) * flow * 4.85 + vec2(5.2, t * 0.027));
         float ridged = 1.0 - abs(detail * 2.0 - 1.0);
         float warped_down = clamp(
             down + (body - 0.5) * 0.105 + (detail - 0.5) * 0.035 + sin(theta * 2.0 + t * 0.04) * 0.018,
@@ -189,13 +196,13 @@ void main() {
         );
 
         vec3 abyss_black = vec3(0.003, 0.0008, 0.006);
-        vec3 theme_ocean = mix(pc.horizon_sun_size.rgb, pc.zenith_falloff.rgb, 0.32);
+        vec3 theme_ocean = mix(pc.ground_sun_str.rgb * 2.15, pc.horizon_sun_size.rgb, 0.36);
         float theme_peak = max(max(theme_ocean.r, theme_ocean.g), max(theme_ocean.b, 0.018));
         vec3 theme_chroma = clamp(theme_ocean / theme_peak, vec3(0.0), vec3(1.0));
         vec3 abyss_shadow = mix(pc.ground_sun_str.rgb, abyss_black, 0.72);
         vec3 abyss_mid = mix(pc.horizon_sun_size.rgb, pc.zenith_falloff.rgb, 0.28);
-        vec3 abyss_hot = mix(abyss_mid, theme_ocean * 2.45 + theme_chroma * 0.10, 0.42);
-        vec3 abyss_cold = mix(abyss_mid, mix(theme_ocean, vec3(0.035, 0.025, 0.060), 0.46), 0.38);
+        vec3 abyss_hot = mix(abyss_mid, theme_ocean * 2.85 + theme_chroma * 0.13, 0.62);
+        vec3 abyss_cold = mix(abyss_mid, mix(theme_ocean, vec3(0.030, 0.022, 0.055), 0.34), 0.48);
 
         float well = smoothstep(0.02, 0.95, warped_down);
         vec3 abyss_base = mix(abyss_mid, abyss_shadow, well);
@@ -246,7 +253,7 @@ void main() {
                          * smoothstep(0.58, 0.90, ridged)
                          * ocean_mask
                          * (1.0 - smoothstep(0.24, 0.64, ocean_depth));
-        float foam_noise = fbm2(rot2(0.37) * flow * 8.5 + vec2(t * 0.045, -2.8));
+        float foam_noise = vnoise2(rot2(0.37) * flow * 8.5 + vec2(t * 0.045, -2.8));
         float crest_foam = soft_band(ocean_wave + (foam_noise - 0.5) * 0.18, 0.86, 0.060)
                          * smoothstep(0.54, 0.88, ridged)
                          * ocean_mask
@@ -258,10 +265,10 @@ void main() {
         float foam = clamp((crest_foam + shear_foam * 0.65) * smoothstep(0.48, 0.82, foam_noise), 0.0, 1.0);
 
         vec3 abyss = abyss_base;
-        vec3 ocean_theme = mix(abyss_mid, abyss_hot, 0.36);
+        vec3 ocean_theme = mix(theme_ocean * 1.25, abyss_hot, 0.42);
         vec3 ocean_body = ocean_theme * (0.70 + ocean_swell * 0.20);
         ocean_body = mix(ocean_body, abyss_shadow, ocean_trough * 0.52);
-        abyss = mix(abyss, ocean_body, ocean_mask * 0.28);
+        abyss = mix(abyss, ocean_body, ocean_mask * 0.52);
         float sink = smoothstep(0.56, 1.0, warped_down) * (0.72 + body * 0.28);
         float ink = smoothstep(0.14, 0.90, warped_down) * (1.0 - smoothstep(0.50, 0.96, body));
         ink += smoothstep(0.52, 1.0, warped_down) * smoothstep(0.18, 0.72, ridged) * 0.35;
@@ -280,7 +287,7 @@ void main() {
         tint_target = mix(tint_target, abyss_hot, warm_tint * 0.12);
         abyss = mix(abyss, tint_target, 0.36);
 
-        vec3 lift_color = mix(abyss_mid, pc.zenith_falloff.rgb, 0.22);
+        vec3 lift_color = mix(theme_ocean, pc.zenith_falloff.rgb, 0.18);
         float flow_lift = undercurrent * 0.030
                 + bands * 0.066
                 + filaments * 0.036
@@ -294,7 +301,8 @@ void main() {
         abyss += lift_color * ocean_spec * 0.050;
         abyss += lift_color * foam * 0.070;
 
-        vec3 depth_grade = mix(abyss_mid, abyss_shadow, smoothstep(0.14, 0.94, warped_down));
+        vec3 theme_grade = mix(abyss_mid, theme_ocean * 1.28 + theme_chroma * 0.020, 0.58);
+        vec3 depth_grade = mix(theme_grade, abyss_shadow, smoothstep(0.14, 0.94, warped_down));
         abyss = mix(abyss, depth_grade + (abyss - depth_grade) * 0.54, 0.52);
         float abyss_luma = max(dot(abyss, vec3(0.2126, 0.7152, 0.0722)), 0.0001);
         float grade_luma = max(dot(depth_grade, vec3(0.2126, 0.7152, 0.0722)), 0.0001);

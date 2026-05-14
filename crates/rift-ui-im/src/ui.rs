@@ -723,6 +723,35 @@ impl<'a> Ui<'a> {
         );
     }
 
+    /// Filled triangle with pixel-space vertices.
+    pub fn draw_triangle(&mut self, p0: Pos2, p1: Pos2, p2: Pos2, color: Color) {
+        self.layers
+            .push(self.current_layer, DrawCmd::Triangle { p0, p1, p2, color });
+    }
+
+    /// Filled arrow oriented along `dir`, where positive `dir`
+    /// points from the arrow tail toward the tip.
+    pub fn draw_arrow(&mut self, centre: Pos2, dir: Vec2, length: f32, width: f32, color: Color) {
+        if length <= 0.0 || width <= 0.0 {
+            return;
+        }
+        let len = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        if len <= 1e-6 {
+            return;
+        }
+        let nx = dir.x / len;
+        let ny = dir.y / len;
+        let tx = -ny;
+        let ty = nx;
+        let half_len = length * 0.5;
+        let tip = Pos2::new(centre.x + nx * half_len, centre.y + ny * half_len);
+        let base = Pos2::new(centre.x - nx * half_len, centre.y - ny * half_len);
+        let half_w = width * 0.5;
+        let left = Pos2::new(base.x + tx * half_w, base.y + ty * half_w);
+        let right = Pos2::new(base.x - tx * half_w, base.y - ty * half_w);
+        self.draw_triangle(tip, left, right, color);
+    }
+
     /// Filled circle centred at `centre` with pixel `radius`.
     /// Implemented as a square rounded-rect with `radius =
     /// half-side`, so it inherits the smooth perimeter

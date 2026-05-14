@@ -8,28 +8,34 @@ use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{
     Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Resource, Transform,
 };
-use rift_engine::ui::im::{Color, Pos2, Rect, ResourceBarAnim, Ui};
+use rift_engine::ui::im::{Color, Pos2, Rect, ResourceBarAnim, Ui, Vec2 as UiVec2};
 
 use super::draw_effect_pip_strip;
 
-/// Off-screen / far-away boss locator. When the boss is alive but the
-/// player can't see them (off-screen, behind camera, or > ARROW_RANGE
-/// world units away), draw a glowing arrow at the screen edge pointing
-/// toward the boss in screen space.
-pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) {
-    const ARROW_RANGE_SQ: f32 = 16.0 * 16.0; // show arrow if boss > 16 m away
-    const EDGE_PAD: f32 = 110.0;
+/// Boss locator shown during the active boss phase. Uses the same
+/// projection convention as the portal compass so the marker sits on
+/// the same side of the screen as the world-space boss.
+pub fn render_boss_arrow(
+    ui: &mut Ui<'_>,
+    world: &hecs::World,
+    view_proj: Mat4,
+    boss_room_center: Vec3,
+) {
+    const EDGE_PAD: f32 = 106.0;
+    const BOSS_ROOM_HIDE_DIST_SQ: f32 = 14.0 * 14.0;
 
     let screen = ui.screen_size();
     let sw = screen.x;
     let sh = screen.y;
 
-    let boss_pos: Option<Vec3> = world
+    let boss_entity_pos: Option<Vec3> = world
         .query::<(&Transform, &Boss)>()
         .iter()
         .map(|(_, (t, _))| t.position + Vec3::new(0.0, 1.2, 0.0))
         .next();
-    let Some(boss_pos) = boss_pos else { return };
+    let (boss_pos, has_boss_entity) = boss_entity_pos
+        .map(|pos| (pos, true))
+        .unwrap_or((boss_room_center + Vec3::new(0.0, 1.2, 0.0), false));
 
     let player_pos: Option<Vec3> = world
         .query::<(&Transform, &Player, &LocalPlayer)>()
@@ -38,122 +44,77 @@ pub fn render_boss_arrow(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4) 
         .next();
     let Some(player_pos) = player_pos else { return };
 
+    let to_room = boss_room_center - player_pos;
+    let room_dist_sq = to_room.x * to_room.x + to_room.z * to_room.z;
+    if room_dist_sq < BOSS_ROOM_HIDE_DIST_SQ {
+        return;
+    }
+
     let to_boss = boss_pos - player_pos;
     let dist_sq = to_boss.x * to_boss.x + to_boss.z * to_boss.z;
 
     let clip = view_proj * boss_pos.extend(1.0);
-    let on_screen = if clip.w > 0.0 {
-        let ndc = clip.truncate() / clip.w;
-        ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0
-    } else {
-        false
-    };
-
-    if on_screen && dist_sq < ARROW_RANGE_SQ {
-        return;
-    }
-
     let cx = sw * 0.5;
     let cy = sh * 0.5;
-    let (dx, dy) = if clip.w > 0.0 {
+    let (raw_x, raw_y, on_screen) = if clip.w > 0.0 {
         let ndc = clip.truncate() / clip.w;
-        let bx = (ndc.x + 1.0) * 0.5 * sw - cx;
-        let by = (ndc.y + 1.0) * 0.5 * sh - cy;
-        (bx, by)
+        let sx = (ndc.x + 1.0) * 0.5 * sw;
+        let sy = (ndc.y + 1.0) * 0.5 * sh;
+        (sx - cx, sy - cy, ndc.x.abs() <= 0.86 && ndc.y.abs() <= 0.78)
     } else {
         let ndc_clip = clip.truncate() / clip.w.abs().max(1.0);
-        (-ndc_clip.x * sw, ndc_clip.y * sh)
+        (-ndc_clip.x * sw, ndc_clip.y * sh, false)
     };
-    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-    let nx = dx / len;
-    let ny = dy / len;
+    let len = (raw_x * raw_x + raw_y * raw_y).sqrt().max(1e-3);
+    let nx = raw_x / len;
+    let ny = raw_y / len;
 
-    let max_x = sw * 0.5 - EDGE_PAD;
-    let max_y = sh * 0.5 - EDGE_PAD;
-    let scale = (max_x / nx.abs().max(1e-3)).min(max_y / ny.abs().max(1e-3));
-    let ax = cx + nx * scale;
-    let ay = cy + ny * scale;
+    let (ax, ay) = if on_screen {
+        (cx + raw_x, cy + raw_y)
+    } else {
+        let max_x = sw * 0.5 - EDGE_PAD;
+        let max_y = sh * 0.5 - EDGE_PAD;
+        let scale = (max_x / nx.abs().max(1e-3)).min(max_y / ny.abs().max(1e-3));
+        (cx + nx * scale, cy + ny * scale)
+    };
 
     let dist = dist_sq.sqrt();
-    let pulse = 0.75 + 0.25 * ((dist * 0.06).sin().abs());
-    let col = Color::rgba(1.00, 0.42, 0.05, (0.98 * pulse).clamp(0.7, 1.0));
-
-    let tx = -ny;
-    let ty = nx;
-
-    let line = |ui: &mut Ui<'_>, u0: f32, v0: f32, u1: f32, v1: f32, thickness: f32| {
-        let du = u1 - u0;
-        let dv = v1 - v0;
-        let line_len = (du * du + dv * dv).sqrt().max(1.0);
-        let dot_pitch: f32 = 1.5;
-        let count = (line_len / dot_pitch).ceil() as i32;
-        for i in 0..=count {
-            let t = i as f32 / count as f32;
-            let u = u0 + du * t;
-            let v = v0 + dv * t;
-            let sx_ = ax + nx * u + tx * v;
-            let sy_ = ay + ny * u + ty * v;
-            ui.draw_rect(
-                Rect::from_xywh(
-                    sx_ - thickness * 0.5,
-                    sy_ - thickness * 0.5,
-                    thickness,
-                    thickness,
-                ),
-                col,
-            );
-        }
-    };
-
-    const HEAD_LEN: f32 = 22.0;
-    const SHAFT_LEN: f32 = 26.0;
-    const HALF_W: f32 = 22.0;
-    const SHAFT_W: f32 = 8.0;
-    let tip_u = HEAD_LEN;
-    let wing_u = 0.0;
-    let tail_u = -SHAFT_LEN;
-    let thick = 4.0;
-
-    line(ui, tip_u, 0.0, wing_u, HALF_W, thick);
-    line(ui, tip_u, 0.0, wing_u, -HALF_W, thick);
-    line(ui, wing_u, HALF_W, wing_u, SHAFT_W, thick);
-    line(ui, wing_u, -HALF_W, wing_u, -SHAFT_W, thick);
-    line(ui, wing_u, SHAFT_W, tail_u, SHAFT_W, thick);
-    line(ui, wing_u, -SHAFT_W, tail_u, -SHAFT_W, thick);
-    line(ui, tail_u, SHAFT_W, tail_u, -SHAFT_W, thick);
-
-    let fill_arr = col.0;
-    let fill = Color::rgba(
-        fill_arr[0],
-        fill_arr[1],
-        fill_arr[2],
-        (fill_arr[3] * 0.65).clamp(0.0, 1.0),
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let pulse = 0.5 + 0.5 * ((dist * 0.10).sin().abs());
+    let accent = Color::rgba(1.00, 0.22, 0.08, 0.92 + 0.08 * pulse);
+    let warm = Color::rgba(1.00, 0.70, 0.24, 0.78 + 0.15 * pulse);
+    let arrow_dir = UiVec2::new(nx, ny);
+    ui.draw_arrow(
+        Pos2::new(ax, ay),
+        arrow_dir,
+        if on_screen { 24.0 * s } else { 34.0 * s },
+        if on_screen { 20.0 * s } else { 28.0 * s },
+        accent,
     );
-    let v_steps = 28;
-    for i in 1..v_steps {
-        let v = -HALF_W + (HALF_W * 2.0) * (i as f32 / v_steps as f32);
-        let av = v.abs();
-        let in_head = av <= HALF_W;
-        if !in_head {
-            continue;
-        }
-        let head_u = HEAD_LEN * (1.0 - av / HALF_W);
-        let in_shaft_band = av <= SHAFT_W;
-        let left_u = if in_shaft_band { tail_u } else { 0.0 };
-        let dot_pitch: f32 = 1.6;
-        let span = head_u - left_u;
-        if span <= 0.0 {
-            continue;
-        }
-        let count = (span / dot_pitch).ceil() as i32;
-        for j in 0..=count {
-            let t = j as f32 / count as f32;
-            let u = left_u + span * t;
-            let sx_ = ax + nx * u + tx * v;
-            let sy_ = ay + ny * u + ty * v;
-            ui.draw_rect(Rect::from_xywh(sx_ - 1.5, sy_ - 1.5, 3.0, 3.0), fill);
-        }
-    }
+    ui.draw_arrow(
+        Pos2::new(ax - nx * 3.0 * s, ay - ny * 3.0 * s),
+        arrow_dir,
+        if on_screen { 15.0 * s } else { 23.0 * s },
+        if on_screen { 11.0 * s } else { 17.0 * s },
+        warm,
+    );
+
+    let label = if has_boss_entity {
+        format!("BOSS  {:.0}m", dist)
+    } else {
+        format!("BOSS ROOM  {:.0}m", dist)
+    };
+    let font = 11.0 * s;
+    let label_w = ui.measure_text(&label, font);
+    let label_x = (ax - label_w * 0.5).clamp(8.0 * s, sw - label_w - 8.0 * s);
+    let label_y = (ay + 22.0 * s).clamp(48.0 * s, sh - 30.0 * s);
+    ui.draw_text(
+        Pos2::new(label_x, label_y),
+        &label,
+        font,
+        Color::rgba(1.0, 0.76, 0.42, 0.98),
+    );
 }
 
 /// Post-boss portal-room locator. Unlike the boss arrow this is
@@ -192,7 +153,7 @@ pub fn render_portal_compass(
     let (raw_x, raw_y, on_screen) = if clip.w > 0.0 {
         let ndc = clip.truncate() / clip.w;
         let sx = (ndc.x + 1.0) * 0.5 * sw;
-        let sy = (1.0 - (ndc.y + 1.0) * 0.5) * sh;
+        let sy = (ndc.y + 1.0) * 0.5 * sh;
         (sx - cx, sy - cy, ndc.x.abs() <= 0.86 && ndc.y.abs() <= 0.78)
     } else {
         let ndc_clip = clip.truncate() / clip.w.abs().max(1.0);
@@ -217,76 +178,30 @@ pub fn render_portal_compass(
     let pulse = 0.5 + 0.5 * ((dist * 0.12).sin().abs());
     let accent = Color::rgba(0.96, 0.24, 0.15, 0.90 + 0.10 * pulse);
     let warm = Color::rgba(1.0, 0.72, 0.36, 0.80 + 0.14 * pulse);
-    let dim = Color::rgba(0.10, 0.02, 0.05, 0.62);
 
-    let tx = -ny;
-    let ty = nx;
-    let line = |ui: &mut Ui<'_>, u0: f32, v0: f32, u1: f32, v1: f32, thickness: f32, col: Color| {
-        let du = u1 - u0;
-        let dv = v1 - v0;
-        let line_len = (du * du + dv * dv).sqrt().max(1.0);
-        let count = (line_len / 1.45).ceil() as i32;
-        for i in 0..=count {
-            let t = i as f32 / count as f32;
-            let u = u0 + du * t;
-            let v = v0 + dv * t;
-            let sx_ = ax + nx * u + tx * v;
-            let sy_ = ay + ny * u + ty * v;
-            ui.draw_rect(
-                Rect::from_xywh(
-                    sx_ - thickness * 0.5,
-                    sy_ - thickness * 0.5,
-                    thickness,
-                    thickness,
-                ),
-                col,
-            );
-        }
-    };
-
-    let halo = 26.0 * s;
-    ui.draw_gradient_rect(
-        Rect::from_xywh(ax - halo, ay - halo, halo * 2.0, halo * 2.0),
-        Color::rgba(0.85, 0.07, 0.12, 0.16),
-        Color::rgba(0.02, 0.00, 0.02, 0.00),
+    let arrow_dir = UiVec2::new(nx, ny);
+    ui.draw_arrow(
+        Pos2::new(ax, ay),
+        arrow_dir,
+        if on_screen { 22.0 * s } else { 31.0 * s },
+        if on_screen { 18.0 * s } else { 25.0 * s },
+        accent,
     );
-
-    if on_screen {
-        let r = 13.0 * s;
-        ui.draw_rect(Rect::from_xywh(ax - r, ay - r, r * 2.0, r * 2.0), dim);
-        ui.draw_outline(
-            Rect::from_xywh(ax - r, ay - r, r * 2.0, r * 2.0),
-            1.0 * s,
-            accent,
-        );
-        line(ui, -8.0 * s, 0.0, 8.0 * s, 0.0, 3.0 * s, warm);
-        line(ui, 0.0, -8.0 * s, 0.0, 8.0 * s, 3.0 * s, warm);
-    } else {
-        let head = 24.0 * s;
-        let wing = 18.0 * s;
-        let tail = 28.0 * s;
-        line(ui, head, 0.0, 0.0, wing, 4.0 * s, accent);
-        line(ui, head, 0.0, 0.0, -wing, 4.0 * s, accent);
-        line(ui, 0.0, wing, -tail, 0.0, 3.0 * s, warm);
-        line(ui, 0.0, -wing, -tail, 0.0, 3.0 * s, warm);
-        line(ui, -tail, 0.0, -tail - 16.0 * s, 0.0, 3.0 * s, accent);
-    }
+    ui.draw_arrow(
+        Pos2::new(ax - nx * 3.0 * s, ay - ny * 3.0 * s),
+        arrow_dir,
+        if on_screen { 14.0 * s } else { 21.0 * s },
+        if on_screen { 10.0 * s } else { 15.0 * s },
+        warm,
+    );
 
     let label = format!("PORTAL  {:.0}m", dist);
     let font = 11.0 * s;
     let label_w = ui.measure_text(&label, font);
-    let label_pad_x = 8.0 * s;
-    let label_rect = Rect::from_xywh(
-        (ax - label_w * 0.5 - label_pad_x)
-            .clamp(8.0 * s, sw - label_w - label_pad_x * 2.0 - 8.0 * s),
-        (ay + 22.0 * s).clamp(48.0 * s, sh - 38.0 * s),
-        label_w + label_pad_x * 2.0,
-        19.0 * s,
-    );
-    ui.draw_rect(label_rect, Color::rgba(0.035, 0.012, 0.020, 0.82));
-    ui.draw_outline(label_rect, 1.0 * s, Color::rgba(1.0, 0.40, 0.24, 0.42));
+    let label_x = (ax - label_w * 0.5).clamp(8.0 * s, sw - label_w - 8.0 * s);
+    let label_y = (ay + 20.0 * s).clamp(48.0 * s, sh - 30.0 * s);
     ui.draw_text(
-        Pos2::new(label_rect.x() + label_pad_x, label_rect.y() + 3.0 * s),
+        Pos2::new(label_x, label_y),
         &label,
         font,
         Color::rgba(1.0, 0.78, 0.48, 0.96),
@@ -306,10 +221,11 @@ pub fn render_enemy_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj:
     for (entity, (transform, _enemy, health)) in
         world.query::<(&Transform, &Enemy, &Health)>().iter()
     {
-        let effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
-            .get::<&Effects>(entity)
-            .map(|d| d.effects.clone())
-            .unwrap_or_default();
+        let effects_ref = world.get::<&Effects>(entity).ok();
+        let effects = effects_ref
+            .as_ref()
+            .map(|d| d.effects.as_slice())
+            .unwrap_or(&[]);
         let damaged = health.current < health.max;
         if !damaged && effects.is_empty() {
             continue;
@@ -430,12 +346,15 @@ pub fn render_remote_player_health_bars(
             );
         }
 
-        let effects: Vec<rift_engine::ecs::components::ActiveEffect> = world
-            .get::<&Effects>(entity)
-            .map(|d| d.effects.clone())
-            .unwrap_or_default();
-        if let (Some(rect), false) = (bar_rect, effects.is_empty()) {
-            draw_effect_pips(&mut wui, rect, &effects);
+        let effects_ref = world.get::<&Effects>(entity).ok();
+        if let (Some(rect), Some(effects)) = (
+            bar_rect,
+            effects_ref
+                .as_ref()
+                .map(|d| d.effects.as_slice())
+                .filter(|effects| !effects.is_empty()),
+        ) {
+            draw_effect_pips(&mut wui, rect, effects);
         }
     }
 }

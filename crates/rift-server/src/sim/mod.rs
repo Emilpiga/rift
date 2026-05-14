@@ -200,6 +200,103 @@ pub(super) fn place_grid_item_at(
     true
 }
 
+pub(super) fn grid_blockers_in(
+    slots: &[Option<rift_game::loot::Item>],
+    anchor: usize,
+    w: u8,
+    h: u8,
+    cols: usize,
+    rows: usize,
+) -> Vec<usize> {
+    let mut owner: Vec<Option<usize>> = vec![None; cols * rows];
+    for (idx, slot) in slots.iter().enumerate() {
+        let Some(it) = slot else { continue };
+        if idx >= cols * rows {
+            break;
+        }
+        let (iw, ih) = it.footprint();
+        let cx = idx % cols;
+        let cy = idx / cols;
+        for dy in 0..ih as usize {
+            for dx in 0..iw as usize {
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if nx < cols && ny < rows {
+                    owner[ny * cols + nx] = Some(idx);
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<usize> = Vec::new();
+    let ax = anchor % cols;
+    let ay = anchor / cols;
+    for dy in 0..h as usize {
+        for dx in 0..w as usize {
+            let nx = ax + dx;
+            let ny = ay + dy;
+            if nx >= cols || ny >= rows {
+                continue;
+            }
+            if let Some(o) = owner[ny * cols + nx] {
+                if !out.contains(&o) {
+                    out.push(o);
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(super) fn move_grid_item_to_anchor(
+    slots: &mut Vec<Option<rift_game::loot::Item>>,
+    source: usize,
+    target: usize,
+    cols: usize,
+    rows: usize,
+) -> bool {
+    let capacity = cols * rows;
+    if source == target || source >= capacity || target >= capacity {
+        return false;
+    }
+    if slots.len() < capacity {
+        slots.resize_with(capacity, || None);
+    }
+    let Some(item) = slots[source].take() else {
+        return false;
+    };
+    let (w, h) = item.footprint();
+    let blockers = grid_blockers_in(slots, target, w, h, cols, rows);
+    if blockers.len() > 1 {
+        slots[source] = Some(item);
+        return false;
+    }
+    let displaced_idx = blockers.first().copied();
+    let displaced = displaced_idx.and_then(|i| slots[i].take());
+
+    let occ = build_grid_occupancy(slots, cols, rows);
+    if !footprint_fits_in(&occ, cols, rows, target, w, h) {
+        if let (Some(i), Some(it)) = (displaced_idx, displaced) {
+            slots[i] = Some(it);
+        }
+        slots[source] = Some(item);
+        return false;
+    }
+
+    slots[target] = Some(item);
+    if let Some(prev) = displaced {
+        if !place_grid_item_at(slots, prev.clone(), source, cols, rows) {
+            let moved = slots[target].take().unwrap();
+            if let Some(i) = displaced_idx {
+                slots[i] = Some(prev);
+            }
+            slots[source] = Some(moved);
+            return false;
+        }
+    }
+    true
+}
+
 // ── Bag-specialized wrappers (use BAG_COLS × BAG_ROWS) ──
 
 pub(super) fn build_bag_occupancy(bag: &[Option<rift_game::loot::Item>]) -> Vec<bool> {
@@ -817,6 +914,99 @@ impl Sim {
     /// send to the instance's members.
     pub fn build_meter_snapshot(&self) -> rift_net::messages::ServerMsg {
         self.meters.build_snapshot(&self.world)
+    }
+}
+
+#[cfg(test)]
+mod grid_move_tests {
+    use super::*;
+    use rift_game::loot::{Item, Rarity, BASE_ITEMS};
+
+    fn item(base_id: &str) -> Item {
+        let base = BASE_ITEMS
+            .iter()
+            .find(|base| base.id == base_id)
+            .unwrap_or_else(|| panic!("missing base item {base_id}"));
+        Item {
+            base,
+            rarity: Rarity::Common,
+            ilvl: 1,
+            affixes: Vec::new(),
+            anchored: false,
+            unstable: false,
+            provenance: None,
+            unique_id: None,
+            unique_pick: None,
+            rift_touched: None,
+        }
+    }
+
+    fn ids(slots: &[Option<Item>]) -> Vec<Option<&'static str>> {
+        slots
+            .iter()
+            .map(|slot| slot.as_ref().map(|item| item.base.id))
+            .collect()
+    }
+
+    #[test]
+    fn move_to_empty_anchor_uses_requested_cell() {
+        let mut slots = vec![None; 16];
+        slots[0] = Some(item("ring_basic"));
+
+        assert!(move_grid_item_to_anchor(&mut slots, 0, 10, 4, 4));
+
+        assert_eq!(ids(&slots)[0], None);
+        assert_eq!(ids(&slots)[10], Some("ring_basic"));
+    }
+
+    #[test]
+    fn move_onto_non_anchor_cell_displaces_owner_to_source() {
+        let mut slots = vec![None; 16];
+        slots[0] = Some(item("ring_basic"));
+        slots[5] = Some(item("light_shoulders"));
+
+        assert!(move_grid_item_to_anchor(&mut slots, 0, 10, 4, 4));
+
+        assert_eq!(ids(&slots)[0], Some("light_shoulders"));
+        assert_eq!(ids(&slots)[5], None);
+        assert_eq!(ids(&slots)[10], Some("ring_basic"));
+    }
+
+    #[test]
+    fn move_rejects_multiple_blockers_without_mutating() {
+        let mut slots = vec![None; 16];
+        slots[0] = Some(item("staff_basic"));
+        slots[9] = Some(item("ring_basic"));
+        slots[10] = Some(item("ring_basic"));
+        let before = ids(&slots);
+
+        assert!(!move_grid_item_to_anchor(&mut slots, 0, 5, 4, 4));
+
+        assert_eq!(ids(&slots), before);
+    }
+
+    #[test]
+    fn move_rejects_when_displaced_item_cannot_fit_source() {
+        let mut slots = vec![None; 16];
+        slots[3] = Some(item("ring_basic"));
+        slots[5] = Some(item("heavy_chest"));
+        let before = ids(&slots);
+
+        assert!(!move_grid_item_to_anchor(&mut slots, 3, 6, 4, 4));
+
+        assert_eq!(ids(&slots), before);
+    }
+
+    #[test]
+    fn move_rejects_adjacent_two_by_three_partial_overlap() {
+        let mut slots = vec![None; 24];
+        slots[0] = Some(item("staff_basic"));
+        slots[2] = Some(item("sword_basic"));
+        let before = ids(&slots);
+
+        assert!(!move_grid_item_to_anchor(&mut slots, 0, 1, 6, 4));
+
+        assert_eq!(ids(&slots), before);
     }
 }
 

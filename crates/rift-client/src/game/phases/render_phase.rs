@@ -368,11 +368,6 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // Split borrow: the system holds a `&self` while we mutate
     // `point_lights`, so we collect into a temp and append.
     {
-        // VFX heat sources are transient — reset every frame
-        // before the system republishes them. Unlike
-        // `point_lights`, no other system writes to this vec,
-        // so we own the clear here.
-        renderer.heat_sources.clear();
         // VFX lights live in their own dedicated pool so that
         // ambient torches/portals/etc can't crowd them out of
         // the per-frame UBO. The renderer packs `vfx_lights`
@@ -380,17 +375,18 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         // atlas, then fills the remainder from `point_lights`.
         renderer.vfx_lights.clear();
         let mut effect_lights: Vec<rift_engine::PointLight> = Vec::new();
-        let mut heat_sources: Vec<rift_engine::HeatSource> = Vec::new();
         renderer
             .vfx_system
-            .collect_lights(elapsed, &mut effect_lights, &mut heat_sources);
+            .collect_lights(elapsed, &mut effect_lights);
         renderer.vfx_lights.extend(effect_lights);
-        renderer.heat_sources.extend(heat_sources);
     }
     state.player_state.abilities.tick_all(dt);
 
     if state.frame.damage_flash > 0.0 {
-        state.frame.damage_flash = (state.frame.damage_flash - dt * 2.2).max(0.0);
+        state.frame.damage_flash *= (-dt * 5.4).exp();
+        if state.frame.damage_flash < 0.003 {
+            state.frame.damage_flash = 0.0;
+        }
     }
     if state.frame.level_up_flash > 0.0 {
         state.frame.level_up_flash = (state.frame.level_up_flash - dt * 0.4).max(0.0);

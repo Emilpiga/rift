@@ -657,7 +657,7 @@ impl BloodField {
             // shaped excursions, the occasional sideways spurt.
             // Without them every pool reads as the same forward
             // teardrop regardless of seed.
-            for _ in 0..2 {
+            for _ in 0..1 {
                 let lobe_angle = self.rand01() * std::f32::consts::TAU;
                 let lobe_dist = pool_size_m * (0.30 + self.rand01() * 0.40);
                 let lobe_dir = Vec2::new(lobe_angle.cos(), lobe_angle.sin());
@@ -690,7 +690,7 @@ impl BloodField {
         // along the impulse axis and stamped with a small forward
         // stagger so the spray reads as motion blur — leading edge
         // pushes furthest, trailing splats sit nearer the body.
-        let fan_count = 3 + (power * 3.0) as i32;
+        let fan_count = 2 + (power * 2.0) as i32;
         for i in 0..fan_count {
             // Distance scales hard with power: a snipe / fireball
             // throws blood metres forward; a melee tap drops it
@@ -725,7 +725,7 @@ impl BloodField {
         // ±25° forward cone, the remaining 20 % scatter wider for
         // chaos. Power lengthens throw distance — a fireball kill
         // throws droplets 4 m+, a knife strike a metre or so.
-        let drop_count = 6 + (self.rand01() * 4.0) as i32 + (5.0 * power) as i32;
+        let drop_count = 3 + (self.rand01() * 2.0) as i32 + (3.0 * power) as i32;
         for _ in 0..drop_count {
             // 80 % ±25° forward cone, 20 % wider ±60°.
             let tight = self.rand01() < 0.80;
@@ -761,14 +761,7 @@ impl BloodField {
             };
             let drop_delay = 0.06 + self.rand01() * 0.42;
             self.emit_at_after(
-                center,
-                size_m,
-                aspect,
-                rot,
-                slice,
-                intensity,
-                time_secs,
-                drop_delay,
+                center, size_m, aspect, rot, slice, intensity, time_secs, drop_delay,
             );
         }
 

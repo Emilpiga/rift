@@ -126,6 +126,13 @@ pub(super) enum DrawCmd {
         thickness: f32,
         color: Color,
     },
+    /// Filled triangle. Used by directional HUD indicators.
+    Triangle {
+        p0: Pos2,
+        p1: Pos2,
+        p2: Pos2,
+        color: Color,
+    },
     /// Bevelled glow-disc. Used for talent-tree nodes and any
     /// other "stamped emissive chip" affordance — see
     /// [`super::ui::Ui::draw_glow_disc`].
@@ -333,6 +340,19 @@ impl LayerBuf {
                             p1.x,
                             p1.y,
                             thickness,
+                            color.to_array(),
+                            screen_w,
+                            screen_h,
+                        );
+                    }
+                    DrawCmd::Triangle { p0, p1, p2, color } => {
+                        batch.triangle_px(
+                            p0.x,
+                            p0.y,
+                            p1.x,
+                            p1.y,
+                            p2.x,
+                            p2.y,
                             color.to_array(),
                             screen_w,
                             screen_h,

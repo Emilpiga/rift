@@ -110,15 +110,6 @@ pub struct EffectLight {
     /// Mutually exclusive with `lifetime` — when this is set,
     /// `lifetime` is ignored.
     pub follow_particles: bool,
-    /// When `true`, this light also emits a screen-space heat-
-    /// distortion source. The composite pass picks the
-    /// strongest one each frame and applies a noise-driven
-    /// UV warp around its screen position. Use for
-    /// explosions, dragon breath, magma bursts — any source
-    /// of *transient* radiant heat. Leave `false` for ambient
-    /// scene flames (torches, hearths) so the world doesn't
-    /// shimmer permanently.
-    pub heat_haze: bool,
 }
 
 impl EffectLight {
@@ -134,7 +125,6 @@ impl EffectLight {
             flicker_hz: 0.0,
             offset: Vec3::ZERO,
             follow_particles: false,
-            heat_haze: false,
         }
     }
 }

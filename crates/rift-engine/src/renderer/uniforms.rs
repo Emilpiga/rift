@@ -1,5 +1,5 @@
 //! Per-frame light + uniform building: directional `KeyLight`,
-//! dynamic `PointLight`s, `HeatSource`s, point-shadow dirty-tracking,
+//! dynamic `PointLight`s, point-shadow dirty-tracking,
 //! and `UniformData` assembly for the camera/lighting/fog UBO.
 
 use glam::{Mat4, Vec3, Vec4};
@@ -7,6 +7,12 @@ use glam::{Mat4, Vec3, Vec4};
 use crate::renderer::forward::Renderer;
 use crate::renderer::passes::{shadow, shadow_point};
 use crate::renderer::uniform::UniformData;
+
+/// Runtime cap for point lights that get shadow-map sampling in
+/// the forward pass. Keep this at the atlas capacity so torch
+/// and portal shadows do not visibly pop as the player moves
+/// through dense rift rooms.
+const ACTIVE_POINT_SHADOWS: usize = shadow_point::MAX_POINT_SHADOWS;
 
 /// Directional key light + ambient floor. The forward shader
 /// reads `direction` as the light vector, `color` as its tint
@@ -134,27 +140,6 @@ pub(super) struct PointShadowSlotState {
     pub(super) caster_hash: u64,
 }
 
-/// One screen-space heat-distortion source. The composite pass
-/// picks the strongest of these each frame and applies a
-/// noise-driven UV warp to the HDR sample. Pushed only by VFX
-/// effects whose attached light has `heat_haze: true` —
-/// passive scene lights (torches, ambient flames) are
-/// excluded by design so the world doesn't shimmer
-/// permanently around them.
-#[derive(Clone, Copy, Debug)]
-pub struct HeatSource {
-    /// World-space origin (the same point as the source
-    /// light). Projected to screen UV in the composite path.
-    pub position: Vec3,
-    /// Falloff radius in metres. Drives the on-screen extent
-    /// of the warp via a perspective projection.
-    pub radius: f32,
-    /// Strength in `[0, 1]`. Drives both the warp amplitude
-    /// and the noise scroll rate. Should fade to 0 alongside
-    /// the source effect's animation.
-    pub strength: f32,
-}
-
 impl Renderer {
     /// Merge `point_lights` and `vfx_lights` into a single
     /// `[PointLight; MAX_POINT_LIGHTS]` with a deliberate
@@ -184,7 +169,10 @@ impl Renderer {
     /// Returns `(merged, light_count, n_shadow)`.
     pub(super) fn merge_per_frame_lights(&self) -> ([PointLight; MAX_POINT_LIGHTS], usize, usize) {
         let n_shadow = if self.shadows_enabled {
-            self.point_lights.len().min(shadow_point::MAX_POINT_SHADOWS)
+            self.point_lights
+                .len()
+                .min(shadow_point::MAX_POINT_SHADOWS)
+                .min(ACTIVE_POINT_SHADOWS)
         } else {
             0
         };
@@ -399,49 +387,5 @@ impl Renderer {
                 1.0,
             ],
         )
-    }
-
-    /// Project the strongest active VFX-published heat source to
-    /// screen UV for the composite pass's heat-haze warp. Only one
-    /// source is forwarded per frame; additional bursts take over
-    /// when the strongest fades.
-    pub(super) fn compute_heat_source_uv(&self) -> [f32; 4] {
-        let view = self.camera.view_matrix();
-        let proj = self.camera.projection_matrix();
-        let mut best: Option<(f32, [f32; 4])> = None;
-        for hs in self.heat_sources.iter() {
-            if hs.strength < 1e-3 {
-                continue;
-            }
-
-            let world = Vec4::new(hs.position.x, hs.position.y, hs.position.z, 1.0);
-            let view_p = view * world;
-            if view_p.z >= -0.05 {
-                continue;
-            }
-            let clip = proj * view_p;
-            if clip.w <= 0.0 {
-                continue;
-            }
-            let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
-            let uv = Vec3::new(ndc.x, ndc.y, 0.0) * 0.5 + Vec3::new(0.5, 0.5, 0.0);
-            if uv.x < -0.2 || uv.x > 1.2 || uv.y < -0.2 || uv.y > 1.2 {
-                continue;
-            }
-            let dist = (-view_p.z).max(0.1);
-            // proj[1][1] is the y-focal term; with the
-            // renderer's flipped-Y projection it's negative,
-            // but we only want magnitude.
-            let focal_y = proj.col(1).y.abs();
-            let radius_uv = (hs.radius / dist) * focal_y * 0.5;
-            if radius_uv < 0.02 {
-                continue;
-            }
-            let s = hs.strength.clamp(0.0, 1.0);
-            if best.map(|(prev, _)| s > prev).unwrap_or(true) {
-                best = Some((s, [uv.x, uv.y, radius_uv.min(0.6), s]));
-            }
-        }
-        best.map(|(_, v)| v).unwrap_or([0.0; 4])
     }
 }

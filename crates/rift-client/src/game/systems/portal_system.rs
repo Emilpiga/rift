@@ -54,7 +54,7 @@ fn facing_yaw(world: &hecs::World, portal_pos: Vec3) -> f32 {
 
 /// Apply the billboard yaw to both the portal mesh's
 /// `model_matrix` and the VFX emitter's orientation, so the
-/// glowing halo / flame licks rotate together with the disc.
+/// dimensional shimmer rotates together with the disc.
 ///
 /// On top of the Y-axis billboard we also spin the mesh around
 /// its *local* Z axis (the disc normal). The frame torus is
@@ -152,7 +152,7 @@ pub struct HubPortal {
     pub kind: PortalKind,
 }
 
-/// Push a hot-crimson point light at every active portal so the
+/// Push a rift-coloured point light at every active portal so the
 /// rift's emissive disc actually paints the surrounding sand,
 /// chest, and player. Called every frame *after* the torch
 /// system has rebuilt `point_lights`, so the portal lights
@@ -164,11 +164,9 @@ pub struct HubPortal {
 ///     Lifted to disc-centre height so the falloff illuminates
 ///     the floor *around* the portal pillar rather than only
 ///     directly underneath it.
-///   * **Color**: deep crimson, HDR-boosted hard so it
+///   * **Color**: deep crimson-violet, HDR-boosted hard so it
 ///     actually paints over the sandstorm hub's warm
-///     ambient fill. Matches the rift's emissive palette so
-///     light spilling onto the chest / player reads as "lit
-///     by the rift" rather than a decorative sconce.
+///     ambient fill without reading as torch flame.
 ///   * **Radius**: 16 m. Reaches well past the portal pillar
 ///     base so the surrounding sand picks up a visible halo,
 ///     not just the immediate dais.
@@ -221,13 +219,10 @@ pub fn push_lights(renderer: &mut Renderer, portals: &[Option<&HubPortal>], elap
         // four torch sconces around the boss room.
         let (color, radius) = match portal.kind {
             PortalKind::HubEntry | PortalKind::Descend => (
-                // Crimson — same chroma family as torches,
-                // but pushed harder on red and noticeably
-                // hotter on the highlight so it dominates
-                // any torch overlap. The faint green / blue
-                // headroom keeps bloom from desaturating
-                // into pink mush.
-                Vec3::new(5.50, 0.65, 0.22),
+                // Crimson-violet — still reads as "deeper
+                // into the rift", but avoids the orange spill
+                // that made the portal feel flame-like.
+                Vec3::new(4.80, 0.28, 1.05),
                 16.0,
             ),
             PortalKind::Extract => (

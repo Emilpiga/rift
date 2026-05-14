@@ -14,7 +14,6 @@ pub(super) enum PostResource {
     Depth,
     Ssao,
     Volumetrics,
-    Heat,
 }
 
 #[repr(C)]
@@ -37,14 +36,6 @@ struct VolumetricPush {
 }
 unsafe impl bytemuck::Pod for VolumetricPush {}
 unsafe impl bytemuck::Zeroable for VolumetricPush {}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct HeatPush {
-    heat_source: [f32; 4],
-}
-unsafe impl bytemuck::Pod for HeatPush {}
-unsafe impl bytemuck::Zeroable for HeatPush {}
 
 pub(super) struct PostGraphNode {
     render_pass: vk::RenderPass,
@@ -227,7 +218,6 @@ pub(super) enum SwapchainResourceState {
 enum PostNodeKind {
     Ssao,
     Volumetrics,
-    Heat,
 }
 
 struct PostNode {
@@ -277,7 +267,6 @@ impl PostNode {
 pub(super) struct PostGraphViews<'a> {
     pub(super) ssao: &'a [vk::ImageView],
     pub(super) volumetrics: &'a [vk::ImageView],
-    pub(super) heat: &'a [vk::ImageView],
 }
 
 pub(super) struct PostGraphDescriptorViews {
@@ -286,8 +275,8 @@ pub(super) struct PostGraphDescriptorViews {
 }
 
 /// Current graph sampler policy is intentionally small: linear
-/// clamp for colour resources, nearest clamp for depth. If heat,
-/// volumetrics, or future graph nodes need custom filtering/mip
+/// clamp for colour resources, nearest clamp for depth. If
+/// volumetrics or future graph nodes need custom filtering/mip
 /// behavior, extend this into per-resource or per-node samplers.
 pub(super) struct PostGraphSamplers {
     pub(super) linear: vk::Sampler,
@@ -338,19 +327,6 @@ impl PostGraph {
             views.volumetrics,
             "post_volumetrics.frag",
             std::mem::size_of::<VolumetricPush>() as u32,
-        )?);
-        graph.add(PostNode::new(
-            device,
-            shader_dir,
-            "heat",
-            vec![PostResource::Hdr],
-            PostResource::Heat,
-            PostNodeKind::Heat,
-            HDR_FORMAT,
-            extent,
-            views.heat,
-            "post_heat.frag",
-            std::mem::size_of::<HeatPush>() as u32,
         )?);
         Ok(graph)
     }
@@ -404,7 +380,6 @@ impl PostGraph {
         match output {
             PostResource::Ssao => views.ssao,
             PostResource::Volumetrics => views.volumetrics,
-            PostResource::Heat => views.heat,
             resource => panic!("post node output cannot be {resource:?}"),
         }
     }
@@ -451,18 +426,6 @@ impl PostGraph {
                 let push = VolumetricPush {
                     sun_screen: record.sun_screen,
                     sun_color: record.sun_color,
-                };
-                node.node.record(
-                    device,
-                    cmd,
-                    image_index,
-                    output_extent,
-                    bytemuck::bytes_of(&push),
-                );
-            }
-            PostNodeKind::Heat => {
-                let push = HeatPush {
-                    heat_source: record.heat_source,
                 };
                 node.node.record(
                     device,
@@ -588,5 +551,4 @@ pub(super) struct PostGraphRecord {
     pub(super) ssao_strength: f32,
     pub(super) sun_screen: [f32; 4],
     pub(super) sun_color: [f32; 4],
-    pub(super) heat_source: [f32; 4],
 }

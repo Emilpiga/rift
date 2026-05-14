@@ -8,9 +8,9 @@ use rift_net::ids::ClientId;
 use super::actor::Vitals;
 use super::player::{ServerPlayer, StashTab};
 use super::{
-    build_stash_occupancy, footprint_fits_stash, place_inventory_item, place_inventory_item_at,
-    place_stash_item, place_stash_item_at, salvage_yield, snapshot_talents, sort_grid_items,
-    trim_trailing_none, Sim,
+    build_stash_occupancy, footprint_fits_stash, move_grid_item_to_anchor, place_inventory_item,
+    place_inventory_item_at, place_stash_item, place_stash_item_at, salvage_yield,
+    snapshot_talents, sort_grid_items, trim_trailing_none, Sim,
 };
 
 impl Sim {
@@ -692,10 +692,10 @@ impl Sim {
         true
     }
 
-    /// Swap two stash slots within `tab_index`. Honours
-    /// multi-cell footprints: both anchors must fit after the
-    /// swap without overlapping any other item. Either may be
-    /// empty. Returns `true` on success.
+    /// Move the item at `a` to anchor `b`, displacing at most
+    /// one item overlapped by the moved footprint back to `a`.
+    /// Rejects instead of first-fitting the displaced item so an
+    /// explicit drag never causes a surprise move elsewhere.
     pub fn swap_stash_slots(
         &mut self,
         client_id: ClientId,
@@ -722,41 +722,8 @@ impl Sim {
         if tab.items.len() < STASH_TAB_SLOTS {
             tab.items.resize_with(STASH_TAB_SLOTS, || None);
         }
-        let it_a = tab.items[a].take();
-        let it_b = tab.items[b].take();
-
-        let occ = build_stash_occupancy(&tab.items);
-        let a_fits = match &it_b {
-            Some(it) => {
-                let (w, h) = it.footprint();
-                footprint_fits_stash(&occ, a, w, h)
-            }
-            None => true,
-        };
-        let b_fits = match &it_a {
-            Some(it) => {
-                let (w, h) = it.footprint();
-                footprint_fits_stash(&occ, b, w, h)
-            }
-            None => true,
-        };
-        // Cross-clash: a's footprint at b can't cover b's anchor (and vice-versa)
-        let cross = match (&it_a, &it_b) {
-            (Some(ia), Some(ib)) => {
-                let (aw, ah) = ia.footprint();
-                let (bw, bh) = ib.footprint();
-                covers(b, aw, ah, a) || covers(a, bw, bh, b)
-            }
-            _ => false,
-        };
-        if !a_fits || !b_fits || cross {
-            tab.items[a] = it_a;
-            tab.items[b] = it_b;
-            return false;
-        }
-        tab.items[a] = it_b;
-        tab.items[b] = it_a;
-        true
+        use rift_net::messages::{STASH_COLS, STASH_ROWS};
+        move_grid_item_to_anchor(&mut tab.items, a, b, STASH_COLS, STASH_ROWS)
     }
 
     /// Auto-sort one stash tab in place. Returns `true` iff
@@ -857,17 +824,4 @@ fn grid_blockers(
         }
     }
     out
-}
-
-/// `true` iff a `(w, h)` footprint anchored at `anchor_idx`
-/// would cover the cell `target_idx`. Used for swap cross-
-/// clash detection regardless of grid dimensions (both
-/// indices share the same grid stride).
-fn covers(anchor_idx: usize, w: u8, h: u8, target_idx: usize) -> bool {
-    use rift_net::messages::STASH_COLS as COLS;
-    let ax = anchor_idx % COLS;
-    let ay = anchor_idx / COLS;
-    let tx = target_idx % COLS;
-    let ty = target_idx / COLS;
-    tx >= ax && tx < ax + w as usize && ty >= ay && ty < ay + h as usize
 }

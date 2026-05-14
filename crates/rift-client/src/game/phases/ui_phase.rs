@@ -216,7 +216,14 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     }
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     if !state.floor.in_hub {
-        hud::render_boss_arrow(&mut ui, &state.world, view_proj);
+        if state.rift.boss_spawned && !state.rift.boss_killed && !state.rift.floor_complete {
+            hud::render_boss_arrow(
+                &mut ui,
+                &state.world,
+                view_proj,
+                state.floor_mgr.boss_room_center,
+            );
+        }
         if let Some(portal_pos) = portal_compass_pos {
             hud::render_portal_compass(&mut ui, &state.world, view_proj, portal_pos);
         }

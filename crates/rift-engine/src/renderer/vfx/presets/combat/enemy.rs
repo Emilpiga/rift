@@ -228,7 +228,6 @@ pub fn wraith_scream_impact(dir: Vec3) -> EffectBundle {
         flicker_hz: 22.0,
         offset: Vec3::new(0.0, 0.65, 0.0),
         follow_particles: true,
-        heat_haze: false,
     })
 }
 
@@ -398,7 +397,6 @@ pub fn void_sigil_impact(radius: f32) -> EffectBundle {
         flicker_hz: 16.0,
         offset: Vec3::new(0.0, 0.30, 0.0),
         follow_particles: true,
-        heat_haze: false,
     })
 }
 
