@@ -36,7 +36,7 @@ pub mod transport;
 pub use channel::{channel_config, Channel};
 pub use codec::{decode, encode, NetCodecError};
 pub use ids::{ClientId, NetId, NetTick};
-pub use messages::{ClientMsg, Gender, ServerMsg};
+pub use messages::{ClientMsg, Gender, ServerMsg, Snapshot, SnapshotDelta};
 pub use protocol::{NetSettings, MAX_CLIENTS, PROTOCOL_ID, PROTOCOL_VERSION, SNAPSHOT_HZ, TICK_HZ};
 pub use transport::{open_client, open_server, ClientHandle, ServerHandle};
 

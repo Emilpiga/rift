@@ -1684,8 +1684,8 @@ pub fn spawn_remote_minion_entity(
     position: Vec3,
     hp_max: f32,
 ) -> anyhow::Result<hecs::Entity> {
-    const MINION_VISUAL_SCALE: f32 = 0.30;
-    let hover_height = minion_hover_height(role).unwrap_or(0.0);
+    let presentation = rift_game::minions::presentation_for_role(role);
+    let hover_height = presentation.hover_height().unwrap_or(0.0);
 
     let shared_set = monsters
         .slot_mut(role)
@@ -1695,7 +1695,7 @@ pub fn spawn_remote_minion_entity(
         .get(role)
         .ok_or_else(|| anyhow::anyhow!("monster role {role:?} not loaded"))?;
     let scaled = Mat4::from_scale_rotation_translation(
-        Vec3::splat(role.scale() * MINION_VISUAL_SCALE),
+        Vec3::splat(role.scale() * presentation.visual_scale),
         glam::Quat::IDENTITY,
         position + Vec3::Y * hover_height,
     );
@@ -1727,7 +1727,7 @@ pub fn spawn_remote_minion_entity(
 
     let mut builder = hecs::EntityBuilder::new();
     let mut transform = Transform::from_position(position + Vec3::Y * hover_height);
-    transform.scale = Vec3::splat(role.scale() * MINION_VISUAL_SCALE);
+    transform.scale = Vec3::splat(role.scale() * presentation.visual_scale);
     builder.add(transform);
     builder.add(Velocity::default());
     builder.add(Health::new(hp_max));
@@ -1748,11 +1748,4 @@ pub fn spawn_remote_minion_entity(
         builder.add(a);
     }
     Ok(world.spawn(builder.build()))
-}
-
-pub fn minion_hover_height(role: MonsterRole) -> Option<f32> {
-    match role {
-        MonsterRole::Wraith => Some(1.15),
-        _ => None,
-    }
 }

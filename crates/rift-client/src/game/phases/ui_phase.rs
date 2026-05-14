@@ -110,6 +110,22 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         None
     };
 
+    let display_resolutions_snapshot: Vec<_> = renderer
+        .display_resolutions()
+        .iter()
+        .map(|r| rift_ui_types::settings::DisplayResolution {
+            width: r.width,
+            height: r.height,
+        })
+        .collect();
+    let selected_resolution_snapshot = {
+        let r = renderer.selected_display_resolution();
+        rift_ui_types::settings::DisplayResolution {
+            width: r.width,
+            height: r.height,
+        }
+    };
+
     use rift_engine::ui::im::{Color, Ui, DEFAULT_THEME};
     let mut ui = Ui::begin(
         &mut renderer.overlay_batch,
@@ -173,6 +189,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // compete with the standard 1..6 / Space layout. Tinted
     // gold when the player has unspent points so the affordance
     // is visible without an explicit notification.
+    let mut pending_bloom: Option<bool> = None;
+    let mut pending_ssao: Option<bool> = None;
+    let mut pending_volumetrics: Option<bool> = None;
+    let mut pending_vsync: Option<bool> = None;
+    let mut pending_resolution: Option<rift_ui_types::settings::DisplayResolution> = None;
     {
         use rift_engine::ui::im::{Button, Color, Id, Rect};
         let theme = *ui.theme();
@@ -526,6 +547,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                 master_volume: state.pause.master_volume,
                 shadows_enabled: state.pause.shadows_enabled,
                 height_shadows_enabled: state.pause.height_shadows_enabled,
+                bloom_enabled: state.pause.bloom_enabled,
+                ssao_enabled: state.pause.ssao_enabled,
+                volumetrics_enabled: state.pause.volumetrics_enabled,
+                vsync_enabled: state.pause.vsync_enabled,
+                display_resolutions: &display_resolutions_snapshot,
+                selected_resolution: selected_resolution_snapshot,
             };
             for action in rift_ui::settings::frame_settings(&mut ui, &view) {
                 use rift_ui_types::settings::SettingsAction;
@@ -543,6 +570,26 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
                     SettingsAction::SetHeightShadowsEnabled(enabled) => {
                         state.pause.height_shadows_enabled = enabled;
                         renderer.height_shadows_enabled = enabled;
+                    }
+                    SettingsAction::SetBloomEnabled(enabled) => {
+                        state.pause.bloom_enabled = enabled;
+                        pending_bloom = Some(enabled);
+                    }
+                    SettingsAction::SetSsaoEnabled(enabled) => {
+                        state.pause.ssao_enabled = enabled;
+                        pending_ssao = Some(enabled);
+                    }
+                    SettingsAction::SetVolumetricsEnabled(enabled) => {
+                        state.pause.volumetrics_enabled = enabled;
+                        pending_volumetrics = Some(enabled);
+                    }
+                    SettingsAction::SetVsyncEnabled(enabled) => {
+                        state.pause.vsync_enabled = enabled;
+                        pending_vsync = Some(enabled);
+                    }
+                    SettingsAction::SetDisplayResolution(resolution) => {
+                        state.pause.display_resolution = resolution;
+                        pending_resolution = Some(resolution);
                     }
                     SettingsAction::Close => {
                         state.pause.settings_open = false;
@@ -578,4 +625,25 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     }
 
     let _ = ui.end();
+
+    if let Some(enabled) = pending_bloom {
+        renderer.set_bloom_enabled(enabled);
+    }
+    if let Some(enabled) = pending_ssao {
+        renderer.set_ssao_enabled(enabled);
+    }
+    if let Some(enabled) = pending_volumetrics {
+        renderer.set_volumetrics_enabled(enabled);
+    }
+    if let Some(enabled) = pending_vsync {
+        if let Err(e) = renderer.set_vsync_enabled(enabled) {
+            log::warn!("Failed to apply VSync setting: {e}");
+        }
+    }
+    if let Some(resolution) = pending_resolution {
+        renderer.request_display_resolution(rift_engine::renderer::forward::DisplayResolution {
+            width: resolution.width,
+            height: resolution.height,
+        });
+    }
 }

@@ -3,7 +3,7 @@ use hecs::World;
 
 use super::components::{
     AnimationSet, Attack, Boss, Collider, Dying, Elite, Enemy, EnemyAnim, FloatingVisual, Health,
-    LocalPlayer, Player, RemoteMinion, Renderable, Skinned, Transform, Velocity,
+    LocalPlayer, LocomotionClips, Player, RemoteMinion, Renderable, Skinned, Transform, Velocity,
 };
 use crate::animation::{self, Animator};
 use crate::input::Input;
@@ -294,37 +294,40 @@ pub fn locomotion_anim_system(world: &mut World) {
     const FADE_GAIT: f32 = 0.12;
 
     const SPRINT_NAMES: &[&str] = &[
-        "Sprint_Loop",
-        "Sprint",
-        "Sprint_Fwd",
-        "Sprint_Forward_Loop",
-        "Run_Loop",
-        "Run", // some packs only ship "Run"
+        "sprint_loop",
+        "sprint",
+        "sprint_fwd",
+        "sprint_forward_loop",
+        "run_loop",
+        "run", // some packs only ship "Run"
     ];
     const JOG_NAMES: &[&str] = &[
-        "Jog_Fwd",
-        "Jog_Forward",
-        "Jog_Forward_Loop",
-        "Jog_Loop",
-        "Jog",
-        "Run_Loop",
-        "Run", // jog as a fallback for run-less packs
+        "jog_fwd",
+        "jog_forward",
+        "jog_forward_loop",
+        "jog_loop",
+        "jog",
+        "run_loop",
+        "run", // jog as a fallback for run-less packs
     ];
-    const WALK_NAMES: &[&str] = &["Walk_Loop", "Walk", "Walk_Fwd", "Walk_Forward_Loop"];
-    const IDLE_NAMES: &[&str] = &["Idle_Loop", "Idle"];
+    const WALK_NAMES: &[&str] = &["walk_loop", "walk", "walk_fwd", "walk_forward_loop"];
+    const IDLE_NAMES: &[&str] = &["idle_loop", "idle"];
 
-    for (_id, (vel, set, animator, enemy_anim, health, player, ghost, remote_minion)) in world
-        .query_mut::<(
-            &Velocity,
-            &AnimationSet,
-            &mut Animator,
-            Option<&EnemyAnim>,
-            Option<&super::components::Health>,
-            Option<&Player>,
-            Option<&super::components::Ghost>,
-            Option<&RemoteMinion>,
-        )>()
-    {
+    let mut pending_clip_cache: Vec<(hecs::Entity, LocomotionClips)> = Vec::new();
+    for (
+        entity,
+        (vel, set, animator, clip_cache, enemy_anim, health, player, ghost, remote_minion),
+    ) in world.query_mut::<(
+        &Velocity,
+        &AnimationSet,
+        &mut Animator,
+        Option<&LocomotionClips>,
+        Option<&EnemyAnim>,
+        Option<&super::components::Health>,
+        Option<&Player>,
+        Option<&super::components::Ghost>,
+        Option<&RemoteMinion>,
+    )>() {
         // Skip locomotion overrides while a one-shot reaction (Death,
         // HitRecieve, Bite_Front) is locked.
         if let Some(ea) = enemy_anim {
@@ -350,26 +353,39 @@ pub fn locomotion_anim_system(world: &mut World) {
         let speed = vel.linear.length();
         let moving = vel.linear.length_squared() > STILL_THRESHOLD_SQ;
 
-        let sprint_clip = set.find_any(SPRINT_NAMES);
-        let jog_clip = set.find_any(JOG_NAMES);
-        let walk_clip = set.find_any(WALK_NAMES).or_else(|| jog_clip.clone());
-        let idle_clip = set.find_any(IDLE_NAMES);
+        let resolved_clips;
+        let clips = match clip_cache {
+            Some(clips) => clips,
+            None => {
+                resolved_clips = LocomotionClips {
+                    sprint: set.find_any(SPRINT_NAMES),
+                    jog: set.find_any(JOG_NAMES),
+                    walk: set.find_any(WALK_NAMES).or_else(|| set.find_any(JOG_NAMES)),
+                    idle: set.find_any(IDLE_NAMES),
+                };
+                pending_clip_cache.push((entity, resolved_clips.clone()));
+                &resolved_clips
+            }
+        };
 
         let (want_clip, target_speed_mult) = if remote_minion.is_some() || !moving {
-            (idle_clip, 1.0)
-        } else if speed >= JOG_SPRINT_THRESHOLD && sprint_clip.is_some() {
-            (sprint_clip, (speed / SPRINT_REF_SPEED).clamp(0.7, 1.5))
-        } else if speed >= WALK_JOG_THRESHOLD && jog_clip.is_some() {
-            (jog_clip, (speed / JOG_REF_SPEED).clamp(0.6, 1.6))
+            (clips.idle.clone(), 1.0)
+        } else if speed >= JOG_SPRINT_THRESHOLD && clips.sprint.is_some() {
+            (
+                clips.sprint.clone(),
+                (speed / SPRINT_REF_SPEED).clamp(0.7, 1.5),
+            )
+        } else if speed >= WALK_JOG_THRESHOLD && clips.jog.is_some() {
+            (clips.jog.clone(), (speed / JOG_REF_SPEED).clamp(0.6, 1.6))
         } else {
-            (walk_clip, (speed / WALK_REF_SPEED).clamp(0.5, 1.7))
+            (clips.walk.clone(), (speed / WALK_REF_SPEED).clamp(0.5, 1.7))
         };
 
         if let Some(clip) = want_clip {
             let switching_clips = !std::sync::Arc::ptr_eq(&animator.clip, &clip);
             if switching_clips {
-                let was_idle = animator.clip.name.to_ascii_lowercase().contains("idle");
-                let going_idle = clip.name.to_ascii_lowercase().contains("idle");
+                let was_idle = contains_ascii_case_insensitive(&animator.clip.name, "idle");
+                let going_idle = contains_ascii_case_insensitive(&clip.name, "idle");
                 let fade = if was_idle || going_idle {
                     FADE_LOCOMOTION
                 } else {
@@ -380,6 +396,16 @@ pub fn locomotion_anim_system(world: &mut World) {
             animator.speed = target_speed_mult;
         }
     }
+    for (entity, clips) in pending_clip_cache {
+        let _ = world.insert_one(entity, clips);
+    }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Drive one-shot reaction animations on enemies: `Death` when the

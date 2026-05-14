@@ -30,7 +30,7 @@ vec3 god_rays(vec2 uv) {
     if (marchDist < 1e-4) return vec3(0.0);
     vec2 dir = to_sun / max(dist, 1e-4);
 
-    const int STEPS = 18;
+    const int STEPS = 12;
     vec3 accum = vec3(0.0);
     float weightSum = 0.0;
     float jitter = hash12(uv * vec2(1023.0, 769.0));
@@ -41,9 +41,9 @@ vec3 god_rays(vec2 uv) {
          || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
 
         float d = texture(u_depth, sample_uv).r;
-        float sky = step(0.9995, d);
+        if (d < 0.9995) continue;
         float w = (1.0 - t);
-        accum += texture(u_hdr, sample_uv).rgb * sky * w;
+        accum += texture(u_hdr, sample_uv).rgb * w;
         weightSum += w;
     }
     if (weightSum < 1e-4) return vec3(0.0);

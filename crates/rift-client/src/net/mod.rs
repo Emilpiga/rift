@@ -31,7 +31,7 @@ use rift_engine::Input;
 use rift_game::kinematic::Kinematic;
 use rift_net::{
     decode, encode, messages::InputCmd, open_client, renet, Channel, ClientHandle, ClientId,
-    ClientMsg, NetId, NetSettings, NetTick, ServerMsg, PROTOCOL_VERSION,
+    ClientMsg, NetId, NetSettings, NetTick, ServerMsg, Snapshot, PROTOCOL_VERSION,
 };
 
 use snapshot::RemoteInterp;
@@ -137,6 +137,7 @@ pub struct NetClient {
     /// Latest known state of every replicated entity, keyed by net
     /// id. Rebuilt from each snapshot.
     pub remote: HashMap<NetId, RemoteEntity>,
+    latest_snapshot: Option<Snapshot>,
     /// Per-remote interpolation buffer. Keeps the previous + current
     /// snapshot sample so `sync_avatars` can blend between them on
     /// every render frame, smoothing 20 Hz snapshot delivery into
@@ -481,6 +482,7 @@ impl NetClient {
             profile: None,
             our_net_id: None,
             remote: HashMap::new(),
+            latest_snapshot: None,
             interp: HashMap::new(),
             profiles: HashMap::new(),
             input_seq: 0,
@@ -756,6 +758,7 @@ impl NetClient {
                 tick,
             } => {
                 self.last_server_tick = tick;
+                self.latest_snapshot = None;
                 self.our_net_id = Some(your_net_id);
                 self.our_client_id = Some(your_client_id);
                 self.floor_index = floor_index;
@@ -794,6 +797,9 @@ impl NetClient {
             }
             ServerMsg::Snapshot(snap) => {
                 self.apply_snapshot(snap);
+            }
+            ServerMsg::SnapshotDelta(delta) => {
+                self.apply_snapshot_delta(delta);
             }
             ServerMsg::PlayerJoined {
                 net_id,
@@ -874,6 +880,7 @@ impl NetClient {
                 // Discard any in-flight snapshots that predate the
                 // transition tick — they describe the *old* floor.
                 self.last_server_tick = tick;
+                self.latest_snapshot = None;
                 // Drop interp buffers so freshly-spawned remote
                 // avatars on the new floor don't interpolate from
                 // their stale old-floor positions.
@@ -1374,15 +1381,18 @@ impl NetClient {
         let Some(owner_id) = self.our_net_id else {
             return Vec::new();
         };
-        let duration = rift_game::effects::lookup(rift_game::effects::id::VOID_FAMILIAR)
-            .map(|def| def.default_duration)
-            .unwrap_or(28.0);
         self.remote
             .values()
             .filter_map(|entity| match entity.kind {
-                rift_net::messages::EntityKind::Minion { owner, .. } if owner == owner_id => {
+                rift_net::messages::EntityKind::Minion { owner, role, .. } if owner == owner_id => {
+                    let role = rift_game::monsters::MonsterRole::from_wire_byte(role)?;
+                    let presentation = rift_game::minions::presentation_for_role(role);
+                    let effect_id = presentation.hud_effect?;
+                    let duration = rift_game::effects::lookup(effect_id)
+                        .map(|def| def.default_duration)
+                        .unwrap_or(28.0);
                     Some(rift_engine::ecs::components::ActiveEffect {
-                        id: rift_game::effects::id::VOID_FAMILIAR,
+                        id: effect_id,
                         remaining: (entity.resource_pct.clamp(0.0, 1.0) * duration).max(0.0),
                         duration,
                     })

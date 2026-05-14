@@ -37,6 +37,12 @@ use crate::vulkan::{
     Swapchain, VulkanDevice, VulkanInstance,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayResolution {
+    pub width: u32,
+    pub height: u32,
+}
+
 // Backwards-compat re-exports: external code imports these as
 // `rift_engine::renderer::forward::{KeyLight, PointLight}`.
 // The types themselves now live in the `uniforms` sibling module.
@@ -89,6 +95,9 @@ pub struct Renderer {
     // Resize tracking
     pub(super) framebuffer_resized: bool,
     pub(super) window_extent: [u32; 2],
+    display_resolutions: Vec<DisplayResolution>,
+    selected_display_resolution: DisplayResolution,
+    requested_display_resolution: Option<DisplayResolution>,
     // Overlay (HUD)
     pub overlay: OverlayRenderer,
     pub overlay_batch: OverlayBatch,
@@ -149,6 +158,17 @@ pub struct Renderer {
     /// Session graphics setting: when true, PBR materials perturb
     /// shadow receiver lookups with their height maps.
     pub height_shadows_enabled: bool,
+    /// Session display setting: when true, use FIFO present mode.
+    pub vsync_enabled: bool,
+    /// Session graphics setting: when false, skip the bloom
+    /// bright/blur passes and composite without bloom energy.
+    pub bloom_enabled: bool,
+    /// Session graphics setting: when false, skip the SSAO graph
+    /// node and composite with neutral ambient occlusion.
+    pub ssao_enabled: bool,
+    /// Session graphics setting: when false, skip the volumetric
+    /// ray graph node and composite without ray energy.
+    pub volumetrics_enabled: bool,
     // Ambient clear color (themed per floor)
     pub clear_color: [f32; 4],
     // Fog parameters
@@ -285,6 +305,7 @@ impl Renderer {
             device.graphics_queue_family,
             device.present_queue_family,
             [size.width, size.height],
+            true,
         )?;
 
         // Determine shader directory (relative to executable or workspace)
@@ -446,6 +467,12 @@ impl Renderer {
             shader_dir,
             framebuffer_resized: false,
             window_extent: [size.width, size.height],
+            display_resolutions: Vec::new(),
+            selected_display_resolution: DisplayResolution {
+                width: size.width,
+                height: size.height,
+            },
+            requested_display_resolution: None,
             overlay,
             overlay_batch,
             vfx_system,
@@ -463,6 +490,10 @@ impl Renderer {
             point_shadow_state: [None; shadow_point::MAX_POINT_SHADOWS],
             shadows_enabled: true,
             height_shadows_enabled: false,
+            vsync_enabled: true,
+            bloom_enabled: true,
+            ssao_enabled: true,
+            volumetrics_enabled: true,
             clear_color: [0.008, 0.006, 0.010, 1.0],
             fog_color: [0.018, 0.012, 0.010],
             fog_start: 5.0,
@@ -525,6 +556,7 @@ impl Renderer {
             self.device.graphics_queue_family,
             self.device.present_queue_family,
             [width, height],
+            self.vsync_enabled,
         )?;
 
         // Recreate depth buffer at new size
@@ -594,8 +626,59 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn set_vsync_enabled(&mut self, enabled: bool) -> Result<()> {
+        if self.vsync_enabled == enabled {
+            return Ok(());
+        }
+        self.vsync_enabled = enabled;
+        self.recreate_swapchain(self.window_extent[0], self.window_extent[1])
+    }
+
+    pub fn set_bloom_enabled(&mut self, enabled: bool) {
+        self.bloom_enabled = enabled;
+    }
+
+    pub fn set_ssao_enabled(&mut self, enabled: bool) {
+        self.ssao_enabled = enabled;
+        let _ = self.post.set_post_node_enabled("ssao", enabled);
+    }
+
+    pub fn set_volumetrics_enabled(&mut self, enabled: bool) {
+        self.volumetrics_enabled = enabled;
+        let _ = self.post.set_post_node_enabled("volumetrics", enabled);
+    }
+
     pub fn window_extent(&self) -> [u32; 2] {
         self.window_extent
+    }
+
+    pub fn display_resolutions(&self) -> &[DisplayResolution] {
+        &self.display_resolutions
+    }
+
+    pub fn selected_display_resolution(&self) -> DisplayResolution {
+        self.selected_display_resolution
+    }
+
+    pub fn set_display_resolutions(
+        &mut self,
+        resolutions: Vec<DisplayResolution>,
+        selected: DisplayResolution,
+    ) {
+        self.display_resolutions = resolutions;
+        self.selected_display_resolution = selected;
+    }
+
+    pub fn request_display_resolution(&mut self, resolution: DisplayResolution) {
+        if resolution.width == 0 || resolution.height == 0 {
+            return;
+        }
+        self.requested_display_resolution = Some(resolution);
+        self.selected_display_resolution = resolution;
+    }
+
+    pub fn take_requested_display_resolution(&mut self) -> Option<DisplayResolution> {
+        self.requested_display_resolution.take()
     }
 
     /// Direct access to the underlying Vulkan device handle (for code
@@ -615,6 +698,7 @@ impl Renderer {
     pub fn notify_resized(&mut self, width: u32, height: u32) {
         self.framebuffer_resized = true;
         self.window_extent = [width, height];
+        self.selected_display_resolution = DisplayResolution { width, height };
     }
 
     pub fn elapsed_secs(&self) -> f32 {

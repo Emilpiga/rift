@@ -23,6 +23,16 @@ pub struct PauseState {
     /// Experimental session graphics toggle for height-map-aware
     /// shadow receiver lookups on PBR materials.
     pub height_shadows_enabled: bool,
+    /// Session graphics toggle for the bloom bright/blur stack.
+    pub bloom_enabled: bool,
+    /// Session graphics toggle for screen-space ambient occlusion.
+    pub ssao_enabled: bool,
+    /// Session graphics toggle for post-process volumetric rays.
+    pub volumetrics_enabled: bool,
+    /// Session display toggle for FIFO/vsync presentation.
+    pub vsync_enabled: bool,
+    /// Session display resolution selected from the current monitor.
+    pub display_resolution: rift_ui_types::settings::DisplayResolution,
     /// Set to `true` when the player picks "Exit Game".
     /// `main.rs` polls this after `GameState::update` and
     /// terminates the process.
@@ -45,6 +55,11 @@ impl PauseState {
 /// game has no settings-persistence layer yet, so this is what
 /// every fresh launch lands on.
 const DEFAULT_MASTER_VOLUME: f32 = 1.0;
+const DEFAULT_DISPLAY_RESOLUTION: rift_ui_types::settings::DisplayResolution =
+    rift_ui_types::settings::DisplayResolution {
+        width: 0,
+        height: 0,
+    };
 
 impl Default for PauseState {
     fn default() -> Self {
@@ -54,6 +69,11 @@ impl Default for PauseState {
             master_volume: DEFAULT_MASTER_VOLUME,
             shadows_enabled: true,
             height_shadows_enabled: false,
+            bloom_enabled: true,
+            ssao_enabled: true,
+            volumetrics_enabled: true,
+            vsync_enabled: true,
+            display_resolution: DEFAULT_DISPLAY_RESOLUTION,
             request_quit: false,
             request_character_select: false,
         }

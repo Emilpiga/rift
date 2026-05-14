@@ -25,6 +25,7 @@ pub mod hero;
 pub mod kinematic;
 pub mod loadout;
 pub mod loot;
+pub mod minions;
 pub mod monsters;
 pub mod stats;
 pub mod talents;

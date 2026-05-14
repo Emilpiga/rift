@@ -401,6 +401,22 @@ impl Renderer {
         self.skin_system.update_palette(frame, handle, palette);
     }
 
+    /// Seed a GPU-skinned object's output buffer with CPU-skinned vertices.
+    pub fn prime_skinned_mesh_output(&mut self, obj_idx: usize, vertices: &[Vertex]) -> Result<()> {
+        let handle = match self.objects.get(obj_idx).and_then(|o| o.skin_handle) {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+        self.skin_system.prime_output_vertices(
+            &self.device.device,
+            &self.allocator,
+            self.device.graphics_queue,
+            self.command_pool,
+            handle,
+            vertices,
+        )
+    }
+
     /// Monotonic render-frame counter. Gameplay-side render systems use
     /// this for deterministic visual LOD staggering without owning their
     /// own global frame state.

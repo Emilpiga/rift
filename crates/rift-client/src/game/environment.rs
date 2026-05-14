@@ -516,14 +516,27 @@ impl EnvTextures {
         if self.decode_worker.is_none() {
             self.decode_worker = Some(DecodeWorker::spawn());
         }
-        let worker = self.decode_worker.as_mut().expect("just spawned");
-
-        // Drain ready jobs. We `try_recv` in a loop so a fast
-        // worker that finished multiple packs between frames
-        // can drop them all into descriptor sets in one tick;
-        // each upload is on the order of tens of ms so even
-        // four-in-a-row is well under the netcode budget.
-        while let Ok(done) = worker.outbox.try_recv() {
+        // Drain ready jobs, but perform at most one GPU upload per tick.
+        // Returning from gameplay can leave several decoded 2K packs queued;
+        // uploading all of them in one character-select frame makes the
+        // preview scene hitch badly. Already-loaded packs and failures are
+        // cheap, so we keep draining those until we either upload one pack or
+        // run out of ready messages.
+        let mut uploaded_this_tick = false;
+        while !uploaded_this_tick {
+            let done = match self
+                .decode_worker
+                .as_ref()
+                .expect("just spawned")
+                .outbox
+                .try_recv()
+            {
+                Ok(done) => done,
+                Err(_) => break,
+            };
+            if let Some(worker) = self.decode_worker.as_mut() {
+                worker.in_flight = worker.in_flight.saturating_sub(1);
+            }
             match done {
                 DecodeOutput::DesertRocks(pack) => {
                     if self.desert_rocks_set.is_none() {
@@ -537,58 +550,62 @@ impl EnvTextures {
                             }
                             Err(e) => log::warn!("env sand PBR decoded upload failed: {}", e),
                         }
+                        uploaded_this_tick = true;
                     }
                 }
-                DecodeOutput::Pbr(name, pack) => match renderer
-                    .upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
-                {
-                    Ok((mut texs, set)) => {
-                        self.textures.append(&mut texs);
-                        match name.as_str() {
-                            "cliff_rocks" => {
-                                if self.cliff_rocks_set.is_none() {
-                                    self.cliff_rocks_set = Some(set);
+                DecodeOutput::Pbr(name, pack) => {
+                    if self.pbr_pack_loaded(&name) {
+                        log::debug!("env: skipped already-bound PBR pack `{name}` (worker)");
+                    } else {
+                        match renderer
+                            .upload_shared_pbr_material(rift_engine::PbrSource::Decoded(pack))
+                        {
+                            Ok((mut texs, set)) => {
+                                self.textures.append(&mut texs);
+                                match name.as_str() {
+                                    "cliff_rocks" => self.cliff_rocks_set = Some(set),
+                                    "ground_tiles" => self.ground_tiles_set = Some(set),
+                                    "bricks_wall" => self.bricks_wall_set = Some(set),
+                                    "white_bricks_wall" => self.white_bricks_wall_set = Some(set),
+                                    "blue_gold_floor" => self.blue_gold_floor_set = Some(set),
+                                    "wood_planks" => self.wood_planks_set = Some(set),
+                                    other => {
+                                        log::warn!(
+                                            "env: unknown PBR pack name from worker: {other}"
+                                        )
+                                    }
                                 }
+                                log::info!("env: bound PBR pack `{name}` (worker)");
                             }
-                            "ground_tiles" => {
-                                if self.ground_tiles_set.is_none() {
-                                    self.ground_tiles_set = Some(set);
-                                }
+                            Err(e) => {
+                                log::warn!("env PBR pack `{name}` decoded upload failed: {}", e)
                             }
-                            "bricks_wall" => {
-                                if self.bricks_wall_set.is_none() {
-                                    self.bricks_wall_set = Some(set);
-                                }
-                            }
-                            "white_bricks_wall" => {
-                                if self.white_bricks_wall_set.is_none() {
-                                    self.white_bricks_wall_set = Some(set);
-                                }
-                            }
-                            "blue_gold_floor" => {
-                                if self.blue_gold_floor_set.is_none() {
-                                    self.blue_gold_floor_set = Some(set);
-                                }
-                            }
-                            "wood_planks" => {
-                                if self.wood_planks_set.is_none() {
-                                    self.wood_planks_set = Some(set);
-                                }
-                            }
-                            other => log::warn!("env: unknown PBR pack name from worker: {other}"),
                         }
-                        log::info!("env: bound PBR pack `{name}` (worker)");
+                        uploaded_this_tick = true;
                     }
-                    Err(e) => log::warn!("env PBR pack `{name}` decoded upload failed: {}", e),
-                },
+                }
                 DecodeOutput::Failed(name, err) => {
                     log::warn!("env: worker failed to decode `{name}`: {err}");
                 }
             }
-            worker.in_flight = worker.in_flight.saturating_sub(1);
         }
 
-        worker.in_flight > 0
+        self.decode_worker
+            .as_ref()
+            .map(|worker| worker.in_flight > 0)
+            .unwrap_or(false)
+    }
+
+    fn pbr_pack_loaded(&self, name: &str) -> bool {
+        match name {
+            "cliff_rocks" => self.cliff_rocks_set.is_some(),
+            "ground_tiles" => self.ground_tiles_set.is_some(),
+            "bricks_wall" => self.bricks_wall_set.is_some(),
+            "white_bricks_wall" => self.white_bricks_wall_set.is_some(),
+            "blue_gold_floor" => self.blue_gold_floor_set.is_some(),
+            "wood_planks" => self.wood_planks_set.is_some(),
+            _ => false,
+        }
     }
 }
 

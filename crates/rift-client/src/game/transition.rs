@@ -86,7 +86,9 @@ pub fn update_character_select(
     // replaces the old "block in `generate_hub` for ~8 s"
     // approach which was tripping the netcode 5 s timeout
     // and forcing the server to drop the connect-token key.
-    state.floor_mgr.env.tick_world_preload(renderer);
+    if state.character_select_world_preload {
+        state.floor_mgr.env.tick_world_preload(renderer);
+    }
 
     // Install (lazily) and animate the sandstorm backdrop so
     // the preview avatar reads as standing on the desert
@@ -140,6 +142,9 @@ pub fn update_character_select(
     // the casting-hand joint, so they update right after the
     // skinning pass refreshes `joint_worlds`.
     super::weapon_visuals::update_weapon_transforms(&mut state.world, renderer, input);
+    state
+        .character_select
+        .settle_preview_pose(&state.world, renderer);
 
     // Fused input + render through the immediate-mode UI stack.
     let (sw, sh) = renderer.screen_size();
@@ -225,6 +230,12 @@ pub fn return_to_character_select(
     renderer.point_lights.clear();
     renderer.vfx_system.clear_all();
 
+    let device = renderer.ash_device().clone();
+    let allocator = renderer.allocator_arc();
+    state.floor_mgr.monsters.cleanup_gpu(&device, &allocator);
+    state.floor_mgr.props.cleanup_gpu(&device, &allocator);
+    state.floor_mgr.env.cleanup_gpu(&device, &allocator);
+
     state.world = hecs::World::new();
     state.rift = RiftState::new(1);
     state.player_state = PlayerState::new();
@@ -240,6 +251,12 @@ pub fn return_to_character_select(
     state.spellbook = super::spellbook::SpellbookUi::new();
     state.talents_panel.open = false;
     state.meters = super::meters::MeterUi::new();
+    state.anim_cache = super::character_spawn::AnimLibraryCache::new();
+    state.equipment_visual_cache = super::equipment_visuals::EquipmentVisualCache::new();
+    state.avatar_cosmetics_cache = super::avatar_cosmetics::AvatarCosmeticsCache::new();
+    state.loot_model_cache = super::loot_models::LootModelCache::new();
+    state.weapon_visual_cache = super::weapon_visuals::WeaponMeshCache::new();
+    state.character_select_world_preload = false;
     state.app_state = AppState::CharacterSelect;
     state.character_select = character_select::CharacterSelect::new();
     state

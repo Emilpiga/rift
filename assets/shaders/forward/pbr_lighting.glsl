@@ -3,9 +3,11 @@ vec3 shadePbr() {
     vec3 V = normalize(ubo.cameraPos.xyz - fragWorldPos);
 
     mat3 TBN = cotangentFrame(Ngeo, fragWorldPos, fragUV);
-    vec3 viewTS = transpose(TBN) * V;
+    mat3 invTBN = transpose(TBN);
+    vec3 viewTS = invTBN * V;
 
     vec2 uv = parallaxOffset(fragUV, viewTS, push.materialParams.y);
+    bool heightShadows = heightShadowsEnabled(push.materialParams.y);
 
     vec3 albedo = texture(baseColorMap, uv).rgb * fragColor;
     vec3 nTex = texture(normalMap, uv).xyz * 2.0 - 1.0;
@@ -35,10 +37,12 @@ vec3 shadePbr() {
     // ---- Directional key light ----
     vec3 L = normalize(ubo.lightDir.xyz);
     vec3 H = normalize(L + V);
-    vec3 shadowWorldPos = heightShadowWorldPos(fragWorldPos, Ngeo, uv, push.materialParams.y);
-    vec3 lightTS = transpose(TBN) * L;
+    vec3 shadowWorldPos = heightShadows
+        ? heightShadowWorldPos(fragWorldPos, Ngeo, uv, push.materialParams.y)
+        : fragWorldPos;
+    vec3 lightTS = heightShadows ? invTBN * L : vec3(0.0, 0.0, 1.0);
     float shadow = sampleShadowAt(shadowWorldPos, N, L)
-                 * heightDirectionalSelfShadow(uv, lightTS, push.materialParams.y);
+                 * (heightShadows ? heightDirectionalSelfShadow(uv, lightTS, push.materialParams.y) : 1.0);
 
     float NDF = distributionGGX(N, H, roughness);
     float G   = geometrySmith(N, V, L, roughness);
@@ -93,25 +97,28 @@ vec3 shadePbr() {
                      (4.0 * max(dot(N, V), 0.0) * NdotLp + 1e-4);
         vec3 kSp = Fp;
         vec3 kDp = (1.0 - kSp) * (1.0 - metallic);
-        vec3 lightPointTS = transpose(TBN) * Lp;
         // Texture-height shadows add a compact self-shadow
         // march per affecting point light. This is deliberately
         // hidden behind the experimental setting: in torch-lit
         // rifts it is the part of the feature the player can
         // actually see, while slower GPUs can skip the extra
         // height taps entirely.
-        float pshadow = sampleHeightPointShadow(
-            i,
-            fragWorldPos,
-            lightPos,
-            radius,
-            N,
-            Ngeo,
-            TBN,
-            uv,
-            lightPointTS,
-            push.materialParams.y
-        );
+        float pshadow = samplePointShadowAt(i, fragWorldPos, lightPos, radius, N);
+        if (heightShadows) {
+            vec3 lightPointTS = invTBN * Lp;
+            pshadow = sampleHeightPointShadow(
+                i,
+                fragWorldPos,
+                lightPos,
+                radius,
+                N,
+                Ngeo,
+                TBN,
+                uv,
+                lightPointTS,
+                push.materialParams.y
+            );
+        }
         lighting += (kDp * albedo / PI + specP) * lightCol * intensity * NdotLp * atten * pshadow;
 
         // ---- Fake hemispherical bounce -----

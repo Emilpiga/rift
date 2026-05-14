@@ -672,8 +672,21 @@ impl Renderer {
             });
         device.cmd_begin_render_pass(cmd, &composite_begin, vk::SubpassContents::INLINE);
 
-        self.post
-            .record_composite(device, cmd, image_index, &self.bloom, self.ghost_mix);
+        let mut bloom = self.bloom;
+        if !self.bloom_enabled {
+            bloom.intensity = 0.0;
+        }
+        let ao_strength = if self.ssao_enabled { 1.0 } else { 0.0 };
+        let volumetrics_intensity = if self.volumetrics_enabled { 1.0 } else { 0.0 };
+        self.post.record_composite(
+            device,
+            cmd,
+            image_index,
+            &bloom,
+            self.ghost_mix,
+            ao_strength,
+            volumetrics_intensity,
+        );
 
         // Overlay (HUD)
         self.overlay.record(frame, device, cmd);
@@ -777,7 +790,11 @@ impl Renderer {
         // the shaded HDR. Gameplay uses a moderate default,
         // while preview scenes can reduce this to avoid visible
         // low-sample screen-space noise on smooth surfaces.
-        let ssao_strength = self.ssao_strength;
+        let ssao_strength = if self.ssao_enabled {
+            self.ssao_strength
+        } else {
+            0.0
+        };
 
         // ---- Record command buffer ----
         unsafe {
@@ -818,17 +835,21 @@ impl Renderer {
 
             self.record_scene_pass(cmd, image_index, &draws);
             self.record_translucent_pass(cmd, image_index, frame);
-            self.post.record_post_graph(
-                &self.device.device,
-                cmd,
-                image_index,
-                inv_proj,
-                ssao_strength,
-                sun_screen,
-                sun_color,
-            );
-            self.post
-                .record_bloom(&self.device.device, cmd, image_index, &self.bloom);
+            if self.ssao_enabled || self.volumetrics_enabled {
+                self.post.record_post_graph(
+                    &self.device.device,
+                    cmd,
+                    image_index,
+                    inv_proj,
+                    ssao_strength,
+                    sun_screen,
+                    sun_color,
+                );
+            }
+            if self.bloom_enabled {
+                self.post
+                    .record_bloom(&self.device.device, cmd, image_index, &self.bloom);
+            }
             self.record_composite_and_overlay(cmd, image_index, frame);
 
             self.device.device.end_command_buffer(cmd)?;

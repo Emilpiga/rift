@@ -1,6 +1,20 @@
 use anyhow::Result;
 use ash::{vk, Device};
 
+fn choose_present_mode(
+    available: &[vk::PresentModeKHR],
+    vsync_enabled: bool,
+) -> vk::PresentModeKHR {
+    if vsync_enabled {
+        return vk::PresentModeKHR::FIFO;
+    }
+
+    [vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE]
+        .into_iter()
+        .find(|mode| available.contains(mode))
+        .unwrap_or(vk::PresentModeKHR::FIFO)
+}
+
 pub struct Swapchain {
     pub swapchain_fn: ash::khr::swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
@@ -20,6 +34,7 @@ impl Swapchain {
         graphics_family: u32,
         present_family: u32,
         window_size: [u32; 2],
+        vsync_enabled: bool,
     ) -> Result<Self> {
         let capabilities = unsafe {
             surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?
@@ -39,11 +54,7 @@ impl Swapchain {
             .unwrap_or(&formats[0])
             .clone();
 
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else {
-            vk::PresentModeKHR::FIFO
-        };
+        let present_mode = choose_present_mode(&present_modes, vsync_enabled);
 
         let extent = if capabilities.current_extent.width != u32::MAX {
             capabilities.current_extent
@@ -114,11 +125,12 @@ impl Swapchain {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         log::info!(
-            "Swapchain created: {}x{}, {} images, {:?}",
+            "Swapchain created: {}x{}, {} images, {:?} (available: {:?})",
             extent.width,
             extent.height,
             images.len(),
-            present_mode
+            present_mode,
+            present_modes
         );
 
         Ok(Self {

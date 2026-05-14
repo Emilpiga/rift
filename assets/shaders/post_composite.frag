@@ -15,7 +15,11 @@ layout(push_constant) uniform Push {
     float bloom_intensity; // multiplier on bloom contribution
     float exposure;        // scene exposure scalar (1.0 default)
     float ghost_mix;       // 0 = normal, 1 = full ghost view
+    float ao_strength;     // 0 = neutral AO, 1 = sampled AO
+    float volumetrics_intensity;
     float _pad0;
+    float _pad1;
+    float _pad2;
 } pc;
 
 // Narkowicz ACES filmic tonemap — cheap, hits LDR cleanly,
@@ -103,13 +107,19 @@ vec3 grade(vec3 c) {
 }
 
 void main() {
-    vec3 hdr         = texture(u_hdr,         v_uv).rgb;
-    vec3 bloom       = texture(u_bloom,       v_uv).rgb;
-    vec3 volumetrics = texture(u_volumetrics, v_uv).rgb;
+    vec3 hdr = texture(u_hdr, v_uv).rgb;
+    vec3 bloom = pc.bloom_intensity > 0.0001
+        ? texture(u_bloom, v_uv).rgb * pc.bloom_intensity
+        : vec3(0.0);
+    vec3 volumetrics = pc.volumetrics_intensity > 0.0001
+        ? texture(u_volumetrics, v_uv).rgb * pc.volumetrics_intensity
+        : vec3(0.0);
 
-    float ao = texture(u_ao, v_uv).r;
+    float ao = pc.ao_strength > 0.0001
+        ? mix(1.0, texture(u_ao, v_uv).r, pc.ao_strength)
+        : 1.0;
 
-    vec3 col = (hdr * ao + volumetrics + bloom * pc.bloom_intensity) * pc.exposure;
+    vec3 col = (hdr * ao + volumetrics + bloom) * pc.exposure;
     vec3 mapped = aces(col);
     mapped = grade(mapped);
 

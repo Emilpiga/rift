@@ -20,5 +20,5 @@ pub mod vfx;
 // but external code still imports them as `renderer::shadow::*` etc.
 pub use passes::{overlay, post, shadow, shadow_point, sky};
 
-pub use forward::Renderer;
+pub use forward::{DisplayResolution, Renderer};
 pub use overlay::{OverlayBatch, OverlayRenderer};

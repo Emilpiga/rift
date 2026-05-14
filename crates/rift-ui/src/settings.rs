@@ -6,13 +6,13 @@
 //! (emitting `Close`) without losing either edge.
 
 use rift_ui_im::{
-    widgets::{label, title},
+    widgets::{label, title, tooltip_at_mouse, TooltipLine},
     Button, ButtonSize, Color, Frame, Id, Layer, Pad, Rect, Ui, Vec2,
 };
-use rift_ui_types::settings::{SettingsAction, SettingsView};
+use rift_ui_types::settings::{DisplayResolution, SettingsAction, SettingsView};
 
 /// One frame of the settings panel.
-pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsAction> {
+pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsAction> {
     let mut actions = Vec::new();
 
     let screen = ui.screen_rect();
@@ -25,7 +25,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
     let sc = theme.scale;
     let s = ui.screen_size();
     let mw = 460.0 * sc;
-    let mh = 320.0 * sc;
+    let mh = 580.0 * sc;
     let modal_rect = Rect::from_xywh((s.x - mw) * 0.5, (s.y - mh) * 0.5, mw, mh);
 
     ui.with_layer(Layer::Modal, |ui| {
@@ -63,6 +63,14 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
                 ) {
                     actions.push(SettingsAction::SetMasterVolume(new_v));
                 }
+                setting_tooltip(
+                    ui,
+                    body,
+                    "master_vol_tip",
+                    Rect::from_xywh(body.min.x, row_y - 4.0 * sc, body.size().x, 40.0 * sc),
+                    "Master Volume",
+                    "Adjusts the overall game audio level for this session.",
+                );
 
                 let pct = (view.master_volume.clamp(0.0, 1.0) * 100.0).round() as i32;
                 let pct_text = format!("{pct} %");
@@ -75,58 +83,104 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
 
                 label(ui, body.min + Vec2::new(0.0, 118.0 * sc), "Graphics");
 
-                let shadows_y = body.min.y + 148.0 * sc;
-                label(
-                    ui,
-                    rift_ui_im::Pos2::new(body.min.x, shadows_y + 10.0 * sc),
-                    "Realtime Shadows",
-                );
                 let toggle_w = 116.0 * sc;
                 let toggle_h = 34.0 * sc;
-                let toggle_rect =
-                    Rect::from_xywh(body.max.x - toggle_w, shadows_y, toggle_w, toggle_h);
-                let toggle_label = if view.shadows_enabled { "On" } else { "Off" };
-                let toggle_resp = if view.shadows_enabled {
-                    Button::active(toggle_label)
-                } else {
-                    Button::new(toggle_label)
-                }
-                .show_with_id(
+                if toggle_row(
                     ui,
-                    Id::root("settings").child("shadows"),
-                    toggle_rect,
-                );
-                if toggle_resp.clicked {
+                    body,
+                    "shadows",
+                    "Realtime Shadows",
+                    "Renders dynamic directional and point-light shadows. Turn off for a large GPU performance win.",
+                    view.shadows_enabled,
+                    body.min.y + 148.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
                     actions.push(SettingsAction::SetShadowsEnabled(!view.shadows_enabled));
                 }
 
-                let height_y = body.min.y + 190.0 * sc;
-                label(
+                if toggle_row(
                     ui,
-                    rift_ui_im::Pos2::new(body.min.x, height_y + 10.0 * sc),
+                    body,
+                    "height_shadows",
                     "Texture Height Shadows",
-                );
-                let height_rect =
-                    Rect::from_xywh(body.max.x - toggle_w, height_y, toggle_w, toggle_h);
-                let height_label = if view.height_shadows_enabled {
-                    "On"
-                } else {
-                    "Off"
-                };
-                let height_resp = if view.height_shadows_enabled {
-                    Button::active(height_label)
-                } else {
-                    Button::new(height_label)
-                }
-                .show_with_id(
-                    ui,
-                    Id::root("settings").child("height_shadows"),
-                    height_rect,
-                );
-                if height_resp.clicked {
+                    "Uses material height maps to add subtle receiver self-shadowing. Costs extra shading work.",
+                    view.height_shadows_enabled,
+                    body.min.y + 190.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
                     actions.push(SettingsAction::SetHeightShadowsEnabled(
                         !view.height_shadows_enabled,
                     ));
+                }
+
+                if toggle_row(
+                    ui,
+                    body,
+                    "bloom",
+                    "Bloom",
+                    "Adds glow from bright pixels through the post-process blur stack. Disable to reduce post-processing cost.",
+                    view.bloom_enabled,
+                    body.min.y + 232.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
+                    actions.push(SettingsAction::SetBloomEnabled(!view.bloom_enabled));
+                }
+
+                if toggle_row(
+                    ui,
+                    body,
+                    "ssao",
+                    "Ambient Occlusion",
+                    "Darkens creases and contact areas with screen-space ambient occlusion. Costs an extra post pass.",
+                    view.ssao_enabled,
+                    body.min.y + 274.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
+                    actions.push(SettingsAction::SetSsaoEnabled(!view.ssao_enabled));
+                }
+
+                if toggle_row(
+                    ui,
+                    body,
+                    "volumetrics",
+                    "Volumetric Rays",
+                    "Adds foggy light shafts in post-processing. Disable if heavy scenes hitch near bright lights.",
+                    view.volumetrics_enabled,
+                    body.min.y + 316.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
+                    actions.push(SettingsAction::SetVolumetricsEnabled(
+                        !view.volumetrics_enabled,
+                    ));
+                }
+
+                if toggle_row(
+                    ui,
+                    body,
+                    "vsync",
+                    "VSync",
+                    "Uses the guaranteed FIFO present mode when available, reducing tearing by syncing presents to the display.",
+                    view.vsync_enabled,
+                    body.min.y + 358.0 * sc,
+                    toggle_w,
+                    toggle_h,
+                ) {
+                    actions.push(SettingsAction::SetVsyncEnabled(!view.vsync_enabled));
+                }
+
+                if let Some(resolution) = resolution_row(
+                    ui,
+                    body,
+                    view.display_resolutions,
+                    view.selected_resolution,
+                    body.min.y + 400.0 * sc,
+                ) {
+                    actions.push(SettingsAction::SetDisplayResolution(resolution));
                 }
 
                 // Back button at the bottom-right.
@@ -148,6 +202,187 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView) -> Vec<SettingsActio
     // matching note in `pause_menu.rs`.
 
     actions
+}
+
+fn toggle_row(
+    ui: &mut Ui<'_>,
+    body: Rect,
+    id: &'static str,
+    text: &'static str,
+    tooltip: &'static str,
+    enabled: bool,
+    y: f32,
+    toggle_w: f32,
+    toggle_h: f32,
+) -> bool {
+    let theme = *ui.theme();
+    let sc = theme.scale;
+    label(ui, rift_ui_im::Pos2::new(body.min.x, y + 10.0 * sc), text);
+    let toggle_rect = Rect::from_xywh(body.max.x - toggle_w, y, toggle_w, toggle_h);
+    let toggle_label = if enabled { "On" } else { "Off" };
+    let toggle_resp = if enabled {
+        Button::active(toggle_label)
+    } else {
+        Button::new(toggle_label)
+    }
+    .show_with_id(ui, Id::root("settings").child(id), toggle_rect);
+
+    setting_tooltip(
+        ui,
+        body,
+        id,
+        Rect::from_xywh(body.min.x, y, body.size().x, toggle_h),
+        text,
+        tooltip,
+    );
+    toggle_resp.clicked
+}
+
+fn resolution_row(
+    ui: &mut Ui<'_>,
+    body: Rect,
+    resolutions: &[DisplayResolution],
+    selected: DisplayResolution,
+    y: f32,
+) -> Option<DisplayResolution> {
+    let theme = *ui.theme();
+    let sc = theme.scale;
+    let row_h = 34.0 * sc;
+    let value_w = 184.0 * sc;
+    let dropdown_id = Id::root("settings").child("resolution_dropdown");
+
+    label(
+        ui,
+        rift_ui_im::Pos2::new(body.min.x, y + 10.0 * sc),
+        "Resolution",
+    );
+
+    let selected_text = resolution_label(selected);
+    let value_rect = Rect::from_xywh(body.max.x - value_w, y, value_w, row_h);
+    let open = ui.state().focus == Some(dropdown_id);
+    let button_label = if open {
+        format!("{} ^", selected_text)
+    } else {
+        format!("{} v", selected_text)
+    };
+
+    let mut picked = None;
+    let button_resp = Button::new(&button_label)
+        .enabled(!resolutions.is_empty())
+        .show_with_id(ui, dropdown_id, value_rect);
+    if button_resp.clicked {
+        ui.state_mut().focus = if open { None } else { Some(dropdown_id) };
+    }
+
+    let mut hovered_dropdown = button_resp.hovered;
+    if open {
+        let option_h = 30.0 * sc;
+        let list_len = resolutions.len().min(8);
+        let list_rect = Rect::from_xywh(
+            value_rect.min.x,
+            value_rect.max.y + 4.0 * sc,
+            value_rect.size().x,
+            option_h * list_len as f32,
+        );
+
+        ui.with_layer(Layer::Tooltip, |ui| {
+            ui.draw_rect(list_rect, Color::rgba(0.025, 0.022, 0.020, 0.98));
+            ui.draw_line(
+                list_rect.min,
+                rift_ui_im::Pos2::new(list_rect.max.x, list_rect.min.y),
+                1.0 * sc,
+                Color::rgba(0.82, 0.58, 0.25, 0.75),
+            );
+
+            for (i, resolution) in resolutions.iter().take(list_len).enumerate() {
+                let option_rect = Rect::from_xywh(
+                    list_rect.min.x,
+                    list_rect.min.y + i as f32 * option_h,
+                    list_rect.size().x,
+                    option_h,
+                );
+                let option_id = Id::root("settings").child(("resolution_option", i as u32));
+                let hovered = ui.interact_hover(option_id, option_rect);
+                let selected_option = *resolution == selected;
+                hovered_dropdown |= hovered;
+
+                let fill = if selected_option {
+                    Color::rgba(0.34, 0.12, 0.08, 0.98)
+                } else if hovered {
+                    Color::rgba(0.25, 0.18, 0.10, 0.98)
+                } else if i % 2 == 0 {
+                    Color::rgba(0.10, 0.075, 0.052, 0.98)
+                } else {
+                    Color::rgba(0.075, 0.058, 0.045, 0.98)
+                };
+                ui.draw_rect(option_rect, fill);
+
+                let label_text = resolution_label(*resolution);
+                ui.draw_text(
+                    rift_ui_im::Pos2::new(
+                        option_rect.min.x + 12.0 * sc,
+                        option_rect.min.y + 8.0 * sc,
+                    ),
+                    &label_text,
+                    13.0 * sc,
+                    theme.colors.text,
+                );
+
+                if hovered && ui.input().left_clicked() {
+                    picked = Some(*resolution);
+                    ui.state_mut().focus = None;
+                }
+            }
+        });
+
+        if ui.input().left_just_pressed() && !hovered_dropdown {
+            ui.state_mut().focus = None;
+        }
+    }
+
+    if !open {
+        setting_tooltip(
+            ui,
+            body,
+            "resolution_tip",
+            Rect::from_xywh(body.min.x, y, body.size().x, row_h),
+            "Resolution",
+            "Changes the display mode to a resolution reported by the current monitor. Lower values reduce GPU pixel work.",
+        );
+    }
+
+    picked
+}
+
+fn resolution_label(resolution: DisplayResolution) -> String {
+    if resolution.width == 0 || resolution.height == 0 {
+        "Unknown".to_string()
+    } else {
+        format!("{} x {}", resolution.width, resolution.height)
+    }
+}
+
+fn setting_tooltip(
+    ui: &mut Ui<'_>,
+    body: Rect,
+    id: &'static str,
+    rect: Rect,
+    header: &'static str,
+    text: &'static str,
+) {
+    let hover = ui.interact_hover(Id::root("settings_tip").child(id), rect);
+    if !hover {
+        return;
+    }
+
+    let theme = *ui.theme();
+    let lines = [TooltipLine::new(
+        text,
+        theme.fonts.size_sm,
+        theme.colors.text_muted,
+    )];
+    let _ = body;
+    tooltip_at_mouse(ui, Some(header), &lines);
 }
 
 /// Horizontal volume slider. Returns the new value when the

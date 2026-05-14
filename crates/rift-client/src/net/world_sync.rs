@@ -28,9 +28,7 @@ use rift_game::character::Gender as GameGender;
 use rift_game::monsters::MonsterRole;
 
 use crate::game::character_spawn::{spawn_character_entity, AnimLibraryCache, CharacterSpawn};
-use crate::game::floor::{
-    minion_hover_height, spawn_remote_enemy_entity, spawn_remote_minion_entity,
-};
+use crate::game::floor::{spawn_remote_enemy_entity, spawn_remote_minion_entity};
 use crate::game::monster_assets::MonsterCache;
 
 use super::snapshot::RemoteProfile;
@@ -865,23 +863,27 @@ impl NetClient {
                 *visual_base += correction * alpha;
             }
             if let Ok(mut t) = world.get::<&mut Transform>(entity) {
-                let hover_height = match re.kind {
+                let presentation = match re.kind {
                     EntityKind::Minion { role, .. } => MonsterRole::from_wire_byte(role)
-                        .and_then(minion_hover_height)
-                        .unwrap_or(0.0),
-                    _ => 0.0,
+                        .map(rift_game::minions::presentation_for_role),
+                    _ => None,
                 };
-                let bob = if hover_height > 0.0 {
-                    let bob_phase = self.minion_hover_time * 3.4 + net_id.0 as f32 * 0.37;
-                    bob_phase.sin() * 0.18
-                } else {
-                    0.0
-                };
+                let hover_height = presentation
+                    .and_then(rift_game::minions::MinionPresentation::hover_height)
+                    .unwrap_or(0.0);
+                let bob = presentation
+                    .map(|presentation| {
+                        let phase = self.minion_hover_time * presentation.bob_speed()
+                            + net_id.0 as f32 * 0.37;
+                        presentation.bob(phase)
+                    })
+                    .unwrap_or(0.0);
                 t.position = *visual_base + Vec3::new(0.0, hover_height + bob, 0.0);
                 t.rotation = Quat::from_rotation_y(display_yaw);
                 if let EntityKind::Minion { role, .. } = re.kind {
                     if let Some(role) = MonsterRole::from_wire_byte(role) {
-                        t.scale = Vec3::splat(role.scale() * 0.30);
+                        let presentation = rift_game::minions::presentation_for_role(role);
+                        t.scale = Vec3::splat(role.scale() * presentation.visual_scale);
                     }
                 }
             }

@@ -8,7 +8,11 @@ struct CompositePush {
     bloom_intensity: f32,
     exposure: f32,
     ghost_mix: f32,
+    ao_strength: f32,
+    volumetrics_intensity: f32,
     _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 unsafe impl bytemuck::Pod for CompositePush {}
 unsafe impl bytemuck::Zeroable for CompositePush {}
@@ -27,6 +31,8 @@ pub(super) fn record(
     cmd: vk::CommandBuffer,
     config: &BloomConfig,
     ghost_mix: f32,
+    ao_strength: f32,
+    volumetrics_intensity: f32,
     info: CompositeRecordInfo,
 ) {
     let viewport = vk::Viewport {
@@ -57,7 +63,11 @@ pub(super) fn record(
             bloom_intensity: config.intensity,
             exposure: config.exposure,
             ghost_mix: ghost_mix.clamp(0.0, 1.0),
+            ao_strength: ao_strength.clamp(0.0, 1.0),
+            volumetrics_intensity: volumetrics_intensity.clamp(0.0, 1.0),
             _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         };
         device.cmd_push_constants(
             cmd,

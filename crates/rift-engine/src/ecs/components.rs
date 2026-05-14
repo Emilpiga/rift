@@ -105,12 +105,26 @@ pub struct AnimationSet {
     pub clips: std::collections::HashMap<String, std::sync::Arc<crate::animation::BoundClip>>,
 }
 
+#[derive(Clone, Default)]
+pub struct LocomotionClips {
+    pub sprint: Option<std::sync::Arc<crate::animation::BoundClip>>,
+    pub jog: Option<std::sync::Arc<crate::animation::BoundClip>>,
+    pub walk: Option<std::sync::Arc<crate::animation::BoundClip>>,
+    pub idle: Option<std::sync::Arc<crate::animation::BoundClip>>,
+}
+
 impl AnimationSet {
     pub fn get(&self, name: &str) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
-        // Avoid allocating a lowercased key string every frame by
-        // doing a case-insensitive linear scan. Clip counts per set
-        // are small (typically < 30) so this is faster in practice
-        // than the lowercased-key hash lookup it replaces.
+        if let Some(clip) = self.clips.get(name) {
+            return Some(clip.clone());
+        }
+        self.get_case_insensitive(name)
+    }
+
+    fn get_case_insensitive(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
         for (k, v) in &self.clips {
             if k.eq_ignore_ascii_case(name) {
                 return Some(v.clone());
@@ -124,7 +138,12 @@ impl AnimationSet {
         candidates: &[&str],
     ) -> Option<std::sync::Arc<crate::animation::BoundClip>> {
         for c in candidates {
-            if let Some(clip) = self.get(c) {
+            if let Some(clip) = self.clips.get(*c) {
+                return Some(clip.clone());
+            }
+        }
+        for c in candidates {
+            if let Some(clip) = self.get_case_insensitive(c) {
                 return Some(clip);
             }
         }

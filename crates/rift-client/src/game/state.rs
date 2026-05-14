@@ -132,6 +132,12 @@ pub struct GameState {
     /// `request_quit` flag this drives is reachable from
     /// `main.rs` after `update`.
     pub pause: super::pause::PauseState,
+    /// Initial character-select can opportunistically prewarm
+    /// world PBR packs. After returning from gameplay, leave
+    /// those loads to the EnteringWorld loading phases so we
+    /// don't overlap a new preload worker with an old worker
+    /// still finishing a decode from the previous world.
+    pub(super) character_select_world_preload: bool,
 }
 
 /// Hub entry portal. Visual + interaction state for the glowing ring
@@ -201,6 +207,7 @@ impl GameState {
                 }
             },
             pause: super::pause::PauseState::default(),
+            character_select_world_preload: true,
         }
     }
 

@@ -102,6 +102,8 @@ void applyHeightMaterialDetail(
     inout float roughness,
     inout float ao
 ) {
+    if (scale <= 0.001) return;
+
     float relief = smoothstep(0.004, 0.025, max(scale, 0.0));
     float h = texture(heightMap, uv).r;
 

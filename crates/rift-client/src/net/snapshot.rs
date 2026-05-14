@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
 use rift_net::{
-    messages::{EntityKind, Snapshot},
-    ClientId, NetId, NetTick,
+    messages::{EntityKind, SnapshotDelta},
+    ClientId, NetId, NetTick, Snapshot,
 };
 
 use super::NetClient;
@@ -115,6 +115,7 @@ impl NetClient {
         if snap.tick.diff(self.last_server_tick) <= 0 {
             return;
         }
+        let latest_snapshot = snap.clone();
         self.last_server_tick = snap.tick;
 
         // Find our own row before draining `remote` so we have
@@ -395,6 +396,30 @@ impl NetClient {
             snap.ack_seq,
             self.input_history.len(),
         );
+        self.latest_snapshot = Some(latest_snapshot);
+    }
+
+    pub(super) fn apply_snapshot_delta(&mut self, delta: SnapshotDelta) {
+        if delta.tick.diff(self.last_server_tick) <= 0 {
+            return;
+        }
+        let Some(base) = self.latest_snapshot.as_ref() else {
+            log::debug!(
+                "net: dropped snapshot delta tick={:?} base={:?}: no local baseline",
+                delta.tick,
+                delta.base_tick
+            );
+            return;
+        };
+        let delta_tick = delta.tick;
+        let delta_base = delta.base_tick;
+        match base.apply_delta(delta) {
+            Some(snapshot) => self.apply_snapshot(snapshot),
+            None => log::debug!(
+                "net: dropped snapshot delta tick={delta_tick:?} base={delta_base:?}: baseline mismatch local={:?}",
+                base.tick
+            ),
+        }
     }
 }
 

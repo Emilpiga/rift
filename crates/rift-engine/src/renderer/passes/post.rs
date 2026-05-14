@@ -1093,6 +1093,8 @@ impl PostProcessing {
         image_index: u32,
         config: &BloomConfig,
         ghost_mix: f32,
+        ao_strength: f32,
+        volumetrics_intensity: f32,
     ) {
         let i = image_index as usize;
         composite::record(
@@ -1100,6 +1102,8 @@ impl PostProcessing {
             cmd,
             config,
             ghost_mix,
+            ao_strength,
+            volumetrics_intensity,
             composite::CompositeRecordInfo {
                 extent: self.extent,
                 pipeline: self.composite_pipeline,

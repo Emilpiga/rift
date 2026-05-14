@@ -48,6 +48,7 @@ pub struct ServerMinion {
     pub owner_net_id: NetId,
     pub role: MonsterRole,
     pub lifetime_remaining: f32,
+    pub lifetime_max: f32,
     pub follow_distance: f32,
     pub attack_range: f32,
     pub attack_interval: f32,
@@ -63,6 +64,7 @@ pub struct ServerMinion {
 impl ServerMinion {
     fn refresh(&mut self, request: &MinionSpawnRequest) {
         self.lifetime_remaining = request.duration;
+        self.lifetime_max = request.duration.max(0.001);
         self.follow_distance = request.follow_distance;
         self.attack_range = request.attack_range;
         self.attack_interval = request.attack_interval;
@@ -114,6 +116,7 @@ pub fn spawn_or_refresh(
             owner_net_id: request.owner_net_id,
             role: request.role,
             lifetime_remaining: request.duration,
+            lifetime_max: request.duration.max(0.001),
             follow_distance: request.follow_distance,
             attack_range: request.attack_range,
             attack_interval: request.attack_interval,

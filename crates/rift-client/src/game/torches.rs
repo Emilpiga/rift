@@ -68,6 +68,17 @@ fn room_at(floor: &Floor, x: f32, z: f32) -> Option<&rift_engine::dungeon::Room>
         .find(|r| gx >= r.x && gx < r.x + r.width && gz >= r.z && gz < r.z + r.depth)
 }
 
+fn insert_nearest<T: Copy>(nearest: &mut Vec<(f32, T)>, d2: f32, value: T, cap: usize) {
+    match nearest.iter().position(|(other_d2, _)| d2 < *other_d2) {
+        Some(pos) => nearest.insert(pos, (d2, value)),
+        None if nearest.len() < cap => nearest.push((d2, value)),
+        None => return,
+    }
+    if nearest.len() > cap {
+        nearest.pop();
+    }
+}
+
 /// One placed torch: the warm point light it casts and the live
 /// VFX effect id, kept around so we can despawn it on floor change.
 #[derive(Clone, Copy)]
@@ -266,21 +277,20 @@ impl TorchSystem {
         const RANK_CAP: usize = 14;
         const RANK_FULL: usize = 12;
 
-        let mut scored: Vec<(f32, PointLight, f32)> = self
-            .torches
-            .iter()
-            .map(|t| {
-                (
-                    t.light.position.distance_squared(player_pos),
-                    t.light,
-                    t.flicker_phase,
-                )
-            })
-            .filter(|(d2, _, _)| *d2 <= max_d2)
-            .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut scored: Vec<(f32, (PointLight, f32))> = Vec::with_capacity(RANK_CAP);
+        for torch in &self.torches {
+            let d2 = torch.light.position.distance_squared(player_pos);
+            if d2 <= max_d2 {
+                insert_nearest(
+                    &mut scored,
+                    d2,
+                    (torch.light, torch.flicker_phase),
+                    RANK_CAP,
+                );
+            }
+        }
 
-        for (rank, (d2, mut light, phase)) in scored.into_iter().take(RANK_CAP).enumerate() {
+        for (rank, (d2, (mut light, phase))) in scored.into_iter().enumerate() {
             // Fog-aligned distance fade. `dist_s` runs from 1.0
             // when the torch is at or inside `fog_start` to 0.0
             // at `fog_end`. The smoothstep curve matches the
@@ -426,23 +436,15 @@ impl TorchSystem {
         const RANK_CAP: usize = 14;
         const RANK_FULL: usize = 12;
 
-        let mut scored: Vec<(f32, usize)> = self
-            .torches
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (t.light.position.distance_squared(player_pos), i))
-            .filter(|(d2, _)| *d2 <= max_d2)
-            .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut scored: Vec<(f32, usize)> = Vec::with_capacity(RANK_CAP);
+        for (idx, torch) in self.torches.iter().enumerate() {
+            let d2 = torch.light.position.distance_squared(player_pos);
+            if d2 <= max_d2 {
+                insert_nearest(&mut scored, d2, idx, RANK_CAP);
+            }
+        }
 
-        // Track which torches were in the active set so the
-        // rest can be muted (kept playing but at zero volume —
-        // cheaper than stop/restart, and preserves the loop's
-        // phase so a torch returning to audible range fades
-        // back in mid-crackle rather than restarting).
-        let mut audible = vec![false; self.torches.len()];
-
-        for (rank, (d2, idx)) in scored.into_iter().take(RANK_CAP).enumerate() {
+        for (rank, (d2, idx)) in scored.iter().copied().enumerate() {
             let t = &self.torches[idx];
             let Some(em) = t.audio else { continue };
             let d = d2.sqrt();
@@ -467,14 +469,13 @@ impl TorchSystem {
             let volume = (dist_s * rank_s * (1.0 + flicker)).max(0.0);
             audio.set_emitter_position(em, t.light.position);
             audio.set_emitter_volume(em, volume);
-            audible[idx] = true;
         }
 
         // Mute everything outside the active set so a torch
         // that just fell off the rank cap doesn't keep
         // bleeding through at full volume.
         for (i, t) in self.torches.iter().enumerate() {
-            if audible[i] {
+            if scored.iter().any(|(_, active_idx)| *active_idx == i) {
                 continue;
             }
             if let Some(em) = t.audio {

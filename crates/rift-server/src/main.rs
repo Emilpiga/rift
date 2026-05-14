@@ -25,7 +25,7 @@ use std::{
 use anyhow::Result;
 use rift_net::{
     decode, encode, open_server, renet, Channel, ClientId, ClientMsg, NetSettings, NetTick,
-    ServerHandle, ServerMsg, MAX_CLIENTS, SNAPSHOT_HZ, TICK_HZ,
+    ServerHandle, ServerMsg, Snapshot, MAX_CLIENTS, SNAPSHOT_HZ, TICK_HZ,
 };
 use rift_persistence::PersistenceHandle;
 
@@ -87,6 +87,7 @@ struct Server {
     tick_accumulator: Duration,
     /// Same idea for snapshot broadcasts (decoupled from sim rate).
     snapshot_accumulator: Duration,
+    snapshot_baselines: HashMap<ClientId, Snapshot>,
     /// Drives 1 Hz `ServerMsg::MeterSnapshot` broadcasts so the
     /// HUD damage-meter panel updates without spamming the
     /// control channel every tick.
@@ -138,6 +139,7 @@ impl Server {
             parties: PartyManager::new(),
             tick_accumulator: Duration::ZERO,
             snapshot_accumulator: Duration::ZERO,
+            snapshot_baselines: HashMap::new(),
             meter_accumulator: Duration::ZERO,
             party_state_accumulator: Duration::ZERO,
             persistence,
@@ -1401,18 +1403,31 @@ impl Server {
     /// route the build through whichever Sim they currently
     /// inhabit so they never see entities from the other floor.
     fn broadcast_snapshot(&mut self) {
-        let connected: Vec<u64> = self
+        const FULL_SNAPSHOT_INTERVAL_TICKS: u32 = SNAPSHOT_HZ;
+
+        let connected: Vec<ClientId> = self
             .handle
             .server
             .clients_id()
             .iter()
-            .map(|id| id.raw())
+            .map(|id| ClientId(id.raw()))
             .collect();
+        self.snapshot_baselines
+            .retain(|client_id, _| connected.contains(client_id));
         let tick = self.tick;
-        for raw in connected {
-            let cid = ClientId(raw);
+        for cid in connected {
             let snap = self.sim_for_client_mut(cid).build_snapshot(tick, cid);
-            self.send_to(cid, Channel::Snapshot, &ServerMsg::Snapshot(snap));
+            let send_full = tick.0 % FULL_SNAPSHOT_INTERVAL_TICKS == 0
+                || !self.snapshot_baselines.contains_key(&cid);
+            let msg = if send_full {
+                ServerMsg::Snapshot(snap.clone())
+            } else if let Some(base) = self.snapshot_baselines.get(&cid) {
+                ServerMsg::SnapshotDelta(snap.delta_since(base))
+            } else {
+                ServerMsg::Snapshot(snap.clone())
+            };
+            self.send_to(cid, Channel::Snapshot, &msg);
+            self.snapshot_baselines.insert(cid, snap);
         }
     }
 

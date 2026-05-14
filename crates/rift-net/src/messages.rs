@@ -14,6 +14,7 @@
 
 use crate::ids::{ClientId, NetId, NetTick};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Bag grid dimensions. The bag is a 2D grid where storage
 /// index = `row * BAG_COLS + col`; each item anchors at its
@@ -804,6 +805,12 @@ pub enum ServerMsg {
     /// World state at a given tick. See [`Snapshot`].
     Snapshot(Snapshot),
 
+    /// Delta-compressed world state against the previous snapshot
+    /// this server sent to the same client. Clients apply it only
+    /// when `base_tick` matches their last reconstructed snapshot;
+    /// otherwise they drop it and wait for the next full baseline.
+    SnapshotDelta(SnapshotDelta),
+
     /// Reliable, one-shot world events that don't fit per-tick
     /// snapshots (damage numbers, ability casts, deaths). See
     /// [`WorldEvent`].
@@ -1196,9 +1203,7 @@ pub struct MeterTakenAbility {
     pub damage_taken: f32,
 }
 
-/// Per-tick snapshot. Phase 1 ships the *full* state every tick — we
-/// will layer delta encoding on top in a later phase once the field
-/// set is stable.
+/// Full world snapshot baseline.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tick: NetTick,
@@ -1207,6 +1212,259 @@ pub struct Snapshot {
     pub ack_seq: u32,
     /// All replicated entities visible to the receiving client.
     pub entities: Vec<EntitySnapshot>,
+}
+
+/// Delta-compressed snapshot relative to `base_tick`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapshotDelta {
+    pub tick: NetTick,
+    pub base_tick: NetTick,
+    pub ack_seq: u32,
+    pub changed: Vec<EntitySnapshotDelta>,
+    pub removed: Vec<NetId>,
+}
+
+/// Per-entity partial update. `kind == Some` means either a newly
+/// visible entity or an archetype payload change. New rows must carry
+/// every common field as `Some` so clients can construct the full row.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EntitySnapshotDelta {
+    pub net_id: NetId,
+    pub kind: Option<EntityKind>,
+    pub position: Option<[f32; 3]>,
+    pub yaw: Option<f32>,
+    pub velocity: Option<[f32; 3]>,
+    pub health_pct: Option<f32>,
+    pub resource_pct: Option<f32>,
+    pub flags: Option<u8>,
+    pub effects: Option<Vec<ActiveEffect>>,
+}
+
+impl Snapshot {
+    pub fn delta_since(&self, base: &Snapshot) -> SnapshotDelta {
+        let base_rows: HashMap<NetId, &EntitySnapshot> =
+            base.entities.iter().map(|row| (row.net_id, row)).collect();
+        let current_ids: HashSet<NetId> = self.entities.iter().map(|row| row.net_id).collect();
+
+        let mut changed = Vec::new();
+        for row in &self.entities {
+            match base_rows.get(&row.net_id).copied() {
+                Some(prev) => {
+                    let delta = EntitySnapshotDelta {
+                        net_id: row.net_id,
+                        kind: (!same_serialized(&row.kind, &prev.kind)).then(|| row.kind.clone()),
+                        position: (row.position != prev.position).then_some(row.position),
+                        yaw: (row.yaw != prev.yaw).then_some(row.yaw),
+                        velocity: (row.velocity != prev.velocity).then_some(row.velocity),
+                        health_pct: (row.health_pct != prev.health_pct).then_some(row.health_pct),
+                        resource_pct: (row.resource_pct != prev.resource_pct)
+                            .then_some(row.resource_pct),
+                        flags: (row.flags != prev.flags).then_some(row.flags),
+                        effects: (!same_serialized(&row.effects, &prev.effects))
+                            .then(|| row.effects.clone()),
+                    };
+                    if delta.has_changes() {
+                        changed.push(delta);
+                    }
+                }
+                None => changed.push(EntitySnapshotDelta::from_full(row)),
+            }
+        }
+
+        let removed = base
+            .entities
+            .iter()
+            .filter_map(|row| (!current_ids.contains(&row.net_id)).then_some(row.net_id))
+            .collect();
+
+        SnapshotDelta {
+            tick: self.tick,
+            base_tick: base.tick,
+            ack_seq: self.ack_seq,
+            changed,
+            removed,
+        }
+    }
+
+    pub fn apply_delta(&self, delta: SnapshotDelta) -> Option<Snapshot> {
+        if self.tick != delta.base_tick {
+            return None;
+        }
+        let removed: HashSet<NetId> = delta.removed.into_iter().collect();
+        let mut rows: Vec<EntitySnapshot> = self
+            .entities
+            .iter()
+            .filter(|row| !removed.contains(&row.net_id))
+            .cloned()
+            .collect();
+
+        for patch in delta.changed {
+            if let Some(row) = rows.iter_mut().find(|row| row.net_id == patch.net_id) {
+                patch.apply_to(row);
+            } else {
+                rows.push(patch.into_full()?);
+            }
+        }
+
+        Some(Snapshot {
+            tick: delta.tick,
+            ack_seq: delta.ack_seq,
+            entities: rows,
+        })
+    }
+}
+
+impl EntitySnapshotDelta {
+    fn from_full(row: &EntitySnapshot) -> Self {
+        Self {
+            net_id: row.net_id,
+            kind: Some(row.kind.clone()),
+            position: Some(row.position),
+            yaw: Some(row.yaw),
+            velocity: Some(row.velocity),
+            health_pct: Some(row.health_pct),
+            resource_pct: Some(row.resource_pct),
+            flags: Some(row.flags),
+            effects: Some(row.effects.clone()),
+        }
+    }
+
+    fn has_changes(&self) -> bool {
+        self.kind.is_some()
+            || self.position.is_some()
+            || self.yaw.is_some()
+            || self.velocity.is_some()
+            || self.health_pct.is_some()
+            || self.resource_pct.is_some()
+            || self.flags.is_some()
+            || self.effects.is_some()
+    }
+
+    fn apply_to(self, row: &mut EntitySnapshot) {
+        if let Some(kind) = self.kind {
+            row.kind = kind;
+        }
+        if let Some(position) = self.position {
+            row.position = position;
+        }
+        if let Some(yaw) = self.yaw {
+            row.yaw = yaw;
+        }
+        if let Some(velocity) = self.velocity {
+            row.velocity = velocity;
+        }
+        if let Some(health_pct) = self.health_pct {
+            row.health_pct = health_pct;
+        }
+        if let Some(resource_pct) = self.resource_pct {
+            row.resource_pct = resource_pct;
+        }
+        if let Some(flags) = self.flags {
+            row.flags = flags;
+        }
+        if let Some(effects) = self.effects {
+            row.effects = effects;
+        }
+    }
+
+    fn into_full(self) -> Option<EntitySnapshot> {
+        Some(EntitySnapshot {
+            net_id: self.net_id,
+            kind: self.kind?,
+            position: self.position?,
+            yaw: self.yaw?,
+            velocity: self.velocity?,
+            health_pct: self.health_pct?,
+            resource_pct: self.resource_pct.unwrap_or_else(resource_pct_default),
+            flags: self.flags?,
+            effects: self.effects.unwrap_or_default(),
+        })
+    }
+}
+
+fn same_serialized<T: Serialize>(a: &T, b: &T) -> bool {
+    match (bincode::serialize(a), bincode::serialize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod snapshot_delta_tests {
+    use super::*;
+
+    fn enemy_row(id: u32, x: f32, hp: f32) -> EntitySnapshot {
+        EntitySnapshot {
+            net_id: NetId(id),
+            kind: EntityKind::Enemy { role: 1, anim: 0 },
+            position: [x, 0.0, 0.0],
+            yaw: 0.0,
+            velocity: [0.0, 0.0, 0.0],
+            health_pct: hp,
+            resource_pct: 1.0,
+            flags: 0,
+            effects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delta_reconstructs_changed_and_removed_rows() {
+        let base = Snapshot {
+            tick: NetTick(10),
+            ack_seq: 7,
+            entities: vec![enemy_row(1, 1.0, 1.0), enemy_row(2, 2.0, 1.0)],
+        };
+        let current = Snapshot {
+            tick: NetTick(11),
+            ack_seq: 9,
+            entities: vec![enemy_row(1, 3.0, 0.5)],
+        };
+
+        let delta = current.delta_since(&base);
+        assert_eq!(delta.base_tick, base.tick);
+        assert_eq!(delta.removed, vec![NetId(2)]);
+        assert_eq!(delta.changed.len(), 1);
+        assert_eq!(delta.changed[0].position, Some([3.0, 0.0, 0.0]));
+        assert_eq!(delta.changed[0].health_pct, Some(0.5));
+        assert!(delta.changed[0].kind.is_none());
+
+        let rebuilt = base.apply_delta(delta).expect("delta applies");
+        assert_eq!(rebuilt.tick, current.tick);
+        assert_eq!(rebuilt.ack_seq, current.ack_seq);
+        assert_eq!(rebuilt.entities.len(), 1);
+        assert_eq!(rebuilt.entities[0].net_id, NetId(1));
+        assert_eq!(rebuilt.entities[0].position, [3.0, 0.0, 0.0]);
+        assert_eq!(rebuilt.entities[0].health_pct, 0.5);
+    }
+
+    #[test]
+    fn delta_reconstructs_new_rows_and_rejects_wrong_base() {
+        let base = Snapshot {
+            tick: NetTick(20),
+            ack_seq: 1,
+            entities: vec![enemy_row(1, 1.0, 1.0)],
+        };
+        let current = Snapshot {
+            tick: NetTick(21),
+            ack_seq: 2,
+            entities: vec![enemy_row(1, 1.0, 1.0), enemy_row(3, 9.0, 0.75)],
+        };
+
+        let delta = current.delta_since(&base);
+        let rebuilt = base
+            .clone()
+            .apply_delta(delta.clone())
+            .expect("delta applies");
+        assert_eq!(rebuilt.entities.len(), 2);
+        assert!(rebuilt.entities.iter().any(|row| row.net_id == NetId(3)));
+
+        let wrong_base = Snapshot {
+            tick: NetTick(19),
+            ack_seq: 1,
+            entities: Vec::new(),
+        };
+        assert!(wrong_base.apply_delta(delta).is_none());
+    }
 }
 
 /// Per-entity snapshot. The `kind` discriminator selects the trailing

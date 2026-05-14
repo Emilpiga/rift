@@ -417,6 +417,42 @@ impl SkinningSystem {
         }
     }
 
+    /// Overwrite a registered mesh's output vertex buffer with a CPU-skinned
+    /// pose. This lets short-lived previews start from an animated pose instead
+    /// of the registration-time bind pose while waiting for the first compute pass.
+    pub fn prime_output_vertices(
+        &mut self,
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        handle: SkinHandle,
+        vertices: &[Vertex],
+    ) -> Result<()> {
+        let slot = match self.slots.get_mut(handle.0) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let Some(mesh) = slot.resources.as_ref() else {
+            return Ok(());
+        };
+        if vertices.len() as u32 != mesh.vertex_count {
+            anyhow::bail!(
+                "SkinningSystem::prime_output_vertices: vertex count mismatch ({} != {})",
+                vertices.len(),
+                mesh.vertex_count
+            );
+        }
+        prime_output_vb(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            &mesh.output_vb,
+            vertices,
+        )
+    }
+
     /// Returns the GPU buffer the graphics pipelines should bind for
     /// this skinned mesh's vertices (i.e. the compute shader's
     /// output target). Stable across frames — safe to cache on the

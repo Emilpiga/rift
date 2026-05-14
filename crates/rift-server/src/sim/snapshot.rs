@@ -154,7 +154,8 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
             yaw: kinematic.yaw,
             velocity: kinematic.velocity.to_array(),
             health_pct: vitals.health_pct(),
-            resource_pct: minion.lifetime_remaining / 28.0,
+            resource_pct: (minion.lifetime_remaining / minion.lifetime_max.max(0.001))
+                .clamp(0.0, 1.0),
             flags: 0,
             effects,
         });

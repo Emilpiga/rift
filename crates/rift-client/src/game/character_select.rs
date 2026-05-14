@@ -21,7 +21,7 @@
 
 use glam::{Mat4, Vec3};
 use rift_engine::{
-    animation::{Animator, Clip},
+    animation::{self, Animator, Clip},
     ecs::components::{AnimationSet, Renderable, Skinned, SkinnedAttachments, Transform},
     renderer::mesh::SkinnedMesh,
     ui::im::{Color, Ui},
@@ -118,6 +118,7 @@ pub struct CharacterSelect {
 struct PreviewState {
     entity: hecs::Entity,
     gender: Gender,
+    hidden_frames_remaining: u8,
 }
 
 impl CharacterSelect {
@@ -227,6 +228,19 @@ impl CharacterSelect {
         self.preview_state.as_ref().map(|s| (s.entity, s.gender))
     }
 
+    /// Keep a freshly-spawned preview invisible until GPU skinning has
+    /// had a couple of frames to overwrite the bind-pose output buffer.
+    pub fn settle_preview_pose(&mut self, world: &hecs::World, renderer: &mut Renderer) {
+        let Some(prev) = self.preview_state.as_mut() else {
+            return;
+        };
+        if prev.hidden_frames_remaining == 0 {
+            return;
+        }
+        collapse_preview_render_slots(world, renderer, prev.entity);
+        prev.hidden_frames_remaining = prev.hidden_frames_remaining.saturating_sub(1);
+    }
+
     /// Drop the preview avatar entity and free its render-object
     /// slot. Called by `GameState` right before generating the
     /// hub so the dynamic mesh slot can be reclaimed (and so the
@@ -258,7 +272,11 @@ impl CharacterSelect {
         }
         if let Some(gender) = desired {
             if let Some(entity) = self.spawn_preview_entity(world, renderer, gender) {
-                self.preview_state = Some(PreviewState { entity, gender });
+                self.preview_state = Some(PreviewState {
+                    entity,
+                    gender,
+                    hidden_frames_remaining: 4,
+                });
             }
         }
     }
@@ -295,6 +313,18 @@ impl CharacterSelect {
             .find_any(&["Idle_Loop", "Idle"])
             .or_else(|| anim_set.clips.values().next().cloned());
         let animator = idle_clip.map(Animator::new);
+        let mut initial_palette = Vec::new();
+        let mut initial_joint_worlds = Vec::new();
+        let mut initial_vertices = Vec::new();
+        if let Some(animator) = animator.as_ref() {
+            animation::build_bone_palette(
+                animator,
+                &skinned.joints,
+                &mut initial_palette,
+                Some(&mut initial_joint_worlds),
+            );
+            skinned.skin_to(&initial_palette, &mut initial_vertices);
+        }
 
         let podium_pos = Vec3::new(0.0, 0.0, 0.0);
         let obj_idx = match renderer.add_skinned_mesh(
@@ -310,6 +340,12 @@ impl CharacterSelect {
                 return None;
             }
         };
+        if !initial_vertices.is_empty() {
+            if let Err(e) = renderer.prime_skinned_mesh_output(obj_idx, &initial_vertices) {
+                log::warn!("Preview idle-pose upload failed: {}", e);
+            }
+            renderer.update_palette(obj_idx, &initial_palette);
+        }
         if let Err(e) = renderer.set_object_texture(
             obj_idx,
             rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
@@ -320,7 +356,7 @@ impl CharacterSelect {
         let comp = Skinned {
             mesh: Arc::new(skinned),
             scratch: Vec::new(),
-            joint_worlds: Vec::new(),
+            joint_worlds: initial_joint_worlds,
         };
         let entity = world.spawn((
             Transform::from_position(podium_pos),
@@ -380,6 +416,10 @@ impl CharacterSelect {
         }
         renderer.camera.position = Vec3::new(OFFSET_X, 1.4, 3.6);
         renderer.camera.target = Vec3::new(OFFSET_X, 1.0, 0.0);
+        // Gameplay anchors fog/animation LOD at the local player. The preview
+        // entity lives at the origin, so returning from a far-away floor must
+        // re-anchor here or the non-player skinning LOD updates it at 15-30 Hz.
+        renderer.fog_origin = Vec3::ZERO;
         // Atmosphere + backdrop disc + dune ring + drifting
         // sand haze are owned by `FloorManager` and installed
         // by `transition::update_character_select` so the

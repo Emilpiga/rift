@@ -8,7 +8,8 @@ use winit::{
 };
 
 use crate::input::Input;
-use crate::renderer::Renderer;
+use crate::renderer::{DisplayResolution, Renderer};
+use std::collections::BTreeSet;
 
 pub struct Window {
     pub title: String,
@@ -92,6 +93,7 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                     }
                     match Renderer::new(&window) {
                         Ok(mut renderer) => {
+                            sync_display_resolutions(&window, &mut renderer);
                             // App-side init now happens incrementally via
                             // `load_step` so we can render a loading
                             // screen while it runs. Just stash the
@@ -260,6 +262,9 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                         }
                     } else {
                         self.user_app.update(renderer, &self.input, dt);
+                        if let Some(window) = &self.window {
+                            apply_requested_display_resolution(window, renderer);
+                        }
                     }
                     self.input.end_frame();
                     if let Err(e) = renderer.draw_frame() {
@@ -284,6 +289,9 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
             WindowEvent::Resized(physical_size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.notify_resized(physical_size.width, physical_size.height);
+                    if let Some(window) = &self.window {
+                        sync_display_resolutions(window, renderer);
+                    }
                 }
             }
             _ => {}
@@ -305,6 +313,82 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
             self.input.on_mouse_motion(dx, dy);
         }
     }
+}
+
+fn sync_display_resolutions(window: &winit::window::Window, renderer: &mut Renderer) {
+    let mut seen = BTreeSet::new();
+    let mut resolutions = Vec::new();
+
+    if let Some(monitor) = window.current_monitor() {
+        for mode in monitor.video_modes() {
+            let size = mode.size();
+            if size.width < 1024 || size.height < 576 {
+                continue;
+            }
+            if seen.insert((size.width, size.height)) {
+                resolutions.push(DisplayResolution {
+                    width: size.width,
+                    height: size.height,
+                });
+            }
+        }
+    }
+
+    resolutions.sort_by(|a, b| {
+        (b.width as u64 * b.height as u64)
+            .cmp(&(a.width as u64 * a.height as u64))
+            .then_with(|| b.width.cmp(&a.width))
+    });
+
+    let size = window.inner_size();
+    let selected = DisplayResolution {
+        width: size.width,
+        height: size.height,
+    };
+    if !resolutions.iter().any(|r| *r == selected) && selected.width > 0 && selected.height > 0 {
+        resolutions.push(selected);
+    }
+
+    renderer.set_display_resolutions(resolutions, selected);
+}
+
+fn apply_requested_display_resolution(window: &winit::window::Window, renderer: &mut Renderer) {
+    let Some(requested) = renderer.take_requested_display_resolution() else {
+        return;
+    };
+
+    let Some(monitor) = window.current_monitor() else {
+        log::warn!("Display resolution change skipped: no current monitor");
+        return;
+    };
+
+    let mut best_mode = None;
+    for mode in monitor.video_modes() {
+        let size = mode.size();
+        if size.width == requested.width && size.height == requested.height {
+            let replace = best_mode
+                .as_ref()
+                .map(|best: &winit::monitor::VideoModeHandle| {
+                    mode.refresh_rate_millihertz() > best.refresh_rate_millihertz()
+                })
+                .unwrap_or(true);
+            if replace {
+                best_mode = Some(mode);
+            }
+        }
+    }
+
+    if let Some(mode) = best_mode {
+        window.set_fullscreen(Some(Fullscreen::Exclusive(mode)));
+    } else {
+        window.set_fullscreen(None);
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
+            requested.width,
+            requested.height,
+        ));
+    }
+
+    sync_display_resolutions(window, renderer);
 }
 
 impl Window {
