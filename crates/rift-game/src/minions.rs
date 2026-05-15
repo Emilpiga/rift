@@ -65,6 +65,11 @@ pub fn presentation_for_role(role: MonsterRole) -> MinionPresentation {
             },
             hud_effect: Some(crate::effects::id::VOID_FAMILIAR),
         },
+        MonsterRole::Riftling => MinionPresentation {
+            visual_scale: 1.0,
+            motion: MinionMotionVisual::Grounded,
+            hud_effect: Some(crate::effects::id::RIFTLING_SWARM),
+        },
         _ => MinionPresentation::GROUNDED,
     }
 }
@@ -99,5 +104,16 @@ mod tests {
             assert_eq!(presentation.visual_scale, 1.0);
             assert_eq!(presentation.hud_effect, None);
         }
+    }
+
+    #[test]
+    fn riftling_minions_are_grounded_with_swarm_hud_effect() {
+        let presentation = presentation_for_role(MonsterRole::Riftling);
+        assert_eq!(presentation.motion, MinionMotionVisual::Grounded);
+        assert_eq!(presentation.visual_scale, 1.0);
+        assert_eq!(
+            presentation.hud_effect,
+            Some(crate::effects::id::RIFTLING_SWARM)
+        );
     }
 }

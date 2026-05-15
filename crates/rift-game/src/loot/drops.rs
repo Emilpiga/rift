@@ -238,6 +238,7 @@ pub fn table_for(role: MonsterRole) -> &'static LootTable {
         MonsterRole::Stalker => &STALKER_TABLE,
         MonsterRole::Caster => &CASTER_TABLE,
         MonsterRole::Wraith => &STALKER_TABLE,
+        MonsterRole::Riftling => &STALKER_TABLE,
         MonsterRole::Mindbinder => &CASTER_TABLE,
         MonsterRole::Elite => &ELITE_TABLE,
         MonsterRole::Boss => &BOSS_TABLE,

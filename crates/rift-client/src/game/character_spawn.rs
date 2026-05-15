@@ -13,6 +13,9 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
+use rift_engine::animation_profile::{
+    AnimBindings, AnimClipKey, JointKey, SkeletonBindings, PLAYER_PROFILE,
+};
 use rift_engine::ecs::components::{
     AnimationSet, Collider, Health, Player, Renderable, Resource, Skinned, Transform, Velocity,
 };
@@ -31,30 +34,6 @@ const ANIM_LIBRARY_PATHS: &[&str] = &[
     "assets/models/animation-library/Unreal-Godot/UAL1_Standard.glb",
     "assets/models/animation-library-two/Unreal-Godot/UAL2_Standard.glb",
 ];
-
-/// Lower-cased clip names whose baked root translation should be
-/// stripped at bind time so gameplay code owns forward motion.
-///
-/// We follow the ARPG convention (Diablo IV, Lost Ark, Last
-/// Epoch): attack animations are conceptually in-place, with the
-/// character's lunge driven by an authored `forward_step`
-/// constant in
-/// [`rift_game::kinematic::ActionProfile`]. Many of the source
-/// clips (Mixamo-style sword swings) have an animator-authored
-/// forward translation on the root joint, which fights the
-/// kinematic when the swing is direction-locked and produces the
-/// "she lunges then snaps back" feel.
-///
-/// We list explicit clip names rather than pattern-matching so
-/// it's easy to audit which clips have their root translation
-/// neutralised, and so accidentally adding a new clip starting
-/// with `Sword_` doesn't silently change motion behaviour.
-fn in_place_clip_names() -> &'static [&'static str] {
-    // Mirror the melee combo's clip_names entries, lowercased.
-    // If the combo table grows, add the new clip's lowercase
-    // name here too.
-    &["sword_attack", "punch_jab", "punch_cross"]
-}
 
 /// Caller-owned cache for the rigged animation library. Kept by
 /// gender since the bind-to-skeleton step is gender-specific (the
@@ -185,10 +164,6 @@ pub fn spawn_character_entity(
         } else {
             let mut set = AnimationSet::default();
             let mut loaded_any = false;
-            // Set of clip names (lowercased) that should be
-            // stripped of baked root translation at bind time
-            // — see [`in_place_clip_names`] below.
-            let in_place = in_place_clip_names();
             // Root joint of the bound skeleton, used by the
             // strip pass. Joint with no parent in the rig.
             let root_joint_idx: Option<u16> = skinned
@@ -217,7 +192,7 @@ pub fn spawn_character_entity(
                             // `attack_dir`.
                             let lowered = clip.name.to_ascii_lowercase();
                             if let Some(root) = root_joint_idx {
-                                if in_place.iter().any(|n| *n == lowered.as_str()) {
+                                if PLAYER_PROFILE.is_in_place_clip_name(&lowered) {
                                     bound.strip_root_translation(root);
                                     log::debug!(
                                         "stripped root motion from in-place clip '{}'",
@@ -252,13 +227,22 @@ pub fn spawn_character_entity(
         }
     };
 
+    let anim_bindings = anim_set
+        .as_ref()
+        .map(|set| AnimBindings::resolve(PLAYER_PROFILE, set));
     let animator = anim_set
         .as_ref()
         .and_then(|set| {
-            set.find_any(&["Idle_Loop", "Idle", "TPose"])
-                .or_else(|| set.clips.values().next().cloned())
+            anim_bindings
+                .as_ref()
+                .and_then(|bindings| bindings.get(AnimClipKey::Idle))
+                .or_else(|| {
+                    set.find_any(PLAYER_PROFILE.names_for(AnimClipKey::Idle))
+                        .or_else(|| set.clips.values().next().cloned())
+                })
         })
         .map(rift_engine::animation::Animator::new);
+    let skeleton_bindings = SkeletonBindings::resolve_player(&skinned.mesh);
 
     // Insert the heavy components after we've decided what to
     // attach. `insert_one` lets us add them piecewise without
@@ -267,40 +251,32 @@ pub fn spawn_character_entity(
     if let Some(set) = anim_set {
         world.insert_one(entity, set).ok();
     }
+    if let Some(bindings) = anim_bindings {
+        world.insert_one(entity, bindings).ok();
+    }
     if let Some(anim) = animator {
         world.insert_one(entity, anim).ok();
     }
 
-    // Read mask + spine joint back from the now-inserted Skinned
-    // component so we don't have to thread it through.
-    let (mask_opt, spine_idx, hand_idx): (
-        Option<(Vec<f32>, Vec<f32>)>,
-        Option<usize>,
-        Option<usize>,
-    ) = match world.get::<&Skinned>(entity) {
-        Ok(s) => (
-            Some(s.mesh.upper_body_mask_with_axis()),
-            s.mesh.spine_root_joint(),
-            s.mesh.left_hand_joint(),
-        ),
-        Err(_) => (None, None, None),
-    };
-    if let Some((mask, yaw_only)) = mask_opt {
+    if !skeleton_bindings.upper_body_mask.is_empty() {
         world
             .insert_one(
                 entity,
-                rift_engine::ecs::components::SpellCast::new_with_axis(mask, yaw_only),
+                rift_engine::ecs::components::SpellCast::new_with_axis(
+                    skeleton_bindings.upper_body_mask.clone(),
+                    skeleton_bindings.yaw_only_mask.clone(),
+                ),
             )
             .ok();
     }
-    if let Some(idx) = spine_idx {
+    if let Some(idx) = skeleton_bindings.get(JointKey::SpineRoot) {
         if let Ok(mut p) = world.get::<&mut Player>(entity) {
-            p.spine_joint = idx as u32;
+            p.spine_joint = idx;
         }
     }
-    if let Some(idx) = hand_idx {
+    if let Some(idx) = skeleton_bindings.get(JointKey::CastHand) {
         if let Ok(mut p) = world.get::<&mut Player>(entity) {
-            p.hand_joint = idx as u32;
+            p.hand_joint = idx;
         }
         log::debug!("hand joint resolved at index {}", idx);
     } else {
@@ -309,20 +285,17 @@ pub fn spawn_character_entity(
         );
     }
 
-    // Foot joints — used by the terrain-pitch + foot-IK pass
-    // in `skinning_system` to plant each foot on the dungeon
-    // floor's per-tile elevation when standing on a ramp / dais
-    // / pit tile.
-    let foot_pair = world
-        .get::<&Skinned>(entity)
-        .map(|s| s.mesh.foot_joints())
-        .unwrap_or((None, None));
+    // Foot joints — used by the terrain-pitch + foot-IK pass.
+    let foot_pair = (
+        skeleton_bindings.get(JointKey::LeftFoot),
+        skeleton_bindings.get(JointKey::RightFoot),
+    );
     if let Ok(mut p) = world.get::<&mut Player>(entity) {
         if let Some(li) = foot_pair.0 {
-            p.foot_l_joint = li as u32;
+            p.foot_l_joint = li;
         }
         if let Some(ri) = foot_pair.1 {
-            p.foot_r_joint = ri as u32;
+            p.foot_r_joint = ri;
         }
     }
     if foot_pair.0.is_none() || foot_pair.1.is_none() {
@@ -332,6 +305,7 @@ pub fn spawn_character_entity(
             foot_pair.1,
         );
     }
+    world.insert_one(entity, skeleton_bindings).ok();
     // Persistent foot-IK smoothing state. Attached unconditionally
     // — the IK pass is no-op when the dungeon floor handle isn't
     // available (hub, menu) or when foot joints didn't resolve.

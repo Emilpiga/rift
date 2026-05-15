@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use rift_engine::ui::im::{widgets::Button, Color, Frame, Id, Layer, Pad, Pos2, Rect, Stroke, Ui};
 use rift_net::messages::{party_mode, ClientMsg, PartyMember, MAX_PARTY};
+use rift_ui::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
 
 use crate::game::chat::ChatUi;
 use crate::game::states::frame_state::FrameState;
@@ -411,18 +412,30 @@ impl PartyUi {
                 btn_w,
                 btn_h,
             );
-            if Button::primary("Accept").show(ui, accept_rect).clicked {
+            if Button::primary("  Accept").show(ui, accept_rect).clicked {
                 net.pending_party_msgs.push(ClientMsg::PartyAccept {
                     from: Some(toast.from.clone()),
                 });
                 self.invite_toasts.pop_front();
             }
-            if Button::new("Decline").show(ui, decline_rect).clicked {
+            draw_placeholder_icon(
+                ui,
+                icon_rect_left(accept_rect, 14.0 * s, 7.0 * s),
+                UiIcon::Check,
+                theme.colors.text,
+            );
+            if Button::new("  Decline").show(ui, decline_rect).clicked {
                 net.pending_party_msgs.push(ClientMsg::PartyDecline {
                     from: Some(toast.from.clone()),
                 });
                 self.invite_toasts.pop_front();
             }
+            draw_placeholder_icon(
+                ui,
+                icon_rect_left(decline_rect, 14.0 * s, 7.0 * s),
+                UiIcon::Cancel,
+                theme.colors.text,
+            );
         });
     }
 
@@ -611,12 +624,24 @@ impl PartyUi {
                         124.0 * s,
                         36.0 * s,
                     );
-                    if Button::new("Cancel").show(ui, cancel).clicked {
+                    if Button::new("  Cancel").show(ui, cancel).clicked {
                         close = true;
                     }
-                    if Button::red("Enter Rift").show(ui, confirm).clicked {
+                    draw_placeholder_icon(
+                        ui,
+                        icon_rect_left(cancel, 16.0 * s, 8.0 * s),
+                        UiIcon::Cancel,
+                        theme.colors.text,
+                    );
+                    if Button::red("  Enter Rift").show(ui, confirm).clicked {
                         confirm_entry = true;
                     }
+                    draw_placeholder_icon(
+                        ui,
+                        icon_rect_left(confirm, 16.0 * s, 8.0 * s),
+                        UiIcon::Portal,
+                        theme.colors.text,
+                    );
                 });
         });
 
@@ -690,14 +715,26 @@ impl PartyUi {
                 ah,
             );
             let yes = Rect::from_xywh(body.x() + body.width() * 0.5 + 8.0 * s, action_y, aw, ah);
-            if Button::new("Decline").show(ui, no).clicked {
+            if Button::new("  Decline").show(ui, no).clicked {
                 net.pending_portal_confirm = Some(false);
                 self.confirm_prompt = None;
             }
-            if Button::primary("Accept").show(ui, yes).clicked {
+            draw_placeholder_icon(
+                ui,
+                icon_rect_left(no, 16.0 * s, 8.0 * s),
+                UiIcon::Cancel,
+                theme.colors.text,
+            );
+            if Button::primary("  Accept").show(ui, yes).clicked {
                 net.pending_portal_confirm = Some(true);
                 self.confirm_prompt = None;
             }
+            draw_placeholder_icon(
+                ui,
+                icon_rect_left(yes, 16.0 * s, 8.0 * s),
+                UiIcon::Check,
+                theme.colors.text,
+            );
         });
     }
 

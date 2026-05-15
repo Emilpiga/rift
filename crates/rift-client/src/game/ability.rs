@@ -36,6 +36,9 @@
 
 use glam::Vec3;
 use rift_engine::animation::BoundClip;
+use rift_engine::animation_profile::{
+    AnimBindings, AnimClipKey, JointKey, SkeletonBindings, PLAYER_PROFILE,
+};
 use rift_engine::ecs::components::{LocalPlayer, Player, SpellCast, SpellPhase, Transform};
 use rift_engine::Renderer;
 use rift_game::abilities::Ability;
@@ -145,14 +148,10 @@ pub fn trigger_local_cast(
                 player_state.punch_jab_next = true;
             }
         }
-        let clip_names: &[&str] = if player_state.punch_jab_next {
-            // Fall back to Punch_Cross / Sword_Attack if the
-            // animation library is missing the Jab clip — the
-            // swing still plays *something* rather than going
-            // silent.
-            &["Punch_Jab", "Punch", "Punch_Cross", "Sword_Attack"]
+        let clip_key = if player_state.punch_jab_next {
+            AnimClipKey::PunchJab
         } else {
-            &["Punch_Cross", "Punch", "Punch_Jab", "Sword_Attack"]
+            AnimClipKey::PunchCross
         };
         let pid_opt = world
             .query::<(&Player, &LocalPlayer)>()
@@ -161,9 +160,15 @@ pub fn trigger_local_cast(
             .next();
         if let Some(pid) = pid_opt {
             let clip = world
-                .get::<&AnimationSet>(pid)
+                .get::<&AnimBindings>(pid)
                 .ok()
-                .and_then(|set| set.find_any(clip_names));
+                .and_then(|bindings| bindings.get(clip_key))
+                .or_else(|| {
+                    world
+                        .get::<&AnimationSet>(pid)
+                        .ok()
+                        .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(clip_key)))
+                });
             if let Some(clip) = clip {
                 if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
                     // Use the preempting variant: punch's
@@ -328,16 +333,23 @@ pub fn on_remote_ability_cast(
     if ability.wire_id == rift_game::abilities::id::PUNCH {
         use rift_engine::ecs::components::AnimationSet;
         let jab_first = start_tick.0 % 2 == 0;
-        let clip_names: &[&str] = if jab_first {
-            &["Punch_Jab", "Punch", "Punch_Cross", "Sword_Attack"]
+        let clip_key = if jab_first {
+            AnimClipKey::PunchJab
         } else {
-            &["Punch_Cross", "Punch", "Punch_Jab", "Sword_Attack"]
+            AnimClipKey::PunchCross
         };
         let clip = state
             .world
-            .get::<&AnimationSet>(entity)
+            .get::<&AnimBindings>(entity)
             .ok()
-            .and_then(|set| set.find_any(clip_names));
+            .and_then(|bindings| bindings.get(clip_key))
+            .or_else(|| {
+                state
+                    .world
+                    .get::<&AnimationSet>(entity)
+                    .ok()
+                    .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(clip_key)))
+            });
         if let Some(clip) = clip {
             if let Ok(mut cast) = state.world.get::<&mut SpellCast>(entity) {
                 play_punch_oneshot(&mut cast, clip, ability.cooldown);
@@ -540,14 +552,23 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
     use rift_engine::ecs::components::Skinned;
     let local_live: Option<(Vec3, Vec3, Option<Vec3>)> = state
         .world
-        .query::<(&Transform, &Player, &LocalPlayer, Option<&Skinned>)>()
+        .query::<(
+            &Transform,
+            &Player,
+            &LocalPlayer,
+            Option<&SkeletonBindings>,
+            Option<&Skinned>,
+        )>()
         .iter()
-        .map(|(_, (t, p, _, s))| {
+        .map(|(_, (t, p, _, bindings, s))| {
             let hand = s.and_then(|s| {
-                if p.hand_joint == u32::MAX {
+                let hand_joint = bindings
+                    .and_then(|b| b.get(JointKey::CastHand))
+                    .unwrap_or(p.hand_joint);
+                if hand_joint == u32::MAX {
                     return None;
                 }
-                let idx = p.hand_joint as usize;
+                let idx = hand_joint as usize;
                 s.joint_worlds.get(idx).map(|m| {
                     let local = m.col(3).truncate();
                     // joint_worlds are mesh-local; lift into
@@ -639,15 +660,24 @@ pub fn tick_channel_visuals(state: &mut GameState, renderer: &mut Renderer, dt: 
         use rift_engine::ecs::components::RemotePlayer;
         let remote_data = state
             .world
-            .query::<(&Transform, &Player, &RemotePlayer, Option<&Skinned>)>()
+            .query::<(
+                &Transform,
+                &Player,
+                &RemotePlayer,
+                Option<&SkeletonBindings>,
+                Option<&Skinned>,
+            )>()
             .iter()
-            .find(|(_, (_, _, rp, _))| rp.net_id == vis.caster.0)
-            .map(|(_, (t, p, _, s))| {
+            .find(|(_, (_, _, rp, _, _))| rp.net_id == vis.caster.0)
+            .map(|(_, (t, p, _, bindings, s))| {
                 let hand = s.and_then(|s| {
-                    if p.hand_joint == u32::MAX {
+                    let hand_joint = bindings
+                        .and_then(|b| b.get(JointKey::CastHand))
+                        .unwrap_or(p.hand_joint);
+                    if hand_joint == u32::MAX {
                         return None;
                     }
-                    let idx = p.hand_joint as usize;
+                    let idx = hand_joint as usize;
                     s.joint_worlds.get(idx).map(|m| {
                         let local = m.col(3).truncate();
                         t.matrix().transform_point3(local)
@@ -873,11 +903,16 @@ pub fn on_remote_death(world: &mut hecs::World, entity: hecs::Entity) {
     use rift_engine::animation::Animator;
     use rift_engine::ecs::components::{AnimationSet, Health, PlayerAction, SpellCast, Velocity};
 
-    let candidates: &[&str] = &["Death01", "Death_01", "Death", "Death02", "Death_02"];
-    let clip = match world.get::<&AnimationSet>(entity) {
-        Ok(set) => set.find_any(candidates),
-        Err(_) => None,
-    };
+    let clip = world
+        .get::<&AnimBindings>(entity)
+        .ok()
+        .and_then(|bindings| bindings.get(AnimClipKey::Death))
+        .or_else(|| {
+            world
+                .get::<&AnimationSet>(entity)
+                .ok()
+                .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(AnimClipKey::Death)))
+        });
     let Some(clip) = clip else {
         log::warn!("Death animation not found in remote player's clip set");
         return;

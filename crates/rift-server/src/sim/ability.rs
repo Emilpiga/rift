@@ -26,6 +26,7 @@ use glam::{Quat, Vec3};
 use hecs::Entity;
 use rift_dungeon::Floor;
 use rift_game::kinematic::Kinematic;
+use rift_game::talents::KeystoneId;
 use rift_net::{messages::WorldEvent, ClientId, NetId, NetTick};
 
 pub use rift_game::abilities::id;
@@ -35,9 +36,10 @@ use super::actor::{NetIdentity, Vitals};
 use super::player::ServerPlayer;
 use super::projectile::{ServerAoeZone, ServerProjectile, Team};
 
-/// Number of cooldown slots tracked per player. Plenty of headroom
-/// over the 6 ability ids in use today; bumping this is free.
-pub const COOLDOWN_SLOTS: usize = 16;
+/// Number of cooldown slots tracked per player. Player-castable
+/// abilities live below wire id 64; keep one slot per id so newly
+/// appended player abilities do not alias cooldowns.
+pub const COOLDOWN_SLOTS: usize = 64;
 
 /// Per-player cooldown state. Indexed by ability id.
 pub type CooldownTable = HashMap<ClientId, [f32; COOLDOWN_SLOTS]>;
@@ -183,6 +185,10 @@ pub struct AcceptedCast {
     /// the `AbilityKind::Projectiles` dispatch arm. `0` for
     /// AI casts and players without a matching mod.
     pub extra_projectiles: u32,
+    /// Extra pierce targets contributed by talent / gear ability
+    /// modifiers. Applies to projectile pierce counts and beam
+    /// channel target caps.
+    pub pierce_bonus: u32,
     /// Global range multiplier from the caster's `Stat::Range`
     /// rolls (`1.0` = no change). Dispatch arms multiply the
     /// per-kind range parameters by this so projectile travel
@@ -190,6 +196,18 @@ pub struct AcceptedCast {
     /// same affix. `1.0` for AI casts — enemies don't roll
     /// player gear stats.
     pub range_mult: f32,
+    /// Player-owned minion stat multipliers snapshotted from
+    /// caster gear at submit/proc time. AI casts keep the neutral
+    /// `1.0` values and enemy-shaped summons use their own tuning.
+    pub minion_damage_mult: f32,
+    pub minion_health_mult: f32,
+    pub minion_attack_speed_mult: f32,
+    pub minion_duration_mult: f32,
+    /// Crit stats inherited by player-owned minions when the
+    /// summoner's active keystones opt into it (Bonded). Neutral
+    /// zeroes keep regular minions non-critting.
+    pub minion_crit_chance: f32,
+    pub minion_crit_damage: f32,
     /// Active ability transform (e.g. `FrostRayShatter`)
     /// contributed by a legendary affix. Dispatch arms that
     /// recognise the variant alter their behaviour
@@ -301,7 +319,21 @@ pub fn submit(
             let affix_cd = p_ref.ability_mods.cooldown_for(ability.id);
             let stat_cdr = p_ref.stats.cooldown_reduction;
             let range_mult = p_ref.stats.range.max(0.1);
+            let minion_damage_mult = 1.0 + p_ref.stats.minion_damage;
+            let minion_health_mult = 1.0 + p_ref.stats.minion_health;
+            let minion_attack_speed_mult = 1.0 + p_ref.stats.minion_attack_speed;
+            let minion_duration_mult = 1.0 + p_ref.stats.minion_duration;
+            let bonded = p_ref
+                .talents
+                .active_keystones()
+                .any(|keystone| keystone == KeystoneId::Bonded);
+            let (minion_crit_chance, minion_crit_damage) = if bonded {
+                (crit_chance, crit_damage)
+            } else {
+                (0.0, 0.0)
+            };
             let extra_projectiles = p_ref.ability_mods.extra_projectiles_for(ability.id);
+            let pierce_bonus = p_ref.ability_mods.pierce_bonus_for(ability.id);
             let transform = p_ref.ability_mods.transform_for(ability.id);
             drop(p_ref);
 
@@ -422,7 +454,14 @@ pub fn submit(
                 target_net_id: target_entity.map(|_| target_net_id.unwrap_or(net_id)),
                 target_position,
                 extra_projectiles,
+                pierce_bonus,
                 range_mult,
+                minion_damage_mult,
+                minion_health_mult,
+                minion_attack_speed_mult,
+                minion_duration_mult,
+                minion_crit_chance,
+                minion_crit_damage,
                 transform,
                 is_proc: false,
             })
@@ -464,7 +503,14 @@ pub fn submit(
                 target_net_id: None,
                 target_position: None,
                 extra_projectiles: 0,
+                pierce_bonus: 0,
                 range_mult: 1.0,
+                minion_damage_mult: 1.0,
+                minion_health_mult: 1.0,
+                minion_attack_speed_mult: 1.0,
+                minion_duration_mult: 1.0,
+                minion_crit_chance: 0.0,
+                minion_crit_damage: 0.0,
                 transform: None,
                 is_proc: false,
             })
@@ -720,9 +766,10 @@ pub fn dispatch(
                     damage: scaled_damage,
                     crit_chance: accepted.crit_chance,
                     crit_damage: accepted.crit_damage,
-                    pierce_remaining: pierce,
+                    pierce_remaining: pierce.saturating_add(accepted.pierce_bonus),
                     size: 0.6,
                     apply_debuff,
+                    from_minion: false,
                 },));
             }
         }
@@ -782,7 +829,7 @@ pub fn dispatch(
                     range: range * accepted.range_mult,
                     width,
                     damage_per_tick,
-                    pierce_targets,
+                    pierce_targets: pierce_targets.saturating_add(accepted.pierce_bonus),
                 },
             };
             // Channels need a caster entity to attach to. AI
@@ -940,6 +987,7 @@ pub fn dispatch(
                     pierce_remaining: 0,
                     size,
                     apply_debuff,
+                    from_minion: false,
                 },));
             }
         }
@@ -1002,34 +1050,44 @@ pub fn dispatch(
         }
         AbilityKind::MinionSummon {
             role,
+            count,
             duration,
             hp,
             follow_distance,
             attack_range,
             attack_interval,
             attack_damage,
+            attack_kind,
             projectile_speed,
             projectile_ttl,
         } => {
             let Some(owner) = accepted.caster_entity else {
                 return;
             };
-            sinks
-                .minion_summons
-                .push(super::minions::MinionSpawnRequest {
-                    owner,
-                    owner_net_id: accepted.caster,
-                    origin: accepted.origin,
-                    role,
-                    duration,
-                    hp,
-                    follow_distance,
-                    attack_range,
-                    attack_interval,
-                    attack_damage,
-                    projectile_speed,
-                    projectile_ttl,
-                });
+            let total_count = count.saturating_add(accepted.extra_projectiles).max(1);
+            for formation_index in 0..total_count {
+                sinks
+                    .minion_summons
+                    .push(super::minions::MinionSpawnRequest {
+                        owner,
+                        owner_net_id: accepted.caster,
+                        origin: accepted.origin,
+                        role,
+                        formation_index,
+                        duration: duration * accepted.minion_duration_mult.max(0.1),
+                        hp: hp * accepted.minion_health_mult.max(0.1),
+                        follow_distance,
+                        attack_range,
+                        attack_interval: attack_interval
+                            / accepted.minion_attack_speed_mult.max(0.1),
+                        attack_damage: attack_damage * accepted.minion_damage_mult.max(0.1),
+                        attack_kind,
+                        crit_chance: accepted.minion_crit_chance,
+                        crit_damage: accepted.minion_crit_damage,
+                        projectile_speed,
+                        projectile_ttl,
+                    });
+            }
         }
         // ── Friendly support kinds ─────────────────────────────
         AbilityKind::HealTarget { amount } => {
@@ -1190,7 +1248,14 @@ pub fn dispatch_proc_cast(
         ability_mult,
         affix_dmg,
         range_mult,
+        minion_damage_mult,
+        minion_health_mult,
+        minion_attack_speed_mult,
+        minion_duration_mult,
+        minion_crit_chance,
+        minion_crit_damage,
         extra_projectiles,
+        pierce_bonus,
         transform,
     ) = {
         let Ok(p) = world.get::<&ServerPlayer>(caster) else {
@@ -1208,6 +1273,15 @@ pub fn dispatch_proc_cast(
         if vitals.is_dead() {
             return;
         }
+        let bonded = p
+            .talents
+            .active_keystones()
+            .any(|keystone| keystone == KeystoneId::Bonded);
+        let minion_crit = if bonded {
+            (p.stats.crit_chance, p.stats.crit_damage)
+        } else {
+            (0.0, 0.0)
+        };
         (
             kinematic.position,
             identity.net_id,
@@ -1218,7 +1292,14 @@ pub fn dispatch_proc_cast(
             p.stats.ability_damage_mult(ability),
             p.ability_mods.damage_for(ability.id),
             p.stats.range.max(0.1),
+            1.0 + p.stats.minion_damage,
+            1.0 + p.stats.minion_health,
+            1.0 + p.stats.minion_attack_speed,
+            1.0 + p.stats.minion_duration,
+            minion_crit.0,
+            minion_crit.1,
             p.ability_mods.extra_projectiles_for(ability.id),
+            p.ability_mods.pierce_bonus_for(ability.id),
             p.ability_mods.transform_for(ability.id),
         )
     };
@@ -1274,7 +1355,14 @@ pub fn dispatch_proc_cast(
         target_net_id: None,
         target_position: None,
         extra_projectiles,
+        pierce_bonus,
         range_mult,
+        minion_damage_mult,
+        minion_health_mult,
+        minion_attack_speed_mult,
+        minion_duration_mult,
+        minion_crit_chance,
+        minion_crit_damage,
         transform,
         is_proc: true,
     };

@@ -32,7 +32,18 @@ pub struct SpellbookAbilityView<'a> {
     pub resource_cost: f32,
     pub channel_cost_per_sec: f32,
     pub damage_mult: f32,
+    pub effective_damage: f32,
+    pub avg_damage: f32,
+    pub crit_chance: f32,
+    pub crit_damage: f32,
     pub projectile_count: u32,
+    pub pierce_count: u32,
+    pub minion_count: u32,
+    pub minion_damage: f32,
+    pub minion_health: f32,
+    pub minion_attack_interval: f32,
+    pub minion_duration: f32,
+    pub minion_inherits_crit: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

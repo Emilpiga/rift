@@ -15,7 +15,10 @@
 //! `pub(crate)` so they're reachable from every submodule
 //! without re-exporting through `main.rs`.
 
-use rift_net::Gender;
+pub(crate) use crate::wire::{
+    gender_from_i16, gender_to_i16, item_to_blob, loadout_to_u8, provenance_from_persisted,
+    provenance_to_persisted,
+};
 
 pub mod chat;
 pub mod inventory;
@@ -66,97 +69,6 @@ impl Server {
             character,
         }
     }
-}
-
-/// Decode a stored gender column back to the wire enum. Unknown
-/// codes (forward-compat with future variants) fall back to
-/// Female so we never panic on a malformed row.
-pub(crate) fn gender_from_i16(g: i16) -> Gender {
-    match g {
-        x if x == Gender::Male as i16 => Gender::Male,
-        _ => Gender::Female,
-    }
-}
-
-/// Coerce a persisted `[i16; 6]` ability loadout to the `u8` wire
-/// shape. Out-of-range entries fall back to the empty-slot
-/// sentinel (`u8::MAX`) so a malformed row leaves the slot
-/// blank instead of accidentally re-binding Steady Shot.
-pub(crate) fn loadout_to_u8(loadout: [i16; 6]) -> [u8; 6] {
-    let mut out = [rift_game::loadout::EMPTY_SLOT.raw(); 6];
-    for (i, &slot) in loadout.iter().enumerate() {
-        out[i] = u8::try_from(slot).unwrap_or(rift_game::loadout::EMPTY_SLOT.raw());
-    }
-    out
-}
-
-/// Convert an authoritative `rift_game::loot::Item` into the
-/// `ItemBlob` shape that ships over the wire. Centralised so all
-/// the `InventorySync` / `EquipmentSync` builders agree on the
-/// field layout — bumping `Item::to_wire` only needs to be
-/// reflected here.
-pub(crate) fn item_to_blob(item: &rift_game::loot::Item) -> rift_net::messages::ItemBlob {
-    let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) = item.to_wire();
-    rift_net::messages::ItemBlob {
-        base_id,
-        rarity,
-        ilvl,
-        affixes,
-        anchored,
-        // Threaded straight through from the in-memory item;
-        // the unstable flag is set at pickup-in-rift time and
-        // cleared when the run extracts.
-        unstable: item.unstable,
-        provenance: provenance_to_wire(item),
-        unique_id: unique_id.map(|s| s.to_string()),
-        unique_pick,
-        rift_touched: item.rift_touched_to_wire(),
-    }
-}
-
-/// Convert an [`Item`]'s in-memory [`rift_game::loot::LootProvenance`]
-/// into the `Option<Vec<[u8; 16]>>` shape used on the wire and
-/// in [`rift_net::messages::ItemBlob`]. Returns `None` for
-/// legacy / unprovenanced items so the receiver can route them
-/// to the self-bind-on-touch path.
-pub(crate) fn provenance_to_wire(item: &rift_game::loot::Item) -> Option<Vec<[u8; 16]>> {
-    item.provenance.as_ref().map(|p| p.eligible.clone())
-}
-
-/// Convert an [`Item`]'s provenance into the
-/// `Option<Vec<rift_persistence::Uuid>>` shape stored as
-/// `provenance UUID[]` in the database. Same `None` semantics
-/// as [`provenance_to_wire`].
-pub(crate) fn provenance_to_persisted(
-    item: &rift_game::loot::Item,
-) -> Option<Vec<rift_persistence::Uuid>> {
-    item.provenance.as_ref().map(|p| {
-        p.eligible
-            .iter()
-            .map(|bytes| rift_persistence::Uuid::from_bytes(*bytes))
-            .collect()
-    })
-}
-
-/// Decode the wire / persisted byte vector back into a runtime
-/// [`rift_game::loot::LootProvenance`]. `None` round-trips to
-/// `None`. Centralised so the inverse of
-/// [`provenance_to_wire`] / [`provenance_to_persisted`] is
-/// always evaluated the same way.
-#[allow(dead_code)]
-pub(crate) fn provenance_from_wire(
-    bytes: Option<Vec<[u8; 16]>>,
-) -> Option<rift_game::loot::LootProvenance> {
-    bytes.map(|eligible| rift_game::loot::LootProvenance::from_ids(eligible))
-}
-
-/// Decode a persisted `Vec<Uuid>` back into a runtime
-/// [`rift_game::loot::LootProvenance`]. Mirror of
-/// [`provenance_from_wire`].
-pub(crate) fn provenance_from_persisted(
-    uuids: Option<Vec<rift_persistence::Uuid>>,
-) -> Option<rift_game::loot::LootProvenance> {
-    uuids.map(|v| rift_game::loot::LootProvenance::from_ids(v.into_iter().map(|u| u.into_bytes())))
 }
 
 /// Insert `item` at `slot_index` in a sparse bag/stash, growing

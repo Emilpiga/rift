@@ -7,7 +7,7 @@ use rift_net::messages::{RosterEntry, ServerMsg};
 use rift_net::{ClientId, Gender};
 use rift_persistence::{CharacterRecord, Uuid};
 
-use super::{gender_from_i16, loadout_to_u8};
+use super::{gender_from_i16, gender_to_i16, loadout_to_u8};
 use crate::Server;
 use rift_net::Channel;
 
@@ -91,7 +91,7 @@ impl Server {
         class_id: &str,
         gender: Gender,
     ) -> CharacterRecord {
-        let gender_id = gender as i16;
+        let gender_id = gender_to_i16(gender);
         if let Some(handle) = &self.persistence {
             match handle.load_or_create_blocking(
                 account_key.to_string(),

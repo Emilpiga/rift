@@ -172,7 +172,10 @@ impl Sim {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return;
         };
-        let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) else {
+        let Ok((p, vitals)) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+        else {
             return;
         };
         // Rebuild the tree from scratch so any node not in
@@ -199,6 +202,7 @@ impl Sim {
         // permanently sink the player's points.
         tree.unspent_points = unspent.saturating_add(orphaned);
         p.talents = tree;
+        p.recompute_stats(vitals);
     }
 
     /// Snapshot of the authoritative talent tree for the
@@ -228,11 +232,15 @@ impl Sim {
         talent_id: u16,
     ) -> Option<(Vec<(u16, u8)>, u32)> {
         let &entity = self.sessions.get(&client_id)?;
-        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let (p, vitals) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+            .ok()?;
         let id = rift_game::talents::TalentId(talent_id);
         if !p.talents.invest(id) {
             return None;
         }
+        p.recompute_stats(vitals);
         Some(snapshot_talents(&p.talents))
     }
 
@@ -247,11 +255,15 @@ impl Sim {
         talent_id: u16,
     ) -> Option<(Vec<(u16, u8)>, u32)> {
         let &entity = self.sessions.get(&client_id)?;
-        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let (p, vitals) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+            .ok()?;
         let id = rift_game::talents::TalentId(talent_id);
         if p.talents.refund_one(id) == 0 {
             return None;
         }
+        p.recompute_stats(vitals);
         Some(snapshot_talents(&p.talents))
     }
 
@@ -263,8 +275,12 @@ impl Sim {
         client_id: ClientId,
     ) -> Option<(Vec<(u16, u8)>, u32)> {
         let &entity = self.sessions.get(&client_id)?;
-        let mut p = self.world.get::<&mut ServerPlayer>(entity).ok()?;
+        let (p, vitals) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+            .ok()?;
         p.talents.refund_all();
+        p.recompute_stats(vitals);
         Some(snapshot_talents(&p.talents))
     }
 

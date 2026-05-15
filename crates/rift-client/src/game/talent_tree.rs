@@ -312,6 +312,10 @@ fn stat_label(s: TalentStat) -> &'static str {
         TalentStat::ProjectileSpeed => "projectile speed",
         TalentStat::Range => "range",
         TalentStat::CooldownReduction => "cooldown reduction",
+        TalentStat::MinionDamage => "minion damage",
+        TalentStat::MinionHealth => "minion health",
+        TalentStat::MinionAttackSpeed => "minion attack speed",
+        TalentStat::MinionDuration => "summon duration",
     }
 }
 

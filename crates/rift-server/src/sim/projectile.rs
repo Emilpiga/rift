@@ -79,6 +79,11 @@ pub struct ServerProjectile {
     /// `rift_game::effects::id::*`. `None` for `Team::Enemy`
     /// bolts today.
     pub apply_debuff: Option<u8>,
+    /// `true` when this player-team projectile was fired by a
+    /// player-owned minion. Minion projectiles still credit damage
+    /// to their owner via `owner`, but owner procs only fire from
+    /// them when a bespoke legendary enables inheritance.
+    pub from_minion: bool,
 }
 
 /// Active server-side AoE damage zone.
@@ -147,6 +152,7 @@ pub(super) struct Hit {
     /// replay, so server determinism is preserved.
     pub crit_seed: u64,
     pub apply_debuff: Option<u8>,
+    pub from_minion: bool,
     /// Horizontal world-space impulse direction at the moment
     /// of impact. Projectile hits use the bolt's velocity;
     /// AoE / aura sources use the radial-outward vector from
@@ -286,6 +292,7 @@ pub fn tick(
                                 proj.net_id.0 as u64,
                             ),
                             apply_debuff: proj.apply_debuff,
+                            from_minion: proj.from_minion,
                             // Bolt velocity — the impulse the
                             // projectile carried at impact. Used
                             // by the client's blood splatter so
@@ -460,6 +467,7 @@ pub fn tick_aoe(
                                 (zone.elapsed.to_bits() as u64) ^ 0xA0E5_BEEF,
                             ),
                             apply_debuff: zone.apply_debuff,
+                            from_minion: false,
                             // Radial-outward from zone
                             // centre — reads as the blast
                             // pushing the victim outward.
@@ -597,6 +605,7 @@ pub(super) fn apply_hits_to_enemies(
             .iter()
             .find(|(nid, _)| *nid == hit.attacker)
             .map(|(_, e)| *e);
+        let mut killed = false;
         if let Ok((en, vitals)) = world.query_one_mut::<(&mut ServerEnemy, &mut Vitals)>(hit.enemy)
         {
             // Already dying \u2014 ignore further hits so we don't
@@ -606,6 +615,7 @@ pub(super) fn apply_hits_to_enemies(
             }
             vitals.damage(scaled);
             let died = vitals.is_dead();
+            killed = died;
             // Punch knockback. Sets a short-lived knockback
             // velocity that the AI tick reads each frame and
             // fades to zero across the window, so the enemy
@@ -723,7 +733,7 @@ pub(super) fn apply_hits_to_enemies(
                 }
             }
         }
-        // OnHit / OnCrit proc dispatch. Done after the enemy
+        // OnHit / OnCrit / OnKill proc dispatch. Done after the enemy
         // borrow drops so we can read the attacker player's
         // proc list. Spawned AoE zones go into
         // `ctx.death_aoe_zones` so they're folded into the
@@ -733,7 +743,17 @@ pub(super) fn apply_hits_to_enemies(
         if let Some(ae) = attacker_entity {
             let procs_clone: Vec<rift_game::loot::ability_mods::Proc> = world
                 .get::<&super::player::ServerPlayer>(ae)
-                .map(|p| p.ability_mods.procs.iter().copied().collect())
+                .map(|p| {
+                    let minion_can_proc = !hit.from_minion
+                        || p.ability_mods.has_bespoke(
+                            rift_game::loot::uniques::BespokeId::PactkeeperMinionProcs,
+                        );
+                    if minion_can_proc {
+                        p.ability_mods.procs.iter().copied().collect()
+                    } else {
+                        Vec::new()
+                    }
+                })
                 .unwrap_or_default();
             if !procs_clone.is_empty() {
                 let mut proc_casts: Vec<super::procs::ProcCastRequest> = Vec::new();
@@ -760,6 +780,14 @@ pub(super) fn apply_hits_to_enemies(
                 if crit {
                     super::procs::dispatch(
                         rift_game::loot::ProcEvent::OnCrit,
+                        &procs_clone,
+                        &origin,
+                        &mut sink,
+                    );
+                }
+                if killed {
+                    super::procs::dispatch(
+                        rift_game::loot::ProcEvent::OnKill,
                         &procs_clone,
                         &origin,
                         &mut sink,

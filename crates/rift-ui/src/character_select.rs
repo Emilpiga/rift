@@ -15,6 +15,8 @@ use rift_ui_types::character_select::{
     RosterEntryView, RosterView, MAX_CHARACTER_SLOTS,
 };
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 // ─── helpers ─────────────────────────────────────────────────
 
 /// Left-side floating stone panel rect. Narrow (~30 % of
@@ -305,10 +307,16 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
             } else if i == filled && view.allow_create {
                 // "+ Create new" row uses the Normal button so
                 // it's clearly secondary to the Red Play CTA.
-                let create = Button::new("+ Create New Character").show_with_id(
+                let create = Button::new("  Create New Character").show_with_id(
                     ui,
                     Id::root("char_select").child(("create_slot", i)),
                     row_rect,
+                );
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(row_rect, 18.0 * s, 12.0 * s),
+                    UiIcon::Add,
+                    theme.colors.text,
                 );
                 if create.clicked {
                     action = RosterAction::Create;
@@ -339,19 +347,37 @@ pub fn frame_roster(ui: &mut Ui<'_>, view: &RosterView<'_>) -> RosterAction {
             .large()
             .enabled(has_selection)
             .show_with_id(ui, Id::root("char_select").child("play"), play_rect);
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(play_rect, 22.0 * s, 16.0 * s),
+            UiIcon::Play,
+            theme.colors.text,
+        );
         if play.clicked {
             action = RosterAction::Play;
         }
 
         let secondary = Row::new(secondary_row).gap(gap).equal(2).layout();
-        let del = Button::red("Delete")
+        let del = Button::red("  Delete")
             .small()
             .enabled(has_selection)
             .show_with_id(ui, Id::root("char_select").child("delete"), secondary[0]);
-        let quit = Button::new("Quit").small().show_with_id(
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(secondary[0], 16.0 * s, 9.0 * s),
+            UiIcon::Delete,
+            theme.colors.text,
+        );
+        let quit = Button::new("  Quit").small().show_with_id(
             ui,
             Id::root("char_select").child("quit"),
             secondary[1],
+        );
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(secondary[1], 16.0 * s, 9.0 * s),
+            UiIcon::Exit,
+            theme.colors.text,
         );
         if del.clicked {
             action = RosterAction::Delete;
@@ -424,27 +450,39 @@ pub fn frame_create(ui: &mut Ui<'_>, view: &mut CreateFormView<'_>) -> CreateAct
         let male_active = *view.gender_is_male;
         let female_active = !*view.gender_is_male;
         let male_btn = if male_active {
-            Button::active("Male")
+            Button::active("  Male")
         } else {
-            Button::new("Male")
+            Button::new("  Male")
         };
         let female_btn = if female_active {
-            Button::active("Female")
+            Button::active("  Female")
         } else {
-            Button::new("Female")
+            Button::new("  Female")
         };
         if male_btn.show(ui, gender_cells[0]).clicked {
             *view.gender_is_male = true;
         }
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(gender_cells[0], 18.0 * s, 12.0 * s),
+            UiIcon::Male,
+            theme.colors.text,
+        );
         if female_btn.show(ui, gender_cells[1]).clicked {
             *view.gender_is_male = false;
         }
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(gender_cells[1], 18.0 * s, 12.0 * s),
+            UiIcon::Female,
+            theme.colors.text,
+        );
 
         // Footer: CONFIRM (red) + Cancel (neutral) split
         // 50/50 so the affordances read as a deliberate pair.
         let footer_cells = Row::new(footer_area).gap(12.0 * s).equal(2).layout();
         let can_confirm = !view.name.trim().is_empty();
-        let confirm = Button::red("CONFIRM")
+        let confirm = Button::red("  CONFIRM")
             .size(ButtonSize::Large)
             .enabled(can_confirm)
             .show_with_id(
@@ -452,10 +490,24 @@ pub fn frame_create(ui: &mut Ui<'_>, view: &mut CreateFormView<'_>) -> CreateAct
                 Id::root("char_select").child("create_confirm"),
                 footer_cells[0],
             );
-        let cancel = Button::new("Cancel").size(ButtonSize::Large).show_with_id(
+        draw_placeholder_icon(
             ui,
-            Id::root("char_select").child("create_cancel"),
-            footer_cells[1],
+            icon_rect_left(footer_cells[0], 22.0 * s, 14.0 * s),
+            UiIcon::Check,
+            theme.colors.text,
+        );
+        let cancel = Button::new("  Cancel")
+            .size(ButtonSize::Large)
+            .show_with_id(
+                ui,
+                Id::root("char_select").child("create_cancel"),
+                footer_cells[1],
+            );
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(footer_cells[1], 22.0 * s, 14.0 * s),
+            UiIcon::Cancel,
+            theme.colors.text,
         );
         let enter = ui.input().enter_just_pressed() && name_resp.focused && can_confirm;
         if (confirm.clicked || enter) && can_confirm {
@@ -507,15 +559,23 @@ pub fn frame_delete_confirm(ui: &mut Ui<'_>, view: &DeleteConfirmView<'_>) -> De
                 let btn_h = 50.0 * sc;
                 let footer = body.bottom(btn_h);
                 let cells = Row::new(footer).gap(12.0 * sc).equal(2).layout();
-                let yes = Button::red("DELETE").size(ButtonSize::Large).show_with_id(
+                let yes = Button::red("  DELETE")
+                    .size(ButtonSize::Large)
+                    .show_with_id(ui, Id::root("char_select").child("del_yes"), cells[0]);
+                draw_placeholder_icon(
                     ui,
-                    Id::root("char_select").child("del_yes"),
-                    cells[0],
+                    icon_rect_left(cells[0], 22.0 * sc, 14.0 * sc),
+                    UiIcon::Delete,
+                    theme.colors.text,
                 );
-                let no = Button::new("Cancel").size(ButtonSize::Large).show_with_id(
+                let no = Button::new("  Cancel")
+                    .size(ButtonSize::Large)
+                    .show_with_id(ui, Id::root("char_select").child("del_no"), cells[1]);
+                draw_placeholder_icon(
                     ui,
-                    Id::root("char_select").child("del_no"),
-                    cells[1],
+                    icon_rect_left(cells[1], 22.0 * sc, 14.0 * sc),
+                    UiIcon::Cancel,
+                    theme.colors.text,
                 );
                 if yes.clicked {
                     action = DeleteAction::Confirm;

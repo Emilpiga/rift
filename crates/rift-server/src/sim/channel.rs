@@ -412,6 +412,7 @@ fn collect_hits_for_effect(
                             crit_damage,
                             crit_seed: seed_for(nid.0 as u64),
                             apply_debuff: channel.apply_debuff,
+                            from_minion: false,
                             // Caster→victim radial direction
                             // — reads as the aura pushing the
                             // victim outward from the caster.
@@ -499,6 +500,7 @@ fn collect_hits_for_effect(
                                 crit_damage,
                                 crit_seed: seed_for(nid.0 as u64),
                                 apply_debuff: channel.apply_debuff,
+                                from_minion: false,
                                 hit_dir: aim, // Beam direction is the hit direction.
                             },
                         ));

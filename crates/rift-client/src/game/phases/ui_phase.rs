@@ -176,6 +176,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         state.player_state.resource_pct * state.player_state.stats().max_resource,
         state.player_state.stats(),
         state.player_state.ability_mods(),
+        &state.player_state.talents,
         &mut state.frame.hud_consume_rects,
         // Highlight whichever slot is mid-targeting so the
         // player has a clear "you're aiming this one" cue.
@@ -191,57 +192,11 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         // without the two-step picker.
         state.spellbook.open_for_slot(slot_idx as u8);
     }
-    // Small HUD button next to the ability bar that opens the
-    // talent panel. Sits to the LEFT of the plaque so it doesn't
-    // compete with the standard 1..6 / Space layout. Tinted
-    // gold when the player has unspent points so the affordance
-    // is visible without an explicit notification.
     let mut pending_bloom: Option<bool> = None;
     let mut pending_ssao: Option<bool> = None;
     let mut pending_volumetrics: Option<bool> = None;
     let mut pending_vsync: Option<bool> = None;
     let mut pending_resolution: Option<rift_ui_types::settings::DisplayResolution> = None;
-    {
-        use rift_engine::ui::im::{Button, Color, Id, Rect};
-        let theme = *ui.theme();
-        let s = theme.scale;
-        let screen = ui.screen_size();
-        let plaque_w = rift_ui::hud::PLAQUE_W_BASE * s;
-        let plaque_h = rift_ui::hud::PLAQUE_H_BASE * s;
-        let plaque_x = (screen.x - plaque_w) * 0.5;
-        let plaque_y = screen.y - plaque_h - rift_ui::hud::BOTTOM_GAP_BASE * s;
-        let btn_w = 96.0 * s;
-        let btn_h = 32.0 * s;
-        let btn_rect = Rect::from_xywh(
-            plaque_x - btn_w - 8.0 * s,
-            plaque_y + (plaque_h - btn_h) * 0.5,
-            btn_w,
-            btn_h,
-        );
-        let has_unspent = state.player_state.talents.unspent_points > 0;
-        let label = if has_unspent {
-            format!("Talents ({})", state.player_state.talents.unspent_points)
-        } else {
-            "Talents".to_string()
-        };
-        let resp = if has_unspent {
-            Button::primary(&label)
-        } else {
-            Button::new(&label)
-        }
-        .show_with_id(&mut ui, Id::root("rift::hud::talents_btn"), btn_rect);
-        if resp.clicked {
-            state.talents_panel.toggle();
-        }
-        // Suppress the next-frame basic-attack cast when the
-        // cursor sits on the button.
-        state.frame.hud_consume_rects.push(btn_rect);
-        // Faint gold pulse when unspent points exist — helps the
-        // player notice. Painted as a translucent rim.
-        if has_unspent {
-            ui.draw_rounded_outline(btn_rect, 6.0, 2.0, Color::rgba(0.92, 0.78, 0.32, 0.55));
-        }
-    }
     hud::render_enemy_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     if state.floor.in_hub {
         hud::render_hub_remote_player_names(&mut ui, &state.world, view_proj, &state.selection);
@@ -258,6 +213,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
             hud::render_portal_compass(&mut ui, &state.world, view_proj, portal_pos);
         }
         hud::render_remote_player_health_bars(&mut ui, &state.world, view_proj, ui_dt);
+        hud::render_minion_health_bars(&mut ui, &state.world, view_proj, ui_dt);
     }
     // Alt-hold loot nameplates. Drawn after world HP bars so
     // labels sort on top, before the minimap / inventory so an
@@ -279,7 +235,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
             .unwrap_or("UNKNOWN DEPTH");
         ("RIFT", format!("{} - LEVEL {}", mood, state.rift.floor))
     };
-    hud::render_minimap(
+    let minimap_rect = hud::render_minimap(
         &mut ui,
         &state.world,
         &state.floor_mgr.nav_grid,
@@ -288,8 +244,23 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         minimap_zone_title,
         &minimap_zone_detail,
         state.floor.in_hub,
+        state.minimap_zoom,
         player_facing,
         hub_portal_pos,
+    );
+    let exit_vote_active_for_controls = state.exit_vote.as_ref().map(|v| v.active).unwrap_or(false);
+    render_minimap_controls(
+        &mut ui,
+        minimap_rect,
+        &mut state.minimap_zoom,
+        state.player_state.talents.unspent_points,
+        &mut state.talents_panel,
+        &mut state.spellbook,
+        &mut state.inventory_ui.open,
+        &mut state.pause,
+        state.loot.stash_session,
+        exit_vote_active_for_controls,
+        &mut state.frame.hud_consume_rects,
     );
     state.combat_text.render(&mut ui, view_proj);
 
@@ -300,6 +271,14 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // panels overlap in the bottom-right of the screen).
     let in_rift = !state.floor.in_hub;
     state.meters.frame(&mut ui, in_rift);
+
+    if !state.loot.stash_session
+        && ui
+            .input()
+            .key_just_pressed(rift_engine::ui::im::ImKey::KeyI)
+    {
+        state.inventory_ui.open = !state.inventory_ui.open;
+    }
 
     crate::game::inventory::frame(
         &mut ui,
@@ -330,6 +309,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &state.player_state.loadout,
         state.player_state.experience.level,
         &state.player_state.talents,
+        state.player_state.stats(),
+        state.player_state.ability_mods(),
     ) {
         match action {
             spellbook::SpellbookAction::AssignSlot {
@@ -656,5 +637,361 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
             width: resolution.width,
             height: resolution.height,
         });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MinimapToolIcon {
+    ZoomOut,
+    ZoomIn,
+    Talents,
+    Spellbook,
+    Inventory,
+    Settings,
+}
+
+fn render_minimap_controls(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    minimap_rect: rift_engine::ui::im::Rect,
+    minimap_zoom: &mut f32,
+    unspent_talent_points: u32,
+    talents_panel: &mut rift_ui_types::talents::TalentPanelState,
+    spellbook: &mut spellbook::SpellbookUi,
+    inventory_open: &mut bool,
+    pause: &mut crate::game::pause::PauseState,
+    stash_session: bool,
+    exit_vote_active: bool,
+    consume_rects: &mut Vec<rift_engine::ui::im::Rect>,
+) {
+    use rift_engine::ui::im::{Color, Id, Rect};
+
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let btn = 31.0 * s;
+    let gap = 5.0 * s;
+    let pad = 6.0 * s;
+    let count = 6.0_f32;
+    let toolbar_w = count * btn + (count - 1.0) * gap + pad * 2.0;
+    let toolbar_h = btn + pad * 2.0;
+    let toolbar = Rect::from_xywh(
+        minimap_rect.max.x - toolbar_w,
+        minimap_rect.max.y + 6.0 * s,
+        toolbar_w,
+        toolbar_h,
+    );
+
+    ui.draw_rounded_radial_rect_noisy(
+        toolbar,
+        0.0,
+        Color::rgba(0.015, 0.017, 0.022, 0.88),
+        Color::rgba(0.070, 0.058, 0.045, 0.88),
+    );
+    ui.draw_outline(toolbar, 1.0, theme.colors.border_stone);
+    consume_rects.push(toolbar);
+
+    let mut x = toolbar.x() + pad;
+    let y = toolbar.y() + pad;
+    let mut rect_for = || {
+        let rect = Rect::from_xywh(x, y, btn, btn);
+        x += btn + gap;
+        rect
+    };
+
+    let zoom_out = rect_for();
+    if icon_button(
+        ui,
+        Id::root("rift::minimap::zoom_out"),
+        zoom_out,
+        MinimapToolIcon::ZoomOut,
+        false,
+        false,
+        *minimap_zoom > 0.66,
+    )
+    .clicked
+    {
+        *minimap_zoom = (*minimap_zoom - 0.15).clamp(0.65, 1.75);
+    }
+    if zoom_out.contains(ui.mouse_pos()) {
+        tooltip(ui, zoom_out, "Zoom out minimap", "-");
+    }
+
+    let zoom_in = rect_for();
+    if icon_button(
+        ui,
+        Id::root("rift::minimap::zoom_in"),
+        zoom_in,
+        MinimapToolIcon::ZoomIn,
+        false,
+        false,
+        *minimap_zoom < 1.74,
+    )
+    .clicked
+    {
+        *minimap_zoom = (*minimap_zoom + 0.15).clamp(0.65, 1.75);
+    }
+    if zoom_in.contains(ui.mouse_pos()) {
+        tooltip(ui, zoom_in, "Zoom in minimap", "+");
+    }
+
+    let talents_rect = rect_for();
+    let talents_enabled = !stash_session && !exit_vote_active;
+    if icon_button(
+        ui,
+        Id::root("rift::hud::tool_talents"),
+        talents_rect,
+        MinimapToolIcon::Talents,
+        talents_panel.open,
+        unspent_talent_points > 0,
+        talents_enabled,
+    )
+    .clicked
+    {
+        talents_panel.toggle();
+    }
+    if talents_rect.contains(ui.mouse_pos()) {
+        tooltip(ui, talents_rect, "Talents", "N");
+    }
+
+    let spellbook_rect = rect_for();
+    if icon_button(
+        ui,
+        Id::root("rift::hud::tool_spellbook"),
+        spellbook_rect,
+        MinimapToolIcon::Spellbook,
+        spellbook.open(),
+        false,
+        !stash_session,
+    )
+    .clicked
+    {
+        spellbook.toggle();
+    }
+    if spellbook_rect.contains(ui.mouse_pos()) {
+        tooltip(ui, spellbook_rect, "Spellbook", "B");
+    }
+
+    let inventory_rect = rect_for();
+    if icon_button(
+        ui,
+        Id::root("rift::hud::tool_inventory"),
+        inventory_rect,
+        MinimapToolIcon::Inventory,
+        *inventory_open && !stash_session,
+        false,
+        !stash_session,
+    )
+    .clicked
+    {
+        *inventory_open = !*inventory_open;
+    }
+    if inventory_rect.contains(ui.mouse_pos()) {
+        tooltip(ui, inventory_rect, "Inventory", "I");
+    }
+
+    let settings_rect = rect_for();
+    if icon_button(
+        ui,
+        Id::root("rift::hud::tool_settings"),
+        settings_rect,
+        MinimapToolIcon::Settings,
+        pause.settings_open,
+        false,
+        true,
+    )
+    .clicked
+    {
+        pause.menu_open = false;
+        pause.settings_open = true;
+    }
+    if settings_rect.contains(ui.mouse_pos()) {
+        tooltip(ui, settings_rect, "Settings", "Esc");
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct IconButtonResponse {
+    clicked: bool,
+}
+
+fn icon_button(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    id: rift_engine::ui::im::Id,
+    rect: rift_engine::ui::im::Rect,
+    icon: MinimapToolIcon,
+    active: bool,
+    attention: bool,
+    enabled: bool,
+) -> IconButtonResponse {
+    use rift_engine::ui::im::Color;
+
+    let theme = *ui.theme();
+    let hovered = ui.interact_hover(id, rect);
+    let clicked = enabled && hovered && ui.input().left_clicked();
+    let base = if !enabled {
+        Color::rgba(0.045, 0.045, 0.050, 0.74)
+    } else if active {
+        Color::rgba(0.30, 0.18, 0.10, 0.96)
+    } else if hovered {
+        Color::rgba(0.18, 0.145, 0.095, 0.94)
+    } else {
+        Color::rgba(0.095, 0.082, 0.065, 0.90)
+    };
+    ui.draw_rounded_rect(rect, 3.0 * theme.scale, base);
+    ui.draw_rounded_outline(rect, 3.0 * theme.scale, 1.0, theme.colors.border_stone);
+    if active || attention {
+        ui.draw_rounded_outline(
+            rect,
+            3.0 * theme.scale,
+            if attention { 2.0 } else { 1.4 },
+            Color::rgba(0.95, 0.72, 0.28, if attention { 0.80 } else { 0.55 }),
+        );
+    }
+    draw_tool_icon(ui, rect, icon, enabled, attention);
+    IconButtonResponse { clicked }
+}
+
+fn tooltip(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    anchor: rift_engine::ui::im::Rect,
+    title: &str,
+    shortcut: &str,
+) {
+    use rift_engine::ui::im::{Pos2, Tooltip, TooltipLine};
+
+    let theme = *ui.theme();
+    let lines = [TooltipLine::new(
+        shortcut,
+        theme.fonts.size_sm,
+        theme.colors.text_dim,
+    )];
+    Tooltip::new()
+        .header(title)
+        .min_width(116.0)
+        .anchor_to(anchor)
+        .prefer_left(true)
+        .show(ui, Pos2::new(0.0, 0.0), &lines);
+}
+
+fn draw_tool_icon(
+    ui: &mut rift_engine::ui::im::Ui<'_>,
+    rect: rift_engine::ui::im::Rect,
+    icon: MinimapToolIcon,
+    enabled: bool,
+    attention: bool,
+) {
+    use rift_engine::ui::im::{Color, Pos2, Rect};
+
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let c = rect.center();
+    let color = if enabled {
+        Color::rgba(0.93, 0.84, 0.64, 1.0)
+    } else {
+        theme.colors.text_dim
+    };
+    let accent = if attention {
+        Color::rgba(1.0, 0.74, 0.22, 1.0)
+    } else {
+        color
+    };
+    let line = (1.7 * s).max(1.0);
+    match icon {
+        MinimapToolIcon::ZoomOut => {
+            let w = 9.0 * s;
+            ui.draw_line(
+                Pos2::new(c.x - w, c.y),
+                Pos2::new(c.x + w, c.y),
+                line,
+                color,
+            );
+        }
+        MinimapToolIcon::ZoomIn => {
+            let w = 9.0 * s;
+            ui.draw_line(
+                Pos2::new(c.x - w, c.y),
+                Pos2::new(c.x + w, c.y),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x, c.y - w),
+                Pos2::new(c.x, c.y + w),
+                line,
+                color,
+            );
+        }
+        MinimapToolIcon::Talents => {
+            let top = Pos2::new(c.x, c.y - 8.0 * s);
+            let mid = Pos2::new(c.x, c.y - 1.0 * s);
+            let left = Pos2::new(c.x - 7.0 * s, c.y + 7.0 * s);
+            let right = Pos2::new(c.x + 7.0 * s, c.y + 7.0 * s);
+            ui.draw_line(top, mid, line, accent);
+            ui.draw_line(mid, left, line, accent);
+            ui.draw_line(mid, right, line, accent);
+            ui.draw_circle(top, 2.3 * s, accent);
+            ui.draw_circle(left, 2.3 * s, accent);
+            ui.draw_circle(right, 2.3 * s, accent);
+            if attention {
+                ui.draw_circle(
+                    Pos2::new(rect.max.x - 6.0 * s, rect.y() + 6.0 * s),
+                    3.0 * s,
+                    accent,
+                );
+            }
+        }
+        MinimapToolIcon::Spellbook => {
+            let book = Rect::from_xywh(c.x - 10.0 * s, c.y - 8.0 * s, 20.0 * s, 16.0 * s);
+            ui.draw_outline(book, line, color);
+            ui.draw_line(
+                Pos2::new(c.x, book.y()),
+                Pos2::new(c.x, book.max.y),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(book.x() + 4.0 * s, book.y() + 5.0 * s),
+                Pos2::new(c.x - 2.0 * s, book.y() + 5.0 * s),
+                1.0,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + 3.0 * s, book.y() + 5.0 * s),
+                Pos2::new(book.max.x - 4.0 * s, book.y() + 5.0 * s),
+                1.0,
+                color,
+            );
+        }
+        MinimapToolIcon::Inventory => {
+            let bag = Rect::from_xywh(c.x - 9.0 * s, c.y - 4.0 * s, 18.0 * s, 13.0 * s);
+            ui.draw_outline(bag, line, color);
+            ui.draw_line(
+                Pos2::new(c.x - 5.0 * s, c.y - 4.0 * s),
+                Pos2::new(c.x - 3.0 * s, c.y - 9.0 * s),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + 5.0 * s, c.y - 4.0 * s),
+                Pos2::new(c.x + 3.0 * s, c.y - 9.0 * s),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - 3.0 * s, c.y - 9.0 * s),
+                Pos2::new(c.x + 3.0 * s, c.y - 9.0 * s),
+                line,
+                color,
+            );
+        }
+        MinimapToolIcon::Settings => {
+            ui.draw_circle(c, 7.0 * s, Color::rgba(0.0, 0.0, 0.0, 0.0));
+            ui.draw_circle(c, 3.0 * s, color);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                let inner = Pos2::new(c.x + a.cos() * 6.0 * s, c.y + a.sin() * 6.0 * s);
+                let outer = Pos2::new(c.x + a.cos() * 9.0 * s, c.y + a.sin() * 9.0 * s);
+                ui.draw_line(inner, outer, line, color);
+            }
+        }
     }
 }

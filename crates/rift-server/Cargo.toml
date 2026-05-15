@@ -40,3 +40,6 @@ steamworks = { workspace = true, optional = true }
 # Today we run against Spacewar appid 480 for end-to-end
 # testing — see BEFORE_PUBLISHING.md.
 steam-auth = ["dep:steamworks"]
+
+[dev-dependencies]
+rift-ui-types = { path = "../rift-ui-types" }

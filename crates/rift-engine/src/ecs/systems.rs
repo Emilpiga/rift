@@ -6,6 +6,7 @@ use super::components::{
     LocalPlayer, LocomotionClips, Player, RemoteMinion, Renderable, Skinned, Transform, Velocity,
 };
 use crate::animation::{self, Animator};
+use crate::animation_profile::{AnimBindings, AnimClipKey, JointKey, SkeletonBindings};
 use crate::input::Input;
 use crate::renderer::Renderer;
 use rift_math::physics::{self, Aabb, Ray};
@@ -316,10 +317,22 @@ pub fn locomotion_anim_system(world: &mut World) {
     let mut pending_clip_cache: Vec<(hecs::Entity, LocomotionClips)> = Vec::new();
     for (
         entity,
-        (vel, set, animator, clip_cache, enemy_anim, health, player, ghost, remote_minion),
+        (
+            vel,
+            set,
+            bindings,
+            animator,
+            clip_cache,
+            enemy_anim,
+            health,
+            player,
+            ghost,
+            remote_minion,
+        ),
     ) in world.query_mut::<(
         &Velocity,
         &AnimationSet,
+        Option<&AnimBindings>,
         &mut Animator,
         Option<&LocomotionClips>,
         Option<&EnemyAnim>,
@@ -358,10 +371,18 @@ pub fn locomotion_anim_system(world: &mut World) {
             Some(clips) => clips,
             None => {
                 resolved_clips = LocomotionClips {
-                    sprint: set.find_any(SPRINT_NAMES),
-                    jog: set.find_any(JOG_NAMES),
-                    walk: set.find_any(WALK_NAMES).or_else(|| set.find_any(JOG_NAMES)),
-                    idle: set.find_any(IDLE_NAMES),
+                    sprint: bindings
+                        .and_then(|b| b.get(AnimClipKey::Sprint))
+                        .or_else(|| set.find_any(SPRINT_NAMES)),
+                    jog: bindings
+                        .and_then(|b| b.get(AnimClipKey::Jog))
+                        .or_else(|| set.find_any(JOG_NAMES)),
+                    walk: bindings
+                        .and_then(|b| b.get(AnimClipKey::Walk))
+                        .or_else(|| set.find_any(WALK_NAMES).or_else(|| set.find_any(JOG_NAMES))),
+                    idle: bindings
+                        .and_then(|b| b.get(AnimClipKey::Idle))
+                        .or_else(|| set.find_any(IDLE_NAMES)),
                 };
                 pending_clip_cache.push((entity, resolved_clips.clone()));
                 &resolved_clips
@@ -419,8 +440,9 @@ pub fn enemy_anim_system(world: &mut World, dt: f32) {
     const DEATH_LOCK: f32 = 999.0; // hold Death pose until despawn
     const FADE: f32 = 0.10;
 
-    for (_id, (set, animator, health, ea, dying)) in world.query_mut::<(
+    for (_id, (set, bindings, animator, health, ea, dying)) in world.query_mut::<(
         &AnimationSet,
+        Option<&AnimBindings>,
         &mut Animator,
         &Health,
         &mut EnemyAnim,
@@ -435,7 +457,10 @@ pub fn enemy_anim_system(world: &mut World, dt: f32) {
         // a positive `dying` reference as the trigger and use the lock
         // to ensure we only swap once.
         if dying.is_some() && ea.lock_remaining < DEATH_LOCK * 0.5 {
-            if let Some(clip) = set.find_any(&["Death"]) {
+            if let Some(clip) = bindings
+                .and_then(|b| b.get(AnimClipKey::Death))
+                .or_else(|| set.find_any(&["Death"]))
+            {
                 animator.cross_fade(clip, false, FADE);
                 animator.speed = 1.0;
                 ea.lock_remaining = DEATH_LOCK;
@@ -450,7 +475,10 @@ pub fn enemy_anim_system(world: &mut World, dt: f32) {
         let took_damage = health.current < ea.last_hp - 0.001;
         ea.last_hp = health.current;
         if took_damage && ea.lock_remaining <= 0.0 {
-            if let Some(clip) = set.find_any(&["HitRecieve", "HitReceive", "Hit"]) {
+            if let Some(clip) = bindings
+                .and_then(|b| b.get(AnimClipKey::HitReact))
+                .or_else(|| set.find_any(&["HitRecieve", "HitReceive", "Hit"]))
+            {
                 animator.cross_fade(clip, false, FADE);
                 animator.speed = 1.0;
                 ea.lock_remaining = HIT_LOCK;
@@ -462,7 +490,10 @@ pub fn enemy_anim_system(world: &mut World, dt: f32) {
         // Bite_Front: gameplay code sets `attacking = true` whenever the
         // enemy is currently overlapping the player.
         if ea.attacking && ea.lock_remaining <= 0.0 {
-            if let Some(clip) = set.find_any(&["Bite_Front", "Bite", "Attack"]) {
+            if let Some(clip) = bindings
+                .and_then(|b| b.get(AnimClipKey::EnemyAttack))
+                .or_else(|| set.find_any(&["Bite_Front", "Bite", "Attack"]))
+            {
                 animator.cross_fade(clip, false, FADE);
                 animator.speed = 1.0;
                 ea.lock_remaining = BITE_LOCK;
@@ -505,18 +536,20 @@ pub fn skinning_system(
 
     let mut palette: Vec<glam::Mat4> = Vec::new();
     let render_frame = renderer.frame_count();
-    for (id, (renderable, skinned, animator, transform, mut cast, player, atts, foot_ik)) in world
-        .query_mut::<(
-            &Renderable,
-            &mut Skinned,
-            &mut Animator,
-            &Transform,
-            Option<&mut super::components::SpellCast>,
-            Option<&Player>,
-            Option<&mut super::components::SkinnedAttachments>,
-            Option<&mut super::components::FootIkState>,
-        )>()
-    {
+    for (
+        id,
+        (renderable, skinned, animator, transform, mut cast, player, skeleton, atts, foot_ik),
+    ) in world.query_mut::<(
+        &Renderable,
+        &mut Skinned,
+        &mut Animator,
+        &Transform,
+        Option<&mut super::components::SpellCast>,
+        Option<&Player>,
+        Option<&SkeletonBindings>,
+        Option<&mut super::components::SkinnedAttachments>,
+        Option<&mut super::components::FootIkState>,
+    )>() {
         let is_player = player.is_some();
         let mut anim_dt = dt;
         if !is_player {
@@ -627,8 +660,11 @@ pub fn skinning_system(
                     t * t * (3.0 - 2.0 * t)
                 };
                 let twisted = clamped * scale;
-                if p.spine_joint != u32::MAX && twisted.abs() > 1e-4 {
-                    Some((p.spine_joint as usize, twisted))
+                let spine = skeleton
+                    .and_then(|s| s.get(JointKey::SpineRoot))
+                    .unwrap_or(p.spine_joint);
+                if spine != u32::MAX && twisted.abs() > 1e-4 {
+                    Some((spine as usize, twisted))
                 } else {
                     None
                 }
@@ -670,16 +706,14 @@ pub fn skinning_system(
         // either way at single-character scale).
         if let (Some(p), Some(floor), Some(ik)) = (player, floor, foot_ik) {
             let host_xform = transform.matrix();
-            let foot_l = if p.foot_l_joint == u32::MAX {
-                None
-            } else {
-                Some(p.foot_l_joint as usize)
-            };
-            let foot_r = if p.foot_r_joint == u32::MAX {
-                None
-            } else {
-                Some(p.foot_r_joint as usize)
-            };
+            let foot_l = skeleton
+                .and_then(|s| s.get(JointKey::LeftFoot))
+                .or_else(|| (p.foot_l_joint != u32::MAX).then_some(p.foot_l_joint))
+                .map(|idx| idx as usize);
+            let foot_r = skeleton
+                .and_then(|s| s.get(JointKey::RightFoot))
+                .or_else(|| (p.foot_r_joint != u32::MAX).then_some(p.foot_r_joint))
+                .map(|idx| idx as usize);
             crate::foot_ik::apply_foot_ik(
                 &skinned.mesh.joints,
                 &mut skinned.joint_worlds,
@@ -739,7 +773,9 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
     // Tunables.
     const WEIGHT_RAMP: f32 = 8.0; // 1/seconds — about 0.125s to reach full weight
 
-    for (entity, (cast, set)) in world.query_mut::<(&mut SpellCast, &AnimationSet)>() {
+    for (entity, (cast, set, bindings)) in
+        world.query_mut::<(&mut SpellCast, &AnimationSet, Option<&AnimBindings>)>()
+    {
         if cast.hit_cooldown > 0.0 {
             cast.hit_cooldown = (cast.hit_cooldown - dt).max(0.0);
         }
@@ -761,26 +797,36 @@ pub fn cast_advance_system(world: &mut World, dt: f32) -> Vec<(hecs::Entity, gla
         // Channels use a different clip stack so the body keeps a
         // sustained "casting" pose for the whole hold duration.
         let target_clip = match cast.phase {
-            SpellPhase::Entering if cast.channeling => set.find_any(&[
-                "Spell_Simple_Idle_Loop",
-                "Spell_Idle_Loop",
-                "Cast_Loop",
-                "Channel_Loop",
-                "Spell_Double_Shoot",
-                "Spell_Simple_Enter",
-                "Spell_Enter",
-                "Cast_Enter",
-            ]),
-            SpellPhase::Entering => {
-                set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"])
-            }
-            SpellPhase::Shooting => set.find_any(&[
-                "Spell_Simple_Shoot",
-                "Spell_Shoot",
-                "Cast_Shoot",
-                "Spell_Simple_Enter",
-            ]),
-            SpellPhase::Exiting => set.find_any(&["Spell_Simple_Exit", "Spell_Exit", "Cast_Exit"]),
+            SpellPhase::Entering if cast.channeling => bindings
+                .and_then(|b| b.get(AnimClipKey::ChannelLoop))
+                .or_else(|| {
+                    set.find_any(&[
+                        "Spell_Simple_Idle_Loop",
+                        "Spell_Idle_Loop",
+                        "Cast_Loop",
+                        "Channel_Loop",
+                        "Spell_Double_Shoot",
+                        "Spell_Simple_Enter",
+                        "Spell_Enter",
+                        "Cast_Enter",
+                    ])
+                }),
+            SpellPhase::Entering => bindings
+                .and_then(|b| b.get(AnimClipKey::CastEnter))
+                .or_else(|| set.find_any(&["Spell_Simple_Enter", "Spell_Enter", "Cast_Enter"])),
+            SpellPhase::Shooting => bindings
+                .and_then(|b| b.get(AnimClipKey::CastShoot))
+                .or_else(|| {
+                    set.find_any(&[
+                        "Spell_Simple_Shoot",
+                        "Spell_Shoot",
+                        "Cast_Shoot",
+                        "Spell_Simple_Enter",
+                    ])
+                }),
+            SpellPhase::Exiting => bindings
+                .and_then(|b| b.get(AnimClipKey::CastExit))
+                .or_else(|| set.find_any(&["Spell_Simple_Exit", "Spell_Exit", "Cast_Exit"])),
             SpellPhase::OneShot => cast.pending_oneshot.clone(),
             SpellPhase::Idle => None,
         };

@@ -40,6 +40,8 @@ pub mod id {
     /// from owned minion snapshot rows so summons share the same
     /// duration-pip language as buffs.
     pub const VOID_FAMILIAR: u8 = 6;
+    /// HUD-only stack counter for active Riftling Swarm minions.
+    pub const RIFTLING_SWARM: u8 = 7;
 }
 
 /// One mechanical effect a debuff applies while it is active. A
@@ -164,7 +166,15 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         default_duration: 28.0,
         effects: &[],
         color: [0.55, 0.75, 1.00],
-        icon: Some("Necromancer_14"),
+        icon: Some("Necromancer_10"),
+    };
+    static RIFTLING_SWARM_DEF: EffectDef = EffectDef {
+        id: RIFTLING_SWARM,
+        name: "Riftling Swarm",
+        default_duration: 18.0,
+        effects: &[],
+        color: [0.45, 0.25, 0.90],
+        icon: Some("Necromancer_15"),
     };
     Some(match effect_id {
         SLOW => &SLOW_DEF,
@@ -174,6 +184,7 @@ pub fn lookup(effect_id: u8) -> Option<&'static EffectDef> {
         REJUVENATION => &REJUVENATION_DEF,
         NECROTIC => &NECROTIC_DEF,
         VOID_FAMILIAR => &VOID_FAMILIAR_DEF,
+        RIFTLING_SWARM => &RIFTLING_SWARM_DEF,
         _ => return None,
     })
 }

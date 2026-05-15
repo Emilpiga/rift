@@ -1,9 +1,10 @@
 use glam::{Mat4, Vec3};
 use rift_dungeon::{FloorMood, NavGrid, RoomTheme};
+use rift_engine::animation_profile::AnimClipKey;
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::{
-    Collider, Enemy, EnemyAnim, EnemyKind, FloatingVisual, Health, LocalPlayer, NetControlled,
-    RemoteEnemy, RemoteMinion, Renderable, Skinned, Static, Transform, Velocity,
+    Collider, Duration, Enemy, EnemyAnim, EnemyKind, FloatingVisual, Health, LocalPlayer,
+    NetControlled, RemoteEnemy, RemoteMinion, Renderable, Skinned, Static, Transform, Velocity,
 };
 use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
 
@@ -1631,9 +1632,9 @@ pub fn spawn_remote_enemy_entity(
         joint_worlds: Vec::new(),
     };
     let initial_clip = asset
-        .anims
-        .find_any(&["Idle", "Idle_Loop"])
-        .or_else(|| asset.anims.find_any(&["Walk", "Walk_Loop"]))
+        .anim_bindings
+        .get(AnimClipKey::Idle)
+        .or_else(|| asset.anim_bindings.get(AnimClipKey::Walk))
         .or_else(|| asset.anims.clips.values().next().cloned());
     let animator = initial_clip.map(rift_engine::animation::Animator::new);
 
@@ -1654,12 +1655,15 @@ pub fn spawn_remote_enemy_entity(
         progress_value: 0.0,
         kind: match role {
             MonsterRole::Brute | MonsterRole::Elite | MonsterRole::Boss => EnemyKind::Brute,
-            MonsterRole::Stalker | MonsterRole::Wraith => EnemyKind::Stalker,
+            MonsterRole::Stalker | MonsterRole::Wraith | MonsterRole::Riftling => {
+                EnemyKind::Stalker
+            }
             MonsterRole::Caster | MonsterRole::Mindbinder => EnemyKind::Caster,
         },
     });
     builder.add(skinned);
     builder.add(asset.anims.clone());
+    builder.add(asset.anim_bindings.clone());
     if let Some(a) = animator {
         builder.add(a);
     }
@@ -1719,9 +1723,9 @@ pub fn spawn_remote_minion_entity(
         joint_worlds: Vec::new(),
     };
     let initial_clip = asset
-        .anims
-        .find_any(&["Idle", "Idle_Loop"])
-        .or_else(|| asset.anims.find_any(&["Walk", "Walk_Loop"]))
+        .anim_bindings
+        .get(AnimClipKey::Idle)
+        .or_else(|| asset.anim_bindings.get(AnimClipKey::Walk))
         .or_else(|| asset.anims.clips.values().next().cloned());
     let animator = initial_clip.map(rift_engine::animation::Animator::new);
 
@@ -1731,6 +1735,7 @@ pub fn spawn_remote_minion_entity(
     builder.add(transform);
     builder.add(Velocity::default());
     builder.add(Health::new(hp_max));
+    builder.add(Duration::new(1.0));
     builder.add(Renderable {
         object_index: obj_index,
     });
@@ -1744,8 +1749,14 @@ pub fn spawn_remote_minion_entity(
     }
     builder.add(skinned);
     builder.add(asset.anims.clone());
+    builder.add(asset.anim_bindings.clone());
     if let Some(a) = animator {
         builder.add(a);
     }
+    builder.add(EnemyAnim {
+        last_hp: hp_max,
+        attacking: false,
+        lock_remaining: 0.0,
+    });
     Ok(world.spawn(builder.build()))
 }

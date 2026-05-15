@@ -1214,6 +1214,28 @@ pub fn snapshot_for_collision(world: &hecs::World) -> Vec<(Entity, Vec3, NetId, 
         .collect()
 }
 
+/// Snapshot enemy rows for player-owned minion AI. Includes the
+/// current target lock so summons can prefer enemies already fighting
+/// their owner before falling back to nearest visible targets.
+pub fn snapshot_for_minion_ai(
+    world: &hecs::World,
+) -> Vec<(Entity, Vec3, NetId, f32, Option<Entity>)> {
+    world
+        .query::<(&ServerEnemy, &NetIdentity, &Kinematic)>()
+        .iter()
+        .filter(|(_, (en, _identity, _kinematic))| !en.is_dying())
+        .map(|(e, (en, identity, kinematic))| {
+            (
+                e,
+                kinematic.position,
+                identity.net_id,
+                en.role.hit_radius(),
+                en.target_lock,
+            )
+        })
+        .collect()
+}
+
 /// Tick the death-fade timer on every dying enemy. Despawns rows
 /// whose timer has expired so the snapshot stops shipping them.
 pub fn tick_dying(world: &mut hecs::World, dt: f32) {

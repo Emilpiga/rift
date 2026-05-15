@@ -6,7 +6,8 @@
 
 use glam::{Mat4, Vec3};
 use rift_engine::ecs::components::{
-    Boss, Effects, Enemy, Health, LocalPlayer, Player, RemotePlayer, Resource, Transform,
+    Boss, Duration, Effects, Enemy, Health, LocalPlayer, Player, RemoteMinion, RemotePlayer,
+    Resource, Transform,
 };
 use rift_engine::ui::im::{Color, Pos2, Rect, ResourceBarAnim, Ui, Vec2 as UiVec2};
 use rift_net::NetId;
@@ -361,6 +362,74 @@ pub fn render_remote_player_health_bars(
     }
 }
 
+/// Render friendly minion health plus remaining summon duration.
+/// The server sends lifetime as `resource_pct`, mirrored into
+/// [`Duration`] by `world_sync`, so the secondary bar stays separate
+/// from future minion resource pools.
+pub fn render_minion_health_bars(ui: &mut Ui<'_>, world: &hecs::World, view_proj: Mat4, dt: f32) {
+    use rift_engine::ui::im::WorldUi;
+
+    const BAR_W: f32 = 48.0;
+    const BAR_H: f32 = 5.0;
+    const DURATION_GAP: f32 = 1.0;
+    const DURATION_BAR_H: f32 = 3.0;
+    const Y_OFFSET: f32 = -28.0;
+
+    let mut wui = WorldUi::new(ui, view_proj);
+    for (entity, (transform, _minion, health, duration)) in world
+        .query::<(&Transform, &RemoteMinion, &Health, &Duration)>()
+        .iter()
+    {
+        let hp_pct = if health.max > 0.0 {
+            (health.current / health.max).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let duration_pct = duration.pct();
+        let world_pos = transform.position + Vec3::new(0.0, 1.15, 0.0);
+        let style = if hp_pct > 0.25 {
+            WorldBarStyle::ally_health()
+        } else {
+            WorldBarStyle::ally_critical()
+        };
+        let bar_rect = draw_animated_world_bar(
+            &mut wui,
+            entity_bar_key(entity, 2),
+            WorldBarLane::Hp,
+            world_pos,
+            Y_OFFSET,
+            BAR_W,
+            BAR_H,
+            hp_pct,
+            dt,
+            style,
+        );
+        draw_animated_world_bar(
+            &mut wui,
+            entity_bar_key(entity, 2),
+            WorldBarLane::Essence,
+            world_pos,
+            Y_OFFSET + BAR_H + DURATION_GAP,
+            BAR_W,
+            DURATION_BAR_H,
+            duration_pct,
+            dt,
+            WorldBarStyle::minion_duration(),
+        );
+
+        let effects_ref = world.get::<&Effects>(entity).ok();
+        if let (Some(rect), Some(effects)) = (
+            bar_rect,
+            effects_ref
+                .as_ref()
+                .map(|d| d.effects.as_slice())
+                .filter(|effects| !effects.is_empty()),
+        ) {
+            draw_effect_pips(&mut wui, rect, effects);
+        }
+    }
+}
+
 /// Hub-only name labels above remote player avatars. Combat floors
 /// keep the cleaner health/resource overlay instead, while the hub
 /// benefits from readable names for social targeting.
@@ -467,6 +536,16 @@ impl WorldBarStyle {
             chip: Color::rgba(0.78, 0.92, 1.0, 0.34),
             glow: Color::rgba(0.30, 0.70, 1.0, 1.0),
             border: Color::rgba(0.02, 0.03, 0.06, 0.92),
+        }
+    }
+
+    fn minion_duration() -> Self {
+        Self {
+            base: Color::rgba(0.42, 0.24, 0.82, 0.94),
+            hot: Color::rgba(0.76, 0.48, 1.0, 1.0),
+            chip: Color::rgba(0.92, 0.78, 1.0, 0.30),
+            glow: Color::rgba(0.68, 0.40, 1.0, 1.0),
+            border: Color::rgba(0.035, 0.025, 0.060, 0.92),
         }
     }
 }

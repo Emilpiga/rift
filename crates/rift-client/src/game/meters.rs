@@ -31,6 +31,7 @@ use rift_game::abilities;
 use rift_game::monsters::MonsterRole;
 use rift_net::messages::{MeterAbilityBreakdown, MeterEntry, MeterTakenAttackerBreakdown};
 use rift_net::NetId;
+use rift_ui::icons::{draw_placeholder_icon, UiIcon};
 
 use crate::net::NetClient;
 
@@ -291,17 +292,25 @@ impl MeterUi {
                 },
             );
             let label = tab.label();
+            let icon_size = 15.0 * s;
+            let icon_rect = Rect::from_xywh(
+                tx + tab_w * 0.5 - 24.0 * s,
+                tab_y + (tab_h - icon_size) * 0.5,
+                icon_size,
+                icon_size,
+            );
             let text_color = if active {
                 Color::rgba(0.96, 0.86, 0.64, 1.0)
             } else {
                 theme.colors.text_dim
             };
+            draw_placeholder_icon(ui, icon_rect, meter_icon(*tab), text_color);
             // Approximate horizontal centring without measuring
             // the glyph run: the button rects are uniform, so a
             // fixed offset reads OK at every UI scale.
             let _ = ui.draw_text(
                 Pos2::new(
-                    tx + tab_w * 0.5 - (label.len() as f32) * 3.5 * s,
+                    tx + tab_w * 0.5 - (label.len() as f32) * 3.5 * s + 8.0 * s,
                     tab_y + 4.0 * s,
                 ),
                 label,
@@ -559,6 +568,15 @@ impl MeterUi {
                 theme.colors.accent,
             );
         }
+    }
+}
+
+fn meter_icon(tab: MeterTab) -> UiIcon {
+    match tab {
+        MeterTab::Dmg => UiIcon::Damage,
+        MeterTab::Hps => UiIcon::Healing,
+        MeterTab::Taken => UiIcon::Shield,
+        MeterTab::Threat => UiIcon::Threat,
     }
 }
 

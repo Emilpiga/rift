@@ -10,6 +10,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use rift_engine::animation_profile::{AnimBindings, MONSTER_PROFILE};
 use rift_engine::ash::vk;
 use rift_engine::ecs::components::AnimationSet;
 use rift_engine::renderer::mesh::SkinnedMesh;
@@ -20,6 +21,7 @@ use rift_game::monsters::MonsterRole;
 pub struct MonsterAsset {
     pub mesh: Arc<SkinnedMesh>,
     pub anims: AnimationSet,
+    pub anim_bindings: AnimBindings,
     /// Raw PNG bytes for the base-color texture (extracted from the
     /// glTF). `None` if the model has no embedded texture; in that case
     /// the spawner falls back to the renderer's default material.
@@ -114,6 +116,7 @@ pub fn load_role(role: MonsterRole) -> Option<MonsterAsset> {
             AnimationSet::default()
         }
     };
+    let anim_bindings = AnimBindings::resolve(MONSTER_PROFILE, &anims);
     let texture_bytes = match rift_engine::renderer::mesh::extract_base_color_image_bytes(path) {
         Ok(Some(b)) => Some(Arc::new(b)),
         Ok(None) => None,
@@ -125,6 +128,7 @@ pub fn load_role(role: MonsterRole) -> Option<MonsterAsset> {
     Some(MonsterAsset {
         mesh: Arc::new(mesh),
         anims,
+        anim_bindings,
         texture_bytes,
         shared_texture: None,
         shared_set: None,

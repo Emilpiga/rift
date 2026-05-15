@@ -42,6 +42,10 @@ pub struct GameState {
     /// network snapshot and reused by click selection, targeted
     /// abilities, and target-of-target presentation.
     pub selection: super::selection::SelectionState,
+    /// Player-controlled minimap zoom multiplier. Values above
+    /// 1.0 show fewer tiles around the player; values below 1.0
+    /// pull back for more context.
+    pub minimap_zoom: f32,
     pub(super) needs_new_floor: bool,
     /// Per-floor state: walls, portals, hub flag. Rebuilt on
     /// every floor regen.
@@ -180,6 +184,7 @@ impl GameState {
             combat_text: CombatTextSystem::new(),
             ui_state: rift_engine::ui::im::UiState::new(),
             selection: super::selection::SelectionState::default(),
+            minimap_zoom: 1.0,
             needs_new_floor: false,
             floor: super::floor_state::FloorState::default(),
             frame: super::frame_state::FrameState::default(),

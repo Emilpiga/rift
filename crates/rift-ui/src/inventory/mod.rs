@@ -18,7 +18,10 @@ mod stash_panel;
 mod stats_panel;
 mod tooltips;
 
-use rift_ui_im::{Button, ButtonSize, Color, Frame, Id, ImKey, Pad, PanelHeader, Pos2, Rect, Ui};
+use rift_ui_im::{
+    widgets::{tooltip_at_mouse, TooltipLine},
+    Button, ButtonSize, Color, Frame, Id, ImKey, Pad, PanelHeader, Pos2, Rect, Ui,
+};
 use rift_ui_types::inventory::{
     DragSource, InventoryAction, InventoryUiState, InventoryView, ItemView,
 };
@@ -31,6 +34,7 @@ use self::tooltips::{
     render_compare_delta_side_of, render_item_tooltip, render_item_tooltip_anchored,
     render_item_tooltip_side_of,
 };
+use crate::icons::{draw_placeholder_icon, icon_rect_center, UiIcon};
 
 /// Run one frame of the inventory drawer.
 ///
@@ -568,39 +572,46 @@ fn render_toggle_bar(
 ) -> ToggleBarOut {
     let mut out = ToggleBarOut::default();
     let bar = layout.toggle_bar;
+    let theme = *ui.theme();
     if bar.width() <= 0.0 {
         return out;
     }
-    let chip_w = 110.0 * layout.fit;
+    let chip_w = bar.height().max(32.0 * layout.fit);
+    let chip_gap = 6.0 * layout.fit;
 
     // Stats chip
     let stats_rect = Rect::from_xywh(bar.x(), bar.y(), chip_w, bar.height());
-    let stats_label = if state.show_stats {
-        "Stats \u{25BC}"
-    } else {
-        "Stats \u{25B6}"
-    };
     let r = if state.show_stats {
-        Button::active(stats_label)
+        Button::active("")
     } else {
-        Button::new(stats_label)
+        Button::new("")
     }
     .size(ButtonSize::Small)
     .show_with_id(ui, Id::root("inv").child("toggle_stats"), stats_rect);
     if r.clicked {
         state.show_stats = !state.show_stats;
     }
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(stats_rect, 18.0 * layout.fit),
+        UiIcon::Stats,
+        theme.colors.text,
+    );
+    if r.hovered {
+        icon_tooltip(
+            ui,
+            if state.show_stats {
+                "Hide character stats"
+            } else {
+                "Show character stats"
+            },
+        );
+    }
 
     // Sort chip immediately to the right of Stats.
-    let sort_lbl = "\u{21C5} Sort";
-    let sort_w = 100.0 * layout.fit;
-    let sort_rect = Rect::from_xywh(
-        bar.x() + chip_w + 6.0 * layout.fit,
-        bar.y(),
-        sort_w,
-        bar.height(),
-    );
-    let sort_btn = Button::new(sort_lbl).size(ButtonSize::Small).show_with_id(
+    let sort_w = chip_w;
+    let sort_rect = Rect::from_xywh(bar.x() + chip_w + chip_gap, bar.y(), sort_w, bar.height());
+    let sort_btn = Button::new("").size(ButtonSize::Small).show_with_id(
         ui,
         Id::root("inv").child("toggle_sort"),
         sort_rect,
@@ -608,21 +619,25 @@ fn render_toggle_bar(
     if sort_btn.clicked {
         out.sort_bag_clicked = true;
     }
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(sort_rect, 18.0 * layout.fit),
+        UiIcon::Sort,
+        theme.colors.text,
+    );
+    if sort_btn.hovered {
+        icon_tooltip(ui, "Sort bag");
+    }
 
     // Salvage Trash on the right (2-stage handled by caller).
     let salvage_armed = state.salvage_armed_at.is_some();
-    let armed_label = if salvage_armed {
-        "\u{2713} Confirm Salvage"
-    } else {
-        "\u{267B} Salvage Trash"
-    };
-    let st_w = 170.0 * layout.fit;
+    let st_w = chip_w;
     let st_rect = Rect::from_xywh(bar.max.x - st_w, bar.y(), st_w, bar.height());
     let id = Id::root("inv").child(("salvage_trash", salvage_armed as u32));
     let r = if salvage_armed {
-        Button::danger(armed_label)
+        Button::danger("")
     } else {
-        Button::new(armed_label)
+        Button::new("")
     }
     .size(ButtonSize::Small)
     .enabled(bulk_count > 0)
@@ -630,7 +645,43 @@ fn render_toggle_bar(
     if r.clicked && bulk_count > 0 {
         out.salvage_trash_clicked = true;
     }
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(st_rect, 18.0 * layout.fit),
+        if salvage_armed {
+            UiIcon::Check
+        } else {
+            UiIcon::Recycle
+        },
+        if salvage_armed {
+            Color::rgba(1.0, 0.70, 0.48, 1.0)
+        } else {
+            theme.colors.text
+        },
+    );
+    if r.hovered {
+        icon_tooltip(
+            ui,
+            if salvage_armed {
+                "Confirm salvage trash"
+            } else if bulk_count > 0 {
+                "Salvage trash"
+            } else {
+                "No trash to salvage"
+            },
+        );
+    }
     out
+}
+
+fn icon_tooltip(ui: &mut Ui<'_>, text: &str) {
+    let theme = *ui.theme();
+    let lines = [TooltipLine::new(
+        text,
+        theme.fonts.size_sm,
+        theme.colors.text,
+    )];
+    tooltip_at_mouse(ui, None, &lines);
 }
 
 fn render_currency_bar(ui: &mut Ui<'_>, rect: Rect, shards: u32, fit: f32) {

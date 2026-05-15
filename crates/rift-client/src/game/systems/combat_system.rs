@@ -20,6 +20,7 @@
 use glam::{Mat4, Vec3};
 use winit::keyboard::KeyCode;
 
+use rift_engine::animation_profile::{JointKey, SkeletonBindings};
 use rift_engine::ecs::components::{LocalPlayer, Player, Skinned, Transform};
 use rift_engine::input::Input;
 use rift_engine::renderer::Renderer;
@@ -643,6 +644,11 @@ fn tick_ability_keybinds(
         }
 
         send_cast(state, renderer, &ability_clone, player_pos, aim_dir, input);
+        if i == 0 {
+            let _ = state
+                .selection
+                .select_hovered_with_relation(SelectionRelation::Hostile);
+        }
 
         // Hold-to-channel latch. Only infinite-duration
         // channels (Frost Ray) need client-side hold/release
@@ -763,17 +769,28 @@ fn send_cast(
         if let Some(pid) = pid {
             let mut q = state
                 .world
-                .query_one::<(&Transform, &Player, Option<&Skinned>)>(pid)
+                .query_one::<(
+                    &Transform,
+                    &Player,
+                    Option<&SkeletonBindings>,
+                    Option<&Skinned>,
+                )>(pid)
                 .ok();
-            hand = q.as_mut().and_then(|q| q.get()).and_then(|(t, p, s)| {
-                if p.hand_joint == u32::MAX {
-                    return None;
-                }
-                let s = s?;
-                let m = s.joint_worlds.get(p.hand_joint as usize)?;
-                let local = m.col(3).truncate();
-                Some(t.matrix().transform_point3(local))
-            });
+            hand = q
+                .as_mut()
+                .and_then(|q| q.get())
+                .and_then(|(t, p, bindings, s)| {
+                    let hand_joint = bindings
+                        .and_then(|b| b.get(JointKey::CastHand))
+                        .unwrap_or(p.hand_joint);
+                    if hand_joint == u32::MAX {
+                        return None;
+                    }
+                    let s = s?;
+                    let m = s.joint_worlds.get(hand_joint as usize)?;
+                    let local = m.col(3).truncate();
+                    Some(t.matrix().transform_point3(local))
+                });
         }
         hand.unwrap_or(player_pos + Vec3::Y * 1.25)
     };

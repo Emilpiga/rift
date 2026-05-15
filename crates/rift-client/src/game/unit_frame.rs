@@ -1,5 +1,6 @@
 use rift_engine::ui::im::{Button, Color, Frame, Id, Pad, Pos2, Rect, Ui};
 use rift_net::messages::ClientMsg;
+use rift_ui::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
 
 use crate::game::chat::ChatUi;
 use crate::game::states::sub_state::NetState;
@@ -149,25 +150,41 @@ pub fn draw_unit_context_menu(
     Frame::panel(&theme)
         .with_padding(Pad::all(pad))
         .show(ui, rect, |ui, body| {
-        for (i, (label, action, enabled)) in rows.iter().enumerate() {
-            let row = Rect::from_xywh(
-                body.x(),
-                body.y() + i as f32 * row_h,
-                body.width(),
-                row_h - 2.0 * s,
-            );
-            if Button::new(label)
-                .enabled(*enabled)
-                .show_with_id(ui, id.child(*label), row)
-                .clicked
-                && *enabled
-            {
-                chosen = Some(*action);
+            for (i, (label, action, enabled)) in rows.iter().enumerate() {
+                let row = Rect::from_xywh(
+                    body.x(),
+                    body.y() + i as f32 * row_h,
+                    body.width(),
+                    row_h - 2.0 * s,
+                );
+                if Button::new(&format!("  {label}"))
+                    .enabled(*enabled)
+                    .show_with_id(ui, id.child(*label), row)
+                    .clicked
+                    && *enabled
+                {
+                    chosen = Some(*action);
+                }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(row, 14.0 * s, 8.0 * s),
+                    context_icon(*action),
+                    theme.colors.text,
+                );
             }
-        }
         });
 
     chosen
+}
+
+fn context_icon(action: UnitContextAction) -> UiIcon {
+    match action {
+        UnitContextAction::Whisper => UiIcon::Whisper,
+        UnitContextAction::Invite => UiIcon::Invite,
+        UnitContextAction::Mute => UiIcon::Cancel,
+        UnitContextAction::Promote => UiIcon::Stats,
+        UnitContextAction::Kick => UiIcon::Exit,
+    }
 }
 
 pub fn unit_context_menu_should_close(ui: &Ui<'_>, menu: &UnitContextMenuState) -> bool {

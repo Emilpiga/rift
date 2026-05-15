@@ -40,6 +40,8 @@ pub struct AbilityMods {
     pub cooldown_mult: HashMap<AbilityId, f32>,
     /// Extra projectile count to add to a fan. Defaults to 0.
     pub extra_projectiles: HashMap<AbilityId, u32>,
+    /// Extra targets a projectile / beam may pass through.
+    pub pierce_bonus: HashMap<AbilityId, u32>,
     /// Active behavioural transforms. Last-applied wins per ability.
     pub transforms: HashMap<AbilityId, AbilityVariant>,
     /// Registered procs (no aggregation — multiple identical procs
@@ -56,6 +58,28 @@ impl AbilityMods {
         Self::default()
     }
 
+    /// Merge another aggregate into this one. Used when multiple
+    /// systems contribute ability modifiers (gear + talents).
+    pub fn extend(&mut self, other: &Self) {
+        for (&ability, &mult) in &other.damage_mult {
+            *self.damage_mult.entry(ability).or_insert(1.0) *= mult;
+        }
+        for (&ability, &mult) in &other.cooldown_mult {
+            *self.cooldown_mult.entry(ability).or_insert(1.0) *= mult;
+        }
+        for (&ability, &count) in &other.extra_projectiles {
+            *self.extra_projectiles.entry(ability).or_insert(0) += count;
+        }
+        for (&ability, &count) in &other.pierce_bonus {
+            *self.pierce_bonus.entry(ability).or_insert(0) += count;
+        }
+        for (&ability, &variant) in &other.transforms {
+            self.transforms.insert(ability, variant);
+        }
+        self.procs.extend(other.procs.iter().copied());
+        self.bespoke.extend(other.bespoke.iter().copied());
+    }
+
     /// Damage multiplier for `ability` (or 1.0 if no affix touches it).
     pub fn damage_for(&self, ability: AbilityId) -> f32 {
         self.damage_mult.get(&ability).copied().unwrap_or(1.0)
@@ -69,6 +93,11 @@ impl AbilityMods {
     /// Bonus projectile count for `ability`.
     pub fn extra_projectiles_for(&self, ability: AbilityId) -> u32 {
         self.extra_projectiles.get(&ability).copied().unwrap_or(0)
+    }
+
+    /// Bonus pierce target count for `ability`.
+    pub fn pierce_bonus_for(&self, ability: AbilityId) -> u32 {
+        self.pierce_bonus.get(&ability).copied().unwrap_or(0)
     }
 
     /// Active transform on `ability`, if any.

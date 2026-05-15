@@ -360,6 +360,7 @@ fn fire_frost_shatter(
             pierce_remaining: 1,
             size: 0.5,
             apply_debuff: snap.apply_debuff,
+            from_minion: false,
         },));
     }
     // One-shot burst event at the terminus so clients have a

@@ -13,6 +13,8 @@ use rift_ui_im::{
 };
 use rift_ui_types::pause_menu::PauseMenuAction;
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 /// One frame of the pause menu. Call inside `Ui::begin`/`end`
 /// scope when the menu is open.
 pub fn frame_pause_menu(ui: &mut Ui<'_>, in_rift: bool) -> Option<PauseMenuAction> {
@@ -54,48 +56,78 @@ pub fn frame_pause_menu(ui: &mut Ui<'_>, in_rift: bool) -> Option<PauseMenuActio
                 {
                     action = Some(PauseMenuAction::Resume);
                 }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(resume_rect, 22.0 * sc, 14.0 * sc),
+                    UiIcon::Play,
+                    theme.colors.text,
+                );
                 y += btn_h + gap;
 
                 let settings_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
-                if Button::new("Settings")
+                if Button::new("  Settings")
                     .size(ButtonSize::Large)
                     .show_with_id(ui, id.child("settings"), settings_rect)
                     .clicked
                 {
                     action = Some(PauseMenuAction::OpenSettings);
                 }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(settings_rect, 22.0 * sc, 14.0 * sc),
+                    UiIcon::Gear,
+                    theme.colors.text,
+                );
                 y += btn_h + gap;
 
                 if in_rift {
                     let hub_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
-                    if Button::danger("Exit to Hub")
+                    if Button::danger("  Exit to Hub")
                         .size(ButtonSize::Large)
                         .show_with_id(ui, id.child("hub"), hub_rect)
                         .clicked
                     {
                         action = Some(PauseMenuAction::ExitToHub);
                     }
+                    draw_placeholder_icon(
+                        ui,
+                        icon_rect_left(hub_rect, 22.0 * sc, 14.0 * sc),
+                        UiIcon::Portal,
+                        theme.colors.text,
+                    );
                     y += btn_h + gap;
                 }
 
                 let chsel_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
-                if Button::new("Exit to Character Select")
+                if Button::new("  Exit to Character Select")
                     .size(ButtonSize::Large)
                     .show_with_id(ui, id.child("chsel"), chsel_rect)
                     .clicked
                 {
                     action = Some(PauseMenuAction::ExitToCharacterSelect);
                 }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(chsel_rect, 22.0 * sc, 14.0 * sc),
+                    UiIcon::Character,
+                    theme.colors.text,
+                );
                 y += btn_h + gap;
 
                 let quit_rect = Rect::from_xywh(body.min.x, y, bw, btn_h);
-                if Button::danger("Exit Game")
+                if Button::danger("  Exit Game")
                     .size(ButtonSize::Large)
                     .show_with_id(ui, id.child("quit"), quit_rect)
                     .clicked
                 {
                     action = Some(PauseMenuAction::ExitGame);
                 }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(quit_rect, 22.0 * sc, 14.0 * sc),
+                    UiIcon::Exit,
+                    theme.colors.text,
+                );
             });
     });
 

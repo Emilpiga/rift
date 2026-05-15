@@ -10,6 +10,8 @@ use rift_ui_types::inventory::{
     DragSource, InventoryAction, ItemView, StashView, STASH_TAB_PALETTE,
 };
 
+use crate::icons::{draw_placeholder_icon, icon_rect_center, icon_rect_left, UiIcon};
+
 use super::drag::{build_item_slot, route_slot_capture, DropTarget};
 use super::grid_drop::{snap_preview_and_resolve, GridSpec};
 use super::layout::pack_bag;
@@ -114,8 +116,7 @@ pub fn render_stash_panel(
     } else {
         0.0
     };
-    let sort_lbl = "Sort";
-    let sort_w = ui.measure_text(sort_lbl, theme.fonts.size_sm) + 20.0 * fit;
+    let sort_w = tab_h + 4.0 * fit;
     let sort_gap = 6.0 * fit;
     let add_gap = if plus_w > 0.0 { tab_gap } else { 0.0 };
     let avail_w = body.width() - plus_w - add_gap - sort_w - sort_gap;
@@ -166,10 +167,16 @@ pub fn render_stash_panel(
     if owned_tabs < view.max_tabs {
         let brect = Rect::from_xywh(tab_controls_x, body.y(), plus_w, tab_h);
         let buy_id = Id::root("inv").child(("stash_tab_buy", owned_tabs));
-        let resp = Button::new("+")
+        let resp = Button::new("")
             .size(ButtonSize::Small)
             .enabled(can_buy_tab)
             .show_with_id(ui, buy_id, brect);
+        draw_placeholder_icon(
+            ui,
+            icon_rect_center(brect, 18.0 * fit),
+            UiIcon::Add,
+            theme.colors.text,
+        );
         if resp.clicked {
             pressed_buy_tab.set(true);
         }
@@ -211,7 +218,7 @@ pub fn render_stash_panel(
         tab_controls_x = brect.max.x + tab_gap;
     }
     let sort_rect = Rect::from_xywh(tab_controls_x, body.y(), sort_w, tab_h);
-    let sort_btn = Button::new(sort_lbl).size(ButtonSize::Small).show_with_id(
+    let sort_btn = Button::new("").size(ButtonSize::Small).show_with_id(
         ui,
         Id::root("inv").child(("stash_sort", active_idx)),
         sort_rect,
@@ -220,6 +227,24 @@ pub fn render_stash_panel(
         out_actions.push(InventoryAction::SortStashTab {
             tab_index: active_tab_u8,
         });
+    }
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(sort_rect, 18.0 * fit),
+        UiIcon::Sort,
+        theme.colors.text,
+    );
+    if sort_btn.hovered {
+        let lines = [TooltipLine::new(
+            "Sort stash tab",
+            theme.fonts.size_sm,
+            theme.colors.text,
+        )];
+        Tooltip::new().anchor_to(sort_rect).show(
+            ui,
+            Pos2::new(sort_rect.max.x, sort_rect.y()),
+            &lines,
+        );
     }
 
     if let Some(anchor) = picker_anchor {
@@ -284,6 +309,13 @@ pub fn render_stash_panel(
         (3, "Legend", [1.00, 0.50, 0.20, 1.0]),
     ];
     let mut x = body.x();
+    draw_placeholder_icon(
+        ui,
+        Rect::from_xywh(body.x(), filter_top + 1.0 * fit, 18.0 * fit, 18.0 * fit),
+        UiIcon::Filter,
+        theme.colors.text_dim,
+    );
+    x += 24.0 * fit;
     for (tier, label, col) in rarity_labels {
         let w = ui.measure_text(label, theme.fonts.size_sm) + chip_pad_x * 2.0;
         let rect = Rect::from_xywh(x, filter_top, w, chip_h);
@@ -311,13 +343,19 @@ pub fn render_stash_panel(
     // any filter is active.
     let any_active = *filter.rarity_mask != 0 || !filter.stat_keys.is_empty();
     if any_active {
-        let clr_lbl = "Clear";
+        let clr_lbl = "  Clear";
         let clr_w = ui.measure_text(clr_lbl, theme.fonts.size_sm) + chip_pad_x * 2.0;
         let clr_rect = Rect::from_xywh(body.max.x - clr_w, filter_top, clr_w, chip_h);
         let clr_id = Id::root("inv").child(("stash_filter_clear", 0u32));
         let resp = Button::new(clr_lbl)
             .size(ButtonSize::Small)
             .show_with_id(ui, clr_id, clr_rect);
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(clr_rect, 14.0 * fit, 7.0 * fit),
+            UiIcon::Cancel,
+            theme.colors.text_dim,
+        );
         if resp.clicked {
             *filter.rarity_mask = 0;
             filter.stat_keys.clear();
@@ -714,6 +752,12 @@ fn draw_stash_tab_button(
     );
 
     ui.draw_rect(swatch, tab_color);
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(swatch, (swatch_size * 0.74).max(10.0 * fit)),
+        UiIcon::Palette,
+        Color::rgba(0.0, 0.0, 0.0, 0.72),
+    );
     ui.draw_outline(
         swatch,
         1.0,
@@ -725,9 +769,15 @@ fn draw_stash_tab_button(
     );
 
     if active {
-        let edit_resp = Button::new("Edit")
+        let edit_resp = Button::new("")
             .size(ButtonSize::Small)
             .show_with_id(ui, rename_id, edit_rect);
+        draw_placeholder_icon(
+            ui,
+            icon_rect_center(edit_rect, 16.0 * fit),
+            UiIcon::Edit,
+            theme.colors.text,
+        );
         let _ = edit_resp;
     }
 

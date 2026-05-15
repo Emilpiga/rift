@@ -194,28 +194,12 @@ impl Sim {
         position: glam::Vec3,
         share: Option<loot::ShareWindow>,
     ) {
-        use rift_net::messages::ItemBlob;
         let net_id = rift_net::NetId(self.next_loot_net_id);
         self.next_loot_net_id = self.next_loot_net_id.wrapping_add(1);
         if self.next_loot_net_id >= 0x4000_0000 {
             self.next_loot_net_id = 0x2000_0000;
         }
-        let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) = item.to_wire();
-        let provenance = item.provenance.as_ref().map(|p| p.eligible.clone());
-        let blob = ItemBlob {
-            base_id,
-            rarity,
-            ilvl,
-            affixes,
-            anchored,
-            // Loot still on the ground hasn't been picked up
-            // yet; the unstable lifecycle starts at pickup.
-            unstable: item.unstable,
-            provenance,
-            unique_id: unique_id.map(|s| s.to_string()),
-            unique_pick,
-            rift_touched: item.rift_touched_to_wire(),
-        };
+        let blob = crate::wire::item_to_blob(&item);
         let loot = loot::ServerLoot {
             net_id,
             position,

@@ -20,6 +20,8 @@ use rift_ui_im::{
 };
 use rift_ui_types::chat::{ChatAction, ChatView};
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 /// Render the chat scrollback + input field + channel
 /// selector. Returns a list of host-actionable events; multiple
 /// may be returned per frame (e.g. picker open + outside-click
@@ -72,7 +74,7 @@ pub fn frame_chat(
     // app. The label combines the channel short-name with a
     // small chevron so the click affordance reads.
     let button_label = format!(
-        "{}  {}",
+        "  {}  {}",
         view.channel_short,
         if view.picker_open {
             "\u{25B2}"
@@ -81,7 +83,7 @@ pub fn frame_chat(
         }
     );
     let button_w =
-        (ui.measure_text(&button_label, theme.fonts.size_md) + 28.0 * scale).max(76.0 * scale);
+        (ui.measure_text(&button_label, theme.fonts.size_md) + 42.0 * scale).max(88.0 * scale);
     let button_rect = Rect::from_xywh(input_rect.x(), input_rect.y(), button_w, input_h);
     let button_id = Id::root("chat").child("channel_btn");
     let btn_resp = Button::new(&button_label)
@@ -107,6 +109,12 @@ pub fn frame_chat(
             view.channel_pip_color[2],
             view.channel_pip_color[3].max(0.9),
         ),
+    );
+    draw_placeholder_icon(
+        ui,
+        icon_rect_left(button_rect, 18.0 * scale, 12.0 * scale),
+        UiIcon::Whisper,
+        theme.colors.text,
     );
 
     let field_x = button_rect.max.x + 6.0 * scale;

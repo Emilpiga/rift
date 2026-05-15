@@ -21,6 +21,7 @@ use glam::Vec3;
 use hecs::World;
 
 use rift_engine::animation::Animator;
+use rift_engine::animation_profile::{AnimBindings, AnimClipKey, PLAYER_PROFILE};
 use rift_engine::ecs::components::{
     AnimationSet, Ghost, GhostRising, Health, LocalPlayer, Player, PlayerAction, Renderable,
     SkinnedAttachments, SpellCast, SpellPhase, Velocity,
@@ -105,10 +106,16 @@ pub fn tick_hit_react(
     } else {
         &["Hit_Head", "Hit_Chest", "HitRecieve", "HitReceive", "Hit"]
     };
-    let clip = match world.get::<&AnimationSet>(pid) {
-        Ok(set) => set.find_any(candidates),
-        Err(_) => None,
-    };
+    let clip = world
+        .get::<&AnimBindings>(pid)
+        .ok()
+        .and_then(|bindings| bindings.get(AnimClipKey::HitReact))
+        .or_else(|| {
+            world
+                .get::<&AnimationSet>(pid)
+                .ok()
+                .and_then(|set| set.find_any(candidates))
+        });
     let Some(clip) = clip else { return };
 
     if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
@@ -128,11 +135,16 @@ pub fn trigger_death(world: &mut World, damage_flash: &mut f32, floor: u32) {
 
     let Some(pid) = player_id(world) else { return };
 
-    let candidates: &[&str] = &["Death01", "Death_01", "Death", "Death02", "Death_02"];
-    let clip = match world.get::<&AnimationSet>(pid) {
-        Ok(set) => set.find_any(candidates),
-        Err(_) => None,
-    };
+    let clip = world
+        .get::<&AnimBindings>(pid)
+        .ok()
+        .and_then(|bindings| bindings.get(AnimClipKey::Death))
+        .or_else(|| {
+            world
+                .get::<&AnimationSet>(pid)
+                .ok()
+                .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(AnimClipKey::Death)))
+        });
     let Some(clip) = clip else {
         log::warn!("Death animation not found in player's clip set");
         return;
@@ -174,9 +186,15 @@ pub fn trigger_rise(world: &mut World, floor: u32) {
     // get-up-from-corpse-pose anim. Fall back to plain Idle
     // crossfade if the rig somehow lacks it.
     let lay_to_idle = world
-        .get::<&AnimationSet>(pid)
+        .get::<&AnimBindings>(pid)
         .ok()
-        .and_then(|set| set.find_any(&["LayToIdle"]));
+        .and_then(|bindings| bindings.get(AnimClipKey::GhostRise))
+        .or_else(|| {
+            world
+                .get::<&AnimationSet>(pid)
+                .ok()
+                .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(AnimClipKey::GhostRise)))
+        });
 
     if let Ok(mut cast) = world.get::<&mut SpellCast>(pid) {
         cast.phase = SpellPhase::Idle;
@@ -213,11 +231,16 @@ pub fn trigger_rise(world: &mut World, floor: u32) {
     // to ghost mode + idle loop - better than freezing the
     // player on the down-pose forever.
     let _ = world.insert_one(pid, Ghost);
-    let candidates: &[&str] = &["Idle_Loop", "Idle", "Idle01", "Idle_01", "Idle02"];
-    let clip = match world.get::<&AnimationSet>(pid) {
-        Ok(set) => set.find_any(candidates),
-        Err(_) => None,
-    };
+    let clip = world
+        .get::<&AnimBindings>(pid)
+        .ok()
+        .and_then(|bindings| bindings.get(AnimClipKey::Idle))
+        .or_else(|| {
+            world
+                .get::<&AnimationSet>(pid)
+                .ok()
+                .and_then(|set| set.find_any(PLAYER_PROFILE.names_for(AnimClipKey::Idle)))
+        });
     let Some(clip) = clip else {
         log::warn!("Idle animation not found for ghost rise");
         return;

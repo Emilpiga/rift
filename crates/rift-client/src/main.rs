@@ -1541,6 +1541,7 @@ impl RiftApp {
             }
             tree.total_spent = total_spent;
             tree.unspent_points = unspent;
+            state.player_state.recompute_stats(&state.loot.equipment);
             state.player_state.refresh_abilities();
         }
 

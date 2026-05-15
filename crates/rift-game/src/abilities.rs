@@ -708,6 +708,7 @@ pub mod id {
     /// any other ability. Never gated by the talent tree.
     pub const PUNCH: AbilityWireId = AbilityWireId::new(14);
     pub const VOID_FAMILIAR: AbilityWireId = AbilityWireId::new(15);
+    pub const RIFTLING_SWARM: AbilityWireId = AbilityWireId::new(16);
 
     // Enemy ability ids start at 64 to leave room for player
     // abilities to grow without colliding. Wire is u8 so the
@@ -764,6 +765,8 @@ pub mod id {
     /// clients can still look up projectile visuals and meters can
     /// attribute familiar damage cleanly.
     pub const VOID_FAMILIAR_BOLT: AbilityWireId = AbilityWireId::new(76);
+    /// Hidden melee hit emitted by Riftling Swarm minions.
+    pub const RIFTLING_BITE: AbilityWireId = AbilityWireId::new(77);
 }
 
 /// What an ability does on the authoritative side. Visuals are not
@@ -860,12 +863,14 @@ pub enum AbilityKind {
     /// server dispatch all agree on the same ability surface.
     MinionSummon {
         role: crate::monsters::MonsterRole,
+        count: u32,
         duration: f32,
         hp: f32,
         follow_distance: f32,
         attack_range: f32,
         attack_interval: f32,
         attack_damage: f32,
+        attack_kind: MinionAttackKind,
         projectile_speed: f32,
         projectile_ttl: f32,
     },
@@ -917,6 +922,17 @@ pub enum ChannelEffect {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum MinionAttackKind {
+    Projectile {
+        ability_id: AbilityWireId,
+    },
+    Melee {
+        ability_id: AbilityWireId,
+        radius: f32,
+    },
+}
+
 // ─── Single ability registry ────────────────────────────────────────────
 //
 // All player + enemy ability data lives in `REGISTRY`. The entries
@@ -945,6 +961,8 @@ pub const MELEE_ATTACK: AbilityId = AbilityId("melee_attack");
 pub const PUNCH: AbilityId = AbilityId("punch");
 pub const VOID_FAMILIAR: AbilityId = AbilityId("void_familiar");
 pub const VOID_FAMILIAR_BOLT: AbilityId = AbilityId("void_familiar_bolt");
+pub const RIFTLING_SWARM: AbilityId = AbilityId("riftling_swarm");
+pub const RIFTLING_BITE: AbilityId = AbilityId("riftling_bite");
 
 /// Master ability table. Server cast dispatch and client cooldown
 /// UI both read from here. Order is purely cosmetic — `lookup`
@@ -1370,12 +1388,16 @@ pub static REGISTRY: &[Ability] = &[
         targeting: TargetingMode::Instant,
         kind: AbilityKind::MinionSummon {
             role: crate::monsters::MonsterRole::Wraith,
+            count: 1,
             duration: 28.0,
             hp: 45.0,
             follow_distance: 2.4,
             attack_range: 8.5,
             attack_interval: 1.25,
             attack_damage: 6.0,
+            attack_kind: MinionAttackKind::Projectile {
+                ability_id: id::VOID_FAMILIAR_BOLT,
+            },
             projectile_speed: 15.0,
             projectile_ttl: 1.2,
         },
@@ -1427,6 +1449,78 @@ pub static REGISTRY: &[Ability] = &[
                 scale: 0.5,
             },
         },
+        effects: &[],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: RIFTLING_SWARM,
+        wire_id: id::RIFTLING_SWARM,
+        name: "Riftling Swarm",
+        description: "Summon weak, short-lived riftlings that rush enemies and bite in melee.",
+        icon: Some("Necromancer_15"),
+        cooldown: 24.0,
+        resource_cost: 28.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 0.0,
+        damage_mult: 0.0,
+        range: 0.0,
+        unlock_level: 1,
+        element: Element::None,
+        archetype: Archetype::Utility,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::MinionSummon {
+            role: crate::monsters::MonsterRole::Riftling,
+            count: 2,
+            duration: 18.0,
+            hp: 16.0,
+            follow_distance: 1.7,
+            attack_range: 1.15,
+            attack_interval: 1.35,
+            attack_damage: 3.0,
+            attack_kind: MinionAttackKind::Melee {
+                ability_id: id::RIFTLING_BITE,
+                radius: 0.65,
+            },
+            projectile_speed: 0.0,
+            projectile_ttl: 0.0,
+        },
+        visuals: AbilityVisuals {
+            cast_spark: Some(VfxKind::CastSpark {
+                rgb: [0.36, 0.18, 0.82],
+            }),
+            shape: ShapeVisuals::None,
+        },
+        effects: &[AbilityEffect::SpawnEmitterAtCaster {
+            visual: VfxKind::CastSpark {
+                rgb: [0.36, 0.18, 0.82],
+            },
+            height: 0.45,
+        }],
+        audio: AbilityAudio::SILENT,
+    },
+    Ability {
+        id: RIFTLING_BITE,
+        wire_id: id::RIFTLING_BITE,
+        name: "Riftling Bite",
+        description: "A riftling melee bite.",
+        icon: None,
+        cooldown: 0.0,
+        resource_cost: 0.0,
+        channel_cost_per_sec: 0.0,
+        base_damage: 3.0,
+        damage_mult: 1.0,
+        range: 1.15,
+        unlock_level: 0,
+        element: Element::Physical,
+        archetype: Archetype::Melee,
+        scaling: Scaling::None,
+        targeting: TargetingMode::Instant,
+        kind: AbilityKind::MeleeArc {
+            radius: 0.65,
+            arc_radians: std::f32::consts::TAU,
+        },
+        visuals: AbilityVisuals::NONE,
         effects: &[],
         audio: AbilityAudio::SILENT,
     },

@@ -13,6 +13,7 @@
 //! readout for the HUD.
 
 use glam::Vec3;
+use rift_engine::animation_profile::{AnimBindings, AnimClipKey, JointKey, SkeletonBindings};
 use rift_engine::ecs::components::{LocalPlayer, Player, Transform};
 use rift_engine::input::Input;
 use rift_engine::renderer::vfx::{presets, EffectId};
@@ -207,14 +208,22 @@ pub fn tick_channel_pose(
     let hand_pos = player_id
         .and_then(|pid| {
             let mut q = world
-                .query_one::<(&Transform, &Player, Option<&Skinned>)>(pid)
+                .query_one::<(
+                    &Transform,
+                    &Player,
+                    Option<&SkeletonBindings>,
+                    Option<&Skinned>,
+                )>(pid)
                 .ok()?;
-            let (t, p, s) = q.get()?;
-            if p.hand_joint == u32::MAX {
+            let (t, p, bindings, s) = q.get()?;
+            let hand_joint = bindings
+                .and_then(|b| b.get(JointKey::CastHand))
+                .unwrap_or(p.hand_joint);
+            if hand_joint == u32::MAX {
                 return None;
             }
             let s = s?;
-            let m = s.joint_worlds.get(p.hand_joint as usize)?;
+            let m = s.joint_worlds.get(hand_joint as usize)?;
             let local = m.col(3).truncate();
             Some(t.matrix().transform_point3(local))
         })
@@ -228,16 +237,19 @@ pub fn tick_channel_pose(
             // clip the engine system would just reset state, so
             // skip the SpellCast setup but still spawn the beam.
             let has_clip = world
-                .get::<&AnimationSet>(pid)
+                .get::<&AnimBindings>(pid)
                 .ok()
-                .and_then(|set| {
-                    set.find_any(&[
-                        "Spell_Simple_Idle_Loop",
-                        "Spell_Idle_Loop",
-                        "Cast_Loop",
-                        "Channel_Loop",
-                        "Spell_Simple_Enter",
-                    ])
+                .and_then(|bindings| bindings.get(AnimClipKey::ChannelLoop))
+                .or_else(|| {
+                    world.get::<&AnimationSet>(pid).ok().and_then(|set| {
+                        set.find_any(&[
+                            "Spell_Simple_Idle_Loop",
+                            "Spell_Idle_Loop",
+                            "Cast_Loop",
+                            "Channel_Loop",
+                            "Spell_Simple_Enter",
+                        ])
+                    })
                 })
                 .is_some();
             if has_clip {

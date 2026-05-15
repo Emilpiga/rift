@@ -29,3 +29,4 @@ pub use renderer::texture::{PbrSource, TextureSource};
 pub use renderer::Renderer;
 pub use resources::gltf_loader;
 pub use window::{App, LoadStatus, Window};
+pub mod animation_profile;

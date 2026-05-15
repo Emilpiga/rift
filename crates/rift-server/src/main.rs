@@ -36,6 +36,7 @@ mod instance;
 mod party;
 mod session;
 mod sim;
+mod wire;
 
 use chat::ChatHistory;
 use instance::{InstanceManager, RiftInstanceId};

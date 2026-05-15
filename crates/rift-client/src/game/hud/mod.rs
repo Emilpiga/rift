@@ -29,7 +29,7 @@ pub use loot_labels::render_loot_labels;
 pub use voting::{render_exit_vote, render_shrine_progress};
 pub use world_overlays::{
     render_boss_arrow, render_enemy_health_bars, render_hub_remote_player_names,
-    render_portal_compass, render_remote_player_health_bars,
+    render_minion_health_bars, render_portal_compass, render_remote_player_health_bars,
 };
 
 use glam::Vec3;
@@ -589,6 +589,7 @@ pub fn render_ability_bar(
     // lines instead of being invisible until the player
     // notices the cast difference.
     ability_mods: &rift_game::loot::ability_mods::AbilityMods,
+    talents: &rift_game::talents::TalentTree,
     // Sink for the plaque rect so the next frame's combat tick
     // can recognise a click that landed on the bar as a UI
     // interaction (e.g. swap-slot opens the spellbook) rather
@@ -632,6 +633,7 @@ pub fn render_ability_bar(
                 let dmg_mult = ability_mods.damage_for(aid);
                 let cd_mult = ability_mods.cooldown_for(aid);
                 let extra_projectiles = ability_mods.extra_projectiles_for(aid);
+                let pierce_bonus = ability_mods.pierce_bonus_for(aid);
                 let transform = ability_mods.transform_for(aid);
 
                 let effective_cd = state.ability.cooldown * cd_mult;
@@ -645,7 +647,38 @@ pub fn render_ability_bar(
 
                 let per_hit = stats.ability_effective_damage(&state.ability) * dmg_mult;
                 let avg = stats.ability_avg_damage(&state.ability) * dmg_mult;
-                let damage_line = if per_hit > 0.01 {
+                let minion_line = if let rift_game::abilities::AbilityKind::MinionSummon {
+                    count,
+                    duration,
+                    hp,
+                    attack_interval,
+                    attack_damage,
+                    ..
+                } = state.ability.kind
+                {
+                    let minion_damage = attack_damage * (1.0 + stats.minion_damage).max(0.1);
+                    let minion_health = hp * (1.0 + stats.minion_health).max(0.1);
+                    let minion_duration = duration * (1.0 + stats.minion_duration).max(0.1);
+                    let minion_attack_interval =
+                        attack_interval / (1.0 + stats.minion_attack_speed).max(0.1);
+                    let minion_count = count.saturating_add(extra_projectiles);
+                    Some((
+                        format!(
+                            "CD: {:.1}s  |  Minions: {} x {:.0} dmg, {:.0} HP",
+                            effective_cd, minion_count, minion_damage, minion_health
+                        ),
+                        format!(
+                            "Duration {:.0}s, attacks every {:.1}s",
+                            minion_duration, minion_attack_interval
+                        ),
+                    ))
+                } else {
+                    None
+                };
+
+                let damage_line = if let Some((line, _)) = &minion_line {
+                    Some(line.clone())
+                } else if per_hit > 0.01 {
                     use rift_game::abilities::AbilityKind;
                     let unit = match state.ability.kind {
                         AbilityKind::Channel { .. } | AbilityKind::AoeZone { .. } => " / tick",
@@ -664,7 +697,20 @@ pub fn render_ability_bar(
                 } else {
                     None
                 };
-                let crit_line = if per_hit > 0.01 && stats.crit_chance > 0.001 {
+                let crit_line = if let Some((_, line)) = &minion_line {
+                    let bonded = talents
+                        .active_keystones()
+                        .any(|keystone| keystone == rift_game::talents::KeystoneId::Bonded);
+                    if bonded && stats.crit_chance > 0.001 {
+                        Some(format!(
+                            "{line}  |  inherits {:.0}% crit, +{:.0}% dmg",
+                            stats.crit_chance * 100.0,
+                            stats.crit_damage * 100.0
+                        ))
+                    } else {
+                        Some(line.clone())
+                    }
+                } else if per_hit > 0.01 && stats.crit_chance > 0.001 {
                     Some(format!(
                         "~{:.0} avg  ({:.0}% crit, +{:.0}% dmg)",
                         avg,
@@ -684,15 +730,22 @@ pub fn render_ability_bar(
                 } else {
                     None
                 };
-                let projectiles_line = if total_projectiles > 1 {
-                    if extra_projectiles > 0 {
-                        Some(format!(
-                            "Projectiles: {} (+{} from gear)",
-                            total_projectiles, extra_projectiles
-                        ))
-                    } else {
-                        Some(format!("Projectiles: {}", total_projectiles))
+                let projectiles_line = if total_projectiles > 1 || pierce_bonus > 0 {
+                    let mut parts = Vec::new();
+                    if total_projectiles > 1 {
+                        if extra_projectiles > 0 {
+                            parts.push(format!(
+                                "Projectiles: {} (+{})",
+                                total_projectiles, extra_projectiles
+                            ));
+                        } else {
+                            parts.push(format!("Projectiles: {}", total_projectiles));
+                        }
                     }
+                    if pierce_bonus > 0 {
+                        parts.push(format!("Pierce +{}", pierce_bonus));
+                    }
+                    Some(parts.join("  |  "))
                 } else {
                     None
                 };
@@ -919,6 +972,25 @@ pub(crate) fn draw_effect_pip_strip(
                 Color::rgba(1.0, 1.0, 1.0, 0.95),
             );
         }
+        if pip_size >= 26.0 && eff.stacks > 1 {
+            let lbl = format!("{}", eff.stacks);
+            let lbl_size = (pip_size * 0.38).max(12.0);
+            let lw = ui.measure_text(&lbl, lbl_size);
+            let lx = pip.max.x - lw - 2.0;
+            let ly = pip.y() + 1.0;
+            ui.draw_text(
+                Pos2::new(lx + 1.0, ly + 1.0),
+                &lbl,
+                lbl_size,
+                Color::rgba(0.0, 0.0, 0.0, 0.9),
+            );
+            ui.draw_text(
+                Pos2::new(lx, ly),
+                &lbl,
+                lbl_size,
+                Color::rgba(1.0, 1.0, 1.0, 0.98),
+            );
+        }
         if interactive {
             let id = Id::root("hud_effect_pip").child((eff.id as u32, i));
             let hovered = ui.interact_hover(id, pip);
@@ -956,7 +1028,15 @@ fn draw_effect_tooltip(
     // `TooltipLine` stays valid for the `Tooltip::show` call.
     let mut texts: Vec<(String, f32, Color)> = Vec::new();
     texts.push((
-        format!("{:.1}s remaining", eff.remaining.max(0.0)),
+        if eff.stacks > 1 {
+            format!(
+                "{} active, {:.1}s remaining",
+                eff.stacks,
+                eff.remaining.max(0.0)
+            )
+        } else {
+            format!("{:.1}s remaining", eff.remaining.max(0.0))
+        },
         theme.fonts.size_md,
         theme.colors.text_dim,
     ));

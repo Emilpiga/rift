@@ -7,8 +7,10 @@
 //! lifecycle edges that need cross-frame state from `GameState`.
 
 use rift_engine::{Input, Renderer};
+use rift_game::abilities::TargetingMode;
 
 use crate::game::state::GameState;
+use crate::game::SelectionRelation;
 
 pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: f32) {
     let dt = _dt;
@@ -63,7 +65,13 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         || spellbook_open
         || talents_open;
     if !selection_blocked {
-        state.selection.tick(input, renderer);
+        let lmb_can_claim_hostile_click = lmb_can_claim_hostile_click(state);
+        state.selection.tick(input, renderer, |selection| {
+            lmb_can_claim_hostile_click
+                && selection
+                    .hovered_with_relation(SelectionRelation::Hostile)
+                    .is_some()
+        });
     }
 
     // Ability-based combat (sends cast requests to the server).
@@ -144,4 +152,31 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
         // the alive→dead edge above stays one-shot.
         state.frame.prev_player_hp = Some(0.0);
     }
+}
+
+fn lmb_can_claim_hostile_click(state: &GameState) -> bool {
+    let Some(slot) = state
+        .player_state
+        .abilities
+        .slots
+        .get(0)
+        .and_then(|slot| slot.as_ref())
+    else {
+        return false;
+    };
+    if !slot.ready() || matches!(slot.ability.targeting, TargetingMode::TargetEntity) {
+        return false;
+    }
+    if slot.ability.base_damage <= 0.0 {
+        return false;
+    }
+    let cost = slot.ability.resource_cost;
+    if cost > 0.0 {
+        let current_essence =
+            state.player_state.resource_pct * state.player_state.stats().max_resource;
+        if cost > current_essence + 1e-3 {
+            return false;
+        }
+    }
+    true
 }

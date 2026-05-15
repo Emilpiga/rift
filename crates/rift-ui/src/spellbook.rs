@@ -12,6 +12,8 @@ use rift_ui_types::spellbook::{
     SpellbookAbilityView, SpellbookAction, SpellbookState, SpellbookView,
 };
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 const CATEGORY_ALL: u8 = 0;
 
 pub fn frame_spellbook(
@@ -73,12 +75,14 @@ pub fn frame_spellbook(
     let rail_w = 148.0 * fit;
     let bar_strip_h = 110.0 * fit;
     let detail_h = 136.0 * fit;
+    let header_content_gap = 12.0 * fit;
+    let content_y = panel.y() + header_h + header_content_gap;
 
     let rail_rect = Rect::from_xywh(
         panel.x() + inner_pad,
-        panel.y() + header_h,
+        content_y,
         rail_w,
-        panel_h - header_h - bar_strip_h - detail_h - inner_pad * 2.0,
+        panel.max.y - content_y - bar_strip_h - detail_h - inner_pad * 2.0,
     );
     let grid_rect = Rect::from_xywh(
         rail_rect.max.x + section_gap,
@@ -236,10 +240,11 @@ fn draw_category_rail(
     state: &mut SpellbookState,
     fit: f32,
 ) {
+    let theme = *ui.theme();
     let cat_btn_h = 36.0 * fit;
     let cat_btn_gap = 6.0 * fit;
     for (i, category) in view.categories.iter().enumerate() {
-        let label = format!("{}  ({})", category.label, category.count);
+        let label = format!("  {}  ({})", category.label, category.count);
         let rect = Rect::from_xywh(
             rail_rect.x(),
             rail_rect.y() + i as f32 * (cat_btn_h + cat_btn_gap),
@@ -259,6 +264,19 @@ fn draw_category_rail(
         if resp.clicked {
             state.selected_category = category.id;
         }
+        let icon = match i % 5 {
+            0 => UiIcon::Book,
+            1 => UiIcon::Damage,
+            2 => UiIcon::Healing,
+            3 => UiIcon::Shield,
+            _ => UiIcon::Threat,
+        };
+        draw_placeholder_icon(
+            ui,
+            icon_rect_left(rect, 18.0 * fit, 8.0 * fit),
+            icon,
+            theme.colors.text,
+        );
     }
 }
 
@@ -335,9 +353,38 @@ fn draw_ability_detail(
     } else if ability.channel_cost_per_sec > 0.0 {
         stat_parts.push(format!("Essence {:.0}/s", ability.channel_cost_per_sec));
     }
-    stat_parts.push(format!("Damage {:.0}%", ability.damage_mult * 100.0));
+    if ability.effective_damage > 0.01 {
+        stat_parts.push(format!("Damage {:.0}", ability.effective_damage));
+        if ability.crit_chance > 0.001 {
+            stat_parts.push(format!(
+                "Avg {:.0} ({:.0}% crit)",
+                ability.avg_damage,
+                ability.crit_chance * 100.0
+            ));
+        }
+    } else if ability.minion_health > 0.01 {
+        if ability.minion_count > 1 {
+            stat_parts.push(format!("Minions {}", ability.minion_count));
+        }
+        stat_parts.push(format!("Minion dmg {:.0}", ability.minion_damage));
+        stat_parts.push(format!("HP {:.0}", ability.minion_health));
+        stat_parts.push(format!("Duration {:.0}s", ability.minion_duration));
+        stat_parts.push(format!("Attack {:.1}s", ability.minion_attack_interval));
+        if ability.minion_inherits_crit && ability.crit_chance > 0.001 {
+            stat_parts.push(format!(
+                "Crit {:.0}% / +{:.0}%",
+                ability.crit_chance * 100.0,
+                ability.crit_damage * 100.0
+            ));
+        }
+    } else {
+        stat_parts.push(format!("Damage {:.0}%", ability.damage_mult * 100.0));
+    }
     if ability.projectile_count > 1 {
         stat_parts.push(format!("Projectiles {}", ability.projectile_count));
+    }
+    if ability.pierce_count > 0 {
+        stat_parts.push(format!("Pierce {}", ability.pierce_count));
     }
     let stats = stat_parts.join("   |   ");
     ui.draw_text(

@@ -26,9 +26,9 @@ use rift_game::loot::{
 use rift_game::stats::Stat;
 use rift_ui::inventory::frame_inventory;
 use rift_ui_types::inventory::{
-    BulkSalvageView, CompareDeltaRow, InventoryAction, InventoryUiState, InventoryView, ItemView,
-    RollBand, StashTabView, StashView, StatRow, StatSection, StatsView, TooltipLineKind,
-    TooltipLineView,
+    BulkSalvageView, CompareDeltaRow, EquipSlotIdx, InventoryAction, InventoryUiState,
+    InventoryView, ItemView, RollBand, StashTabView, StashView, StatRow, StatSection, StatsView,
+    TooltipLineKind, TooltipLineView,
 };
 
 use crate::game::sub_state::{EquipRequest, StashRequest, StashTabClient};
@@ -41,6 +41,10 @@ use crate::game::PlayerState;
 /// unaffected.
 const BAG_COLS: u8 = rift_net::messages::BAG_COLS as u8;
 const BAG_ROWS: u8 = rift_net::messages::BAG_ROWS as u8;
+
+// Hot-reload UI types mirror game equipment slots by byte index.
+// Fail at build time if either side gains or loses a physical slot.
+const _: () = assert!(EquipSlot::COUNT == EquipSlotIdx::COUNT);
 
 /// Monotonic seconds since process start. Used for the
 /// salvage 2-stage confirm window AND the inline rename
@@ -763,6 +767,10 @@ fn compare_delta_rows(hovered: &Item, equipped: &Item) -> Vec<(String, bool)> {
         Stat::FireDamage,
         Stat::IceDamage,
         Stat::LightningDamage,
+        Stat::MinionDamage,
+        Stat::MinionHealth,
+        Stat::MinionAttackSpeed,
+        Stat::MinionDuration,
     ];
     let h_stats = hovered.stats();
     let e_stats = equipped.stats();
@@ -995,6 +1003,48 @@ fn build_stat_rows(
             ));
         }
         rows.push(el);
+    }
+
+    if s.minion_damage > 0.0
+        || s.minion_health > 0.0
+        || s.minion_attack_speed > 0.0
+        || s.minion_duration > 0.0
+    {
+        names.push("MINIONS");
+        let mut minions = Vec::new();
+        if s.minion_damage > 0.0 {
+            minions.push((
+                "Damage".into(),
+                pct(s.minion_damage),
+                Some([0.72, 0.55, 1.00, 1.0]),
+                tip("Bonus multiplier applied to player-owned minion damage when they are summoned."),
+            ));
+        }
+        if s.minion_health > 0.0 {
+            minions.push((
+                "Health".into(),
+                pct(s.minion_health),
+                Some([0.72, 0.55, 1.00, 1.0]),
+                tip("Bonus multiplier applied to player-owned minion maximum health when they are summoned."),
+            ));
+        }
+        if s.minion_attack_speed > 0.0 {
+            minions.push((
+                "Attack Speed".into(),
+                pct(s.minion_attack_speed),
+                Some([0.72, 0.55, 1.00, 1.0]),
+                tip("Bonus multiplier applied to player-owned minion attack tempo when they are summoned."),
+            ));
+        }
+        if s.minion_duration > 0.0 {
+            minions.push((
+                "Duration".into(),
+                pct(s.minion_duration),
+                Some([0.72, 0.55, 1.00, 1.0]),
+                tip("Bonus multiplier applied to player-owned minion lifetime when they are summoned."),
+            ));
+        }
+        rows.push(minions);
     }
 
     (names, rows)

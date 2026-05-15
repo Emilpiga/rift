@@ -142,7 +142,9 @@ fn draw_floor_and_pips(
             (max_z - min_z + 1.0).max(1.0),
         )
     } else if rich_cells {
-        (VIEW_TILES_BASE, VIEW_TILES_BASE)
+        let zoom = view.zoom.clamp(0.65, 1.75);
+        let tiles = (VIEW_TILES_BASE / zoom).clamp(24.0, 92.0);
+        (tiles, tiles)
     } else {
         (grid_max, grid_max)
     };

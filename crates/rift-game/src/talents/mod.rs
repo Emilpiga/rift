@@ -18,6 +18,7 @@
 //!   one new file + one line in `fresh_character_tree`.
 
 use crate::abilities::AbilityId;
+use crate::loot::AbilityMods;
 use crate::stats::{Stat, StatModifiers};
 
 pub mod healer;
@@ -186,6 +187,10 @@ pub enum TalentStat {
     ProjectileSpeed,
     Range,
     CooldownReduction,
+    MinionDamage,
+    MinionHealth,
+    MinionAttackSpeed,
+    MinionDuration,
 }
 
 /// How a talent modifies an ability.
@@ -454,6 +459,10 @@ pub struct TalentBonuses {
     pub projectile_speed_pct: f32,
     pub range_pct: f32,
     pub cooldown_reduction_pct: f32,
+    pub minion_damage_pct: f32,
+    pub minion_health_pct: f32,
+    pub minion_attack_speed_pct: f32,
+    pub minion_duration_pct: f32,
 }
 
 impl TalentBonuses {
@@ -469,6 +478,10 @@ impl TalentBonuses {
             TalentStat::ProjectileSpeed => self.projectile_speed_pct += value,
             TalentStat::Range => self.range_pct += value,
             TalentStat::CooldownReduction => self.cooldown_reduction_pct += value,
+            TalentStat::MinionDamage => self.minion_damage_pct += value,
+            TalentStat::MinionHealth => self.minion_health_pct += value,
+            TalentStat::MinionAttackSpeed => self.minion_attack_speed_pct += value,
+            TalentStat::MinionDuration => self.minion_duration_pct += value,
         }
     }
 
@@ -518,6 +531,10 @@ impl TalentTree {
                 (TalentStat::AttackSpeed, _) => m.flat.add(Stat::AttackSpeed, v),
                 (TalentStat::MoveSpeed, _) => m.flat.add(Stat::MoveSpeed, v),
                 (TalentStat::CooldownReduction, _) => m.flat.add(Stat::CooldownReduction, v),
+                (TalentStat::MinionDamage, _) => m.flat.add(Stat::MinionDamage, v),
+                (TalentStat::MinionHealth, _) => m.flat.add(Stat::MinionHealth, v),
+                (TalentStat::MinionAttackSpeed, _) => m.flat.add(Stat::MinionAttackSpeed, v),
+                (TalentStat::MinionDuration, _) => m.flat.add(Stat::MinionDuration, v),
                 // `Defense` is now folded into `Stat::Armor`'s
                 // percent channel — a +5 % defense talent reads
                 // as +5 % armor at compute time.
@@ -530,6 +547,54 @@ impl TalentTree {
             }
         }
         m
+    }
+
+    /// Convert invested ability-specific talents into the same
+    /// aggregate shape gear affixes use. The client and server
+    /// merge this with equipment mods when stats are recomputed,
+    /// so tooltip numbers and authoritative casts share one path.
+    pub fn ability_mods(&self) -> AbilityMods {
+        let mut mods = AbilityMods::new();
+        for node in &self.nodes {
+            if node.current_rank == 0 {
+                continue;
+            }
+            let TalentEffect::AbilityMod { ability, modifier } = &node.effect else {
+                continue;
+            };
+            let rank = node.current_rank as u32;
+            match modifier {
+                AbilityModifier::DamageBonus(p) => {
+                    let entry = mods.damage_mult.entry(*ability).or_insert(1.0);
+                    for _ in 0..rank {
+                        *entry *= 1.0 + *p;
+                    }
+                }
+                AbilityModifier::CooldownReduction(seconds) => {
+                    let Some(ab) = crate::abilities::lookup_by_id(*ability) else {
+                        continue;
+                    };
+                    if ab.cooldown <= 0.0 {
+                        continue;
+                    }
+                    let per_rank_mult = ((ab.cooldown - *seconds) / ab.cooldown).clamp(0.20, 1.0);
+                    let entry = mods.cooldown_mult.entry(*ability).or_insert(1.0);
+                    for _ in 0..rank {
+                        *entry *= per_rank_mult;
+                    }
+                }
+                AbilityModifier::ExtraProjectiles(n) => {
+                    *mods.extra_projectiles.entry(*ability).or_insert(0) += n.saturating_mul(rank);
+                }
+                AbilityModifier::Pierce(n) => {
+                    *mods.pierce_bonus.entry(*ability).or_insert(0) += n.saturating_mul(rank);
+                }
+                // Chain needs a dedicated runtime field before it
+                // can be represented in AbilityMods.
+                AbilityModifier::Chain(_) => {}
+            }
+        }
+        mods
     }
 }
 
@@ -724,5 +789,92 @@ mod tests {
         assert_eq!(node.status, TalentStatus::Ready);
         assert!(crate::abilities::lookup_by_id(crate::abilities::VOID_FAMILIAR).is_some());
         assert!(crate::abilities::lookup(crate::abilities::id::VOID_FAMILIAR_BOLT).is_some());
+    }
+
+    #[test]
+    fn ready_summoner_minion_nodes_feed_minion_stats() {
+        let mut tree = fresh_character_tree();
+        for id in [
+            TalentId(4001),
+            TalentId(4002),
+            TalentId(4060),
+            TalentId(4062),
+            TalentId(4063),
+        ] {
+            let node = tree.nodes.iter_mut().find(|n| n.id == id).unwrap();
+            assert_eq!(node.status, TalentStatus::Ready);
+            node.current_rank = node.max_rank;
+        }
+
+        let modifiers = tree.stat_modifiers();
+        assert!((modifiers.flat.get(Stat::MinionDamage) - 0.21).abs() < 1.0e-6);
+        assert!((modifiers.flat.get(Stat::MinionHealth) - 0.15).abs() < 1.0e-6);
+        assert!((modifiers.flat.get(Stat::MinionAttackSpeed) - 0.04).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn ready_summoner_ability_mod_nodes_feed_ability_mods() {
+        let mut tree = fresh_character_tree();
+        for id in [TalentId(4011), TalentId(4061)] {
+            let node = tree.nodes.iter_mut().find(|n| n.id == id).unwrap();
+            assert_eq!(node.status, TalentStatus::Ready);
+            node.current_rank = node.max_rank;
+        }
+
+        let mods = tree.ability_mods();
+        let expected = (17.0_f32 / 18.0).powi(2);
+        assert!((mods.cooldown_for(crate::abilities::VOID_FAMILIAR) - expected).abs() < 1.0e-6);
+        assert_eq!(
+            mods.extra_projectiles_for(crate::abilities::RIFTLING_SWARM),
+            1
+        );
+    }
+
+    #[test]
+    fn riftling_swarm_is_ready_and_registered() {
+        let tree = fresh_character_tree();
+        let node = tree
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(
+                    n.effect,
+                    TalentEffect::UnlockAbility {
+                        ability: crate::abilities::RIFTLING_SWARM
+                    }
+                )
+            })
+            .expect("Riftling Swarm talent node missing");
+        assert_eq!(node.status, TalentStatus::Ready);
+        assert!(crate::abilities::lookup_by_id(crate::abilities::RIFTLING_SWARM).is_some());
+        assert!(crate::abilities::lookup(crate::abilities::id::RIFTLING_BITE).is_some());
+    }
+
+    #[test]
+    fn ready_pierce_nodes_feed_ability_mods() {
+        let mut tree = fresh_character_tree();
+        let node = tree
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == TalentId(2031))
+            .unwrap();
+        assert_eq!(node.status, TalentStatus::Ready);
+        node.current_rank = node.max_rank;
+
+        let mods = tree.ability_mods();
+        assert_eq!(mods.pierce_bonus_for(crate::abilities::FROST_RAY), 1);
+    }
+
+    #[test]
+    fn bonded_is_ready_keystone() {
+        let tree = fresh_character_tree();
+        let node = tree.nodes.iter().find(|n| n.id == TalentId(4016)).unwrap();
+        assert_eq!(node.status, TalentStatus::Ready);
+        assert!(matches!(
+            node.effect,
+            TalentEffect::Keystone {
+                keystone: KeystoneId::Bonded
+            }
+        ));
     }
 }

@@ -18,6 +18,7 @@ pub enum MonsterRole {
     Boss,
     Wraith,
     Mindbinder,
+    Riftling,
 }
 
 /// Spawn-time stat multipliers applied on top of
@@ -45,7 +46,7 @@ pub struct MonsterDef {
     pub stats: RoleStats,
 }
 
-pub const MONSTER_DEFS: [MonsterDef; 7] = [
+pub const MONSTER_DEFS: [MonsterDef; 8] = [
     MonsterDef {
         role: MonsterRole::Brute,
         wire: 0,
@@ -130,6 +131,18 @@ pub const MONSTER_DEFS: [MonsterDef; 7] = [
             hp_mult: 0.90,
         },
     },
+    MonsterDef {
+        role: MonsterRole::Riftling,
+        wire: 7,
+        display_name: "Riftling",
+        gltf_path: "assets/models/animated-monsters/glTF/GreenDemon.gltf",
+        scale: 0.34,
+        hit_radius: 0.30,
+        stats: RoleStats {
+            speed_mult: 1.25,
+            hp_mult: 0.35,
+        },
+    },
 ];
 
 impl MonsterRole {
@@ -195,6 +208,7 @@ pub const ALL_ROLES: [MonsterRole; MONSTER_DEFS.len()] = [
     MonsterRole::Boss,
     MonsterRole::Wraith,
     MonsterRole::Mindbinder,
+    MonsterRole::Riftling,
 ];
 
 impl MonsterRole {

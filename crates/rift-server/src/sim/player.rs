@@ -213,13 +213,16 @@ impl ServerPlayer {
     ) -> (Self, NetIdentity, Vitals, Kinematic) {
         let attrs = Attributes::for_class(HERO.primary_attribute);
         let equipment = rift_game::loot::Equipment::new();
+        let mut talents = fresh_character_tree();
+        talents.unspent_points = 1;
         let stats = CharacterStats::compute(
             &attrs,
             DEFAULT_LEVEL,
             &equipment.active_affix_sum(),
-            &rift_game::stats::StatModifiers::new(),
+            &talents.stat_modifiers(),
         );
-        let ability_mods = equipment.ability_mods();
+        let mut ability_mods = equipment.ability_mods();
+        ability_mods.extend(&talents.ability_mods());
         let hp_max = stats.max_hp;
         let max_resource = stats.max_resource;
         let kinematic = Kinematic {
@@ -255,18 +258,14 @@ impl ServerPlayer {
             ghost_rise_timer: None,
             channeling_shrine: None,
             shards: 0,
-            talents: {
-                // Fresh in-memory tree with the level-1 starter
-                // point pre-allocated. Hello-time hydration
-                // overwrites this with the persisted ranks +
-                // unspent count from `CharacterRecord`, so this
-                // only matters for the brief pre-hello window
-                // and for sims that bypass persistence (dev /
-                // offline).
-                let mut t = fresh_character_tree();
-                t.unspent_points = 1;
-                t
-            },
+            // Fresh in-memory tree with the level-1 starter
+            // point pre-allocated. Hello-time hydration
+            // overwrites this with the persisted ranks +
+            // unspent count from `CharacterRecord`, so this
+            // only matters for the brief pre-hello window
+            // and for sims that bypass persistence (dev /
+            // offline).
+            talents,
         };
         (
             player,
@@ -289,7 +288,7 @@ impl ServerPlayer {
             &self.attrs,
             self.level,
             &self.equipment.active_affix_sum(),
-            &rift_game::stats::StatModifiers::new(),
+            &self.talents.stat_modifiers(),
         );
         vitals.rescale_max(new_stats.max_hp);
         // Mirror the HP-rescale on essence so equipping a
@@ -305,6 +304,7 @@ impl ServerPlayer {
         // procs, per-ability damage). Recompute alongside stats
         // so equip / unequip is one consistent edge.
         self.ability_mods = self.equipment.ability_mods();
+        self.ability_mods.extend(&self.talents.ability_mods());
     }
 
     /// Per-cast damage scalar — `stats.damage / class.base_damage`.

@@ -25,9 +25,10 @@ pub fn render_minimap(
     zone_title: &str,
     zone_detail: &str,
     show_full_extent: bool,
+    zoom: f32,
     player_facing: Vec3,
     portal_pos: Option<Vec3>,
-) {
+) -> rift_engine::ui::im::Rect {
     // Walkable mask, row-major.
     let mut walkable = Vec::with_capacity(nav.width * nav.depth);
     for z in 0..nav.depth {
@@ -134,13 +135,14 @@ pub fn render_minimap(
         cells: &cells,
         props: &props,
         focus: player.map(|p| p.pos),
+        zoom,
         show_full_extent,
         portal: portal_pos.map(|p| (p.x, p.z)),
         enemies: &enemies,
         party: &party,
         player,
     };
-    rift_ui::hud::frame_minimap(ui, &view);
+    rift_ui::hud::frame_minimap(ui, &view)
 }
 
 fn update_minimap_visibility(

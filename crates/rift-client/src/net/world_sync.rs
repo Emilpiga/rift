@@ -14,9 +14,9 @@ use std::time::Instant;
 use glam::{Mat4, Quat, Vec3};
 use rift_engine::animation::Animator;
 use rift_engine::ecs::components::{
-    AnimationSet, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player, PlayerAction,
-    RemoteEnemy, RemoteMinion, RemotePlayer, Renderable, Resource, SkinnedAttachments, Transform,
-    Velocity,
+    AnimationSet, Duration, Effects, EnemyAnim, Health, LocalPlayer, NetControlled, Player,
+    PlayerAction, RemoteEnemy, RemoteMinion, RemotePlayer, Renderable, Resource,
+    SkinnedAttachments, Transform, Velocity,
 };
 use rift_engine::Renderer;
 use rift_net::{
@@ -49,6 +49,7 @@ fn enemy_arrival_scale(role: MonsterRole) -> f32 {
         MonsterRole::Brute => 1.15,
         MonsterRole::Mindbinder => 1.1,
         MonsterRole::Stalker | MonsterRole::Caster | MonsterRole::Wraith => 1.0,
+        MonsterRole::Riftling => 0.75,
     }
 }
 
@@ -790,19 +791,24 @@ impl NetClient {
         }
 
         const MAX_SPAWNS_PER_FRAME: usize = 8;
-        let to_spawn: Vec<(NetId, NetId, u8, Vec3, f32)> = self
+        let to_spawn: Vec<(NetId, NetId, u8, Vec3, f32, f32)> = self
             .remote
             .iter()
             .filter(|(nid, _)| !self.minion_entities.contains_key(nid))
             .filter_map(|(nid, re)| match re.kind {
-                EntityKind::Minion { role, owner, .. } => {
-                    Some((*nid, owner, role, re.position, re.health_pct))
-                }
+                EntityKind::Minion { role, owner, .. } => Some((
+                    *nid,
+                    owner,
+                    role,
+                    re.position,
+                    re.health_pct,
+                    re.resource_pct,
+                )),
                 _ => None,
             })
             .take(MAX_SPAWNS_PER_FRAME)
             .collect();
-        for (net_id, owner, role_byte, position, hp_pct) in to_spawn {
+        for (net_id, owner, role_byte, position, hp_pct, resource_pct) in to_spawn {
             let role = match MonsterRole::from_wire_byte(role_byte) {
                 Some(r) => r,
                 None => continue,
@@ -814,6 +820,9 @@ impl NetClient {
                 Ok(entity) => {
                     if let Ok(mut h) = world.get::<&mut Health>(entity) {
                         h.current = h.max * hp_pct;
+                    }
+                    if let Ok(mut d) = world.get::<&mut Duration>(entity) {
+                        d.remaining = d.max * resource_pct;
                     }
                     self.minion_entities.insert(net_id, entity);
                     self.minion_visual_positions.insert(net_id, position);
@@ -892,6 +901,14 @@ impl NetClient {
             }
             if let Ok(mut h) = world.get::<&mut Health>(entity) {
                 h.current = h.max * re.health_pct;
+            }
+            if let Ok(mut d) = world.get::<&mut Duration>(entity) {
+                d.remaining = d.max * re.resource_pct;
+            }
+            if let EntityKind::Minion { anim, .. } = re.kind {
+                if let Ok(mut ea) = world.get::<&mut EnemyAnim>(entity) {
+                    ea.attacking = anim == 2; // server::sim::enemy_anim::ATTACK
+                }
             }
             sync_effects(world, entity, &re.effects);
         }
@@ -1328,6 +1345,7 @@ fn sync_effects(
             id: e.id,
             remaining: e.remaining,
             duration: e.duration,
+            stacks: e.stacks.max(1),
         })
         .collect();
     if let Ok(mut d) = world.get::<&mut Effects>(entity) {

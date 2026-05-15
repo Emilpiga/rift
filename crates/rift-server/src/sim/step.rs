@@ -30,7 +30,8 @@ impl Sim {
         // 2. Enemies: AI tick (queues melee damage + ranged
         //    shot requests), then integrate motion and spawn
         //    any caster bolts the AI asked for.
-        let player_targets = player::target_positions(&self.world);
+        let mut player_targets = player::target_positions(&self.world);
+        player_targets.extend(minions::target_positions(&self.world));
         let damage_mult = FloorConfig::for_floor(self.floor_index).enemy_damage_mult;
         let ai_outcome = enemies::tick_ai(
             &mut self.world,
@@ -222,6 +223,12 @@ impl Sim {
             &mut proc_cast_queue,
         );
         self.check_party_wipe();
+        // Enemy AI used the pre-damage target list above, but
+        // melee/cast resolves can kill players before projectile,
+        // AoE, channel, or proc-cast hit tests run. Refresh so
+        // later enemy-side collision cannot consume hits on corpses.
+        let mut player_targets = player::target_positions(&self.world);
+        player_targets.extend(minions::target_positions(&self.world));
 
         // 4. Tick ability cooldowns.
         ability::tick_cooldowns(&mut self.cooldowns, dt);
@@ -244,10 +251,11 @@ impl Sim {
         //    direct kills both run through `loot::finalise_kills`
         //    (which emits `Death`, rolls drops, and despawns).
         let enemies = enemies::snapshot_for_collision(&self.world);
+        let minion_ai_enemies = enemies::snapshot_for_minion_ai(&self.world);
         minions::tick_ai(
             &mut self.world,
             &self.floor,
-            &enemies,
+            &minion_ai_enemies,
             &mut self.next_projectile_net_id,
             dt,
         );
@@ -334,6 +342,7 @@ impl Sim {
                             swing.ability_id.raw() as u64,
                         ),
                         apply_debuff: None,
+                        from_minion: false,
                         // Swing impulse points from caster
                         // outward along the aim direction so
                         // the blood splash kicks away from
@@ -423,6 +432,11 @@ impl Sim {
             );
             self.check_party_wipe();
         }
+        // Enemy projectile/AoE/channel damage can also kill players
+        // before proc-driven casts resolve below. Keep delayed AoE
+        // proc casts from targeting a player that died earlier this tick.
+        let mut player_targets = player::target_positions(&self.world);
+        player_targets.extend(minions::target_positions(&self.world));
 
         // Drain proc-driven free casts (Mirrorglass Amulet pool +
         // future OnHit / OnDodge / OnLowHealth `CastAbility`

@@ -16,8 +16,8 @@
 //! * `OnLowHealth` — `apply_player_damage` on the tick the
 //!   target's HP fraction crosses below 0.30 (one-shot per dip,
 //!   re-arms when HP crosses back above the threshold).
-//! * `OnKill` — not currently wired (would need killer
-//!   attribution threaded through `loot::finalise_kills`).
+//! * `OnKill` — `projectile::apply_hits_to_enemies` when the
+//!   applied hit drops the target.
 //!
 //! # Adding a new action
 //! Add a new `ProcAction` variant in `rift_game::loot::affixes`,

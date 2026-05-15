@@ -21,6 +21,8 @@ use rift_ui_types::talents::{
     TalentTreeView,
 };
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 // ─── Layout constants (world space, pre-zoom) ────────────────
 
 /// Radius of an ordinary stat / proc / modifier node, in world
@@ -135,13 +137,14 @@ pub fn frame_talent_panel(
     let pill_text = format!("{} unspent", view.unspent_points);
     let header_h = inner_pad + theme.fonts.size_lg + row_gap + theme.fonts.size_sm + section_gap;
     let header_rect = Rect::from_xywh(panel.x(), panel.y(), panel.width(), header_h);
+    let header_content_gap = 12.0 * theme.scale;
 
     // ── Search field geometry (top, below header text) ───
     let search_w = 240.0 * theme.scale;
     let search_h = 28.0 * theme.scale;
     let search_rect = Rect::from_xywh(
         panel.min.x + inner_pad,
-        panel.min.y + header_h,
+        panel.min.y + header_h + header_content_gap,
         search_w,
         search_h,
     );
@@ -342,42 +345,6 @@ pub fn frame_talent_panel(
             );
 
             draw_route_ornaments(ui, transform);
-
-            // ── Rungs: route spines ──
-            //
-            // Bright I-bar ladders along each route's cardinal
-            // axis, connecting the hub passive band to the
-            // route entry band. Reads as "this is the channel
-            // your chips travel along".
-            for route in [
-                TalentRouteView::Warrior,
-                TalentRouteView::Mage,
-                TalentRouteView::Healer,
-                TalentRouteView::Summoner,
-            ] {
-                let a = route_centre_angle(route);
-                let tint = route_tint(route);
-                let rung = Color::rgba(
-                    tint.0[0] * 0.55 + 0.25,
-                    tint.0[1] * 0.55 + 0.22,
-                    tint.0[2] * 0.55 + 0.18,
-                    0.40,
-                );
-                // Spine from the hub passive band's outer
-                // edge to the route entry band's inner edge.
-                i_bar(ui, b2_out, b3_in, a, s(7.0), 1.4, rung);
-                // And one further out into the route tier-2
-                // band, lighter to fade outward.
-                i_bar(
-                    ui,
-                    b3_out,
-                    b4_in,
-                    a,
-                    s(6.0),
-                    1.2,
-                    Color::rgba(rung.0[0], rung.0[1], rung.0[2], 0.28),
-                );
-            }
 
             // ── Rungs: hub passive slots ──
             //
@@ -640,10 +607,16 @@ pub fn frame_talent_panel(
         btn_w,
         btn_h,
     );
-    let refund_resp = Button::danger("Refund All")
+    let refund_resp = Button::danger("  Refund All")
         .small()
         .enabled(view.total_spent > 0)
         .show_with_id(ui, Id::root("rift::talents::refund_all"), btn_rect);
+    draw_placeholder_icon(
+        ui,
+        icon_rect_left(btn_rect, 16.0 * theme.scale, 9.0 * theme.scale),
+        UiIcon::Recycle,
+        theme.colors.text,
+    );
     if refund_resp.clicked {
         action = Some(TalentTreeAction::RespecAll);
     }
@@ -1072,18 +1045,18 @@ fn draw_prereq_edge(
 }
 
 fn draw_route_ornaments(ui: &mut Ui<'_>, transform: PanZoomTransform) {
-    draw_route_causeway(ui, transform, TalentRouteView::Warrior, (1.0, 0.0));
-    draw_route_causeway(ui, transform, TalentRouteView::Mage, (0.0, -1.0));
-    draw_route_causeway(ui, transform, TalentRouteView::Healer, (0.0, 1.0));
-    draw_route_causeway(ui, transform, TalentRouteView::Summoner, (-1.0, 0.0));
+    for route in [
+        TalentRouteView::Warrior,
+        TalentRouteView::Mage,
+        TalentRouteView::Healer,
+        TalentRouteView::Summoner,
+    ] {
+        draw_route_labyrinth(ui, transform, route);
+    }
 }
 
-fn route_point(dir: (f32, f32), distance: f32, offset: f32) -> Pos2 {
-    let normal = (-dir.1, dir.0);
-    Pos2::new(
-        dir.0 * distance + normal.0 * offset,
-        dir.1 * distance + normal.1 * offset,
-    )
+fn polar_world(angle: f32, radius: f32) -> Pos2 {
+    Pos2::new(angle.cos() * radius, angle.sin() * radius)
 }
 
 fn draw_world_line(
@@ -1102,109 +1075,100 @@ fn draw_world_line(
     );
 }
 
-fn draw_route_causeway(
+fn draw_world_arc(
     ui: &mut Ui<'_>,
     transform: PanZoomTransform,
-    route: TalentRouteView,
-    dir: (f32, f32),
+    radius: f32,
+    a0: f32,
+    a1: f32,
+    segments: usize,
+    width: f32,
+    color: Color,
 ) {
-    let tint = route_tint(route);
-    let rail = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.22);
-    let rail_dim = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.13);
-    let stone = Color::rgba(0.52, 0.45, 0.32, 0.20);
-    let start = 360.0;
-    let end = 2040.0;
-
-    for offset in [-112.0, -76.0, 76.0, 112.0] {
-        draw_world_line(
-            ui,
-            transform,
-            route_point(dir, start, offset),
-            route_point(dir, end, offset),
-            1.0,
-            if offset.abs() > 100.0 { rail_dim } else { rail },
-        );
+    let mut prev = polar_world(a0, radius);
+    for step in 1..=segments.max(1) {
+        let t = step as f32 / segments.max(1) as f32;
+        let angle = a0 + (a1 - a0) * t;
+        let next = polar_world(angle, radius);
+        draw_world_line(ui, transform, prev, next, width, color);
+        prev = next;
     }
+}
 
+fn draw_radial_cap(
+    ui: &mut Ui<'_>,
+    transform: PanZoomTransform,
+    angle: f32,
+    inner: f32,
+    outer: f32,
+    width: f32,
+    color: Color,
+) {
     draw_world_line(
         ui,
         transform,
-        route_point(dir, start, 0.0),
-        route_point(dir, end, 0.0),
-        1.0,
-        rail_dim,
+        polar_world(angle, inner),
+        polar_world(angle, outer),
+        width,
+        color,
     );
+}
 
-    let mut distance = start + 80.0;
-    let mut flip = false;
-    while distance < end - 80.0 {
-        draw_world_line(
-            ui,
-            transform,
-            route_point(dir, distance, -112.0),
-            route_point(dir, distance, 112.0),
-            1.0,
-            stone,
-        );
+fn draw_route_labyrinth(ui: &mut Ui<'_>, transform: PanZoomTransform, route: TalentRouteView) {
+    let tint = route_tint(route);
+    let centre = route_centre_angle(route);
+    let lane_half = ROUTE_WEDGE * 0.36;
+    let a0 = centre - lane_half;
+    let a1 = centre + lane_half;
+    let rail = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.24);
+    let rail_dim = Color::rgba(tint.0[0], tint.0[1], tint.0[2], 0.13);
+    let stone = Color::rgba(0.54, 0.47, 0.34, 0.20);
 
-        for side in [-1.0, 1.0] {
-            let inner = side * 58.0;
-            let outer = side * if flip { 112.0 } else { 86.0 };
-            draw_world_line(
-                ui,
-                transform,
-                route_point(dir, distance - 58.0, inner),
-                route_point(dir, distance + 18.0, inner),
-                1.0,
-                rail,
-            );
-            draw_world_line(
-                ui,
-                transform,
-                route_point(dir, distance + 18.0, inner),
-                route_point(dir, distance + 18.0, outer),
-                1.0,
-                rail,
-            );
-            draw_world_line(
-                ui,
-                transform,
-                route_point(dir, distance + 18.0, outer),
-                route_point(dir, distance + 92.0, outer),
-                1.0,
-                rail,
-            );
+    for ring in 0..7 {
+        let inner = ROUTE_BASE_RADIUS + ring as f32 * ROUTE_RING_STEP + KEYSTONE_NODE_RADIUS + 18.0;
+        let outer =
+            ROUTE_BASE_RADIUS + (ring as f32 + 1.0) * ROUTE_RING_STEP - KEYSTONE_NODE_RADIUS - 18.0;
+        if inner >= outer {
+            continue;
         }
-
-        distance += 180.0;
-        flip = !flip;
+        let color = if ring % 2 == 0 { rail } else { rail_dim };
+        draw_labyrinth_gap(ui, transform, a0, a1, inner, outer, color, stone);
     }
+}
 
-    for distance in [start, end] {
-        draw_world_line(
-            ui,
-            transform,
-            route_point(dir, distance, -132.0),
-            route_point(dir, distance, 132.0),
-            1.2,
-            rail,
-        );
-        draw_world_line(
-            ui,
-            transform,
-            route_point(dir, distance - 28.0, -96.0),
-            route_point(dir, distance, -132.0),
-            1.0,
-            rail,
-        );
-        draw_world_line(
-            ui,
-            transform,
-            route_point(dir, distance - 28.0, 96.0),
-            route_point(dir, distance, 132.0),
-            1.0,
-            rail,
-        );
+fn draw_labyrinth_gap(
+    ui: &mut Ui<'_>,
+    transform: PanZoomTransform,
+    a0: f32,
+    a1: f32,
+    inner: f32,
+    outer: f32,
+    color: Color,
+    stone: Color,
+) {
+    let mid_lo = inner + (outer - inner) * 0.32;
+    let mid_hi = inner + (outer - inner) * 0.68;
+    let segments = 6;
+    draw_world_arc(ui, transform, inner, a0, a1, 18, 1.0, stone);
+    draw_world_arc(ui, transform, outer, a0, a1, 18, 1.0, stone);
+    draw_radial_cap(ui, transform, a0, inner, outer, 1.0, stone);
+    draw_radial_cap(ui, transform, a1, inner, outer, 1.0, stone);
+
+    for step in 0..segments {
+        let t0 = step as f32 / segments as f32;
+        let t1 = (step as f32 + 0.45) / segments as f32;
+        let t2 = (step as f32 + 1.0) / segments as f32;
+        let aa0 = a0 + (a1 - a0) * t0;
+        let aa1 = a0 + (a1 - a0) * t1;
+        let aa2 = a0 + (a1 - a0) * t2;
+        let (r0, r1) = if step % 2 == 0 {
+            (mid_lo, mid_hi)
+        } else {
+            (mid_hi, mid_lo)
+        };
+        draw_world_arc(ui, transform, r0, aa0, aa1, 4, 1.0, color);
+        draw_radial_cap(ui, transform, aa1, r0, r1, 1.0, color);
+        draw_world_arc(ui, transform, r1, aa1, aa2, 4, 1.0, color);
     }
 }
 

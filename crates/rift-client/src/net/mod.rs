@@ -1381,25 +1381,44 @@ impl NetClient {
         let Some(owner_id) = self.our_net_id else {
             return Vec::new();
         };
-        self.remote
-            .values()
-            .filter_map(|entity| match entity.kind {
+        let mut effects: Vec<rift_engine::ecs::components::ActiveEffect> = Vec::new();
+        for entity in self.remote.values() {
+            let Some((effect_id, remaining, duration)) = (match entity.kind {
                 rift_net::messages::EntityKind::Minion { owner, role, .. } if owner == owner_id => {
-                    let role = rift_game::monsters::MonsterRole::from_wire_byte(role)?;
+                    let Some(role) = rift_game::monsters::MonsterRole::from_wire_byte(role) else {
+                        continue;
+                    };
                     let presentation = rift_game::minions::presentation_for_role(role);
-                    let effect_id = presentation.hud_effect?;
+                    let Some(effect_id) = presentation.hud_effect else {
+                        continue;
+                    };
                     let duration = rift_game::effects::lookup(effect_id)
                         .map(|def| def.default_duration)
                         .unwrap_or(28.0);
-                    Some(rift_engine::ecs::components::ActiveEffect {
-                        id: effect_id,
-                        remaining: (entity.resource_pct.clamp(0.0, 1.0) * duration).max(0.0),
+                    Some((
+                        effect_id,
+                        (entity.resource_pct.clamp(0.0, 1.0) * duration).max(0.0),
                         duration,
-                    })
+                    ))
                 }
                 _ => None,
-            })
-            .collect()
+            }) else {
+                continue;
+            };
+            if let Some(existing) = effects.iter_mut().find(|eff| eff.id == effect_id) {
+                existing.remaining = existing.remaining.max(remaining);
+                existing.duration = existing.duration.max(duration);
+                existing.stacks = existing.stacks.saturating_add(1);
+            } else {
+                effects.push(rift_engine::ecs::components::ActiveEffect {
+                    id: effect_id,
+                    remaining,
+                    duration,
+                    stacks: 1,
+                });
+            }
+        }
+        effects
     }
 
     /// Look up a remote player's display name by `NetId`. Returns

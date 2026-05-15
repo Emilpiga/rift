@@ -9,6 +9,7 @@ use rift_net::messages::WorldEvent;
 use rift_net::{NetId, NetTick};
 
 use super::actor::{NetIdentity, Vitals};
+use super::minions::ServerMinion;
 use super::player::{self, ServerPlayer};
 use super::{combat_ctx, meters, procs, projectile, GHOST_RISE_DELAY};
 
@@ -57,6 +58,34 @@ pub(super) fn apply_player_damage(
             ability_id,
             amount,
         } = hit;
+
+        if world.get::<&ServerPlayer>(player_entity).is_err() {
+            if let Ok((_minion, vitals, identity, kinematic)) =
+                world.query_one_mut::<(&ServerMinion, &mut Vitals, &NetIdentity, &Kinematic)>(
+                    player_entity,
+                )
+            {
+                if vitals.is_dead() {
+                    continue;
+                }
+                let was_alive = !vitals.is_dead();
+                vitals.damage(amount);
+                events.push(WorldEvent::Damage {
+                    target: identity.net_id,
+                    amount,
+                    crit: false,
+                    position: kinematic.position.to_array(),
+                });
+                if was_alive && vitals.is_dead() {
+                    events.push(WorldEvent::Death {
+                        entity: identity.net_id,
+                        killer: None,
+                        hit_dir: [0.0, 0.0, 0.0],
+                    });
+                }
+            }
+            continue;
+        }
 
         // Resolve the source ability's element / archetype for
         // resist routing. Unknown ids (`OTHER`, environmental)

@@ -636,6 +636,7 @@ pub struct ActiveEffect {
     pub id: u8,
     pub remaining: f32,
     pub duration: f32,
+    pub stacks: u16,
 }
 
 /// Active buffs / debuffs replicated onto an entity. One entry
@@ -691,6 +692,32 @@ pub struct Resource {
 impl Resource {
     pub fn new(max: f32) -> Self {
         Self { current: max, max }
+    }
+}
+
+/// Generic finite-duration timer mirrored from authoritative
+/// gameplay state. Used by world overlays for summon lifetime
+/// bars without conflating duration with ability resources.
+#[derive(Clone, Copy, Debug)]
+pub struct Duration {
+    pub remaining: f32,
+    pub max: f32,
+}
+
+impl Duration {
+    pub fn new(max: f32) -> Self {
+        Self {
+            remaining: max,
+            max,
+        }
+    }
+
+    pub fn pct(&self) -> f32 {
+        if self.max > 0.0 {
+            (self.remaining / self.max).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 

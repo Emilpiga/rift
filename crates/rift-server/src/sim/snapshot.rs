@@ -198,28 +198,10 @@ pub fn build(world: &hecs::World, tick: NetTick, ack_for: ClientId) -> Snapshot 
         if !in_view(viewer_pos, loot_row.position) {
             continue;
         }
-        let (base_id, rarity, ilvl, affixes, anchored, unique_id, unique_pick) =
-            loot_row.item.to_wire();
-        let provenance = loot_row
-            .item
-            .provenance
-            .as_ref()
-            .map(|p| p.eligible.clone());
         entities.push(EntitySnapshot {
             net_id: loot_row.net_id,
             kind: EntityKind::Loot {
-                item: rift_net::messages::ItemBlob {
-                    base_id,
-                    rarity,
-                    ilvl,
-                    affixes,
-                    anchored,
-                    unstable: loot_row.item.unstable,
-                    provenance,
-                    unique_id: unique_id.map(|s| s.to_string()),
-                    unique_pick,
-                    rift_touched: loot_row.item.rift_touched_to_wire(),
-                },
+                item: crate::wire::item_to_blob(&loot_row.item),
             },
             target_net_id: None,
             position: loot_row.position.to_array(),

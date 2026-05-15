@@ -27,6 +27,7 @@ use std::sync::Arc;
 use glam::Mat4;
 use hecs::Entity;
 
+use rift_engine::animation_profile::{JointKey, SkeletonBindings};
 use rift_engine::ecs::components::{LocalPlayer, Player, Skinned, Transform};
 use rift_engine::Input;
 use rift_engine::Mesh;
@@ -149,12 +150,18 @@ pub fn apply_weapon_visual(
             .ok()
             .map(|p| p.hand_joint)
             .filter(|&j| j != u32::MAX);
-        match from_player {
+        let from_bindings = world
+            .get::<&SkeletonBindings>(entity)
+            .ok()
+            .and_then(|bindings| bindings.get(JointKey::WeaponHand));
+        match from_bindings {
             Some(idx) => Some(idx),
-            None => world
-                .get::<&Skinned>(entity)
-                .ok()
-                .and_then(|s| s.mesh.left_hand_joint().map(|i| i as u32)),
+            None => from_player.or_else(|| {
+                world
+                    .get::<&Skinned>(entity)
+                    .ok()
+                    .and_then(|s| s.mesh.left_hand_joint().map(|i| i as u32))
+            }),
         }
     };
 

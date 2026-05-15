@@ -1550,6 +1550,14 @@ pub struct ActiveEffect {
     /// progress relative to the original duration even after a
     /// refresh.
     pub duration: f32,
+    /// Stack count for HUD-only aggregation. Defaults to one so
+    /// older snapshots without this field still render normally.
+    #[serde(default = "default_effect_stacks")]
+    pub stacks: u16,
+}
+
+fn default_effect_stacks() -> u16 {
+    1
 }
 
 /// What a snapshot row represents. Trailing fields are kept on the

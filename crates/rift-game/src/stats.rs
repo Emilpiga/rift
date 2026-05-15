@@ -24,6 +24,7 @@
 //! - **Defensive** — `Health`, `Armor`, `Evasion`.
 //! - **Utility** — `CooldownReduction`, `ResourceRegen`, `MoveSpeed`.
 //! - **Elemental** — `FireDamage`, `IceDamage`, `LightningDamage`.
+//! - **Minion** — summon damage, durability, tempo, and duration.
 //!
 //! Some stats are **flat** (`Health: +120`) and some are **percent**
 //! (`CritChance: +0.05` = +5 %). Use [`Stat::is_percent`] to decide
@@ -89,6 +90,13 @@ pub enum Stat {
     FireDamage,
     IceDamage,
     LightningDamage,
+    // Player-owned minion scaling. These are percent bonuses
+    // applied when a summon request is created so the minion
+    // snapshots the owner's gear at cast time.
+    MinionDamage,
+    MinionHealth,
+    MinionAttackSpeed,
+    MinionDuration,
 }
 
 impl Stat {
@@ -116,6 +124,10 @@ impl Stat {
             Stat::FireDamage => "Fire Damage",
             Stat::IceDamage => "Ice Damage",
             Stat::LightningDamage => "Lightning Damage",
+            Stat::MinionDamage => "Minion Damage",
+            Stat::MinionHealth => "Minion Health",
+            Stat::MinionAttackSpeed => "Minion Attack Speed",
+            Stat::MinionDuration => "Summon Duration",
         }
     }
 
@@ -139,6 +151,10 @@ impl Stat {
                 | Stat::FireDamage
                 | Stat::IceDamage
                 | Stat::LightningDamage
+                | Stat::MinionDamage
+                | Stat::MinionHealth
+                | Stat::MinionAttackSpeed
+                | Stat::MinionDuration
         )
     }
 
@@ -151,7 +167,11 @@ impl Stat {
     pub fn is_offensive_bonus(self) -> bool {
         matches!(
             self,
-            Stat::CritChance | Stat::CritDamage | Stat::AttackSpeed
+            Stat::CritChance
+                | Stat::CritDamage
+                | Stat::AttackSpeed
+                | Stat::MinionDamage
+                | Stat::MinionAttackSpeed
         )
     }
 
@@ -210,7 +230,7 @@ impl StatModifiers {
 ///
 /// Used both as a per-item rolled-stat block and as the aggregated
 /// equipment total. Cheap to clone; never indexed by hashing because
-/// the cardinality is tiny (≤ 13 entries).
+/// the cardinality is tiny.
 #[derive(Clone, Debug, Default)]
 pub struct StatBlock {
     entries: Vec<(Stat, f32)>,
@@ -338,6 +358,12 @@ pub struct CharacterStats {
     pub ice_damage: f32,
     pub lightning_damage: f32,
     pub physical_damage: f32,
+
+    // --- Minions ---------------------------------------------------
+    pub minion_damage: f32,
+    pub minion_health: f32,
+    pub minion_attack_speed: f32,
+    pub minion_duration: f32,
 }
 
 impl CharacterStats {
@@ -430,6 +456,11 @@ impl CharacterStats {
             ice_damage: flat(Stat::IceDamage),
             lightning_damage: flat(Stat::LightningDamage),
             physical_damage: flat(Stat::PhysicalDamage),
+
+            minion_damage: flat(Stat::MinionDamage),
+            minion_health: flat(Stat::MinionHealth),
+            minion_attack_speed: flat(Stat::MinionAttackSpeed),
+            minion_duration: flat(Stat::MinionDuration),
         }
     }
 
@@ -520,5 +551,27 @@ impl CharacterStats {
         let per_hit = self.ability_effective_damage(ability);
         let chance = self.crit_chance.clamp(0.0, 1.0);
         per_hit * (1.0 + chance * self.crit_damage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equipment_minion_stats_flow_into_character_stats() {
+        let mut equipment = StatBlock::new();
+        equipment.add(Stat::MinionDamage, 0.12);
+        equipment.add(Stat::MinionHealth, 0.20);
+        equipment.add(Stat::MinionAttackSpeed, 0.08);
+        equipment.add(Stat::MinionDuration, 0.15);
+
+        let stats =
+            CharacterStats::compute(&Attributes::default(), 1, &equipment, &StatModifiers::new());
+
+        assert_eq!(stats.minion_damage, 0.12);
+        assert_eq!(stats.minion_health, 0.20);
+        assert_eq!(stats.minion_attack_speed, 0.08);
+        assert_eq!(stats.minion_duration, 0.15);
     }
 }

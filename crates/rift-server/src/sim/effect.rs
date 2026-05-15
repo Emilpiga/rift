@@ -112,6 +112,7 @@ impl EffectStack {
                 id: d.id,
                 remaining: d.remaining,
                 duration: d.applied_duration.max(0.001),
+                stacks: 1,
             })
             .collect()
     }

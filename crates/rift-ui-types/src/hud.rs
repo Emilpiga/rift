@@ -252,6 +252,9 @@ pub struct MinimapView<'a> {
     pub props: &'a [MinimapProp],
     /// Grid-space centre for the zoomed minimap viewport.
     pub focus: Option<(f32, f32)>,
+    /// Viewport zoom multiplier. `1.0` is the default tile
+    /// coverage; larger values zoom in, smaller values zoom out.
+    pub zoom: f32,
     /// When true, fit the whole grid into the minimap instead
     /// of using the player-centered dungeon viewport.
     pub show_full_extent: bool,

@@ -81,6 +81,7 @@
 pub mod character_select;
 pub mod chat;
 pub mod hud;
+pub mod icons;
 pub mod inventory;
 pub mod pause_menu;
 pub mod settings;

@@ -29,15 +29,15 @@
 //! - [`UniqueDef`] — one row in the [`UNIQUES`] table. The match
 //!   predicate is a `fn(&BaseItem) -> bool` so each unique
 //!   declares its own family / kind rule inline.
-//! - [`UNIQUES`] — the seed catalogue. Five entries for the Phase
+//! - [`UNIQUES`] — the seed catalogue. Six entries for the Phase
 //!   4 launch (Embercrown, Splinterstep, Cleavebreaker, Mirrorglass
-//!   Amulet, Shardspire). Stormcaller's Reach is deliberately
+//!   Amulet, Pactkeeper's Signet, Shardspire). Stormcaller's Reach is deliberately
 //!   deferred until Chain Lightning ships as a real ability.
 
 use crate::abilities::{self, AbilityId};
 
 use super::affixes::{AbilityVariant, ProcAction, ProcEvent};
-use super::items::{BaseItem, EquipSlot, ItemSlot, WeaponKind};
+use super::items::{AccessoryKind, BaseItem, EquipSlot, ItemSlot, WeaponKind};
 
 /// Concrete legendary effect attached to an item. One per unique;
 /// the active set on a player is therefore exactly the number of
@@ -88,6 +88,9 @@ pub enum BespokeId {
     /// its cooldown gate. Triggered at the cast-dispatch site
     /// for [`abilities::EVASIVE_ROLL`].
     MirrorglassFreeRoll,
+    /// Pactkeeper's Signet — player-owned minion hits and kills
+    /// can trigger the owner's equipped proc effects.
+    PactkeeperMinionProcs,
 }
 
 /// How the unique's effect is selected at roll time.
@@ -186,6 +189,9 @@ fn any_boots(_b: &BaseItem) -> bool {
 }
 fn any_amulet(_b: &BaseItem) -> bool {
     true
+}
+fn any_ring(b: &BaseItem) -> bool {
+    matches!(b.slot, ItemSlot::Accessory(AccessoryKind::Ring))
 }
 fn any_wand(b: &BaseItem) -> bool {
     matches!(b.slot, ItemSlot::Weapon(WeaponKind::Wand))
@@ -304,6 +310,14 @@ pub static UNIQUES: &[UniqueDef] = &[
     //     flavor: "",
     // },
     UniqueDef {
+        id: "pactkeepers_signet",
+        name: "Pactkeeper's Signet",
+        equip_slot: EquipSlot::Ring1,
+        matches_base: any_ring,
+        roll: UniqueRoll::Fixed(LegendaryEffect::Bespoke(BespokeId::PactkeeperMinionProcs)),
+        flavor: "A circle small enough for a finger, wide enough for a legion.",
+    },
+    UniqueDef {
         id: "shardspire",
         name: "Shardspire",
         equip_slot: EquipSlot::Weapon,
@@ -379,6 +393,9 @@ pub fn tooltip_line(eff: &LegendaryEffect) -> String {
         }
         LegendaryEffect::Bespoke(id) => match id {
             BespokeId::MirrorglassFreeRoll => "Evasive Roll ignores its cooldown".to_string(),
+            BespokeId::PactkeeperMinionProcs => {
+                "Your minions inherit your on-hit and on-kill procs".to_string()
+            }
         },
     }
 }

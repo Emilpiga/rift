@@ -3222,6 +3222,7 @@ dependencies = [
  "rift-math",
  "rift-net",
  "rift-persistence",
+ "rift-ui-types",
  "sha2",
  "steamworks",
  "subtle",

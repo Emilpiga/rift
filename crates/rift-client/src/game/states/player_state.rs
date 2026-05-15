@@ -98,7 +98,8 @@ impl PlayerState {
             &default_equipment.active_affix_sum(),
             &talents.stat_modifiers(),
         );
-        let cached_ability_mods = default_equipment.ability_mods();
+        let mut cached_ability_mods = default_equipment.ability_mods();
+        cached_ability_mods.extend(&talents.ability_mods());
 
         Self {
             gender,
@@ -151,6 +152,8 @@ impl PlayerState {
             &self.talents.stat_modifiers(),
         );
         self.cached_ability_mods = equipment.ability_mods();
+        self.cached_ability_mods
+            .extend(&self.talents.ability_mods());
     }
 
     /// Borrow the cached resolved stats. O(1) — no recomputation.

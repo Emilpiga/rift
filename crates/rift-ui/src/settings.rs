@@ -11,6 +11,8 @@ use rift_ui_im::{
 };
 use rift_ui_types::settings::{DisplayResolution, SettingsAction, SettingsView};
 
+use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+
 /// One frame of the settings panel.
 pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsAction> {
     let mut actions = Vec::new();
@@ -39,9 +41,15 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                 // right.
                 let row_y = body.min.y + 56.0 * sc;
                 let row_h = 28.0 * sc;
+                draw_placeholder_icon(
+                    ui,
+                    Rect::from_xywh(body.min.x, row_y + 4.0 * sc, 20.0 * sc, 20.0 * sc),
+                    UiIcon::Volume,
+                    theme.colors.text_dim,
+                );
                 label(
                     ui,
-                    body.min + Vec2::new(0.0, 56.0 * sc + 4.0 * sc),
+                    body.min + Vec2::new(28.0 * sc, 56.0 * sc + 4.0 * sc),
                     "Master Volume",
                 );
 
@@ -92,6 +100,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "Realtime Shadows",
                     "Renders dynamic directional and point-light shadows. Turn off for a large GPU performance win.",
                     view.shadows_enabled,
+                    UiIcon::Shield,
                     body.min.y + 148.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -106,6 +115,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "Texture Height Shadows",
                     "Uses material height maps to add subtle receiver self-shadowing. Costs extra shading work.",
                     view.height_shadows_enabled,
+                    UiIcon::Shield,
                     body.min.y + 190.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -122,6 +132,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "Bloom",
                     "Adds glow from bright pixels through the post-process blur stack. Disable to reduce post-processing cost.",
                     view.bloom_enabled,
+                    UiIcon::Damage,
                     body.min.y + 232.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -136,6 +147,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "Ambient Occlusion",
                     "Darkens creases and contact areas with screen-space ambient occlusion. Costs an extra post pass.",
                     view.ssao_enabled,
+                    UiIcon::Filter,
                     body.min.y + 274.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -150,6 +162,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "Volumetric Rays",
                     "Adds foggy light shafts in post-processing. Disable if heavy scenes hitch near bright lights.",
                     view.volumetrics_enabled,
+                    UiIcon::Portal,
                     body.min.y + 316.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -166,6 +179,7 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                     "VSync",
                     "Uses the guaranteed FIFO present mode when available, reducing tearing by syncing presents to the display.",
                     view.vsync_enabled,
+                    UiIcon::Monitor,
                     body.min.y + 358.0 * sc,
                     toggle_w,
                     toggle_h,
@@ -188,13 +202,19 @@ pub fn frame_settings(ui: &mut Ui<'_>, view: &SettingsView<'_>) -> Vec<SettingsA
                 let btn_w = 140.0 * sc;
                 let back_rect =
                     Rect::from_xywh(body.max.x - btn_w, body.max.y - btn_h, btn_w, btn_h);
-                if Button::new("Back")
+                if Button::new("  Back")
                     .size(ButtonSize::Large)
                     .show_with_id(ui, Id::root("settings").child("back"), back_rect)
                     .clicked
                 {
                     actions.push(SettingsAction::Close);
                 }
+                draw_placeholder_icon(
+                    ui,
+                    icon_rect_left(back_rect, 20.0 * sc, 14.0 * sc),
+                    UiIcon::Back,
+                    theme.colors.text,
+                );
             });
     });
 
@@ -211,13 +231,24 @@ fn toggle_row(
     text: &'static str,
     tooltip: &'static str,
     enabled: bool,
+    icon: UiIcon,
     y: f32,
     toggle_w: f32,
     toggle_h: f32,
 ) -> bool {
     let theme = *ui.theme();
     let sc = theme.scale;
-    label(ui, rift_ui_im::Pos2::new(body.min.x, y + 10.0 * sc), text);
+    draw_placeholder_icon(
+        ui,
+        Rect::from_xywh(body.min.x, y + 7.0 * sc, 20.0 * sc, 20.0 * sc),
+        icon,
+        theme.colors.text_dim,
+    );
+    label(
+        ui,
+        rift_ui_im::Pos2::new(body.min.x + 28.0 * sc, y + 10.0 * sc),
+        text,
+    );
     let toggle_rect = Rect::from_xywh(body.max.x - toggle_w, y, toggle_w, toggle_h);
     let toggle_label = if enabled { "On" } else { "Off" };
     let toggle_resp = if enabled {
@@ -251,9 +282,15 @@ fn resolution_row(
     let value_w = 184.0 * sc;
     let dropdown_id = Id::root("settings").child("resolution_dropdown");
 
+    draw_placeholder_icon(
+        ui,
+        Rect::from_xywh(body.min.x, y + 7.0 * sc, 20.0 * sc, 20.0 * sc),
+        UiIcon::Monitor,
+        theme.colors.text_dim,
+    );
     label(
         ui,
-        rift_ui_im::Pos2::new(body.min.x, y + 10.0 * sc),
+        rift_ui_im::Pos2::new(body.min.x + 28.0 * sc, y + 10.0 * sc),
         "Resolution",
     );
 

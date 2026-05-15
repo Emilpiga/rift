@@ -24,7 +24,7 @@ use super::families::BaseFamily;
 /// Tag constants used by [`BaseItem::allowed_tags`] /
 /// [`BaseItem::favored_tags`] and [`crate::loot::AffixDef::tags`].
 ///
-/// A new tag is one `const` line. Eight is plenty for now; the
+/// A new tag is one `const` line. The
 /// underlying type is `u32` so we have headroom.
 pub mod tag {
     pub const FIRE: u32 = 1 << 0;
@@ -36,9 +36,11 @@ pub mod tag {
     pub const CASTER: u32 = 1 << 6;
     pub const MELEE: u32 = 1 << 7;
     pub const UTILITY: u32 = 1 << 8;
+    pub const SUMMON: u32 = 1 << 9;
 
     /// Every tag — used by accessories, which can roll anything.
-    pub const ALL: u32 = FIRE | ICE | LIGHTNING | CRIT | SPEED | DEFENSE | CASTER | MELEE | UTILITY;
+    pub const ALL: u32 =
+        FIRE | ICE | LIGHTNING | CRIT | SPEED | DEFENSE | CASTER | MELEE | UTILITY | SUMMON;
 
     /// Caster gear shorthand.
     pub const ANY_ELEMENT: u32 = FIRE | ICE | LIGHTNING;
@@ -287,8 +289,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         name: "Apprentice Staff",
         slot: ItemSlot::Weapon(WeaponKind::Staff),
         equip_slot: Some(EquipSlot::Weapon),
-        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | CRIT,
-        favored_tags: ANY_ELEMENT | CASTER,
+        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | CRIT | SUMMON,
+        favored_tags: ANY_ELEMENT | CASTER | SUMMON,
         implicit: &[(Stat::FireDamage, 0.08)],
         min_ilvl: 1,
         // Staff = caster: spell scaling, any element, archetype
@@ -342,8 +344,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         name: "Carved Wand",
         slot: ItemSlot::Weapon(WeaponKind::Wand),
         equip_slot: Some(EquipSlot::Weapon),
-        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SPEED,
-        favored_tags: CASTER | UTILITY,
+        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SPEED | SUMMON,
+        favored_tags: CASTER | UTILITY | SUMMON,
         implicit: &[(Stat::Agility, 3.0), (Stat::CooldownReduction, 0.04)],
         min_ilvl: 1,
         // Wand = caster, any element, projectile shape (Fireball,
@@ -469,8 +471,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         name: "Mage Robe",
         slot: ItemSlot::Armor(ArmorKind::Robe),
         equip_slot: Some(EquipSlot::Chest),
-        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | DEFENSE,
-        favored_tags: CASTER | UTILITY,
+        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | DEFENSE | SUMMON,
+        favored_tags: CASTER | UTILITY | SUMMON,
         implicit: &[(Stat::Health, 14.0), (Stat::ResourceRegen, 0.08)],
         min_ilvl: 1,
         // Robe — Intellect, element-flex, no archetype lock.
@@ -486,8 +488,8 @@ pub const BASE_ITEMS: &[BaseItem] = &[
         name: "Leather Gloves",
         slot: ItemSlot::Armor(ArmorKind::Light),
         equip_slot: Some(EquipSlot::Hands),
-        allowed_tags: ANY_ELEMENT | CASTER | UTILITY,
-        favored_tags: CASTER | ANY_ELEMENT,
+        allowed_tags: ANY_ELEMENT | CASTER | UTILITY | SUMMON,
+        favored_tags: CASTER | ANY_ELEMENT | SUMMON,
         implicit: &[(Stat::CooldownReduction, 0.03)],
         min_ilvl: 1,
         // Light gloves lean caster — Intellect, element-flex.

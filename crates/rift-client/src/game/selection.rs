@@ -10,6 +10,7 @@ use rift_net::messages::EntityKind;
 use rift_net::NetId;
 use std::collections::HashMap;
 
+use crate::game::avatar_cosmetics::COSMETIC_TAG_BASE;
 use crate::game::chat::ChatUi;
 use crate::game::sub_state::NetState;
 use crate::game::unit_frame::{
@@ -244,17 +245,58 @@ impl SelectionState {
         self.prune_stale_refs();
     }
 
-    pub fn tick(&mut self, input: &Input, renderer: &mut Renderer) {
+    pub fn tick<F>(&mut self, input: &Input, renderer: &mut Renderer, suppress_left_select: F)
+    where
+        F: FnOnce(&SelectionState) -> bool,
+    {
         self.hovered = self
             .pick_mesh(input, renderer)
             .map(|candidate| candidate.reference);
-        if input.left_just_pressed() {
+        let suppress_left_select = suppress_left_select(self);
+        if input.left_just_pressed() && !suppress_left_select {
             if let Some(hovered) = self.hovered {
                 let _ = input.left_clicked();
                 self.selected = Some(hovered);
             }
         }
         self.update_outline(renderer);
+    }
+
+    pub fn hovered_valid_target(
+        &self,
+        relation: SelectionRelation,
+        range: f32,
+        caster: Vec3,
+    ) -> Option<NetId> {
+        self.hovered
+            .and_then(|hovered| self.valid_target(hovered, relation, range, caster))
+    }
+
+    pub fn hovered_with_relation(&self, relation: SelectionRelation) -> Option<NetId> {
+        let hovered = self.hovered?;
+        let candidate = self.by_id(hovered.net_id)?;
+        (candidate.reference.relation == relation).then_some(candidate.reference.net_id)
+    }
+
+    pub fn select_hovered_valid_target(
+        &mut self,
+        relation: SelectionRelation,
+        range: f32,
+        caster: Vec3,
+    ) -> Option<NetId> {
+        let hovered = self.hovered?;
+        let net_id = self.valid_target(hovered, relation, range, caster)?;
+        self.selected = Some(hovered);
+        self.context_menu = None;
+        Some(net_id)
+    }
+
+    pub fn select_hovered_with_relation(&mut self, relation: SelectionRelation) -> Option<NetId> {
+        let hovered = self.hovered?;
+        let net_id = self.hovered_with_relation(relation)?;
+        self.selected = Some(hovered);
+        self.context_menu = None;
+        Some(net_id)
     }
 
     pub fn candidate(&self, reference: SelectionRef) -> Option<&SelectionCandidate> {
@@ -444,7 +486,8 @@ impl SelectionState {
             .selected
             .and_then(|reference| self.by_id(reference.net_id));
         if let Some(selected) = selected {
-            if let Some(obj_idx) = selected.object_indices.first().copied() {
+            let indices = selected.object_indices.clone();
+            for obj_idx in indices {
                 set_object_flag(renderer, obj_idx, SELECTED_FLAG, true);
                 self.outlined_objects.push(obj_idx);
             }
@@ -504,7 +547,13 @@ fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32>
 fn object_indices(renderable: &Renderable, attachments: Option<&SkinnedAttachments>) -> Vec<usize> {
     let mut indices = vec![renderable.object_index];
     if let Some(attachments) = attachments {
-        indices.extend(attachments.pieces.iter().map(|piece| piece.object_index));
+        indices.extend(
+            attachments
+                .pieces
+                .iter()
+                .filter(|piece| piece.visible && piece.tag < COSMETIC_TAG_BASE)
+                .map(|piece| piece.object_index),
+        );
     }
     indices
 }
