@@ -314,6 +314,26 @@ void main() {
         float hue_unify = 0.34 + smoothstep(0.12, 0.88, warped_down) * 0.20 + seam_suppress * 0.16;
         abyss = mix(abyss, unified_hue, hue_unify);
 
+        // Distant-scale cue layered on top of the existing ocean:
+        // a very broad, slow swell plus a faint atmosphere veil.
+        // Keep this subtle so it sells depth without replacing the
+        // authored turbulent abyss motion above.
+        float scale_wave = 0.5 + 0.5 * sin(theta * 0.65 + depth * 3.2 + body * 0.55 - t * 0.018);
+        float distant_swell = soft_band(scale_wave, 0.58, 0.42)
+                            * smoothstep(0.10, 0.78, warped_down)
+                            * (1.0 - smoothstep(0.84, 1.0, warped_down));
+        float depth_veil = smoothstep(0.08, 0.42, ocean_depth)
+                         * (1.0 - smoothstep(0.64, 1.0, ocean_depth));
+        vec3 veil_color = mix(pc.ground_sun_str.rgb, pc.horizon_sun_size.rgb, 0.35);
+        abyss = mix(abyss, veil_color, depth_veil * 0.08);
+        abyss = mix(abyss, abyss_shadow, distant_swell * 0.08);
+
+        float atmos_depth = smoothstep(0.18, 0.92, warped_down);
+        float horizon_distance = 1.0 - smoothstep(-0.02, 0.16, h);
+        float distance_haze = clamp(atmos_depth * 0.10 + horizon_distance * depth_veil * 0.14, 0.0, 0.18);
+        vec3 far_haze = mix(abyss_shadow, veil_color, 0.38);
+        abyss = mix(abyss, far_haze, distance_haze);
+
         float horizon_keep = 1.0 - smoothstep(-0.01, 0.22, h + 0.02 + (body - 0.5) * 0.035);
         float mask = void_strength * horizon_keep * smoothstep(0.0, 0.18, warped_down);
         sky = mix(sky, abyss, mask);
@@ -326,6 +346,24 @@ void main() {
     // Costs four fbm calls per fragment — sky is a fullscreen
     // triangle without depth so this is cheap.
     float cloud_strength = pc.cloud_params.y;
+    // Lightning without storm clouds: void hub / character-select use
+    // `cloud_strength == 0` but still drive `cloud_params.z` from
+    // `HubStorm`. Lift the gradient dome with a hashed fork mask so
+    // flashes read as ripped sky rather than a flat colour pulse.
+    float flash_clear = pc.cloud_params.z;
+    if (flash_clear > 0.001 && cloud_strength < 0.001) {
+        vec2 xz_f = dir.xz / max(length(dir.xz), 1e-4);
+        float theta_f = atan(xz_f.y, xz_f.x);
+        float t_f = pc.cloud_params.x;
+        vec2 fork_uv = vec2(theta_f * 3.1 + sin(t_f * 2.7 + theta_f * 5.0) * 0.35,
+                            h * 7.0 + theta_f * 1.4);
+        float fork = mix(0.28, 1.0, hash21(fork_uv));
+        float overhead = pow(max(h, 0.0), 0.55);
+        float rim = smoothstep(-0.35, 0.42, h) * (1.0 - smoothstep(0.55, 1.0, h));
+        float dome_w = overhead * 0.62 + rim * 0.48;
+        sky += pc.cloud_flash_color.rgb * (flash_clear * 0.52 * fork * dome_w);
+    }
+
     if (cloud_strength > 0.001 && h > -0.05) {
         // Project the view direction onto a planar "cloud sheet"
         // sitting at altitude 1. Adding a small bias to `h` keeps

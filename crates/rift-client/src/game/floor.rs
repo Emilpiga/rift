@@ -6,7 +6,8 @@ use rift_engine::ecs::components::{
     Collider, Duration, Enemy, EnemyAnim, EnemyKind, FloatingVisual, Health, LocalPlayer,
     NetControlled, RemoteEnemy, RemoteMinion, Renderable, Skinned, Static, Transform, Velocity,
 };
-use rift_engine::{Floor, FloorConfig, Mesh, Renderer};
+use rift_engine::{Floor, FloorConfig, Mesh, PointLight, Renderer};
+use std::f32::consts::TAU;
 
 use super::environment::EnvTextures;
 use super::monster_assets::MonsterCache;
@@ -15,6 +16,19 @@ use super::rift_state::RiftState;
 use super::torches::TorchSystem;
 use crate::game::PlayerState;
 use rift_game::monsters::MonsterRole;
+
+/// Multiplies final lit colour in the forward pass (`push.tint.rgb`) — strong enough
+/// to read as void-purple over the rock-tile albedo.
+const VOID_SAND_MESH_TINT: [f32; 4] = [0.74, 0.38, 1.0, 1.0];
+
+/// Vertex tint on hub / character-select **ground** meshes (albedo × `fragColor` in PBR).
+const VOID_SAND_DISC_VERTEX_TINT: Vec3 = Vec3::new(0.78, 0.65, 1.0);
+/// Applied to dune ring vertex colours on [`Mesh::mountain_terrain`].
+const VOID_SAND_DUNE_VERTEX_MUL: Vec3 = Vec3::new(0.72, 0.55, 1.1);
+
+/// PBR + dual-layer anti-tile sampling for void hub / char-select rock
+/// (shader bit 11; skips POM, uses `textureGrad` blend — see `pbr_lighting`).
+const VOID_ROCK_PBR_FLAGS: u32 = 1u32 | (1u32 << 11);
 
 /// Hub thunderstorm driver. Lives on [`FloorManager`] for the
 /// duration of the player's stay in the hub and is dropped on
@@ -68,11 +82,47 @@ enum StormState {
 }
 
 impl HubStorm {
+    /// Capture calm-state lighting from `renderer` after hub /
+    /// character-select atmosphere has been applied; `seed`
+    /// separates RNG streams between scenes.
+    pub fn new_void_hub(renderer: &Renderer, hub_centre: Vec3, seed: u64) -> Self {
+        let mut rng = rift_dungeon::props_placement::SmallRng::new(seed ^ 0xE1EC_74D0_C01D_u64);
+
+        let n = 14_usize;
+        let radius = 98.0;
+        let height = 44.0;
+        let mut cloud_anchors = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = (i as f32 / n as f32) * TAU;
+            let jitter = rng.frange(-0.22, 0.22);
+            let r = radius + rng.frange(-8.0, 14.0);
+            let a = base + jitter;
+            cloud_anchors.push(hub_centre + Vec3::new(a.cos() * r, height, a.sin() * r));
+        }
+
+        Self {
+            base_key_color: renderer.key_light.color,
+            base_key_ambient: renderer.key_light.ambient,
+            base_fog_color: renderer.fog_color,
+            cloud_anchors,
+            state: Self::schedule_next(&mut rng),
+            rng,
+        }
+    }
+
+    /// Refresh calm-state snapshots when authored atmosphere is
+    /// reapplied every frame (character-select path).
+    pub fn sync_calm_from(&mut self, renderer: &Renderer) {
+        self.base_key_color = renderer.key_light.color;
+        self.base_key_ambient = renderer.key_light.ambient;
+        self.base_fog_color = renderer.fog_color;
+    }
+
     fn schedule_next(rng: &mut rift_dungeon::props_placement::SmallRng) -> StormState {
-        // 4–14 seconds between strikes — enough silence that
-        // each fork lands as an event rather than wallpaper.
+        // Wide irregular gaps — two overlapping rolls so the
+        // silence doesn't feel like a metronome.
         StormState::Idle {
-            cooldown: rng.frange(4.0, 14.0),
+            cooldown: rng.frange(2.8, 14.0) + rng.frange(0.0, 10.0),
         }
     }
 
@@ -96,13 +146,11 @@ impl HubStorm {
             }
         });
         let color = carry_color.unwrap_or_else(|| {
-            // Cool-white-blue with occasional warm amber tint
-            // (rare red-orange storms read as hellfire flares
-            // instead of cold sky lightning).
-            if rng.frange(0.0, 1.0) < 0.18 {
-                Vec3::new(1.6, 0.55, 0.25)
+            // Violet-white void flashes; occasional magenta spike.
+            if rng.frange(0.0, 1.0) < 0.09 {
+                Vec3::new(1.35, 0.52, 1.15)
             } else {
-                Vec3::new(0.85, 0.95, 1.25)
+                Vec3::new(0.72, 0.78, 1.22)
             }
         });
         // Punchy onset, fast decay — feels like a real strike.
@@ -116,14 +164,15 @@ impl HubStorm {
     }
 
     pub fn tick(&mut self, renderer: &mut Renderer, dt: f32) {
-        // Always restore base values before re-applying the
-        // active flash. Torches don't run in the hub so the
-        // point-light vec is owned exclusively by the storm.
+        // Restore calm sky/light state before re-applying an active flash.
         renderer.key_light.color = self.base_key_color;
         renderer.key_light.ambient = self.base_key_ambient;
         renderer.fog_color = self.base_fog_color;
         renderer.sky.cloud_flash = 0.0;
-        renderer.point_lights.clear();
+
+        // Preserve rim fills / portal glow pushed earlier this frame;
+        // hub gameplay paths typically leave this empty before portals extend it.
+        let mut preserved = std::mem::take(&mut renderer.point_lights);
 
         // State machine step.
         let next = match self.state {
@@ -209,39 +258,25 @@ impl HubStorm {
         } = self.state
         {
             let i = intensity.clamp(0.0, 3.0);
-            // Lift the directional + ambient toward the bolt
-            // color so the whole platform catches the strike,
-            // not just the rim that the point light reaches.
             let key_lift = color * 0.35 * i;
             renderer.key_light.color = self.base_key_color + key_lift;
             renderer.key_light.ambient = self.base_key_ambient + 0.18 * i;
-            // Fog brightens during the flash so the abyss
-            // momentarily reveals the cloud silhouettes /
-            // mountain tops that were drowning in black.
             renderer.fog_color = [
                 (self.base_fog_color[0] + color.x * 0.10 * i).min(0.9),
                 (self.base_fog_color[1] + color.y * 0.10 * i).min(0.9),
                 (self.base_fog_color[2] + color.z * 0.10 * i).min(0.9),
             ];
-            // Single huge-radius point light at the cloud
-            // anchor so the bolt also rim-lights the platform
-            // / chest from the strike's actual direction. The
-            // shader caps point lights at 8; in the hub we
-            // own all 8 slots so this is always visible.
-            renderer.point_lights.push(rift_engine::PointLight {
+            preserved.push(rift_engine::PointLight {
                 position: pos,
                 color,
                 radius: 140.0,
                 intensity: 8.0 * i,
             });
-            // Light up the procedural sky clouds with the
-            // bolt's colour. The shader scales the flash by a
-            // per-fragment hash so it reads as a fork
-            // sweeping through the cumulonimbus rather than a
-            // uniform fade.
             renderer.sky.cloud_flash = i;
             renderer.sky.cloud_flash_color = color;
         }
+
+        renderer.point_lights = preserved;
     }
 }
 
@@ -281,6 +316,8 @@ pub struct FloorManager {
     /// rift floor (the chest only exists in the hub). Read by
     /// `GameState::tick_stash_chest` for the proximity prompt.
     pub stash_chest_pos: Option<Vec3>,
+    /// World position of the hub anvil station. `None` on rift floors.
+    pub anvil_pos: Option<Vec3>,
     /// World position of the active floor's spawn point. Updated
     /// by both [`Self::generate`] and [`Self::generate_hub`] so
     /// the rift-spawn portal can sit on top of it. Mirrors
@@ -292,23 +329,16 @@ pub struct FloorManager {
     /// them, and the cloud-anchor positions used as strike
     /// origins.
     pub hub_storm: Option<HubStorm>,
-    /// Hub-only sandstorm haze emitter. Spawned at hub
-    /// generation, anchored on the player every frame so the
-    /// dust field travels with the camera. `None` outside the
-    /// hub. Stored as an opaque `EffectId` so the renderer
-    /// owns the actual particle state.
+    /// Legacy particle slot retained for compatibility with saves /
+    /// tooling; the void hub no longer spawns sandstorm haze. `None`
+    /// in normal play.
     pub hub_haze: Option<rift_engine::renderer::vfx::EffectId>,
-    /// Hub-only looping wind audio emitter. Lives in lockstep
-    /// with `hub_haze`: spawned at hub generation, despawned
-    /// on rift entry / hub teardown, anchored on the player
-    /// every frame. Its volume is driven by the same gust
-    /// envelope that modulates the haze brightness so the
-    /// soundscape and the visual sandstorm pulse together.
-    /// `None` when the audio system is unavailable or the
-    /// `ambient/wind.mp3` asset failed to load.
+    /// Hub-only looping wind audio emitter (legacy sandstorm).
+    /// Unused while `hub_haze` is never spawned; cleared on rift
+    /// entry so stale ids cannot leak.
     pub hub_wind: Option<rift_audio::EmitterId>,
-    /// `true` once the character-select sandstorm backdrop
-    /// (sand disc + dune ring + atmosphere + drifting haze)
+    /// `true` once the character-select void backdrop
+    /// (sand disc + dune ring + atmosphere + lightning driver)
     /// has been installed into the renderer for this entry
     /// into the screen. Reset to `false` by `generate_hub`
     /// and `generate` (rift floors) since they call
@@ -338,6 +368,7 @@ impl FloorManager {
             env: EnvTextures::default(),
             torches: TorchSystem::new(),
             stash_chest_pos: None,
+            anvil_pos: None,
             spawn_pos: Vec3::ZERO,
             hub_storm: None,
             hub_haze: None,
@@ -363,16 +394,12 @@ impl FloorManager {
         // Rift floors don't host the chest; clear any stale
         // hub-floor position so proximity tests can't false-fire.
         self.stash_chest_pos = None;
+        self.anvil_pos = None;
         // Rift floors have no thunderstorm — drop the hub
         // storm driver so it doesn't keep stomping on the
         // dungeon's torch lights / fog tint.
         self.hub_storm = None;
-        // Drop the hub's drifting sand haze. Its `EffectId`
-        // belonged to the previous hub instance and the
-        // renderer-side particle system is wiped during
-        // floor regen anyway; clearing the handle prevents
-        // a stale `set_anchor` call from stomping a fresh
-        // emitter that happens to land on the same slot.
+        // Drop the hub's drifting sand haze handle if any (legacy).
         self.hub_haze = None;
         // Char-select shared the same disc + haze rig; the
         // upcoming `clear_objects()` will wipe it, so reset
@@ -618,7 +645,7 @@ impl FloorManager {
             if positions.is_empty() {
                 continue;
             }
-            let mesh = Mesh::dungeon_floor(positions, rift.floor);
+            let mesh = Mesh::dungeon_floor_with_edge_contrast(Some(&floor), positions, rift.floor);
             renderer.add_mesh(&mesh, Mat4::IDENTITY)?;
             floor_obj_indices[i] = Some(renderer.objects.len() - 1);
         }
@@ -630,7 +657,6 @@ impl FloorManager {
             .iter()
             .find_map(|o| *o)
             .expect("dungeon must have at least one floor tile");
-
         // Stair / ramp mesh — slanted quads bridging tiles at
         // adjacent elevations. Built per material pack so
         // each ramp inherits the floor texture of its
@@ -766,6 +792,25 @@ impl FloorManager {
             renderer.add_mesh(&batched, Mat4::IDENTITY)?;
             wall_obj_indices[i] = Some(renderer.objects.len() - 1);
         }
+        let fog_vec = Vec3::new(
+            atmosphere.fog_color[0],
+            atmosphere.fog_color[1],
+            atmosphere.fog_color[2],
+        );
+        let void_edge_shadow = Mesh::dungeon_void_edge_shadow(&floor, fog_vec);
+        let void_edge_shadow_obj_idx = if void_edge_shadow.indices.is_empty() {
+            None
+        } else {
+            renderer.add_mesh(&void_edge_shadow, Mat4::IDENTITY)?;
+            Some(renderer.objects.len() - 1)
+        };
+        let edge_rim = Mesh::dungeon_floor_edge_rim(&floor, fog_vec);
+        let edge_rim_obj_idx = if edge_rim.indices.is_empty() {
+            None
+        } else {
+            renderer.add_mesh(&edge_rim, Mat4::IDENTITY)?;
+            Some(renderer.objects.len() - 1)
+        };
 
         // Bind authored PBR materials to floor and walls. We
         // still call `ensure(...)` to keep the procedural sets
@@ -819,6 +864,8 @@ impl FloorManager {
         let wall_flags = f32::from_bits(1u32 | (1u32 << 3));
         let floor_params = [1.0 / 3.0, 0.012, pbr_flags, 0.0];
         let wall_params = [1.0 / 3.0, 0.02, wall_flags, 0.0];
+        let edge_rim_params = [1.0, 0.0, f32::from_bits(1u32 << 9), 0.0];
+        let void_edge_shadow_params = [1.0, 0.0, f32::from_bits(1u32 << 10), 0.0];
 
         // Resolve per-pack descriptor sets, falling back to
         // the default stone pack while themed packs are still
@@ -887,6 +934,18 @@ impl FloorManager {
                 renderer.set_object_shared_material(idx, set);
             }
         }
+        if let Some(idx) = void_edge_shadow_obj_idx {
+            renderer.set_object_material_params(idx, void_edge_shadow_params);
+            if let Some(obj) = renderer.objects.get_mut(idx) {
+                obj.tint[3] = 0.66;
+            }
+        }
+        if let Some(idx) = edge_rim_obj_idx {
+            renderer.set_object_material_params(idx, edge_rim_params);
+            if let Some(obj) = renderer.objects.get_mut(idx) {
+                obj.tint[3] = 0.46;
+            }
+        }
         // Floor is a giant flat slab \u2014 it would only contribute
         // self-shadow against the directional light, which is
         // already handled by the heightmap self-shadow + height-
@@ -903,6 +962,12 @@ impl FloorManager {
         }
         for obj in skirt_obj_indices.iter().flatten() {
             renderer.set_object_casts_shadow(*obj, false);
+        }
+        if let Some(idx) = void_edge_shadow_obj_idx {
+            renderer.set_object_casts_shadow(idx, false);
+        }
+        if let Some(idx) = edge_rim_obj_idx {
+            renderer.set_object_casts_shadow(idx, false);
         }
 
         // Still need individual ECS entities for collision
@@ -966,73 +1031,70 @@ impl FloorManager {
         Ok(())
     }
 
-    /// Install the sandstorm visual backdrop used by the
-    /// character-select screen: the sand-PBR ground disc, the
-    /// dune ring, the warm-tan atmosphere (clear / fog / sky /
-    /// key-light), and the drifting sand-haze emitter.
+    /// Install the void visual backdrop used by the
+    /// character-select screen: rock-tile PBR ground disc, dune ring,
+    /// violet atmosphere (clear / fog / sky / key-light), subtle
+    /// fill lights, and the non-linear lightning driver.
     ///
-    /// Idempotent — the disc + dunes are added once, then the
-    /// method just retargets the haze brightness each frame
-    /// using the same gust envelope the hub uses. Anchor is
-    /// the avatar-podium position (camera offset baked in).
+    /// Idempotent — the disc + dunes are added once; atmosphere is
+    /// cheap to set every frame. Anchor is the avatar-podium position
+    /// (camera offset baked in).
     ///
     /// Mirrors the visual section of [`Self::generate_hub`]
     /// without world reset, floor data, props, portals, or
-    /// torches — char-select shows just the desert and the
+    /// torches — char-select shows just the void platform and the
     /// preview avatar.
     pub fn ensure_char_select_backdrop(&mut self, renderer: &mut Renderer) {
-        // Anchor under the camera podium. `OFFSET_X = -0.95`
-        // matches `character_select::update_preview_camera`.
-        let anchor = Vec3::new(-0.95, 0.6, 0.0);
+        // Podium centre. `OFFSET_X = -0.95` matches
+        // `character_select::update_preview_camera`.
         let centre = Vec3::new(-0.95, 0.02, 0.0);
 
         // Atmosphere is cheap to set every frame. Character
-        // select gets its own quieter variant of the hub
-        // sandstorm so the preview model stays legible.
-        renderer.clear_color = [0.22, 0.15, 0.10, 1.0];
-        renderer.fog_color = [0.58, 0.40, 0.24];
+        // select uses a slightly quieter fog reach than the hub
+        // so the preview model stays legible.
+        renderer.clear_color = [0.035, 0.02, 0.07, 1.0];
+        renderer.fog_color = [0.22, 0.12, 0.34];
         renderer.fog_start = 14.0;
         renderer.fog_end = 80.0;
         renderer.ssao_strength = 0.08;
         renderer.camera.far = 260.0;
-        renderer.sky = rift_engine::SkyConfig::sandstorm_hub();
-        renderer.sky.sun_dir = Vec3::new(0.24, 0.46, -0.86).normalize();
-        renderer.sky.sun_strength = 0.32;
-        renderer.sky.sun_size = 0.9992;
-        renderer.sky.cloud_flash_color = Vec3::new(0.95, 0.76, 0.48);
-        renderer.key_light = rift_engine::KeyLight {
-            direction: Vec3::new(0.24, 0.62, -0.74),
-            color: Vec3::new(1.65, 1.22, 0.76),
-            ambient: 0.42,
-        };
+        renderer.sky = rift_engine::SkyConfig::void_hub();
+        renderer.sky.cloud_flash_color = Vec3::new(0.72, 0.62, 1.05);
+        renderer.key_light = rift_engine::KeyLight::VOID_HUB;
         renderer.point_lights.clear();
         renderer.point_lights.push(rift_engine::PointLight {
             position: Vec3::new(-1.30, 2.05, 2.65),
-            color: Vec3::new(1.0, 0.72, 0.42),
+            color: Vec3::new(0.62, 0.48, 0.96),
             radius: 9.5,
-            intensity: 2.4,
+            intensity: 1.65,
         });
         renderer.point_lights.push(rift_engine::PointLight {
             position: Vec3::new(1.25, 2.80, -2.25),
-            color: Vec3::new(0.95, 0.62, 0.34),
+            color: Vec3::new(0.58, 0.42, 0.88),
             radius: 12.0,
-            intensity: 1.15,
+            intensity: 0.95,
         });
 
         if !self.char_select_backdrop_built {
-            // ── Ground disc (sand PBR) ──────────────────────
+            // ── Ground disc (rock tile PBR + void tint) ─────
             const PLATFORM_RADIUS: f32 = 64.0;
-            let platform =
-                Mesh::ground_disc(centre, PLATFORM_RADIUS, 96, Vec3::splat(1.0), 1.0 / 2.0);
+            let platform = Mesh::ground_disc(
+                centre,
+                PLATFORM_RADIUS,
+                96,
+                VOID_SAND_DISC_VERTEX_TINT,
+                1.0 / 2.65,
+            );
             if renderer.add_mesh(&platform, Mat4::IDENTITY).is_ok() {
                 let platform_obj_idx = renderer.objects.len() - 1;
                 self.env.ensure_desert_rocks(renderer);
                 if let Some(set) = self.env.desert_rocks_set {
                     renderer.set_object_shared_material(platform_obj_idx, set);
-                    let pbr_flags = f32::from_bits(1u32);
+                    let pbr_flags = f32::from_bits(VOID_ROCK_PBR_FLAGS);
                     renderer
                         .set_object_material_params(platform_obj_idx, [1.0, 0.012, pbr_flags, 0.0]);
                 }
+                renderer.set_object_tint(platform_obj_idx, VOID_SAND_MESH_TINT);
                 renderer.set_object_casts_shadow(platform_obj_idx, false);
             }
 
@@ -1048,39 +1110,35 @@ impl FloorManager {
                 ridged_blend: 0.0,
                 seed: 0xD0_5E_5A_4D_5A_4D_5A_4D,
             };
-            let dunes =
-                Mesh::mountain_terrain(&dune_params, centre, Vec3::new(1.0, 0.92, 0.78), 6.0);
+            let dunes = Mesh::mountain_terrain(
+                &dune_params,
+                centre,
+                Vec3::new(1.0, 0.92, 0.78) * VOID_SAND_DUNE_VERTEX_MUL,
+                6.0,
+            );
             if renderer.add_mesh(&dunes, Mat4::IDENTITY).is_ok() {
                 let dunes_obj_idx = renderer.objects.len() - 1;
                 if let Some(set) = self.env.desert_rocks_set {
                     renderer.set_object_shared_material(dunes_obj_idx, set);
-                    let pbr_flags = f32::from_bits(1u32);
+                    let pbr_flags = f32::from_bits(VOID_ROCK_PBR_FLAGS);
                     renderer
                         .set_object_material_params(dunes_obj_idx, [1.0, 0.008, pbr_flags, 0.0]);
                 }
+                renderer.set_object_tint(dunes_obj_idx, VOID_SAND_MESH_TINT);
                 renderer.set_object_casts_shadow(dunes_obj_idx, false);
             }
 
-            // ── Haze emitter ────────────────────────────────
-            self.hub_haze = Some(renderer.vfx_system.spawn(
-                rift_engine::renderer::vfx::presets::sandstorm_haze(),
-                anchor,
-            ));
-
             self.char_select_backdrop_built = true;
+
+            self.hub_storm = Some(HubStorm::new_void_hub(
+                renderer,
+                centre,
+                0xCAFE_CE11EC700Bu64,
+            ));
         }
 
-        // Drive the gust envelope on the haze each frame so
-        // the dust pulses (same curve `render_phase` runs on
-        // the real hub).
-        if let Some(h) = self.hub_haze {
-            let t = renderer.elapsed_secs();
-            let slow = (t * 0.35).sin() * 0.55
-                + (t * 0.17 + 1.7).sin() * 0.35
-                + (t * 0.08 + 0.4).sin() * 0.10;
-            let gust = (1.0 + slow * 0.45).max(0.05);
-            renderer.vfx_system.set_anchor(h, anchor);
-            renderer.vfx_system.set_brightness(h, gust * 0.10);
+        if let Some(storm) = self.hub_storm.as_mut() {
+            storm.sync_calm_from(renderer);
         }
     }
 
@@ -1139,41 +1197,27 @@ impl FloorManager {
         self.nav_grid = NavGrid::from_floor(&floor);
         self.minimap_seen = vec![false; floor.width * floor.depth];
 
-        // Brooding "floating obsidian platform in a sandstorm"
-        // ambience. The platform is dark stone, the sky is a
-        // tan dust dome, and the fog is a warm dust haze
-        // tight enough to limit visibility to ~25 m so the
-        // play area reads as enclosed by airborne sand
-        // rather than open desert.
-        renderer.clear_color = [0.30, 0.20, 0.12, 1.0];
+        // Floating hub over void rock tiles: dark violet sky, abyss band below the
+        // horizon, irregular lightning (`HubStorm`), no airborne sandstorm.
+        renderer.clear_color = [0.05, 0.028, 0.09, 1.0];
         renderer.ssao_strength = 0.7;
-        // Fog colour: matches the sky's horizon band so the
-        // foggy platform edge fades smoothly into the dust
-        // horizon instead of showing a darker rust-coloured
-        // ring against a lighter sky.
-        renderer.fog_color = [0.78, 0.55, 0.30];
-        // Loose-but-still-veiling fog. We want the player to
-        // sense a vast desert beyond the immediate clear
-        // zone — dune silhouettes barely visible through the
-        // haze — without ever being able to see a hard edge
-        // of the world. The visible platform extends well
-        // past `fog_end`, so distant dunes silhouette into
-        // the dust horizon and the platform "feels infinite".
+        renderer.fog_color = [0.28, 0.14, 0.42];
         renderer.fog_start = 8.0;
-        renderer.fog_end = 55.0;
-        // Camera far plane needs to clear the dune ring
-        // (~180 m max radius) so distant silhouettes don't
-        // pop out at oblique camera angles.
+        renderer.fog_end = 58.0;
         renderer.camera.far = 260.0;
+        renderer.sky = rift_engine::SkyConfig::void_hub();
+        renderer.sky.cloud_flash_color = Vec3::new(0.72, 0.62, 1.05);
+        renderer.key_light = rift_engine::KeyLight::VOID_HUB;
 
-        // Sandstorm sky preset. Warm tan dome, no sun disc
-        // (fully veiled by dust), drifting dust streaks
-        // overhead.
-        renderer.sky = rift_engine::SkyConfig::sandstorm_hub();
-        // Diffuse warm fill — in a sandstorm the dust scatters
-        // skylight uniformly so the directional contribution
-        // is soft and the ambient does most of the work.
-        renderer.key_light = rift_engine::KeyLight::SANDSTORM;
+        let hub_centre = Vec3::new((floor.width / 2) as f32, 0.02, (floor.depth / 2) as f32);
+        const PLATFORM_RADIUS: f32 = 64.0;
+        let storm_seed = (floor.width as u64).wrapping_mul(0x9E37_79B9)
+            ^ (floor.depth as u64).wrapping_mul(0x85EB_CA77)
+            ^ hub_centre.x.to_bits() as u64
+            ^ (hub_centre.z.to_bits() as u64).rotate_left(12)
+            ^ 0x90AD_B077_BEEF_u64;
+        self.hub_storm = Some(HubStorm::new_void_hub(renderer, hub_centre, storm_seed));
+        self.hub_haze = None;
 
         // Hub floor: a single dark obsidian platform disc.
         // Slightly oversized vs. the playable square so the
@@ -1185,35 +1229,24 @@ impl FloorManager {
         // a disc at exactly y=0 reads as "the character is
         // floating". Two cm of lift hides the gap without
         // looking like a step.
-        let hub_centre = Vec3::new((floor.width / 2) as f32, 0.02, (floor.depth / 2) as f32);
-        const PLATFORM_RADIUS: f32 = 64.0;
         let platform = Mesh::ground_disc(
             hub_centre,
             PLATFORM_RADIUS,
             96,
-            // White vertex color so the lava-rocks texture
-            // shows through unmodulated. Mesh `uv_scale` of
-            // `1.0/2.0` means one tile of the 2k texture
-            // spans 2 m of world space — fine enough that
-            // grain detail (sand specks, pebbles) reads
-            // clearly at walking range, while the new
-            // tightened fog (28 m) and the underlying
-            // pseudo-random tile-rotation in the cel path
-            // hide the repeat across the platform.
-            Vec3::splat(1.0),
-            1.0 / 2.0,
+            // Violet-biased vertex tint so the rock reads void-
+            // touched; mesh `uv_scale` `1.0/2.65` ≈ one 2 k tile per ~2.65 m
+            // so the disc shows fewer repeats; dual-layer PBR (bit 11) breaks
+            // alignment between layers.
+            VOID_SAND_DISC_VERTEX_TINT,
+            1.0 / 2.65,
         );
         renderer.add_mesh(&platform, Mat4::IDENTITY)?;
         let platform_obj_idx = renderer.objects.len() - 1;
-        // Bind the desert-rocks basecolor only on the cel-
-        // shading path. PBR is intentionally skipped here —
-        // the disc is huge and viewed top-down, so PBR
-        // specular tends to wander distractingly across it as
-        // the camera nudges and the normal / height detail
-        // is invisible at that distance. The cel path produces
-        // a calm painterly finish that doesn't shimmer. Falls
-        // back to the procedural crimson-stone tile if the
-        // asset fails to load.
+        // Bind `ground_tiles_rock` PBR (see [`EnvTextures::ensure_desert_rocks`]).
+        // The disc is huge and viewed top-down, so parallax scale stays small —
+        // height detail + self-shadow still read at walking range; bit 11 skips
+        // POM in favour of dual-layer anti-tile sampling. Falls
+        // back to the procedural crimson-stone tile if the asset fails to load.
         //
         // The actual PNG decode happens in the background
         // during character-select via
@@ -1221,16 +1254,16 @@ impl FloorManager {
         // typically a no-op cache hit by the time we hit
         // `generate_hub`. Calling it here defensively covers
         // the corner case where the user clicked Play very
-        // quickly and pre-warm hasn't reached desert_rocks
+        // quickly and pre-warm hasn't reached ground_tiles_rock
         // yet — at worst we pay the decode for one pack
         // (instead of all four like before).
         self.env.ensure_desert_rocks(renderer);
         if let Some(set) = self.env.desert_rocks_set {
             renderer.set_object_shared_material(platform_obj_idx, set);
             // Enable the PBR shading path now that the disc is
-            // bound to a full sand PBR pack. uvScale stays at
+            // bound to the full rock-tile PBR pack. uvScale stays at
             // the platform mesh's baked `1/2` so one tile of
-            // the 2 k sand maps spans 2 m of world space (the
+            // the 2 k maps span 2 m of world space (the
             // mesh emits world-space UVs pre-multiplied by
             // that factor, so passing `1.0` here yields the
             // intended 2 m / tile coverage). Small parallax
@@ -1238,11 +1271,11 @@ impl FloorManager {
             // when the player walks across the disc) and
             // height-map self-shadowing along the cast
             // shadow boundary — the shadow line bends
-            // along the sand's ripples instead of cutting
+            // along the tile relief instead of cutting
             // straight across them. 0.015 is small enough
             // that the parallax march cost stays negligible
             // at our top-down view angle.
-            let pbr_flags = f32::from_bits(1u32);
+            let pbr_flags = f32::from_bits(VOID_ROCK_PBR_FLAGS);
             renderer.set_object_material_params(platform_obj_idx, [1.0, 0.015, pbr_flags, 0.0]);
         } else {
             self.env.ensure_crimson_stone(renderer);
@@ -1250,6 +1283,7 @@ impl FloorManager {
                 renderer.set_object_shared_material(platform_obj_idx, set);
             }
         }
+        renderer.set_object_tint(platform_obj_idx, VOID_SAND_MESH_TINT);
         // The platform disc is a giant flat receiver — it
         // doesn't cast meaningful shadows on anything (the
         // shadow it would cast goes off the visible scene
@@ -1260,17 +1294,17 @@ impl FloorManager {
         // lookup already handle the visible micro-shadows.
         renderer.set_object_casts_shadow(platform_obj_idx, false);
         // No glowing rim: the platform now extends well past
-        // the fog wall (`fog_end = 55 m`, platform radius =
-        // 64 m), so the disc's edge is never visible to the
+        // the fog wall (`fog_end` ≈ 58 m, platform radius =
+        // 64 m), so the disc's edge is rarely visible to the
         // player. A bright crimson ring at the rim would only
         // silhouette through the haze as a hard "edge of the
-        // world" line, breaking the desired "infinite desert"
+        // world" line, breaking the desired infinite void-rock
         // feel. Distant dune silhouettes (added below) pick
         // up the framing job instead.
 
         // Sand-dune ring beyond the platform. The dunes start
         // a couple of metres inside the platform's outer edge
-        // (so the seam is hidden under the disc's PBR sand
+        // (so the seam is hidden under the disc's PBR tiling
         // material) and march out to ~180 m where camera-far
         // and fog completely swallow them. Inside the play
         // arena the disc is dead flat — the dunes only ramp
@@ -1304,11 +1338,10 @@ impl FloorManager {
         let dunes = Mesh::mountain_terrain(
             &dune_params,
             hub_centre,
-            // Warm sand tint, modulated by the bound PBR
-            // basecolor texture below. Slightly desaturated
-            // so the desert_rocks pack drives the actual hue.
-            Vec3::new(1.0, 0.92, 0.78),
-            // One tile of the 2 k sand pack per ~6 m of
+            // Neutral-warm vertex mul × [`VOID_SAND_DUNE_VERTEX_MUL`];
+            // rock basecolor carries most of the hue.
+            Vec3::new(1.0, 0.92, 0.78) * VOID_SAND_DUNE_VERTEX_MUL,
+            // One tile of the 2 k rock pack per ~6 m of
             // dune surface — fine enough to avoid obvious
             // repeats at the camera distance, coarse enough
             // that the mip pyramid doesn't thrash on the
@@ -1317,25 +1350,25 @@ impl FloorManager {
         );
         renderer.add_mesh(&dunes, Mat4::IDENTITY)?;
         let dunes_obj_idx = renderer.objects.len() - 1;
-        // Reuse the same sandy_cliff_rocks PBR pack the
+        // Reuse the same ground_tiles_rock PBR pack the
         // platform binds — the dunes are an extension of the
-        // same desert surface, just elevated.
+        // same tiled surface, just elevated.
         if let Some(set) = self.env.desert_rocks_set {
             renderer.set_object_shared_material(dunes_obj_idx, set);
-            let pbr_flags = f32::from_bits(1u32);
+            let pbr_flags = f32::from_bits(VOID_ROCK_PBR_FLAGS);
             // `uv_world_scale` above already produced a
             // tiling UV; pass `1.0` for the per-object
             // multiplier so the bake-in scale is honoured.
             // Tiny parallax scale (0.01) drives height-map
             // self-shadowing so the dune face's grain detail
-            // shadow-feathers under the strong directional
-            // sun. View-angle is grazing on the far dunes
-            // where the offset itself reads as artefacts, so
-            // we keep the scale very small — just enough to
-            // give the self-shadow march something to work
-            // with.
+            // shadow-feathers under grazing views; view-angle
+            // is grazing on the far dunes where the offset
+            // itself reads as artefacts, so we keep the scale
+            // very small — just enough to give the self-shadow
+            // march something to work with.
             renderer.set_object_material_params(dunes_obj_idx, [1.0, 0.01, pbr_flags, 0.0]);
         }
+        renderer.set_object_tint(dunes_obj_idx, VOID_SAND_MESH_TINT);
         // Dunes ring spans 60–180 m at low elevation; their
         // cast shadow on each other is dwarfed by the
         // heightmap self-shadow already in the lit pass, and
@@ -1352,34 +1385,7 @@ impl FloorManager {
         // with the fog wall, so we just let the disc cast a
         // hard silhouette and let the fog do the rest.
 
-        // No distant skyline. The sandstorm replaces the old
-        // mountain ring: the warm-tan fog wall starts at 6 m
-        // and saturates by 28 m, so anything that would sit
-        // outside the platform is invisible anyway. Removing
-        // the geometry also means we no longer pay for the
-        // 256×24 vertex heightfield, the cliff-rocks PBR
-        // pack upload, or the per-frame draw call.
-
-        // No storm driver in the sandstorm hub — a sandstorm
-        // doesn't fork lightning. We drop any pre-existing
-        // driver (in case of hub-to-hub regenerate) and skip
-        // creating a new one; `tick_hub_storm` is a no-op
-        // when `hub_storm` is `None`.
-        self.hub_storm = None;
-
-        // Drifting sand haze: a wide-area particle layer
-        // spawned once at hub-gen and anchored on the player
-        // every frame (see `phases::render_phase`). Two
-        // stacked sublayers (slow soft sheets + fast low
-        // streaks) sell "you're standing inside a sandstorm"
-        // without occluding the sun disc / god rays. Spawned
-        // at the hub centre as a placeholder anchor; the
-        // per-frame retarget will move it to the player on
-        // the very next tick.
-        self.hub_haze = Some(renderer.vfx_system.spawn(
-            rift_engine::renderer::vfx::presets::sandstorm_haze(),
-            hub_centre,
-        ));
+        // No distant skyline mesh — dunes + fog frame the play space.
 
         // No baked hub point lights. The only light in the
         // hub is the rift portal's own crimson glow, which
@@ -1428,10 +1434,26 @@ impl FloorManager {
             .iter()
             .find(|p| p.id == rift_dungeon::props::PropId::StashChest)
             .map(|p| p.pos);
+        let anvil_pos = floor
+            .props
+            .iter()
+            .find(|p| p.id == rift_dungeon::props::PropId::VoidForge)
+            .map(|p| p.pos);
         // Render every prop the dungeon placed (stash chest +
         // ground scatter).
         self.props.render_floor(renderer, &floor);
         self.stash_chest_pos = stash_pos;
+        self.anvil_pos = anvil_pos;
+        // Local violet fill so the void forge silhouette pops off the
+        // obsidian platform (mesh tint alone can read flat under VOID_HUB key).
+        if let Some(fp) = self.anvil_pos {
+            renderer.point_lights.push(PointLight {
+                position: fp + Vec3::new(0.0, 0.42, 0.0),
+                color: Vec3::new(0.42, 0.18, 0.88),
+                radius: 5.5,
+                intensity: 1.45,
+            });
+        }
 
         let spawn = floor.spawn_pos;
         self.spawn_pos = spawn;
@@ -1469,6 +1491,7 @@ impl FloorManager {
             super::character_spawn::CharacterSpawn {
                 position: spawn,
                 gender: player_state.gender,
+                appearance: player_state.appearance,
                 move_speed: player_state.config.base_move_speed,
                 max_hp: player_state.max_hp(),
             },
@@ -1589,6 +1612,7 @@ pub fn spawn_remote_enemy_entity(
     position: Vec3,
     hp_max: f32,
 ) -> anyhow::Result<hecs::Entity> {
+    monsters.ensure_loaded(role);
     // Make sure the role's shared texture is uploaded before we
     // bind it. First call per role does the upload; subsequent
     // calls return the cached descriptor set.
@@ -1691,6 +1715,7 @@ pub fn spawn_remote_minion_entity(
     let presentation = rift_game::minions::presentation_for_role(role);
     let hover_height = presentation.hover_height().unwrap_or(0.0);
 
+    monsters.ensure_loaded(role);
     let shared_set = monsters
         .slot_mut(role)
         .as_mut()

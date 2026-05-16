@@ -107,6 +107,20 @@ impl Equipment {
         })
     }
 
+    /// Resolve where `item` should equip when the client names an explicit slot
+    /// (`preferred_u8` = [`EquipSlot::to_u8`]). Uses [`Self::accepts`] — invalid /
+    /// cross-class hints fall back to [`Self::default_slot`].
+    pub fn resolve_equip_slot(&self, item: &Item, preferred_u8: Option<u8>) -> Option<EquipSlot> {
+        if let Some(byte) = preferred_u8 {
+            if let Some(slot) = EquipSlot::from_u8(byte) {
+                if Self::accepts(slot, item) {
+                    return Some(slot);
+                }
+            }
+        }
+        self.default_slot(item)
+    }
+
     /// Sum every equipped item's [`Item::stats`] into a single
     /// [`StatBlock`], suitable for feeding into
     /// `CharacterStats::compute`. Pure / cheap — recomputed on

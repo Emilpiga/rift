@@ -7,7 +7,7 @@
 
 use glam::Vec3;
 use hecs::Entity;
-use rift_dungeon::Floor;
+use rift_dungeon::{Floor, ELEVATION_STEP};
 use rift_game::abilities::{AbilityWireId, MinionAttackKind};
 use rift_game::kinematic::{self, loco, Kinematic};
 use rift_game::monsters::MonsterRole;
@@ -98,6 +98,7 @@ impl ServerMinion {
 
 pub fn spawn_or_refresh(
     world: &mut hecs::World,
+    floor: &Floor,
     request: MinionSpawnRequest,
     next_net_id: &mut u32,
 ) {
@@ -115,6 +116,7 @@ pub fn spawn_or_refresh(
                 > OWNER_RECALL_DISTANCE * OWNER_RECALL_DISTANCE
             {
                 kinematic.position = spawn_position(
+                    floor,
                     request.origin,
                     request.owner_net_id,
                     request.formation_index,
@@ -127,6 +129,7 @@ pub fn spawn_or_refresh(
     let net_id = NetId(*next_net_id);
     *next_net_id = next_net_id.wrapping_add(1).max(1);
     let position = spawn_position(
+        floor,
         request.origin,
         request.owner_net_id,
         request.formation_index,
@@ -236,8 +239,12 @@ pub fn tick_ai(
         let to_owner = owner_pos - kinematic.position;
         let owner_dist = xz_len(to_owner);
         if owner_dist > OWNER_SNAP_DISTANCE {
-            kinematic.position =
-                spawn_position(owner_pos, minion.owner_net_id, minion.formation_index);
+            kinematic.position = spawn_position(
+                floor,
+                owner_pos,
+                minion.owner_net_id,
+                minion.formation_index,
+            );
             kinematic.velocity = Vec3::ZERO;
             continue;
         }
@@ -284,6 +291,7 @@ pub fn tick_ai(
                             net_id,
                             ability_id,
                             owner: minion.owner_net_id,
+                            threat_owner: Some(identity.net_id),
                             team: Team::Player,
                             attacker_kind: super::meters::ATTACKER_KIND_OTHER,
                             position: spawn,
@@ -303,6 +311,7 @@ pub fn tick_ai(
                             net_id,
                             ability_id,
                             owner: minion.owner_net_id,
+                            threat_owner: Some(identity.net_id),
                             team: Team::Player,
                             attacker_kind: super::meters::ATTACKER_KIND_OTHER,
                             position: enemy_pos + Vec3::Y * 0.45,
@@ -531,18 +540,66 @@ fn world_to_tile(p: Vec3) -> (i32, i32) {
     ((p.x + 0.5).floor() as i32, (p.z + 0.5).floor() as i32)
 }
 
-fn spawn_position(origin: Vec3, owner_net_id: NetId, formation_index: u32) -> Vec3 {
+fn spawn_position(floor: &Floor, origin: Vec3, owner_net_id: NetId, formation_index: u32) -> Vec3 {
     let side = if (owner_net_id.0.wrapping_add(formation_index)) & 1 == 0 {
         1.0
     } else {
         -1.0
     };
     let row = formation_index / 2;
-    Vec3::new(
+    let desired = Vec3::new(
         origin.x + SPAWN_SIDE_OFFSET * side,
         0.0,
         origin.z + 0.6 + row as f32 * 0.55,
-    )
+    );
+    snap_to_playable(floor, desired).unwrap_or(desired)
+}
+
+fn snap_to_playable(floor: &Floor, desired: Vec3) -> Option<Vec3> {
+    let (tx, tz) = world_to_tile(desired);
+    if is_playable_tile(floor, tx, tz) {
+        return Some(with_floor_height(floor, desired, tx, tz));
+    }
+
+    let mut best: Option<(f32, i32, i32)> = None;
+    // Minions are spawned next to their owner, so a small local
+    // search should be enough. Radius 8 still covers a full room
+    // width if a formation offset lands deep inside wall support.
+    for radius in 1..=8 {
+        for z in (tz - radius)..=(tz + radius) {
+            for x in (tx - radius)..=(tx + radius) {
+                if (x - tx).abs() != radius && (z - tz).abs() != radius {
+                    continue;
+                }
+                if !is_playable_tile(floor, x, z) {
+                    continue;
+                }
+                let dx = x as f32 - desired.x;
+                let dz = z as f32 - desired.z;
+                let d2 = dx * dx + dz * dz;
+                if best.map_or(true, |(best_d2, _, _)| d2 < best_d2) {
+                    best = Some((d2, x, z));
+                }
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    best.map(|(_, x, z)| with_floor_height(floor, Vec3::new(x as f32, 0.0, z as f32), x, z))
+}
+
+fn is_playable_tile(floor: &Floor, x: i32, z: i32) -> bool {
+    if x < 0 || z < 0 || x as usize >= floor.width || z as usize >= floor.depth {
+        return false;
+    }
+    let i = z as usize * floor.width + x as usize;
+    floor.tiles[i].is_walkable() && !floor.prop_blocked[i]
+}
+
+fn with_floor_height(floor: &Floor, pos: Vec3, x: i32, z: i32) -> Vec3 {
+    let i = z as usize * floor.width + x as usize;
+    Vec3::new(pos.x, floor.elevation[i] as f32 * ELEVATION_STEP, pos.z)
 }
 
 fn initial_hover_phase(owner_net_id: NetId) -> f32 {

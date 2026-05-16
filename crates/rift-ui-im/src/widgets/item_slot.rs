@@ -57,7 +57,7 @@ pub struct ItemSlot<'a> {
     /// the cast.
     unaffordable: bool,
     /// `true` for items carrying the rare "Anchored" trait.
-    /// Renders a distinctive gold outer outline so the trait
+    /// Renders a distinctive accent outer outline so the trait
     /// is recognisable at a glance even when the rarity tint
     /// already maxes the slot's chroma.
     anchored: bool,
@@ -162,7 +162,7 @@ impl<'a> ItemSlot<'a> {
     }
 
     /// Mark this slot as carrying an Anchored item. Draws an
-    /// additional gold outer outline on top of the normal
+    /// additional accent outer outline on top of the normal
     /// hover/selected outline so the trait is recognisable
     /// across the bag, equipment panel, and stash.
     pub fn anchored(mut self, on: bool) -> Self {
@@ -316,9 +316,9 @@ impl<'a> ItemSlot<'a> {
             // panel texture behind the slot stays visible.
             if hovered || self.selected {
                 let wash = if self.selected {
-                    Color::rgba(0.95, 0.54, 0.18, 0.16)
+                    Color::rgba(0.42, 0.32, 0.88, 0.18)
                 } else {
-                    Color::rgba(0.95, 0.66, 0.30, 0.10)
+                    Color::rgba(0.62, 0.56, 1.0, 0.12)
                 };
                 ui.draw_rect(rect, wash);
             }
@@ -441,18 +441,28 @@ impl<'a> ItemSlot<'a> {
 
         // Anchored ring sits underneath the hover/selected
         // outline so the active interaction state still wins
-        // visually but the gold border remains visible at
+        // visually but the accent border remains visible at
         // rest. Width 2.0 to match the selected outline.
         if self.anchored {
-            ui.draw_outline(rect, 2.0, Color::rgba(1.00, 0.78, 0.20, 0.95));
+            let a = theme.colors.accent;
+            ui.draw_outline(
+                rect,
+                2.0,
+                Color::rgba(
+                    (a.0[0] * 1.08).min(1.0),
+                    (a.0[1] * 1.08).min(1.0),
+                    (a.0[2] * 1.08).min(1.0),
+                    0.95,
+                ),
+            );
         }
 
         // Selected / hover outline (drawn last so nothing
         // overlaps the highlight).
         if self.selected {
-            ui.draw_outline(rect, 2.0, Color::rgba(0.98, 0.58, 0.22, 0.95));
+            ui.draw_outline(rect, 2.0, Color::rgba(0.62, 0.48, 1.0, 0.95));
         } else if hovered {
-            ui.draw_outline(rect, 1.5, Color::rgba(0.92, 0.62, 0.30, 0.78));
+            ui.draw_outline(rect, 1.5, Color::rgba(0.78, 0.72, 1.0, 0.78));
         }
 
         // Filter dim wash. Painted absolutely last so the
@@ -486,15 +496,15 @@ pub struct SlotInteraction<T> {
 
 fn pick_bg(theme: &Theme, hovered: bool, selected: bool, enabled: bool) -> Color {
     if !enabled {
-        return Color::rgba(0.055, 0.050, 0.045, 0.88);
+        return Color::rgba(0.05, 0.048, 0.072, 0.88);
     }
     if selected {
-        return Color::rgba(0.20, 0.135, 0.075, 0.92);
+        return Color::rgba(0.13, 0.095, 0.22, 0.92);
     }
     if hovered {
-        return Color::rgba(0.155, 0.118, 0.078, 0.90);
+        return Color::rgba(0.10, 0.088, 0.16, 0.90);
     }
-    Color::rgba(0.070, 0.060, 0.050, theme.colors.bg_slot.0[3])
+    Color::rgba(0.062, 0.056, 0.082, theme.colors.bg_slot.0[3])
 }
 
 fn draw_socket_bevel(ui: &mut Ui<'_>, rect: Rect, lit: bool) {
@@ -525,7 +535,7 @@ fn draw_socket_bevel(ui: &mut Ui<'_>, rect: Rect, lit: bool) {
             (rect.width() - 2.0).max(0.0),
             1.0,
         ),
-        Color::rgba(1.0, 0.86, 0.56, highlight_alpha),
+        Color::rgba(0.72, 0.68, 1.0, highlight_alpha),
     );
     ui.draw_rect(
         Rect::from_xywh(
@@ -534,7 +544,7 @@ fn draw_socket_bevel(ui: &mut Ui<'_>, rect: Rect, lit: bool) {
             1.0,
             (rect.height() - 2.0).max(0.0),
         ),
-        Color::rgba(1.0, 0.86, 0.56, highlight_alpha),
+        Color::rgba(0.72, 0.68, 1.0, highlight_alpha),
     );
 }
 

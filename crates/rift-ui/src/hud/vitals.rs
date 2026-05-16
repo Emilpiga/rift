@@ -1,7 +1,7 @@
 //! Bottom-center HP / Essence / XP vitals stack.
 //!
 //! Wraps three progress bars in a `Frame::stone` plaque so the
-//! cluster reads as a single carved-stone surface. Bars are
+//! cluster reads as one floating void-glass surface. Bars are
 //! flat-edged (no rounded radius) so they read as tiles in the
 //! plaque, then receive a top-down highlight → bottom-shadow
 //! gradient overlay for a slight beveled look. All labels are
@@ -152,8 +152,8 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
     let s = ui.scale();
     ui.draw_gradient_rect(
         rect,
-        Color::rgba(0.18, 0.155, 0.125, 0.98),
-        Color::rgba(0.045, 0.040, 0.038, 0.99),
+        Color::rgba(0.14, 0.10, 0.22, 0.98),
+        Color::rgba(0.04, 0.03, 0.08, 0.99),
     );
     ui.draw_rect(
         Rect::from_xywh(
@@ -162,9 +162,9 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
             rect.width() - 4.0 * s,
             1.0,
         ),
-        Color::rgba(1.0, 0.95, 0.82, 0.11),
+        Color::rgba(0.78, 0.72, 1.0, 0.14),
     );
-    ui.draw_outline(rect, 1.0 * s, Color::rgba(0.66, 0.53, 0.30, 0.82));
+    ui.draw_outline(rect, 1.0 * s, Color::rgba(0.58, 0.48, 0.88, 0.82));
     ui.draw_outline(
         Rect::from_xywh(
             rect.x() + 2.0 * s,
@@ -173,7 +173,7 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
             rect.height() - 4.0 * s,
         ),
         1.0 * s,
-        Color::rgba(1.0, 0.92, 0.70, 0.10),
+        Color::rgba(0.72, 0.65, 0.98, 0.12),
     );
     ui.draw_gradient_rect(
         Rect::from_xywh(
@@ -182,7 +182,7 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
             1.0 * s,
             rect.height() - 6.0 * s,
         ),
-        Color::rgba(1.0, 0.86, 0.52, 0.16),
+        Color::rgba(0.72, 0.58, 1.0, 0.18),
         Color::rgba(0.0, 0.0, 0.0, 0.18),
     );
 
@@ -196,7 +196,7 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
         ),
         label,
         label_size,
-        Color::rgba(0.70, 0.64, 0.54, 0.92),
+        Color::rgba(0.76, 0.72, 0.92, 0.92),
     );
 
     let value = level.to_string();
@@ -210,7 +210,7 @@ fn draw_level_badge(ui: &mut Ui<'_>, rect: Rect, level: u32) {
             rect.y() + (rect.height() - value_size) * 0.5 + 7.0 * s,
         ),
         value_size,
-        Color::rgba(0.95, 0.88, 0.68, 1.0),
+        Color::rgba(0.92, 0.88, 0.98, 1.0),
     );
 }
 

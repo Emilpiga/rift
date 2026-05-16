@@ -5,7 +5,7 @@
 //! reset so the database row set matches the post-mutation
 //! layout.
 
-use rift_net::{Channel, ClientId, NetId, ServerMsg};
+use rift_net::{messages::EnchantSource, Channel, ClientId, NetId, ServerMsg};
 use rift_persistence::{PersistedItem, PersistedStashTab};
 
 use super::item_to_blob;
@@ -92,6 +92,7 @@ impl Server {
                     unique_id,
                     unique_pick: unique_pick.map(|p| p as i16),
                     rift_touched: item.rift_touched_to_persisted(),
+                    enchanted_affix_index: item.enchanted_affix_index.map(|i| i as i16),
                 };
                 if !handle.append_inventory_item(rec.id, persisted) {
                     log::warn!("persistence: append_inventory_item dropped for {from:?}");
@@ -105,10 +106,15 @@ impl Server {
     /// inventory + equipment state to the picker, and queue a
     /// `ResetCharacterInventory` so the persisted snapshot
     /// matches the in-memory swap.
-    pub(crate) fn handle_equip_item(&mut self, from: ClientId, inventory_index: usize) {
+    pub(crate) fn handle_equip_item(
+        &mut self,
+        from: ClientId,
+        inventory_index: usize,
+        target_slot: Option<u8>,
+    ) {
         if !self
             .sim_for_client_mut(from)
-            .equip_from_bag(from, inventory_index)
+            .equip_from_bag(from, inventory_index, target_slot)
         {
             log::debug!("equip: rejected equip request from {from:?} idx={inventory_index}");
             return;
@@ -270,6 +276,7 @@ impl Server {
                     unique_id,
                     unique_pick: unique_pick.map(|p| p as i16),
                     rift_touched: item.rift_touched_to_persisted(),
+                    enchanted_affix_index: item.enchanted_affix_index.map(|i| i as i16),
                 }
             })
             .collect();
@@ -310,6 +317,47 @@ impl Server {
         if was_open != is_open {
             self.broadcast_stash_chest_state(is_open);
         }
+    }
+
+    pub(crate) fn handle_open_anvil(&mut self, from: ClientId) {
+        if self.floor_for_client(from) != 0 {
+            log::debug!("anvil: open rejected for {from:?} not in hub");
+            return;
+        }
+        self.hub.set_anvil_open(from, true);
+    }
+
+    pub(crate) fn handle_close_anvil(&mut self, from: ClientId) {
+        self.hub.set_anvil_open(from, false);
+    }
+
+    pub(crate) fn handle_reroll_affix(
+        &mut self,
+        from: ClientId,
+        source: EnchantSource,
+        affix_index: u8,
+    ) {
+        if self.floor_for_client(from) != 0 {
+            log::debug!("anvil: reroll rejected for {from:?} not in hub");
+            return;
+        }
+        let Some((new_shards, _equipped_changed)) =
+            self.hub
+                .reroll_item_affix(from, self.tick.0, source, affix_index)
+        else {
+            log::debug!(
+                "anvil: reroll rejected for {from:?} source={source:?} affix={affix_index}"
+            );
+            return;
+        };
+        self.broadcast_inventory_state(from);
+        self.send_to(
+            from,
+            Channel::Control,
+            &ServerMsg::ShardsSync { amount: new_shards },
+        );
+        self.persist_inventory_state(from);
+        self.persist_shards_for(from, new_shards);
     }
 
     pub(crate) fn broadcast_stash_chest_state(&mut self, open: bool) {
@@ -371,12 +419,16 @@ impl Server {
         from: ClientId,
         tab_index: usize,
         stash_index: usize,
+        target_slot: Option<u8>,
     ) {
         if !self.hub.is_stash_open(from) {
             log::debug!("stash: equip-from rejected for {from:?} stash not open");
             return;
         }
-        if !self.hub.equip_from_stash(from, tab_index, stash_index) {
+        if !self
+            .hub
+            .equip_from_stash(from, tab_index, stash_index, target_slot)
+        {
             log::debug!(
                 "stash: equip-from rejected for {from:?} tab={tab_index} idx={stash_index}"
             );
@@ -536,6 +588,7 @@ impl Server {
                     unique_id,
                     unique_pick: unique_pick.map(|p| p as i16),
                     rift_touched: item.rift_touched_to_persisted(),
+                    enchanted_affix_index: item.enchanted_affix_index.map(|i| i as i16),
                 });
             }
         }

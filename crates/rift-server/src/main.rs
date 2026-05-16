@@ -381,7 +381,8 @@ impl Server {
                 character_name,
                 class_id,
                 gender,
-            } => self.handle_enter_world(from, character_name, class_id, gender),
+                appearance,
+            } => self.handle_enter_world(from, character_name, class_id, gender, appearance),
             ClientMsg::Input(cmd) => self.sim_for_client_mut(from).ingest_input(from, cmd),
             ClientMsg::CastAbility {
                 ability_id,
@@ -414,14 +415,23 @@ impl Server {
                 }
                 self.handle_pick_up_loot(from, net_id)
             }
-            ClientMsg::EquipItem { inventory_index } => {
-                self.handle_equip_item(from, inventory_index as usize);
+            ClientMsg::EquipItem {
+                inventory_index,
+                target_slot,
+            } => {
+                self.handle_equip_item(from, inventory_index as usize, target_slot);
             }
             ClientMsg::UnequipItem { slot } => {
                 self.handle_unequip_item(from, slot);
             }
             ClientMsg::OpenStash => self.handle_open_stash(from),
             ClientMsg::CloseStash => self.handle_close_stash(from),
+            ClientMsg::OpenAnvil => self.handle_open_anvil(from),
+            ClientMsg::CloseAnvil => self.handle_close_anvil(from),
+            ClientMsg::RerollAffix {
+                source,
+                affix_index,
+            } => self.handle_reroll_affix(from, source, affix_index),
             ClientMsg::DepositToStash {
                 inventory_index,
                 tab_index,
@@ -461,8 +471,14 @@ impl Server {
             ClientMsg::EquipFromStash {
                 tab_index,
                 stash_index,
+                target_slot,
             } => {
-                self.handle_equip_from_stash(from, tab_index as usize, stash_index as usize);
+                self.handle_equip_from_stash(
+                    from,
+                    tab_index as usize,
+                    stash_index as usize,
+                    target_slot,
+                );
             }
             ClientMsg::UnequipToStashSlot {
                 slot,
@@ -803,6 +819,8 @@ impl Server {
             log::warn!("move_client_to_instance: {cid:?} has no hub entity");
             return;
         };
+        player.stash_open = false;
+        player.anvil_open = false;
         if self.instances.get(instance).is_none() {
             log::warn!("move_client_to_instance: instance {instance:?} gone");
             // Re-inject the player back into the hub so they

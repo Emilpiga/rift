@@ -42,6 +42,7 @@ const LEGACY_FIREBALL_STARTER_LOADOUT: [i16; 6] = [
     EMPTY_LOADOUT_SLOT,
     EMPTY_LOADOUT_SLOT,
 ];
+const DEFAULT_APPEARANCE: [i16; 6] = [0, 0, 0, 16, 16, 128];
 
 /// One persisted character row, decoded from the `characters` table.
 #[derive(Clone, Debug)]
@@ -85,6 +86,11 @@ pub struct CharacterRecord {
     /// level plus quest / boss rewards; this field mirrors
     /// `TalentTree::unspent_points` on the gameplay side.
     pub talent_unspent: i32,
+    /// Cosmetic appearance bytes:
+    /// skin tone, hair style, eyebrow style, hair color, eyebrow
+    /// color, chest size. Stored as `SMALLINT[]` so future UI
+    /// additions can migrate in one place.
+    pub appearance: [i16; 6],
 }
 
 /// One persisted inventory row. Keys items by *stable* string ids
@@ -149,6 +155,9 @@ pub struct PersistedItem {
     /// `None` so legacy rows + the migration's default fill
     /// hydrate cleanly.
     pub rift_touched: Option<(String, f32, i16)>,
+    /// The one affix slot locked for anvil rerolls. `None` for
+    /// items that have never been enchanted.
+    pub enchanted_affix_index: Option<i16>,
 }
 
 /// One persisted stash-tab metadata row. Items live in their
@@ -217,6 +226,7 @@ pub enum PersistenceMsg {
         character_name: String,
         class_id: String,
         gender: i16,
+        appearance: [i16; 6],
         reply: oneshot::Sender<Result<CharacterRecord, PersistenceError>>,
     },
 
@@ -322,6 +332,7 @@ impl PersistenceHandle {
         character_name: String,
         class_id: String,
         gender: i16,
+        appearance: [i16; 6],
     ) -> Result<CharacterRecord, PersistenceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -331,6 +342,7 @@ impl PersistenceHandle {
                 character_name,
                 class_id,
                 gender,
+                appearance,
                 reply,
             })
             .map_err(|_| PersistenceError::WorkerGone)?;
@@ -511,6 +523,7 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                 character_name,
                 class_id,
                 gender,
+                appearance,
                 reply,
             } => {
                 let res = load_or_create(
@@ -520,6 +533,7 @@ async fn worker_loop(pool: PgPool, mut rx: mpsc::UnboundedReceiver<PersistenceMs
                     &character_name,
                     &class_id,
                     gender,
+                    appearance,
                 )
                 .await;
                 let _ = reply.send(res);
@@ -601,6 +615,7 @@ async fn load_or_create(
     character_name: &str,
     class_id: &str,
     gender: i16,
+    appearance: [i16; 6],
 ) -> Result<CharacterRecord, PersistenceError> {
     let mut tx = pool.begin().await?;
 
@@ -652,8 +667,8 @@ async fn load_or_create(
     let default_talent_unspent: i32 = 1;
     sqlx::query(
         "INSERT INTO characters \
-         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent) \
-         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0, 0, $7, $8)",
+         (id, account_id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent, appearance) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0, $6, 0, 0, $7, $8, $9)",
     )
     .bind(character_id)
     .bind(account_id)
@@ -663,6 +678,7 @@ async fn load_or_create(
     .bind(&default_loadout[..])
     .bind(&default_talents[..])
     .bind(default_talent_unspent)
+    .bind(&appearance[..])
     .execute(&mut *tx)
     .await?;
 
@@ -681,6 +697,7 @@ async fn load_or_create(
         shards: 0,
         talents: default_talents,
         talent_unspent: default_talent_unspent,
+        appearance,
     })
 }
 
@@ -715,8 +732,21 @@ async fn list_account_characters(
             id
         }
     };
-    let rows: Vec<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent \
+    let rows: Vec<(
+        Uuid,
+        String,
+        String,
+        i16,
+        i32,
+        i32,
+        Vec<i16>,
+        i32,
+        i32,
+        Vec<i16>,
+        i32,
+        Vec<i16>,
+    )> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent, appearance \
          FROM characters WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(account_id)
@@ -738,6 +768,7 @@ async fn list_account_characters(
                 shards,
                 talents,
                 talent_unspent,
+                appearance,
             )| {
                 CharacterRecord {
                     id,
@@ -752,6 +783,7 @@ async fn list_account_characters(
                     shards,
                     talents,
                     talent_unspent,
+                    appearance: appearance_from_vec(appearance),
                 }
             },
         )
@@ -764,8 +796,21 @@ async fn fetch_by_account_and_name(
     account_id: Uuid,
     name: &str,
 ) -> Result<Option<CharacterRecord>, PersistenceError> {
-    let row: Option<(Uuid, String, String, i16, i32, i32, Vec<i16>, i32, i32, Vec<i16>, i32)> = sqlx::query_as(
-        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent \
+    let row: Option<(
+        Uuid,
+        String,
+        String,
+        i16,
+        i32,
+        i32,
+        Vec<i16>,
+        i32,
+        i32,
+        Vec<i16>,
+        i32,
+        Vec<i16>,
+    )> = sqlx::query_as(
+        "SELECT id, name, class_id, gender, level, xp, loadout, deepest_cleared_floor, shards, talents, talent_unspent, appearance \
          FROM characters WHERE account_id = $1 AND name = $2",
     )
     .bind(account_id)
@@ -785,6 +830,7 @@ async fn fetch_by_account_and_name(
             shards,
             talents,
             talent_unspent,
+            appearance,
         )| {
             CharacterRecord {
                 id,
@@ -799,6 +845,7 @@ async fn fetch_by_account_and_name(
                 shards,
                 talents,
                 talent_unspent,
+                appearance: appearance_from_vec(appearance),
             }
         },
     ))
@@ -809,7 +856,7 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
         "UPDATE characters SET \
             class_id = $2, gender = $3, level = $4, xp = $5, \
             loadout = $6, deepest_cleared_floor = $7, shards = $8, \
-            talents = $9, talent_unspent = $10, updated_at = now() \
+            talents = $9, talent_unspent = $10, appearance = $11, updated_at = now() \
          WHERE id = $1",
     )
     .bind(rec.id)
@@ -822,6 +869,7 @@ async fn save(pool: &PgPool, rec: &CharacterRecord) -> Result<(), sqlx::Error> {
     .bind(rec.shards)
     .bind(&rec.talents[..])
     .bind(rec.talent_unspent)
+    .bind(&rec.appearance[..])
     .execute(pool)
     .await?;
     Ok(())
@@ -839,6 +887,14 @@ fn loadout_from_vec(v: Vec<i16>) -> [i16; 6] {
     let mut out = default;
     for (i, slot) in v.into_iter().take(6).enumerate() {
         out[i] = slot;
+    }
+    out
+}
+
+fn appearance_from_vec(v: Vec<i16>) -> [i16; 6] {
+    let mut out = DEFAULT_APPEARANCE;
+    for (i, value) in v.into_iter().take(6).enumerate() {
+        out[i] = value.clamp(0, u8::MAX as i16);
     }
     out
 }
@@ -872,9 +928,10 @@ async fn load_inventory(
         Option<String>,
         Option<f32>,
         Option<i16>,
+        Option<i16>,
     )> = sqlx::query_as(
         "SELECT base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, \
-                rift_touched_id, rift_touched_value, rift_touched_depth \
+                rift_touched_id, rift_touched_value, rift_touched_depth, enchanted_affix_index \
              FROM inventory_items \
              WHERE character_id = $1 \
              ORDER BY equipped_slot NULLS LAST, slot_index, acquired_at, id",
@@ -899,6 +956,7 @@ async fn load_inventory(
                 rt_id,
                 rt_value,
                 rt_depth,
+                enchanted_affix_index,
             )| {
                 PersistedItem {
                     base_id,
@@ -913,6 +971,7 @@ async fn load_inventory(
                     unique_id,
                     unique_pick,
                     rift_touched: rift_touched_from_columns(rt_id, rt_value, rt_depth),
+                    enchanted_affix_index,
                 }
             },
         )
@@ -939,10 +998,10 @@ async fn append_inventory_item(
     // collide on a stale client-side counter.
     sqlx::query(
         "INSERT INTO inventory_items \
-         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
+         (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth, enchanted_affix_index) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, \
             COALESCE((SELECT MAX(slot_index) + 1 FROM inventory_items \
-                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8, $9, $10, $11, $12, $13, $14)",
+                      WHERE character_id = $2 AND equipped_slot IS NULL), 0), $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(Uuid::new_v4())
     .bind(character_id)
@@ -958,6 +1017,7 @@ async fn append_inventory_item(
     .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
     .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
     .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
+    .bind(item.enchanted_affix_index)
     .execute(pool)
     .await?;
     Ok(())
@@ -989,8 +1049,8 @@ async fn reset_character_inventory(
             .collect();
         sqlx::query(
             "INSERT INTO inventory_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             (id, character_id, base_id, rarity, ilvl, affixes, equipped_slot, slot_index, anchored, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth, enchanted_affix_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -1007,6 +1067,7 @@ async fn reset_character_inventory(
         .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
         .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
         .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
+        .bind(item.enchanted_affix_index)
         .execute(&mut *tx)
         .await?;
     }
@@ -1057,9 +1118,10 @@ async fn load_stash(
         Option<String>,
         Option<f32>,
         Option<i16>,
+        Option<i16>,
     )> = sqlx::query_as(
         "SELECT base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance, unique_id, unique_pick, \
-                rift_touched_id, rift_touched_value, rift_touched_depth \
+                rift_touched_id, rift_touched_value, rift_touched_depth, enchanted_affix_index \
              FROM stash_items \
              WHERE character_id = $1 \
              ORDER BY tab_index, slot_index, acquired_at, id",
@@ -1084,6 +1146,7 @@ async fn load_stash(
                 rt_id,
                 rt_value,
                 rt_depth,
+                enchanted_affix_index,
             )| {
                 PersistedItem {
                     base_id,
@@ -1098,6 +1161,7 @@ async fn load_stash(
                     unique_id,
                     unique_pick,
                     rift_touched: rift_touched_from_columns(rt_id, rt_value, rt_depth),
+                    enchanted_affix_index,
                 }
             },
         )
@@ -1148,8 +1212,8 @@ async fn reset_character_stash(
             .collect();
         sqlx::query(
             "INSERT INTO stash_items \
-             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             (id, character_id, base_id, rarity, ilvl, affixes, slot_index, anchored, tab_index, provenance, unique_id, unique_pick, rift_touched_id, rift_touched_value, rift_touched_depth, enchanted_affix_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(Uuid::new_v4())
         .bind(character_id)
@@ -1166,6 +1230,7 @@ async fn reset_character_stash(
         .bind(item.rift_touched.as_ref().map(|(id, _, _)| id.as_str()))
         .bind(item.rift_touched.as_ref().map(|(_, v, _)| *v))
         .bind(item.rift_touched.as_ref().map(|(_, _, d)| *d))
+        .bind(item.enchanted_affix_index)
         .execute(&mut *tx)
         .await?;
     }

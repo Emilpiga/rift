@@ -136,12 +136,14 @@ pub fn tick(
                 // windup+dash window.
                 en.path.clear();
                 en.path_target_tile = None;
+                let dash_aim = to_target.normalize_or_zero();
                 enter_windup(
                     en,
                     kinematic,
                     net_id,
                     WindupKind::StalkerDash,
                     spec.windup_dur,
+                    dash_aim,
                     outcome,
                 );
                 en.attack_anim_remaining = spec.windup_dur + spec.dash_dur;

@@ -333,7 +333,7 @@ pub fn render_descend_tooltip(ui: &mut Ui<'_>, current_floor: u32) {
         .fold(0.0_f32, f32::max);
     let col_gap = 18.0 * s;
     let inner_w = ui
-        .measure_text(&title, title_size)
+        .measure_header_text(&title, title_size)
         .max(key_w_max + col_gap + val_w_max);
     let inner_h = title_size + 6.0 * s + (lines.len() as f32) * (row_size + row_gap) - row_gap;
     let pad = Pad::symmetric(18.0 * s, 8.0 * s);
@@ -350,8 +350,8 @@ pub fn render_descend_tooltip(ui: &mut Ui<'_>, current_floor: u32) {
         .with_fill(Color::rgba(0.06, 0.04, 0.10, 0.92))
         .with_padding(pad);
     frame.show(ui, rect, |ui, body| {
-        let title_w = ui.measure_text(&title, title_size);
-        ui.draw_text(
+        let title_w = ui.measure_header_text(&title, title_size);
+        ui.draw_header_text(
             Pos2::new(body.x() + (inner_w - title_w) * 0.5, body.y()),
             &title,
             title_size,

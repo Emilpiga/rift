@@ -38,7 +38,7 @@ use rift_engine::ecs::components::{AttachmentPiece, Skinned, SkinnedAttachments,
 use rift_engine::renderer::mesh::SkinnedMesh;
 use rift_engine::Renderer;
 
-use rift_game::character::Gender;
+use rift_game::character::{CharacterAppearance, Gender};
 
 /// Tag values for cosmetic attachment pieces. Chosen well above
 /// any plausible equipment-slot id so `apply_equipment_visuals`
@@ -47,6 +47,7 @@ use rift_game::character::Gender;
 /// identify "leave this piece alone".
 pub const COSMETIC_TAG_BASE: u32 = 200;
 const TAG_EYES: u32 = 200;
+const TAG_EYEBROWS: u32 = 201;
 const TAG_HAIR: u32 = 202;
 
 /// Path to the gendered base-character gltf that owns the
@@ -73,30 +74,126 @@ fn base_character_path(gender: Gender) -> &'static str {
 /// rectangles as opaque white planes, which looks awful. The
 /// chosen meshes (`Hair_Buns`, `Hair_Buzzed`) are solid
 /// geometry that reads correctly without alpha support.
-fn hair_path(gender: Gender) -> &'static str {
-    match gender {
-        Gender::Female => {
-            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/Hair_Buns.gltf"
+fn hair_path(gender: Gender, style: u8) -> &'static str {
+    match (gender, style % 3) {
+        (Gender::Female, 0) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_Buns.gltf"
+        ),
+        (Gender::Female, 1) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_BuzzedFemale.gltf"
+        ),
+        (Gender::Female, _) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_Buzzed.gltf"
+        ),
+        (Gender::Male, 0) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_Buzzed.gltf"
+        ),
+        (Gender::Male, 1) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_Beard.gltf"
+        ),
+        (Gender::Male, _) => concat!(
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)",
+            "/Hair_Buns.gltf"
+        ),
+    }
+}
+
+fn eyebrow_path(style: u8) -> &'static str {
+    match style % 2 {
+        0 => {
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/Eyebrows_Regular.gltf"
         }
-        Gender::Male => {
-            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/Hair_Buzzed.gltf"
+        _ => {
+            "assets/models/base-characters/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/Eyebrows_Female.gltf"
         }
     }
 }
 
-/// Solid hair tint per gender. The hair gltfs ship with hair-card
+/// Solid hair tint. The hair gltfs ship with hair-card
 /// textures whose alpha channel encodes strand cutout — without
 /// alpha-cutout in the shader, sampling that texture stains
 /// every hair vertex bright white. Tinting the vertex color and
 /// not binding the texture at all gives clean solid-color hair
 /// that matches what these solid-mesh styles want anyway.
-fn hair_tint(gender: Gender) -> Vec3 {
-    match gender {
-        // Warm chestnut for female buns.
-        Gender::Female => Vec3::new(0.32, 0.18, 0.10),
-        // Cool dark brown for male buzz cut.
-        Gender::Male => Vec3::new(0.18, 0.12, 0.09),
+fn hair_tint(color: u8) -> Vec3 {
+    hsv_to_rgb(color as f32 / 255.0, 0.72, 0.78)
+}
+
+pub fn skin_tint(style: u8) -> Vec3 {
+    match style % 10 {
+        0 => Vec3::new(1.08, 0.96, 0.86),
+        1 => Vec3::new(1.00, 0.86, 0.72),
+        2 => Vec3::new(0.94, 0.74, 0.56),
+        3 => Vec3::new(0.84, 0.62, 0.44),
+        4 => Vec3::new(0.72, 0.50, 0.34),
+        5 => Vec3::new(0.60, 0.40, 0.27),
+        6 => Vec3::new(0.48, 0.31, 0.22),
+        7 => Vec3::new(1.04, 0.90, 0.74),
+        8 => Vec3::new(0.90, 0.67, 0.50),
+        _ => Vec3::new(0.38, 0.24, 0.18),
     }
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
+    let h = h.fract() * 6.0;
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    match i as i32 {
+        0 => Vec3::new(v, t, p),
+        1 => Vec3::new(q, v, p),
+        2 => Vec3::new(p, v, t),
+        3 => Vec3::new(p, q, v),
+        4 => Vec3::new(t, p, v),
+        _ => Vec3::new(v, p, q),
+    }
+}
+
+pub fn apply_body_shape(mesh: &mut SkinnedMesh, gender: Gender, appearance: CharacterAppearance) {
+    if gender != Gender::Female {
+        return;
+    }
+    let amount = (appearance.chest_size as f32 / 255.0 - 0.5) * 0.76;
+    if amount.abs() < 0.01 || mesh.bind_vertices.is_empty() {
+        return;
+    }
+
+    let mut mn = Vec3::splat(f32::INFINITY);
+    let mut mx = Vec3::splat(f32::NEG_INFINITY);
+    for v in &mesh.bind_vertices {
+        mn = mn.min(v.position);
+        mx = mx.max(v.position);
+    }
+    let height = (mx.y - mn.y).max(0.001);
+    let half_width = ((mx.x - mn.x) * 0.5).max(0.001);
+    let depth = (mx.z - mn.z).max(0.001);
+    let mid_z = (mn.z + mx.z) * 0.5;
+
+    for v in &mut mesh.bind_vertices {
+        let p = v.position;
+        let y_t = (p.y - mn.y) / height;
+        let chest_y = smoothstep(0.58, 0.66, y_t) * (1.0 - smoothstep(0.70, 0.79, y_t));
+        let front = smoothstep(mid_z + depth * 0.10, mx.z, p.z);
+        let side = (1.0 - (p.x / half_width).abs().powf(1.7)).clamp(0.0, 1.0);
+        let w = chest_y * front * side;
+        if w <= 0.0 {
+            continue;
+        }
+        v.position.z += amount * w;
+        v.position.x *= 1.0 + amount.max(0.0) * w * 0.08;
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(0.001)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// True when a glTF primitive belongs to the body sibling (and
@@ -241,6 +338,7 @@ pub fn apply_avatar_cosmetics(
     cache: &mut AvatarCosmeticsCache,
     entity: Entity,
     gender: Gender,
+    appearance: CharacterAppearance,
 ) {
     // Pull host skeleton info up front so we can drop the borrow
     // before mutating attachments / the renderer.
@@ -254,8 +352,10 @@ pub fn apply_avatar_cosmetics(
         .unwrap_or(Mat4::IDENTITY);
 
     let body_path = base_character_path(gender);
-    let hair_p = hair_path(gender);
-    let hair_color = hair_tint(gender);
+    let hair_p = hair_path(gender, appearance.hair_style);
+    let eyebrow_p = eyebrow_path(appearance.eyebrow_style);
+    let hair_color = hair_tint(appearance.hair_color);
+    let eyebrow_color = hair_tint(appearance.eyebrow_color);
 
     let mut pieces: Vec<CosmeticPiece> = Vec::with_capacity(2);
     if let Some(eyes) = cache.fetch_eyes_white(body_path, &host_joint_names, host_joint_count) {
@@ -271,6 +371,18 @@ pub fn apply_avatar_cosmetics(
         pieces.push(CosmeticPiece {
             tag: TAG_HAIR,
             mesh: hair,
+            texture: None,
+        });
+    }
+    if let Some(eyebrows) = cache.fetch_hair_tinted(
+        eyebrow_p,
+        eyebrow_color,
+        &host_joint_names,
+        host_joint_count,
+    ) {
+        pieces.push(CosmeticPiece {
+            tag: TAG_EYEBROWS,
+            mesh: eyebrows,
             texture: None,
         });
     }

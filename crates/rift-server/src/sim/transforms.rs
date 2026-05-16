@@ -349,6 +349,7 @@ fn fire_frost_shatter(
             net_id,
             ability_id: ability_id::FROST_SHATTER_SHARD,
             owner: snap.caster_net_id,
+            threat_owner: None,
             team: Team::Player,
             attacker_kind: super::meters::ATTACKER_KIND_OTHER,
             position: terminus,

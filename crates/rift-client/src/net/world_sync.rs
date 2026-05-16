@@ -34,6 +34,11 @@ use crate::game::monster_assets::MonsterCache;
 use super::snapshot::RemoteProfile;
 use super::{EnemyDeathCue, NetClient};
 
+/// Cap concurrent looping travel emitters: each uses a kira spatial sub-
+/// track for its whole flight. Multi-projectile specs share the pool with
+/// torches/portals/footsteps; extras stay silent instead of spamming errors.
+const MAX_PROJECTILE_TRAVEL_AUDIO_EMITTERS: usize = 8;
+
 fn spawn_enemy_soul_return(renderer: &mut Renderer, net_id: NetId, pos: Vec3, reason: &str) {
     let eid = renderer.vfx_system.spawn(
         rift_engine::renderer::vfx::presets::enemy_soul_return(),
@@ -302,6 +307,7 @@ impl NetClient {
             let cfg = CharacterSpawn {
                 position,
                 gender: gender_to_game(profile.gender),
+                appearance: appearance_to_game(profile.appearance),
                 // Speed/HP placeholders: server is authoritative for
                 // both, but the components need *some* value for the
                 // SP systems we share with locals.
@@ -1084,8 +1090,10 @@ impl NetClient {
                     );
                     if let Some(path) = recipe.travel {
                         let spec = crate::game::ability_audio::travel_spec(path);
-                        if let Some(em) = audio.spawn_emitter(&spec, pos) {
-                            self.projectile_audio.insert(net_id, em);
+                        if self.projectile_audio.len() < MAX_PROJECTILE_TRAVEL_AUDIO_EMITTERS {
+                            if let Some(em) = audio.spawn_emitter(&spec, pos) {
+                                self.projectile_audio.insert(net_id, em);
+                            }
                         }
                     }
                 }
@@ -1327,6 +1335,19 @@ fn gender_to_game(g: Gender) -> GameGender {
 /// the conversion glue here.
 pub fn wire_gender_to_game(g: Gender) -> GameGender {
     gender_to_game(g)
+}
+
+fn appearance_to_game(
+    a: rift_net::messages::Appearance,
+) -> rift_game::character::CharacterAppearance {
+    rift_game::character::CharacterAppearance {
+        skin_tone: a.skin_tone,
+        hair_style: a.hair_style,
+        eyebrow_style: a.eyebrow_style,
+        hair_color: a.hair_color,
+        eyebrow_color: a.eyebrow_color,
+        chest_size: a.chest_size,
+    }
 }
 
 /// Mirror a snapshot row's `effects` list into the entity's

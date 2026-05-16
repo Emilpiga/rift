@@ -75,7 +75,11 @@ layout(location = 0) out vec4 outColor;
 //   x = uvScale          (already applied to fragUV in the vert)
 //   y = parallaxScale    (tangent-space parallax depth amplitude;
 //                         `0` disables parallax)
-//   z = flagsFloat       (bit 0 = enable PBR + normal mapping)
+//   z = flagsFloat       (bit 0 = enable PBR + normal mapping,
+//                         bit 8 = unlit vertex colour,
+//                         bit 9 = animated abyss rim,
+//                         bit 10 = void edge shadow,
+//                         bit 11 = void rock dual-layer anti-tile)
 //   w = reserved; portrait draws use this as local head clip Y
 layout(push_constant) uniform PushConstants {
     mat4 model;

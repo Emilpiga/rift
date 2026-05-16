@@ -331,6 +331,7 @@ impl Sim {
                         enemy_net_id: *en_net_id,
                         enemy_pos: *en_pos,
                         attacker: swing.caster_net_id,
+                        threat_attacker: None,
                         ability_id: swing.ability_id,
                         damage: swing.damage,
                         crit_chance: swing.crit_chance,
@@ -501,7 +502,12 @@ impl Sim {
                 "proc cast queued summons; not yet routed",
             );
             for request in proc_minion_summons {
-                minions::spawn_or_refresh(&mut self.world, request, &mut self.next_enemy_net_id);
+                minions::spawn_or_refresh(
+                    &mut self.world,
+                    &self.floor,
+                    request,
+                    &mut self.next_enemy_net_id,
+                );
             }
         }
 

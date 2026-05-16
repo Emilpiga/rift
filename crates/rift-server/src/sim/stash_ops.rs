@@ -3,7 +3,8 @@
 //! browsable. Pure `impl Sim` block — every method is already
 //! defined on `Sim` and migrated here verbatim.
 
-use rift_net::ids::ClientId;
+use rift_game::loot::{self, LootRng};
+use rift_net::{ids::ClientId, messages::EnchantSource};
 
 use super::actor::Vitals;
 use super::player::{ServerPlayer, StashTab};
@@ -14,6 +15,8 @@ use super::{
 };
 
 impl Sim {
+    pub const ENCHANT_REROLL_COST: u32 = 100;
+
     /// Borrow the player's stash (read-only). Used by the
     /// server's dispatch path to encode `StashSync` payloads.
     /// One [`StashTab`] per page; items inside each tab are
@@ -220,6 +223,92 @@ impl Sim {
             .unwrap_or(false)
     }
 
+    /// Toggle the per-player "anvil session is open" flag.
+    pub fn set_anvil_open(&mut self, client_id: ClientId, open: bool) {
+        let Some(&entity) = self.sessions.get(&client_id) else {
+            return;
+        };
+        if let Ok(mut p) = self.world.get::<&mut ServerPlayer>(entity) {
+            p.anvil_open = open;
+        }
+    }
+
+    pub fn is_anvil_open(&self, client_id: ClientId) -> bool {
+        self.sessions
+            .get(&client_id)
+            .and_then(|&e| self.world.get::<&ServerPlayer>(e).ok())
+            .map(|p| p.anvil_open)
+            .unwrap_or(false)
+    }
+
+    /// Server-authoritative anvil reroll. Returns the new shard
+    /// balance and whether equipped stats changed.
+    pub fn reroll_item_affix(
+        &mut self,
+        client_id: ClientId,
+        tick: u32,
+        source: EnchantSource,
+        affix_index: u8,
+    ) -> Option<(u32, bool)> {
+        if !self.is_anvil_open(client_id) {
+            return None;
+        }
+        let &entity = self.sessions.get(&client_id)?;
+        let seed = {
+            let p_ro = self.world.get::<&ServerPlayer>(entity).ok()?;
+            if p_ro.shards < Self::ENCHANT_REROLL_COST {
+                return None;
+            }
+            match source {
+                EnchantSource::Bag(idx) => {
+                    let item = p_ro.inventory.get(idx as usize).and_then(|s| s.as_ref())?;
+                    loot::reroll_entropy_seed(tick, client_id.0, 0, idx, affix_index, item)
+                }
+                EnchantSource::Equip(slot_byte) => {
+                    let slot = loot::EquipSlot::from_u8(slot_byte)?;
+                    let item = p_ro.equipment.get(slot)?;
+                    loot::reroll_entropy_seed(
+                        tick,
+                        client_id.0,
+                        1,
+                        slot_byte as u32,
+                        affix_index,
+                        item,
+                    )
+                }
+            }
+        };
+        let mut rng = LootRng::new(seed);
+        let (p, vitals) = self
+            .world
+            .query_one_mut::<(&mut ServerPlayer, &mut Vitals)>(entity)
+            .ok()?;
+        if p.shards < Self::ENCHANT_REROLL_COST {
+            return None;
+        }
+        let equipped_changed = match source {
+            EnchantSource::Bag(idx) => {
+                let slot = p.inventory.get_mut(idx as usize)?;
+                let item = slot.as_mut()?;
+                loot::reroll_affix(item, affix_index, &mut rng).ok()?;
+                false
+            }
+            EnchantSource::Equip(slot_byte) => {
+                let slot = loot::EquipSlot::from_u8(slot_byte)?;
+                let mut item = p.equipment.take(slot)?;
+                let ok = loot::reroll_affix(&mut item, affix_index, &mut rng).is_ok();
+                p.equipment.set(slot, Some(item));
+                if !ok {
+                    return None;
+                }
+                p.recompute_stats(vitals);
+                true
+            }
+        };
+        p.shards -= Self::ENCHANT_REROLL_COST;
+        Some((p.shards, equipped_changed))
+    }
+
     /// Shared hub chest visual state: `true` while one or more
     /// players have their private stash session open. This is
     /// intentionally aggregate-only so clients can animate the
@@ -320,6 +409,7 @@ impl Sim {
         client_id: ClientId,
         tab_index: usize,
         stash_index: usize,
+        target_slot: Option<u8>,
     ) -> bool {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
@@ -361,7 +451,7 @@ impl Sim {
             p.stash[tab_index].items[stash_index] = Some(item);
             return false;
         }
-        let Some(slot) = p.equipment.default_slot(&item) else {
+        let Some(slot) = p.equipment.resolve_equip_slot(&item, target_slot) else {
             // Bag-only item (consumable) with no target slot.
             // Restore and bail — nothing else to validate.
             p.stash[tab_index].items[stash_index] = Some(item);

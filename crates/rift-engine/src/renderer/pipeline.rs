@@ -176,10 +176,9 @@ impl Renderer {
             // Also rebuild the post-process pipelines (bright /
             // blur / composite). The dirty flag fires for *any*
             // .frag/.vert change in the shader directory so we
-            // can't tell whether forward_opaque.* or post_*.* moved —
-            // just rebuild everything. Cheap relative to the
-            // device wait above. Compile failures are
-            // non-fatal: the existing pipelines stay live.
+            // can't tell which file moved — rebuild overlays plus
+            // scene/post/etc. Cheap relative to the device wait.
+            // Compile failures are non-fatal: existing pipelines stay live.
             if let Err(e) = self
                 .post
                 .reload_pipelines(&self.device.device, &self.shader_dir)
@@ -190,6 +189,20 @@ impl Renderer {
                 );
             } else {
                 log::info!("Post pipelines hot-reloaded successfully!");
+            }
+
+            if let Err(e) = self.overlay.recreate_pipeline(
+                &self.device.device,
+                self.post.composite_pass,
+                self.swapchain.extent,
+                &self.shader_dir,
+            ) {
+                log::error!(
+                    "Overlay pipeline hot-reload failed (keeping old pipeline): {}",
+                    e
+                );
+            } else {
+                log::info!("Overlay pipeline hot-reloaded successfully!");
             }
 
             if let Err(e) = self.sky_renderer.reload_pipeline(

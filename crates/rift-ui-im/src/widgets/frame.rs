@@ -70,12 +70,9 @@ impl Frame {
         }
     }
 
-    /// Heavy, carved-stone floating panel. Used by the
-    /// character-select roster and any other surface that
-    /// should read as a slab in front of the live scene
-    /// rather than a translucent HUD card. The thicker
-    /// near-black border is what sells the "indentation"
-    /// against the smudged red buttons.
+    /// Heavy void-glass floating panel. Used by character-select,
+    /// inventory, and other slabs that sit over the scene. Thick
+    /// near-black border sells depth against accent buttons.
     pub fn stone(theme: &Theme) -> Self {
         Self {
             fill: theme.colors.bg_stone,
@@ -239,9 +236,9 @@ impl Frame {
             );
             let inner_r = (self.corner_radius - 2.0).max(0.0);
             if inner_r <= 0.0 {
-                ui.draw_outline(inner, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+                ui.draw_outline(inner, 1.0, Color::rgba(0.72, 0.62, 0.98, 0.16));
             } else {
-                ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+                ui.draw_rounded_outline(inner, inner_r, 1.0, Color::rgba(0.72, 0.62, 0.98, 0.16));
             }
         }
 

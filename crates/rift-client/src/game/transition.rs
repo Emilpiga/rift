@@ -90,14 +90,15 @@ pub fn update_character_select(
         state.floor_mgr.env.tick_world_preload(renderer);
     }
 
-    // Install (lazily) and animate the sandstorm backdrop so
-    // the preview avatar reads as standing on the desert
-    // floor with dunes silhouetted in the haze. Idempotent:
-    // the disc + dunes are built once on first call, the
-    // gust envelope runs every frame.
+    // Install (lazily) the void desert backdrop so the preview avatar
+    // reads as standing on violet sand under a dark void dome with
+    // irregular lightning. Idempotent — meshes once; atmosphere +
+    // lightning sync every frame.
     state.floor_mgr.ensure_char_select_backdrop(renderer);
 
-    // Preview avatar (independent of UI; needs &mut World/Renderer).
+    if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
+        storm.tick(renderer, dt);
+    }
     state
         .character_select
         .tick_preview(&mut state.world, renderer, dt);
@@ -105,13 +106,14 @@ pub fn update_character_select(
     // equipped gear so the preview matches what the player will
     // see in-world. Both passes are cache-backed so they
     // short-circuit on every frame after the first.
-    if let Some((entity, gender)) = state.character_select.preview_entity() {
+    if let Some((entity, gender, appearance)) = state.character_select.preview_entity() {
         super::avatar_cosmetics::apply_avatar_cosmetics(
             &mut state.world,
             renderer,
             &mut state.avatar_cosmetics_cache,
             entity,
             gender,
+            appearance,
         );
         if let Some(base_ids) = state.character_select.preview_equipped_base_ids() {
             let desired = super::equipment_visuals::desired_visuals_for_base_ids(base_ids, gender);
@@ -192,6 +194,7 @@ fn start_with_profile(
     );
     state.player_state = PlayerState::with_profile(
         profile.gender,
+        profile.appearance,
         profile.name.clone(),
         rift_game::loadout::Loadout::default_hero(),
     );
@@ -345,7 +348,6 @@ pub fn tick_entering_world(state: &mut GameState, renderer: &mut Renderer, phase
             // and modulated by the same gust envelope that
             // brightens / dims the haze, so the audio and
             // visuals breathe together.
-            spawn_hub_wind(state);
             // Fresh world / fresh local avatar — the
             // `SkinnedAttachments` component is empty. Mark
             // dirty so the binary's per-frame retry loop
@@ -437,7 +439,6 @@ pub fn tick_net_entering(state: &mut GameState, renderer: &mut Renderer, phase: 
                     }
                     Err(e) => log::error!("Hub regeneration failed: {}", e),
                 }
-                spawn_hub_wind(state);
             } else {
                 state.floor.in_hub = false;
                 state.rift = RiftState::new(index);
@@ -613,36 +614,4 @@ pub fn rebuild_wall_caches(state: &mut GameState, renderer: &mut Renderer) {
         };
         renderer.recreate_blood_field(min, max, floor_y_min, floor_y_max);
     }
-}
-
-/// Spawn the looping hub-wind ambient emitter. Idempotent:
-/// if a previous emitter is still around (e.g. re-entering
-/// the hub from the rift) it is despawned first so we don't
-/// stack two copies of the same loop. Anchored at the hub
-/// origin as a placeholder; `render_phase` re-anchors it on
-/// the player every frame, which keeps the source effectively
-/// at the listener's position so the loop reads as a coherent
-/// surrounding wind rather than a directional point source.
-fn spawn_hub_wind(state: &mut GameState) {
-    let Some(audio) = state.audio.as_mut() else {
-        return;
-    };
-    if let Some(prev) = state.floor_mgr.hub_wind.take() {
-        audio.despawn_emitter(prev);
-    }
-    // Wide falloff (1 m full -> 60 m silent) plus the
-    // listener-anchored update means the player hears the
-    // wind at full volume regardless of where they walk on
-    // the platform. Volume is intentionally moderate (0.6)
-    // so per-frame gust modulation in `tick_hub_wind` can
-    // dip below it without sounding like the wind died.
-    let spec = rift_audio::SoundSpec {
-        path: "ambient/wind.mp3".into(),
-        volume: 0.6,
-        min_distance: 1.0,
-        max_distance: 60.0,
-        looping: true,
-        pitch: 1.0,
-    };
-    state.floor_mgr.hub_wind = audio.spawn_emitter(&spec, glam::Vec3::ZERO);
 }

@@ -23,6 +23,7 @@ use super::layer::{DrawCmd, Layer, LayerBuf};
 use super::rect::{Pos2, Rect, Vec2};
 use super::response::Response;
 use super::state::{DragState, UiState};
+use super::text_font::UiTextFont;
 use super::theme::Theme;
 
 /// Outcome of [`Ui::end`]. Consumed by the game loop to gate
@@ -622,6 +623,27 @@ impl<'a> Ui<'a> {
         );
     }
 
+    /// Rounded rect with Chebyshev (square) radial: `centre` at
+    /// the geometric centre, `edge` at the square boundary
+    /// (same smoothstep falloff as [`Self::draw_rounded_radial_rect`]).
+    pub fn draw_rounded_radial_square_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        edge: Color,
+        centre: Color,
+    ) {
+        self.layers.push(
+            self.current_layer,
+            DrawCmd::RadialSquareRect {
+                rect,
+                radius,
+                edge,
+                centre,
+            },
+        );
+    }
+
     /// Same as `draw_rounded_radial_rect` but the fragment
     /// shader applies a procedural cloud-noise modulation per
     /// pixel — the surface reads as textured stone / hammered
@@ -832,9 +854,23 @@ impl<'a> Ui<'a> {
 
     /// Draw text at `pos` (top-left). Returns the rendered width.
     pub fn draw_text(&mut self, pos: Pos2, text: &str, size: f32, color: Color) -> f32 {
-        // Width measurement matches OverlayBatch's bitmap font:
-        // fixed-width glyphs scaled by `size / glyph_height`.
-        let measured = self.measure_text(text, size);
+        self.draw_text_font(pos, text, size, color, UiTextFont::Body)
+    }
+
+    /// Same as [`Self::draw_text`] but uses the header face (Share Tech).
+    pub fn draw_header_text(&mut self, pos: Pos2, text: &str, size: f32, color: Color) -> f32 {
+        self.draw_text_font(pos, text, size, color, UiTextFont::Header)
+    }
+
+    fn draw_text_font(
+        &mut self,
+        pos: Pos2,
+        text: &str,
+        size: f32,
+        color: Color,
+        font: UiTextFont,
+    ) -> f32 {
+        let measured = self.measure_text_for(text, size, font);
         self.layers.push(
             self.current_layer,
             DrawCmd::Text {
@@ -843,6 +879,7 @@ impl<'a> Ui<'a> {
                 y: pos.y,
                 size,
                 color,
+                font,
             },
         );
         measured
@@ -857,6 +894,20 @@ impl<'a> Ui<'a> {
                 name: name.to_string(),
                 rect,
                 tint,
+                silhouette: false,
+            },
+        );
+    }
+
+    /// Tinted icon using only the artwork's luminance × alpha — solid RGB from `tint`.
+    pub fn draw_icon_silhouette(&mut self, rect: Rect, name: &str, tint: Color) {
+        self.layers.push(
+            self.current_layer,
+            DrawCmd::Icon {
+                name: name.to_string(),
+                rect,
+                tint,
+                silhouette: true,
             },
         );
     }
@@ -865,7 +916,17 @@ impl<'a> Ui<'a> {
     /// the underlying batch's font metrics so widgets stay
     /// consistent with what `draw_text` will produce.
     pub fn measure_text(&self, text: &str, size: f32) -> f32 {
-        self.batch.measure_text(text, size)
+        self.measure_text_for(text, size, UiTextFont::Body)
+    }
+
+    /// [`Self::measure_text`] for the header face (Share Tech).
+    pub fn measure_header_text(&self, text: &str, size: f32) -> f32 {
+        self.measure_text_for(text, size, UiTextFont::Header)
+    }
+
+    pub fn measure_text_for(&self, text: &str, size: f32, font: UiTextFont) -> f32 {
+        self.batch
+            .measure_text(text, size, font == UiTextFont::Header)
     }
 
     /// Draw text at `pos` truncated to fit within `max_width`,
@@ -880,25 +941,36 @@ impl<'a> Ui<'a> {
         max_width: f32,
         color: Color,
     ) -> f32 {
-        let full = self.measure_text(text, size);
+        self.draw_text_ellipsized_for(pos, text, size, max_width, color, UiTextFont::Body)
+    }
+
+    /// Like [`Self::draw_text_ellipsized`] but honours `font` for
+    /// width measurement and the final draw.
+    pub fn draw_text_ellipsized_for(
+        &mut self,
+        pos: Pos2,
+        text: &str,
+        size: f32,
+        max_width: f32,
+        color: Color,
+        font: UiTextFont,
+    ) -> f32 {
+        let full = self.measure_text_for(text, size, font);
         if full <= max_width {
-            return self.draw_text(pos, text, size, color);
+            return self.draw_text_font(pos, text, size, color, font);
         }
         let ell = "\u{2026}";
-        let ell_w = self.measure_text(ell, size);
+        let ell_w = self.measure_text_for(ell, size, font);
         if ell_w >= max_width {
             return 0.0;
         }
-        // Binary search the longest prefix that still fits with
-        // the ellipsis appended. Cheap because text is short and
-        // measure_text is O(n).
         let chars: Vec<char> = text.chars().collect();
         let mut lo = 0usize;
         let mut hi = chars.len();
         while lo < hi {
             let mid = (lo + hi + 1) / 2;
             let candidate: String = chars[..mid].iter().collect();
-            let w = self.measure_text(&candidate, size) + ell_w;
+            let w = self.measure_text_for(&candidate, size, font) + ell_w;
             if w <= max_width {
                 lo = mid;
             } else {
@@ -907,7 +979,7 @@ impl<'a> Ui<'a> {
         }
         let mut s: String = chars[..lo].iter().collect();
         s.push_str(ell);
-        self.draw_text(pos, &s, size, color)
+        self.draw_text_font(pos, &s, size, color, font)
     }
 }
 

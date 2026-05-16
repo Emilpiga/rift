@@ -26,9 +26,9 @@ use rift_game::loot::{
 use rift_game::stats::Stat;
 use rift_ui::inventory::frame_inventory;
 use rift_ui_types::inventory::{
-    BulkSalvageView, CompareDeltaRow, EquipSlotIdx, InventoryAction, InventoryUiState,
-    InventoryView, ItemView, RollBand, StashTabView, StashView, StatRow, StatSection, StatsView,
-    TooltipLineKind, TooltipLineView,
+    BulkSalvageView, CompareDeltaRow, EnchantAffixView, EnchantSourceView, EnchantView,
+    EquipSlotIdx, InventoryAction, InventoryUiState, InventoryView, ItemView, RollBand,
+    StashTabView, StashView, StatRow, StatSection, StatsView, TooltipLineKind, TooltipLineView,
 };
 
 use crate::game::sub_state::{EquipRequest, StashRequest, StashTabClient};
@@ -69,6 +69,8 @@ pub fn frame(
     stash_open: bool,
     stash_tabs: &[StashTabClient],
     stash_pending: &mut Vec<StashRequest>,
+    enchant_open: bool,
+    enchant_pending: &mut Vec<(rift_net::messages::EnchantSource, u8)>,
     player_state: &PlayerState,
     pending_consume_bag_idx: &mut Option<u32>,
     open_talents_panel: &mut bool,
@@ -321,6 +323,12 @@ pub fn frame(
         .map(|i| {
             let slot = EquipSlot::ALL[i];
             let it = equipment.get(slot)?;
+            let slot_u8 = slot.to_u8();
+            let forge_locked = enchant_open
+                && matches!(
+                    inv_state.enchant_source,
+                    Some(EnchantSourceView::Equip(s)) if s.0 == slot_u8
+                );
             Some(build_item_view(
                 it,
                 &equip_lines[i],
@@ -329,6 +337,7 @@ pub fn frame(
                 &[],
                 None,
                 &equip_stat_keys[i],
+                forge_locked,
             ))
         })
         .collect();
@@ -337,6 +346,11 @@ pub fn frame(
         .enumerate()
         .map(|(i, slot)| {
             let it = slot.as_ref()?;
+            let forge_locked = enchant_open
+                && matches!(
+                    inv_state.enchant_source,
+                    Some(EnchantSourceView::Bag(b)) if b as usize == i
+                );
             let compare_with =
                 bag_compare_slots[i].and_then(|es| equip_views[es.to_u8() as usize].as_ref());
             let compare_with_secondary = bag_compare_slots_secondary[i]
@@ -349,6 +363,7 @@ pub fn frame(
                 &bag_compare_rows_secondary[i],
                 compare_with_secondary,
                 &bag_stat_keys[i],
+                forge_locked,
             ))
         })
         .collect();
@@ -373,6 +388,7 @@ pub fn frame(
                         &stash_compare_rows_secondary[ti][si],
                         compare_with_secondary,
                         &stash_stat_keys[ti][si],
+                        false,
                     ))
                 })
                 .collect()
@@ -432,6 +448,91 @@ pub fn frame(
         None
     };
 
+    let selected_item: Option<&Item> = match inv_state.enchant_source {
+        Some(EnchantSourceView::Bag(i)) => items.get(i as usize).and_then(|s| s.as_ref()),
+        Some(EnchantSourceView::Equip(slot)) => {
+            EquipSlot::from_u8(slot.0).and_then(|slot| equipment.get(slot))
+        }
+        None => None,
+    };
+    let selected_item_view: Option<&ItemView<'_>> = match inv_state.enchant_source {
+        Some(EnchantSourceView::Bag(i)) => bag_views.get(i as usize).and_then(|s| s.as_ref()),
+        Some(EnchantSourceView::Equip(slot)) => {
+            equip_views.get(slot.0 as usize).and_then(|s| s.as_ref())
+        }
+        None => None,
+    };
+    let enchant_item_name = selected_item.map(|it| it.display_name());
+    let enchant_affix_strings: Vec<String> = selected_item
+        .map(|it| it.affixes.iter().map(|a| a.tooltip(it.ilvl)).collect())
+        .unwrap_or_default();
+    let enchant_affix_options: Vec<Vec<String>> = selected_item
+        .map(|it| {
+            (0..it.affixes.len())
+                .map(|idx| {
+                    rift_game::loot::reroll_candidate_tooltips(it, idx as u8).unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let enchant_excluded_options: Vec<Vec<(String, &'static str)>> = selected_item
+        .map(|it| {
+            (0..it.affixes.len())
+                .map(|idx| {
+                    rift_game::loot::reroll_excluded_previews(it, idx as u8).unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let locked_affix_index = selected_item.and_then(|it| {
+        it.enchanted_affix_index
+            .filter(|&i| (i as usize) < it.affixes.len())
+    });
+    if let Some(lock) = locked_affix_index {
+        inv_state.enchant_affix = Some(lock);
+    }
+    if let Some(sel) = inv_state.enchant_affix {
+        let invalid = selected_item
+            .map(|it| sel as usize >= it.affixes.len())
+            .unwrap_or(true);
+        if invalid {
+            inv_state.enchant_affix = None;
+        }
+    }
+    let enchant_affixes: Vec<EnchantAffixView<'_>> = enchant_affix_strings
+        .iter()
+        .enumerate()
+        .map(|(i, text)| EnchantAffixView {
+            index: i as u8,
+            text: text.as_str(),
+            reroll_options: enchant_affix_options
+                .get(i)
+                .map(|options| options.as_slice())
+                .unwrap_or(&[]),
+            reroll_excluded: enchant_excluded_options
+                .get(i)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+            locked: locked_affix_index == Some(i as u8),
+        })
+        .collect();
+    let enchant_view = if enchant_open {
+        Some(EnchantView {
+            selected_source: inv_state.enchant_source,
+            item: selected_item_view,
+            item_name: enchant_item_name.as_deref(),
+            affixes: enchant_affixes.as_slice(),
+            selected_affix: inv_state.enchant_affix,
+            locked_affix_index,
+            player_shards: player_state.shards,
+            cost: 100,
+        })
+    } else {
+        inv_state.enchant_source = None;
+        inv_state.enchant_affix = None;
+        None
+    };
+
     // ── Phase 6 ─ assemble + invoke. ──────────────────────
     let view = InventoryView {
         items: bag_views.as_slice(),
@@ -442,6 +543,7 @@ pub fn frame(
         stats: stats_view,
         bulk_salvage: bulk_preview(items),
         currency_shards: player_state.shards,
+        enchant: enchant_view,
     };
 
     let (open, actions) = frame_inventory(ui, &view, inv_state, ui_now());
@@ -451,8 +553,37 @@ pub fn frame(
             InventoryAction::Close => {
                 inv_state.open = false;
             }
-            InventoryAction::Equip { inventory_index } => {
-                pending.push(EquipRequest::Equip { inventory_index });
+            InventoryAction::SelectEnchantSource { source } => {
+                inv_state.enchant_source = Some(source);
+                inv_state.enchant_affix = None;
+            }
+            InventoryAction::SelectEnchantAffix { affix_index } => {
+                inv_state.enchant_affix = Some(affix_index);
+            }
+            InventoryAction::ClearEnchantForge => {
+                inv_state.enchant_source = None;
+                inv_state.enchant_affix = None;
+            }
+            InventoryAction::RerollAffix {
+                source,
+                affix_index,
+            } => {
+                let source = match source {
+                    EnchantSourceView::Bag(i) => rift_net::messages::EnchantSource::Bag(i),
+                    EnchantSourceView::Equip(slot) => {
+                        rift_net::messages::EnchantSource::Equip(slot.0)
+                    }
+                };
+                enchant_pending.push((source, affix_index));
+            }
+            InventoryAction::Equip {
+                inventory_index,
+                target_slot,
+            } => {
+                pending.push(EquipRequest::Equip {
+                    inventory_index,
+                    target_slot,
+                });
             }
             InventoryAction::Unequip { slot } => {
                 pending.push(EquipRequest::Unequip { slot });
@@ -565,10 +696,12 @@ pub fn frame(
             InventoryAction::EquipFromStash {
                 tab_index,
                 stash_index,
+                target_slot,
             } => {
                 stash_pending.push(StashRequest::EquipFromStash {
                     tab_index,
                     stash_index,
+                    target_slot,
                 });
             }
             InventoryAction::UnequipToStashSlot {
@@ -621,6 +754,7 @@ fn build_item_view<'a>(
     compare_delta_secondary: &'a [CompareDeltaRow<'a>],
     compare_with_secondary: Option<&'a ItemView<'a>>,
     stat_keys: &'a [&'static str],
+    forge_locked: bool,
 ) -> ItemView<'a> {
     let c = it.rarity.color();
     let salvageable = !it.anchored && (it.rarity as u8) <= Rarity::Magic as u8;
@@ -656,7 +790,9 @@ fn build_item_view<'a>(
         cell_h,
         rarity_tier: it.rarity as u8,
         stat_keys,
+        equip_native_slot: it.base.equip_slot.map(|s| s.to_u8()),
         is_consumable: it.consumable_kind().is_some(),
+        forge_locked,
     }
 }
 
@@ -721,6 +857,7 @@ fn view_tooltip<'a>(lines: &'a [TooltipLine], viewer_level: u32) -> Vec<TooltipL
             out.push(TooltipLineView {
                 text: first,
                 kind,
+                enchanted: ln.enchanted,
                 band,
             });
         }
@@ -728,6 +865,7 @@ fn view_tooltip<'a>(lines: &'a [TooltipLine], viewer_level: u32) -> Vec<TooltipL
             out.push(TooltipLineView {
                 text: cont,
                 kind,
+                enchanted: false,
                 band: None,
             });
         }

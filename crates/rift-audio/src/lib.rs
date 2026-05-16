@@ -272,7 +272,13 @@ impl AudioSystem {
     /// [`SoundSpec::path`] values are resolved as
     /// `assets_root / "audio" / path`.
     pub fn new(assets_root: impl Into<PathBuf>) -> anyhow::Result<Self> {
-        let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())?;
+        // Default kira `sub_track_capacity` is 128; every spatial one-shot
+        // and emitter allocates a mixer sub-track. Dense combat (multi-
+        // projectile casts, many torches/portals) exhausts that quickly and
+        // `add_spatial_sub_track` starts failing with ResourceLimitReached.
+        let mut settings = AudioManagerSettings::default();
+        settings.capacities.sub_track_capacity = 512;
+        let mut manager = AudioManager::<DefaultBackend>::new(settings)?;
         // Listener starts at the origin facing -Z (matches the
         // engine's default camera convention). The client
         // calls `set_listener` every frame before tick, so the

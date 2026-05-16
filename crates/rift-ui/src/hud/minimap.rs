@@ -68,7 +68,7 @@ fn draw_header_detail(
 ) {
     let scale = theme.scale;
     let title_x = header.x() + 17.0 * scale;
-    let title_w = ui.measure_text(title, theme.fonts.size_md);
+    let title_w = ui.measure_header_text(title, theme.fonts.size_md);
     let left_guard = title_x + title_w + 14.0 * scale;
     let right_pad = 14.0 * scale;
     let available = (header.max.x - right_pad - left_guard).max(0.0);
@@ -95,12 +95,7 @@ fn draw_header_detail(
         size,
         Color::rgba(0.0, 0.0, 0.0, 0.58),
     );
-    ui.draw_text(
-        Pos2::new(x, y),
-        detail,
-        size,
-        Color::rgba(0.96, 0.84, 0.52, 1.0),
-    );
+    ui.draw_text(Pos2::new(x, y), detail, size, theme.colors.accent);
 }
 
 fn draw_floor_and_pips(
@@ -1138,13 +1133,13 @@ fn draw_chest_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
     ui.draw_rounded_rect(
         Rect::from_xywh(mx - glow * 0.5, my - glow * 0.5, glow, glow),
         glow * 0.5,
-        Color::rgba(1.0, 0.62, 0.16, 0.16),
+        Color::rgba(0.62, 0.38, 0.98, 0.14),
     );
     let body = Rect::from_xywh(mx - size * 0.5, my - size * 0.38, size, size * 0.76);
     ui.draw_rounded_rect(
         body,
         (size * 0.16).max(1.0),
-        Color::rgba(0.98, 0.66, 0.22, 0.96),
+        Color::rgba(0.58, 0.40, 0.94, 0.94),
     );
     ui.draw_rect(
         Rect::from_xywh(
@@ -1153,7 +1148,7 @@ fn draw_chest_marker(ui: &mut Ui<'_>, mx: f32, my: f32, size: f32) {
             body.width(),
             (size * 0.12).max(1.0),
         ),
-        Color::rgba(0.38, 0.19, 0.07, 0.72),
+        Color::rgba(0.22, 0.10, 0.38, 0.74),
     );
     ui.draw_rect(
         Rect::from_xywh(

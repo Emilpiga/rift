@@ -165,8 +165,8 @@ pub struct HubPortal {
 ///     the floor *around* the portal pillar rather than only
 ///     directly underneath it.
 ///   * **Color**: deep crimson-violet, HDR-boosted hard so it
-///     actually paints over the sandstorm hub's warm
-///     ambient fill without reading as torch flame.
+///     reads crisply over the void hub's violet ambient fill
+///     without looking like torch flame.
 ///   * **Radius**: 16 m. Reaches well past the portal pillar
 ///     base so the surrounding sand picks up a visible halo,
 ///     not just the immediate dais.

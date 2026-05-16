@@ -6,6 +6,7 @@
 //! pipeline.
 
 pub mod combat_system;
+pub mod enchant_system;
 pub mod ghost_system;
 pub mod loot_system;
 pub mod portal_system;

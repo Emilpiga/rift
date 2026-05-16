@@ -1,7 +1,9 @@
 //! Drag/drop and click routing for inventory slots.
 
-use rift_ui_im::{Color, ItemSlot, SlotInteraction};
-use rift_ui_types::inventory::{DragSource, EquipSlotIdx, InventoryAction, ItemView};
+use rift_ui_im::{Color, ItemSlot, Rect, SlotInteraction};
+use rift_ui_types::inventory::{
+    DragSource, EnchantSourceView, EquipSlotIdx, InventoryAction, ItemView,
+};
 
 /// Default size of an `ItemSlot` widget the drag-ghost uses.
 /// The actual rect on the bag/paperdoll is whatever the
@@ -37,8 +39,84 @@ pub fn build_item_slot<'a>(item: Option<&'a ItemView<'a>>) -> ItemSlot<'a> {
         } else if let Some(ch) = it.fallback_glyph {
             s = s.fallback_glyph(ch);
         }
+        if it.forge_locked {
+            s = s.dim_alpha(0.74);
+        }
     }
     s
+}
+
+/// `true` when dropping `src → tgt` would move or swap the forge-
+/// anchored item (bag anchor index or equip slot).
+pub fn forge_drop_blocked(
+    forge: Option<EnchantSourceView>,
+    src: DragSource,
+    tgt: DropTarget,
+) -> bool {
+    let Some(f) = forge else {
+        return false;
+    };
+    match f {
+        EnchantSourceView::Bag(lock) => {
+            if matches!(src, DragSource::Bag(i) if i == lock) {
+                return true;
+            }
+            if matches!(tgt, DropTarget::Bag(j) if j == lock) {
+                return true;
+            }
+            false
+        }
+        EnchantSourceView::Equip(lock_s) => {
+            if matches!(src, DragSource::Equip(s) if s == lock_s) {
+                return true;
+            }
+            if matches!(
+                tgt,
+                DropTarget::Equip { slot, .. } if slot == lock_s
+            ) {
+                return true;
+            }
+            false
+        }
+    }
+}
+
+/// Strip inventory mutations that would relocate the forge-selected item.
+pub fn forge_action_mutates_locked(
+    forge: Option<EnchantSourceView>,
+    act: &InventoryAction,
+) -> bool {
+    let Some(f) = forge else {
+        return false;
+    };
+    match f {
+        EnchantSourceView::Bag(lock) => match act {
+            InventoryAction::SwapBag { a, b } => *a == lock || *b == lock,
+            InventoryAction::DepositToStash {
+                inventory_index, ..
+            }
+            | InventoryAction::DepositToStashSlot {
+                inventory_index, ..
+            }
+            | InventoryAction::WithdrawFromStashSlot {
+                inventory_index, ..
+            }
+            | InventoryAction::Salvage { inventory_index } => *inventory_index == lock,
+            InventoryAction::SortBag | InventoryAction::SalvageBulk { .. } => true,
+            _ => false,
+        },
+        EnchantSourceView::Equip(lock_s) => {
+            let lock_u8 = lock_s.0;
+            match act {
+                InventoryAction::UnequipToStashSlot { slot, .. } => *slot == lock_u8,
+                InventoryAction::EquipFromStash {
+                    target_slot: Some(t),
+                    ..
+                } => *t == lock_u8,
+                _ => false,
+            }
+        }
+    }
 }
 
 /// Fan a slot's [`SlotInteraction`] out into the appropriate
@@ -50,6 +128,7 @@ pub fn route_slot(
     ctrl: bool,
     active_tab: u8,
     is_consumable: bool,
+    void_forge_open: bool,
     out: &mut Vec<InventoryAction>,
 ) {
     if let Some(drop) = r.dropped {
@@ -81,6 +160,22 @@ pub fn route_slot(
                     inventory_index: idx,
                 });
             }
+        } else if void_forge_open {
+            match src {
+                DragSource::Bag(idx) => {
+                    out.push(InventoryAction::SelectEnchantSource {
+                        source: EnchantSourceView::Bag(idx),
+                    });
+                }
+                DragSource::Equip(slot) => {
+                    out.push(InventoryAction::SelectEnchantSource {
+                        source: EnchantSourceView::Equip(slot),
+                    });
+                }
+                DragSource::Stash(_) => {
+                    handle_right_click(src, stash_open, active_tab, out);
+                }
+            }
         } else {
             handle_right_click(src, stash_open, active_tab, out);
         }
@@ -105,17 +200,71 @@ pub fn route_slot_capture(
     ctrl: bool,
     active_tab: u8,
     is_consumable: bool,
+    void_forge_open: bool,
     out: &mut Vec<InventoryAction>,
     in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
 ) {
     let dropped_payload = r.dropped.as_ref().map(|dp| dp.payload);
     let actions_before = out.len();
-    route_slot(r, target, stash_open, ctrl, active_tab, is_consumable, out);
+    route_slot(
+        r,
+        target,
+        stash_open,
+        ctrl,
+        active_tab,
+        is_consumable,
+        void_forge_open,
+        out,
+    );
     if let Some(payload) = dropped_payload {
         if out.len() > actions_before {
             *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(
                 payload, active_tab,
             ));
+        }
+    }
+}
+
+/// Same as [`route_slot_capture`], plus optional destination rect for drops onto paperdoll cells
+/// (feeds the destination ghost until the server applies equip mutations).
+pub fn route_slot_capture_equip_dest(
+    r: SlotInteraction<DragSource>,
+    target: DropTarget,
+    stash_open: bool,
+    ctrl: bool,
+    active_tab: u8,
+    is_consumable: bool,
+    void_forge_open: bool,
+    out: &mut Vec<InventoryAction>,
+    in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
+    dest_rect: &mut Option<[f32; 4]>,
+    equip_cell_screen_rect: Rect,
+) {
+    let dropped_payload = r.dropped.as_ref().map(|dp| dp.payload);
+    let actions_before = out.len();
+    route_slot(
+        r,
+        target,
+        stash_open,
+        ctrl,
+        active_tab,
+        is_consumable,
+        void_forge_open,
+        out,
+    );
+    if let Some(payload) = dropped_payload {
+        if out.len() > actions_before {
+            *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(
+                payload, active_tab,
+            ));
+            if matches!(target, DropTarget::Equip { .. }) {
+                *dest_rect = Some([
+                    equip_cell_screen_rect.x(),
+                    equip_cell_screen_rect.y(),
+                    equip_cell_screen_rect.width(),
+                    equip_cell_screen_rect.height(),
+                ]);
+            }
         }
     }
 }
@@ -140,6 +289,7 @@ fn handle_right_click(
             } else {
                 out.push(InventoryAction::Equip {
                     inventory_index: idx,
+                    target_slot: None,
                 });
             }
         }
@@ -174,6 +324,7 @@ fn handle_click(
                 // `handle_right_click`).
                 out.push(InventoryAction::Equip {
                     inventory_index: idx,
+                    target_slot: None,
                 });
             }
         }
@@ -212,6 +363,7 @@ pub fn handle_drop(
             } else {
                 out.push(InventoryAction::Equip {
                     inventory_index: idx,
+                    target_slot: Some(slot.0),
                 });
             }
         }
@@ -265,6 +417,7 @@ pub fn handle_drop(
                 out.push(InventoryAction::EquipFromStash {
                     tab_index: active_tab,
                     stash_index: idx,
+                    target_slot: Some(slot.0),
                 });
             }
         }
@@ -324,7 +477,10 @@ mod tests {
 
         assert!(matches!(
             out.as_slice(),
-            [InventoryAction::Equip { inventory_index: 4 }]
+            [InventoryAction::Equip {
+                inventory_index: 4,
+                target_slot: Some(7),
+            }]
         ));
     }
 

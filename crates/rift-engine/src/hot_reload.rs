@@ -140,3 +140,37 @@ pub fn shader_kind_from_path(path: &Path) -> Option<shaderc::ShaderKind> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn shader_assets_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders")
+    }
+
+    #[test]
+    fn compile_vfx_particle_shaders() {
+        let dir = shader_assets_dir();
+        compile_glsl_file(
+            &dir.join("vfx/particle/particle.vert"),
+            shaderc::ShaderKind::Vertex,
+        )
+        .expect("particle.vert");
+        compile_glsl_file(
+            &dir.join("vfx/particle/particle.frag"),
+            shaderc::ShaderKind::Fragment,
+        )
+        .expect("particle.frag");
+    }
+
+    #[test]
+    fn compile_ribbon_shaders() {
+        let dir = shader_assets_dir();
+        compile_glsl_file(&dir.join("ribbon.vert"), shaderc::ShaderKind::Vertex)
+            .expect("ribbon.vert");
+        compile_glsl_file(&dir.join("ribbon.frag"), shaderc::ShaderKind::Fragment)
+            .expect("ribbon.frag");
+    }
+}

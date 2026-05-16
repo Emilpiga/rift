@@ -69,6 +69,7 @@ pub(crate) fn item_to_blob(item: &rift_game::loot::Item) -> ItemBlob {
         unique_id: unique_id.map(|s| s.to_string()),
         unique_pick,
         rift_touched: item.rift_touched_to_wire(),
+        enchanted_affix_index: item.enchanted_affix_index,
     }
 }
 
@@ -92,6 +93,7 @@ pub(crate) fn item_from_blob(blob: &ItemBlob) -> Option<rift_game::loot::Item> {
     )?;
     item.unstable = blob.unstable;
     item.rift_touched = rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
+    item.enchanted_affix_index = blob.enchanted_affix_index;
     Some(item)
 }
 

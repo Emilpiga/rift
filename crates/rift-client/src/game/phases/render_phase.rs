@@ -43,8 +43,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // `joint_worlds` is fresh for this frame.
     crate::game::weapon_visuals::update_weapon_transforms(&mut state.world, renderer, input);
 
-    // Local-avatar ghost tint.
-    crate::game::ghost_system::apply_tint(&state.world, renderer, state.net.local_ghost_cached);
+    // Local-avatar ghost tint. When not ghosting, restore the
+    // chosen skin tone rather than stomping the body back to white.
+    let skin = crate::game::avatar_cosmetics::skin_tint(state.player_state.appearance.skin_tone);
+    crate::game::ghost_system::apply_tint(
+        &state.world,
+        renderer,
+        state.net.local_ghost_cached,
+        [skin.x, skin.y, skin.z, 1.0],
+    );
 
     // Channel beam visuals (Frost Ray etc.).
     crate::game::ability::tick_channel_visuals(state, renderer, dt);
@@ -254,9 +261,9 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
             .torches
             .tick_audio(audio, player_pos, elapsed, fog_start, fog_end);
     }
-    // Hub thunderstorm: when present, restores calm lighting
-    // and overlays any in-progress lightning flash. Owns the
-    // entire point-light vec while in the hub (no torches).
+    // Hub lightning driver: restores calm lighting and overlays any
+    // active strike while merging pre-authored fills (`TorchSystem`,
+    // character-select rims), portal pushes extend afterward.
     if let Some(storm) = state.floor_mgr.hub_storm.as_mut() {
         storm.tick(renderer, dt);
     }
@@ -264,7 +271,6 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
     // Rift-floor void embers: re-anchor every frame ~10 m
     // below the player so the field of glowing motes
     // continuously spawns under whatever room the player is
-    // standing in, then rises past the floor's outer edges.
     // `None` on the hub / char-select. The 10 m depth puts
     // the spawn plane well below the floor mesh so the floor
     // depth-test naturally hides every ember that's still
@@ -275,45 +281,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
             .vfx_system
             .set_anchor(id, player_pos - Vec3::new(0.0, 10.0, 0.0));
     }
-    // Hub sandstorm haze: keep the haze emitter centred on
-    // the player so the field of dust travels with the
-    // camera rather than reading as a fixed volumetric panel
-    // somewhere on the platform. Anchor lifted to chest
-    // height so the spawn disc samples mostly ankle-to-head
-    // altitude.
-    //
-    // Wind gust envelope: a slow sum-of-sines yields a
-    // breathing curve in roughly [0.55 .. 1.45] that pulses
-    // every ~6–18 seconds. We feed it into BOTH the haze
-    // brightness (visual gust = thicker dust) and the wind
-    // emitter volume (audio gust = louder roar) so the two
-    // pulse together — the player sees the dust thicken at
-    // the same instant the wind howls. Identical phase by
-    // construction.
-    if let Some(haze) = state.floor_mgr.hub_haze {
-        let t = elapsed;
-        let slow =
-            (t * 0.35).sin() * 0.55 + (t * 0.17 + 1.7).sin() * 0.35 + (t * 0.08 + 0.4).sin() * 0.10;
-        // Map [-1, +1] -> roughly [0.55, 1.45]: a 45 % dip
-        // at the lull and a 45 % swell at the peak — wide
-        // enough to feel obviously alive without hiding /
-        // overpowering the rest of the scene.
-        let gust = (1.0 + slow * 0.45).max(0.05);
-        renderer
-            .vfx_system
-            .set_anchor(haze, player_pos + Vec3::new(0.0, 0.6, 0.0));
-        renderer.vfx_system.set_brightness(haze, gust);
-        // Drive the wind loop's volume from the same gust.
-        // Anchor it on the listener (player ear height) so
-        // the loop reads as a coherent wash of wind rather
-        // than a directional point source — distance
-        // attenuation stays at full while the gust does the
-        // work.
-        if let (Some(audio), Some(em)) = (state.audio.as_mut(), state.floor_mgr.hub_wind) {
-            audio.set_emitter_position(em, player_pos + Vec3::new(0.0, 1.6, 0.0));
-            audio.set_emitter_volume(em, gust);
-        }
-    }
+
     // Push a hot-crimson light at every active portal AFTER
     // the torch / storm systems have rebuilt `point_lights`,
     // so the portal's environmental glow lands on the chest,
@@ -378,6 +346,19 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         renderer
             .vfx_system
             .collect_lights(elapsed, &mut effect_lights);
+        // Shader merges at most 16 point lights total. Uncapped VFX (e.g.
+        // many simultaneous projectile trails) would crowd out torches;
+        // keep the nearest lights to the viewer so volleys stay bounded.
+        const MAX_VFX_POINT_LIGHTS: usize = 8;
+        if effect_lights.len() > MAX_VFX_POINT_LIGHTS {
+            let origin = renderer.fog_origin;
+            effect_lights.sort_by(|a, b| {
+                let da = (a.position - origin).length_squared();
+                let db = (b.position - origin).length_squared();
+                da.total_cmp(&db)
+            });
+            effect_lights.truncate(MAX_VFX_POINT_LIGHTS);
+        }
         renderer.vfx_lights.extend(effect_lights);
     }
     state.player_state.abilities.tick_all(dt);

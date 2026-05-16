@@ -4,6 +4,7 @@
 
 use glam::Vec3;
 
+use crate::renderer::vfx::builder::{particle, EffectBuilder};
 use crate::renderer::vfx::spec::*;
 
 /// Ghost rise — soft burst of pale cyan-white wisps that
@@ -13,9 +14,8 @@ use crate::renderer::vfx::spec::*;
 /// the avatar simply popping out of existence. Owner
 /// suppresses this for themselves.
 pub fn ghost_rise() -> Effect {
-    Effect {
-        duration: 0.10,
-        layers: vec![Layer::Particles(ParticleSpec {
+    EffectBuilder::timed(0.10)
+        .layers(vec![particle(ParticleSpec {
             spawn: SpawnShape::Sphere,
             emission: EmissionMode::Burst { count: 24 },
             speed: (0.6, 1.8),
@@ -36,8 +36,10 @@ pub fn ghost_rise() -> Effect {
             sprite: SpriteShape::Smoke,
             blend: BlendMode::Alpha,
             opacity: 1.0,
-        })],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    })])
+        .finish()
 }
 
 /// Revive-shrine pillar — a tall holy beam reaching skyward,
@@ -49,11 +51,10 @@ pub fn ghost_rise() -> Effect {
 ///      column's radius for a denser core.
 ///   3. Soft halo at the base for ground anchoring.
 pub fn revive_shrine_pillar() -> Effect {
-    Effect {
-        duration: 0.0,
-        layers: vec![
+    EffectBuilder::persistent()
+        .layers(vec![
             // Wide rising column.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Column {
                     radius: 0.55,
                     height: 0.0,
@@ -81,9 +82,11 @@ pub fn revive_shrine_pillar() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Inner sparks orbiting upward.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Column {
                     radius: 0.22,
                     height: 0.0,
@@ -111,9 +114,11 @@ pub fn revive_shrine_pillar() -> Effect {
                 sprite: SpriteShape::Spark,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Ground halo.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Continuous { rate: 35.0 },
                 speed: (0.4, 1.2),
@@ -127,9 +132,11 @@ pub fn revive_shrine_pillar() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Channel beam linking a player's hand to a revive shrine. A
@@ -138,12 +145,11 @@ pub fn revive_shrine_pillar() -> Effect {
 /// the gameplay layer via `set_endpoints` so the beam tracks
 /// the player as they move within the channel radius.
 pub fn shrine_channel_beam() -> Effect {
-    Effect {
-        duration: 0.0,
-        layers: vec![
+    EffectBuilder::persistent()
+        .layers(vec![
             // Hand-base swirl: small bright motes orbiting the
             // caster's hand for a "gathering energy" read.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Continuous { rate: 80.0 },
                 speed: (0.3, 1.0),
@@ -163,7 +169,9 @@ pub fn shrine_channel_beam() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // The actual beam ribbon. Endpoints driven by
             // gameplay; HDR core for bloom; gentle scrolling
             // noise so it shimmers along its length.
@@ -213,6 +221,6 @@ pub fn shrine_channel_beam() -> Effect {
                 }),
                 blend: BlendMode::Additive,
             }),
-        ],
-    }
+        ])
+        .finish()
 }

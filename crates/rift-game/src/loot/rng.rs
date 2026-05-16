@@ -36,12 +36,16 @@ impl LootRng {
         ((self.next_u64() >> 40) as u32) as f32 / (1u32 << 24) as f32
     }
 
-    /// Uniform `f32` in `[lo, hi)`.
+    /// Uniform `f32` in `[lo, hi]` — both endpoints are reachable (same
+    /// 24‑bit resolution as [`Self::next_f32`] on the unit interval).
     pub fn frange(&mut self, lo: f32, hi: f32) -> f32 {
         if hi <= lo {
             return lo;
         }
-        lo + (hi - lo) * self.next_f32()
+        const MASK: u64 = (1u64 << 24) - 1;
+        let u = ((self.next_u64() >> 40) & MASK) as f32;
+        let t = u / MASK as f32;
+        lo + (hi - lo) * t
     }
 
     /// Uniform integer in `[lo, hi)`.

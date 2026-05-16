@@ -207,13 +207,13 @@ impl RibbonRenderer {
         translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
-        let vert_src = std::fs::read_to_string(shader_dir.join("ribbon.vert"))?;
-        let frag_src = std::fs::read_to_string(shader_dir.join("ribbon.frag"))?;
+        let vert_path = shader_dir.join("ribbon.vert");
+        let frag_path = shader_dir.join("ribbon.frag");
 
         let vert_spv =
-            hot_reload::compile_glsl(&vert_src, "ribbon.vert", shaderc::ShaderKind::Vertex)?;
+            hot_reload::compile_glsl_file(&vert_path, shaderc::ShaderKind::Vertex)?;
         let frag_spv =
-            hot_reload::compile_glsl(&frag_src, "ribbon.frag", shaderc::ShaderKind::Fragment)?;
+            hot_reload::compile_glsl_file(&frag_path, shaderc::ShaderKind::Fragment)?;
 
         let vert_module = crate::vulkan::pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = crate::vulkan::pipeline::create_shader_module(device, &frag_spv)?;
@@ -250,9 +250,11 @@ impl RibbonRenderer {
         // tip:    vec4    @ 16
         // params: vec4    @ 32
         // flags:  vec4    @ 48
-        // cross:  vec4×8  @ 64..192
-        // length: vec4×4  @192..256
-        let mut attrs: Vec<vk::VertexInputAttributeDescription> = Vec::with_capacity(17);
+        // cross:       vec4×8  @  64..192
+        // length:      vec4×4  @ 192..256
+        // style_pack:  vec4    @ 256
+        // style_aux:   vec4    @ 272
+        let mut attrs: Vec<vk::VertexInputAttributeDescription> = Vec::with_capacity(19);
 
         // location 0: per-vertex quad corner
         attrs.push(vk::VertexInputAttributeDescription {
@@ -281,6 +283,8 @@ impl RibbonRenderer {
         for i in 0..4u32 {
             push(&mut attrs, 13 + i, 192 + i * 16); // length[i]
         }
+        push(&mut attrs, 17, 256); // style_pack
+        push(&mut attrs, 18, 272); // style_aux
 
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&binding_descs)

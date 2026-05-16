@@ -1,16 +1,81 @@
 vec3 shadePbr() {
+    uint pbrFlags = floatBitsToUint(push.materialParams.z);
+    // Second UV scale + offset beats grid alignment; textureGrad keeps
+    // mips stable. POM skipped (needs one height ray). TBN from fragUV.
+    // Layer 2 adds rotation (~31°) so tile axes do not stay parallel to layer 1.
+    const uint PBR_VOID_ROCK_DUAL_TILE = 2048u;
+    bool voidRockDual = (pbrFlags & PBR_VOID_ROCK_DUAL_TILE) != 0u;
+
     vec3 Ngeo = normalize(fragNormal);
     vec3 V = normalize(ubo.cameraPos.xyz - fragWorldPos);
 
     mat3 TBN = cotangentFrame(Ngeo, fragWorldPos, fragUV);
     mat3 invTBN = transpose(TBN);
-    vec3 viewTS = invTBN * V;
 
-    vec2 uv = parallaxOffset(fragUV, viewTS, push.materialParams.y);
-    bool heightShadows = heightShadowsEnabled(push.materialParams.y);
+    vec2 uv;
+    vec3 albedo;
+    vec3 nTex;
+    vec2 mr;
+    float ao;
 
-    vec3 albedo = texture(baseColorMap, uv).rgb * fragColor;
-    vec3 nTex = texture(normalMap, uv).xyz * 2.0 - 1.0;
+    if (voidRockDual) {
+        // Layer 1: mesh UV. Layer 2: anisotropic scale + offset, then ~31°
+        // rotation so grout / tile axes never stay parallel to layer 1
+        // (the main reason a mild second scale still looked "on a grid").
+        const vec2 DUAL_SCL = vec2(1.108, 0.902);
+        const vec2 DUAL_OFF = vec2(0.217, 0.183);
+        const float RC = 0.8571673007;
+        const float RS = 0.5150380749;
+        mat2 Rm = mat2(RC, RS, -RS, RC);
+
+        vec2 uv0 = fragUV;
+        vec2 ddx0 = dFdx(uv0);
+        vec2 ddy0 = dFdy(uv0);
+
+        vec2 uv_s = uv0 * DUAL_SCL + DUAL_OFF;
+        vec2 ddx_s = ddx0 * DUAL_SCL;
+        vec2 ddy_s = ddy0 * DUAL_SCL;
+        vec2 uv1 = Rm * uv_s;
+        vec2 ddx1 = Rm * ddx_s;
+        vec2 ddy1 = Rm * ddy_s;
+
+        // Several incommensurate world frequencies so blend weight never
+        // locks to one layer across long strips aligned with UV axes.
+        vec2 wpA = fragWorldPos.xz * 0.068;
+        vec2 wpB = fragWorldPos.xz * 0.141;
+        float wraw = 0.5
+            + 0.31 * sin(wpA.x * 2.41 + wpA.y * 3.07)
+            + 0.28 * sin(wpA.x * 7.11 - wpA.y * 4.89)
+            + 0.24 * sin(wpB.x * 5.33 + wpB.y * 2.71)
+            + 0.19 * sin(dot(wpB, vec2(3.9, 5.7)) * 4.2);
+        float w = smoothstep(0.06, 0.94, wraw);
+
+        vec4 c0 = textureGrad(baseColorMap, uv0, ddx0, ddy0);
+        vec4 c1 = textureGrad(baseColorMap, uv1, ddx1, ddy1);
+        albedo = mix(c0, c1, w).rgb * fragColor;
+
+        vec3 sn0 = textureGrad(normalMap, uv0, ddx0, ddy0).xyz * 2.0 - 1.0;
+        vec3 sn1 = textureGrad(normalMap, uv1, ddx1, ddy1).xyz * 2.0 - 1.0;
+        nTex = normalize(mix(sn0, sn1, w));
+
+        vec2 mr0 = textureGrad(mrMap, uv0, ddx0, ddy0).rg;
+        vec2 mr1 = textureGrad(mrMap, uv1, ddx1, ddy1).rg;
+        mr = mix(mr0, mr1, w);
+
+        float ao0 = textureGrad(aoMap, uv0, ddx0, ddy0).r;
+        float ao1 = textureGrad(aoMap, uv1, ddx1, ddy1).r;
+        ao = mix(ao0, ao1, w);
+
+        uv = mix(uv0, uv1, w);
+    } else {
+        vec3 viewTS = invTBN * V;
+        uv = parallaxOffset(fragUV, viewTS, push.materialParams.y);
+        albedo = texture(baseColorMap, uv).rgb * fragColor;
+        nTex = texture(normalMap, uv).xyz * 2.0 - 1.0;
+        mr = texture(mrMap, uv).rg;
+        ao = texture(aoMap, uv).r;
+    }
+
     vec3 N = normalize(TBN * nTex);
     // Final NaN guard. If the TBN frame still degenerated
     // for any reason (e.g. nTex itself was a degenerate
@@ -19,10 +84,10 @@ vec3 shadePbr() {
     // going black across the derivative quad.
     if (any(isnan(N))) N = Ngeo;
 
-    vec2 mr = texture(mrMap, uv).rg;
-    float metallic  = mr.r;
+    float metallic = mr.r;
     float roughness = clamp(mr.g, 0.045, 1.0);
-    float ao        = texture(aoMap, uv).r;
+
+    bool heightShadows = heightShadowsEnabled(push.materialParams.y);
 
     applyHeightMaterialDetail(uv, push.materialParams.y, albedo, roughness, ao);
 

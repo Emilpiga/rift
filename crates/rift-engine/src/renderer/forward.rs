@@ -29,6 +29,7 @@ use crate::renderer::passes::sky::{SkyConfig, SkyRenderer};
 use crate::renderer::texture::Texture;
 use crate::renderer::uniform::UniformBuffers;
 use crate::renderer::uniforms::PointShadowSlotState;
+use crate::renderer::vfx::textures::VfxTextureLibrary;
 use crate::renderer::vfx::{ParticleVfxRenderer, RibbonRenderer, VfxSystem};
 use crate::vulkan::{
     buffer::GpuBuffer,
@@ -121,6 +122,8 @@ pub struct Renderer {
     /// additive); instances are partitioned by `blend` field at
     /// upload time and drawn in two `cmd_draw_indexed` calls.
     pub vfx_particle_renderer: ParticleVfxRenderer,
+    /// Authored VFX textures for hybrid particles (billow, flipbooks, …).
+    vfx_textures: VfxTextureLibrary,
     /// Compute-shader mesh skinner. Owns the `skin.comp` pipeline
     /// and per-skinned-mesh GPU resources (rest VB, skin SSBO,
     /// palette UBO ring, output VB, descriptor sets). Replaces
@@ -474,6 +477,13 @@ impl Renderer {
             post.translucent_set_layout,
             &shader_dir,
         )?;
+        let vfx_textures = VfxTextureLibrary::load(
+            &device.device,
+            &allocator,
+            device.graphics_queue,
+            command_pool,
+        )?;
+        vfx_textures.bind_translucent_descriptors(&device.device, &post);
         let vfx_system = VfxSystem::new(8192);
         let sky_renderer = SkyRenderer::new(&device.device, render_pass, &shader_dir)?;
         let skin_system = SkinningSystem::new(&device.device, &shader_dir)?;
@@ -523,6 +533,7 @@ impl Renderer {
             vfx_system,
             vfx_ribbon_renderer,
             vfx_particle_renderer,
+            vfx_textures,
             skin_system,
             deletion_queue: Vec::new(),
             // Per-frame scratch lists. Pre-sized to avoid the
@@ -625,6 +636,8 @@ impl Renderer {
             &self.swapchain,
             self.depth_buffer.view,
         )?;
+        self.vfx_textures
+            .bind_translucent_descriptors(&self.device.device, &self.post);
 
         // Recreate pipeline with new extent
         let (new_pipeline, new_layout) = Self::compile_pipeline_from_disk(
@@ -849,6 +862,8 @@ impl Drop for Renderer {
         self.vfx_ribbon_renderer
             .cleanup(&self.device.device, &self.allocator);
         self.vfx_particle_renderer
+            .cleanup(&self.device.device, &self.allocator);
+        self.vfx_textures
             .cleanup(&self.device.device, &self.allocator);
         self.skin_system
             .cleanup(&self.device.device, &self.allocator);

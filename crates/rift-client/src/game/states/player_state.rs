@@ -10,7 +10,7 @@
 
 use rift_game::abilities::AbilitySlot;
 use rift_game::attributes::Attributes;
-use rift_game::character::Gender;
+use rift_game::character::{CharacterAppearance, Gender};
 use rift_game::experience::Experience;
 use rift_game::hero::{HeroConfig, HERO};
 use rift_game::loadout::Loadout;
@@ -19,6 +19,7 @@ use rift_game::talents::{self, TalentTree};
 
 pub struct PlayerState {
     pub gender: Gender,
+    pub appearance: CharacterAppearance,
     pub name: String,
     pub config: HeroConfig,
     pub attributes: Attributes,
@@ -80,10 +81,20 @@ pub const PUNCH_RESET_AFTER: std::time::Duration = std::time::Duration::from_mil
 
 impl PlayerState {
     pub fn new() -> Self {
-        Self::with_profile(Gender::Female, String::new(), Loadout::default_hero())
+        Self::with_profile(
+            Gender::Female,
+            CharacterAppearance::default(),
+            String::new(),
+            Loadout::default_hero(),
+        )
     }
 
-    pub fn with_profile(gender: Gender, name: String, loadout: Loadout) -> Self {
+    pub fn with_profile(
+        gender: Gender,
+        appearance: CharacterAppearance,
+        name: String,
+        loadout: Loadout,
+    ) -> Self {
         let config = HERO.clone();
         let attributes = Attributes::for_class(config.primary_attribute);
 
@@ -103,6 +114,7 @@ impl PlayerState {
 
         Self {
             gender,
+            appearance,
             name,
             config,
             attributes,

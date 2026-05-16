@@ -85,11 +85,15 @@ pub fn tick(
             ..
         }
     ) {
+        let snap_aim = match en.ai_phase {
+            AiPhase::Windup { aim_dir, .. } => aim_dir,
+            _ => facing,
+        };
         if let Some(WindupKind::WraithScream) = tick_windup(en, kinematic, dt) {
             resolve_scream(
                 en,
                 kinematic.position,
-                facing,
+                snap_aim,
                 spec,
                 players,
                 damage_mult,
@@ -100,8 +104,8 @@ pub fn tick(
                 ability_id: rift_game::abilities::id::WRAITH_SCREAM_IMPACT,
                 origin: kinematic.position,
                 target: target_pos,
-                dir_x: facing.x,
-                dir_y: facing.z,
+                dir_x: snap_aim.x,
+                dir_y: snap_aim.z,
             });
             en.attack_cooldown = spec.cooldown;
         }
@@ -116,6 +120,7 @@ pub fn tick(
             net_id,
             WindupKind::WraithScream,
             spec.windup_dur,
+            facing,
             outcome,
         );
         outcome.casts.push(super::EnemyCast::Start {

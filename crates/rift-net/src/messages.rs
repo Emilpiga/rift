@@ -122,6 +122,10 @@ pub enum ClientMsg {
         class_id: String,
         /// Cosmetic gender choice (drives base mesh).
         gender: Gender,
+        /// Cosmetic appearance choice. Used when creating a new
+        /// character; existing characters keep their persisted row.
+        #[serde(default)]
+        appearance: Appearance,
     },
 
     /// Per-frame coalesced input. Sent at the client's render rate
@@ -131,12 +135,16 @@ pub enum ClientMsg {
 
     /// Request to pick up a loot drop. Server validates range +
     /// availability, broadcasts [`ServerMsg::LootClaimed`] on success.
-    PickUpLoot { net_id: NetId },
+    PickUpLoot {
+        net_id: NetId,
+    },
 
     /// Heartbeat / keepalive when the client is otherwise idle. Renet
     /// sends its own keepalive but this also lets the server track
     /// "client knows about tick N" for ack purposes.
-    Ack { last_received_tick: NetTick },
+    Ack {
+        last_received_tick: NetTick,
+    },
 
     /// Clean disconnect. Optional — the renet layer detects drops on
     /// its own — but lets the server log a friendly reason.
@@ -181,7 +189,9 @@ pub enum ClientMsg {
     /// to ride along, or `accept = false` to decline. Decline /
     /// timeout means the proposer's run starts without them
     /// (they stay in the hub). Reliable on `Channel::Control`.
-    PortalConfirm { accept: bool },
+    PortalConfirm {
+        accept: bool,
+    },
 
     /// Send a party invite to the player whose character name is
     /// `name`. Server validates the invitee is online, not
@@ -191,7 +201,9 @@ pub enum ClientMsg {
     /// a TTL-bound row is recorded server-side; on failure the
     /// inviter receives [`ServerMsg::PartyError`]. Reliable on
     /// `Channel::Control`.
-    PartyInvite { name: String },
+    PartyInvite {
+        name: String,
+    },
 
     /// Accept the most recent pending invite (or the named one
     /// if `from` is provided — useful when multiple invites are
@@ -199,12 +211,16 @@ pub enum ClientMsg {
     /// inviter's party, broadcasts [`ServerMsg::PartyState`] to
     /// every member, and clears the invite row. Reliable on
     /// `Channel::Control`.
-    PartyAccept { from: Option<String> },
+    PartyAccept {
+        from: Option<String>,
+    },
 
     /// Decline a pending invite. Server clears the row and
     /// notifies the inviter via a system chat line. Reliable on
     /// `Channel::Control`.
-    PartyDecline { from: Option<String> },
+    PartyDecline {
+        from: Option<String>,
+    },
 
     /// Leave the current party. If the leaver is the leader,
     /// leadership transfers to the next-longest-serving member.
@@ -217,13 +233,17 @@ pub enum ClientMsg {
     /// shape as [`Self::PartyLeave`]. Server silently drops the
     /// request if the caller is not the leader or `name` is not
     /// a member. Reliable on `Channel::Control`.
-    PartyKick { name: String },
+    PartyKick {
+        name: String,
+    },
 
     /// Leader-only: transfer leadership to `name`. Same
     /// broadcast shape as [`Self::PartyLeave`]. Server silently
     /// drops if the caller is not the leader or `name` is not a
     /// member. Reliable on `Channel::Control`.
-    PartyPromote { name: String },
+    PartyPromote {
+        name: String,
+    },
 
     /// Player asked to return to the safe hub (e.g. via a "leave
     /// rift" portal or after a death respawn). Same shape as
@@ -264,7 +284,9 @@ pub enum ClientMsg {
     /// Server cancels the matching active channel (if any). Reliable
     /// on `Channel::Event` so a dropped release doesn't lock the
     /// caster into the channel for its full duration.
-    EndChannel { ability_id: u8 },
+    EndChannel {
+        ability_id: u8,
+    },
 
     /// Move the item at `inventory_index` (into the bag mirror
     /// the client renders) into its default equipment slot. The
@@ -274,13 +296,23 @@ pub enum ClientMsg {
     /// `EquipmentSync` so client mirrors stay coherent. Reliable
     /// on `Channel::Control` so a dropped equip never silently
     /// loses the item.
-    EquipItem { inventory_index: u32 },
+    EquipItem {
+        inventory_index: u32,
+        /// Paperdoll cell ([`rift_game::loot::EquipSlot::to_u8`]). When `Some` and
+        /// [`rift_game::loot::Equipment::accepts`], that slot wins over
+        /// [`rift_game::loot::Equipment::default_slot`] (e.g. ring → ring 2 while
+        /// ring 1 is still empty). `None` keeps legacy first-empty-ring behaviour.
+        #[serde(default)]
+        target_slot: Option<u8>,
+    },
 
     /// Move whatever's currently in `slot` back into the bag.
     /// Server replies with the same dual sync as `EquipItem`. No-op
     /// (silently dropped) if the slot is empty or the byte doesn't
     /// match a known [`rift_game::loot::EquipSlot`].
-    UnequipItem { slot: u8 },
+    UnequipItem {
+        slot: u8,
+    },
 
     /// Ask the server to start a stash session. Server validates
     /// the player is in the hub and within interact range of the
@@ -294,12 +326,28 @@ pub enum ClientMsg {
     /// a fresh `OpenStash` succeeds. Reliable on `Channel::Control`.
     CloseStash,
 
+    /// Ask the server to start/end a hub anvil session. While open,
+    /// [`ClientMsg::RerollAffix`] may mutate bag/equipped items.
+    OpenAnvil,
+    CloseAnvil,
+
+    /// Reroll one affix on a bag or equipped item for shards. The
+    /// server validates the open anvil session, shard balance, item
+    /// source, and affix slot lock before spending.
+    RerollAffix {
+        source: EnchantSource,
+        affix_index: u8,
+    },
+
     /// Move the bag item at `inventory_index` into stash tab
     /// `tab_index` (server picks the first free slot in that
     /// tab). Server validates the index + that a stash session
     /// is open, then replies with both a fresh `InventorySync`
     /// and a fresh `StashSync`. Reliable on `Channel::Control`.
-    DepositToStash { inventory_index: u32, tab_index: u8 },
+    DepositToStash {
+        inventory_index: u32,
+        tab_index: u8,
+    },
 
     /// Like `DepositToStash` but moves the item into a specific
     /// `(tab_index, stash_index)` slot. If the slot is already
@@ -317,7 +365,10 @@ pub enum ClientMsg {
     /// stash session is open, then replies with both a fresh
     /// `InventorySync` and a fresh `StashSync`. Reliable on
     /// `Channel::Control`.
-    WithdrawFromStash { tab_index: u8, stash_index: u32 },
+    WithdrawFromStash {
+        tab_index: u8,
+        stash_index: u32,
+    },
 
     /// Like `WithdrawFromStash` but places the item into a
     /// specific bag slot. Same swap semantics as
@@ -334,7 +385,12 @@ pub enum ClientMsg {
     /// stash cell (or the first free bag slot if that fails).
     /// Server validates indices + that a stash session is open.
     /// Reliable on `Channel::Control`.
-    EquipFromStash { tab_index: u8, stash_index: u32 },
+    EquipFromStash {
+        tab_index: u8,
+        stash_index: u32,
+        #[serde(default)]
+        target_slot: Option<u8>,
+    },
 
     /// Unequip the item currently in `slot` directly into a
     /// specific stash cell. If the cell is occupied, the
@@ -357,13 +413,18 @@ pub enum ClientMsg {
     /// Auto-sort one stash tab. Same ordering as
     /// `SortInventory`. Server validates a stash session is
     /// open. Reliable on `Channel::Control`.
-    SortStashTab { tab_index: u8 },
+    SortStashTab {
+        tab_index: u8,
+    },
 
     /// Reorder the bag: swap the items at `a` and `b` (either may
     /// be an empty slot, in which case the filled item moves into
     /// the empty cell). Server replies with a fresh
     /// `InventorySync`. Reliable on `Channel::Control`.
-    SwapInventorySlots { a: u32, b: u32 },
+    SwapInventorySlots {
+        a: u32,
+        b: u32,
+    },
 
     /// Reorder the stash: swap the items at `a` and `b` within
     /// `tab_index`. Either index may be empty (past the
@@ -372,7 +433,11 @@ pub enum ClientMsg {
     /// last filled slot. Server validates a stash session is
     /// open and replies with a fresh `StashSync`. Reliable on
     /// `Channel::Control`.
-    SwapStashSlots { tab_index: u8, a: u32, b: u32 },
+    SwapStashSlots {
+        tab_index: u8,
+        a: u32,
+        b: u32,
+    },
 
     /// Drop the bag item at `inventory_index` onto the ground at
     /// the picker's current position. Server removes the row from
@@ -380,7 +445,9 @@ pub enum ClientMsg {
     /// usual `WorldEvent::LootDropped` so every observer's loot
     /// pillar appears. Replies with a fresh `InventorySync` to
     /// the picker. Reliable on `Channel::Control`.
-    DropInventoryItem { inventory_index: u32 },
+    DropInventoryItem {
+        inventory_index: u32,
+    },
 
     /// Drop the equipped item in `slot` directly onto the
     /// ground (skipping the bag). Server validates the slot
@@ -390,7 +457,9 @@ pub enum ClientMsg {
     /// with fresh `InventorySync` + `EquipmentSync`. Same
     /// town-drop ban as `DropInventoryItem` applies.
     /// Reliable on `Channel::Control`.
-    DropEquippedItem { slot: u8 },
+    DropEquippedItem {
+        slot: u8,
+    },
 
     /// Permanently destroy the bag item at `inventory_index` in
     /// exchange for [shards](`ServerMsg::ShardsSync`). Yield is
@@ -400,7 +469,9 @@ pub enum ClientMsg {
     /// their locked drops. Replies with both a fresh
     /// `InventorySync` and `ShardsSync`. Reliable on
     /// `Channel::Control`.
-    SalvageInventoryItem { inventory_index: u32 },
+    SalvageInventoryItem {
+        inventory_index: u32,
+    },
 
     /// Bulk-salvage every non-anchored bag item whose rarity is
     /// at most `rarity_max` (encoded the same as
@@ -409,7 +480,9 @@ pub enum ClientMsg {
     /// ctrl-clicking every slot. Replies with a single fresh
     /// `InventorySync` and `ShardsSync`. Reliable on
     /// `Channel::Control`.
-    SalvageInventoryBulk { rarity_max: u8 },
+    SalvageInventoryBulk {
+        rarity_max: u8,
+    },
 
     /// Spend shards to unlock another stash tab. Server picks
     /// the price from the player's current tab count and
@@ -425,12 +498,18 @@ pub enum ClientMsg {
     /// length cap, replaces leading/trailing whitespace, and
     /// rejects empty strings. On success: fresh `StashSync`.
     /// Reliable on `Channel::Control`.
-    RenameStashTab { tab_index: u8, name: String },
+    RenameStashTab {
+        tab_index: u8,
+        name: String,
+    },
 
     /// Recolor `tab_index`. `color` is packed `0xRRGGBB` and is
     /// applied verbatim. Server replies with a fresh
     /// `StashSync`. Reliable on `Channel::Control`.
-    RecolorStashTab { tab_index: u8, color: u32 },
+    RecolorStashTab {
+        tab_index: u8,
+        color: u32,
+    },
 
     /// Take whatever's currently in `slot` and place it into the
     /// bag at `inventory_index` (extending the bag if the index
@@ -438,7 +517,10 @@ pub enum ClientMsg {
     /// path so the user can pick the destination slot, instead of
     /// always appending to the end as `UnequipItem` does. Server
     /// replies with fresh `InventorySync` + `EquipmentSync`.
-    UnequipToBagSlot { slot: u8, inventory_index: u32 },
+    UnequipToBagSlot {
+        slot: u8,
+        inventory_index: u32,
+    },
 
     /// Swap the contents of two equipment slots in place.
     /// Server validates `Equipment::accepts` in BOTH
@@ -447,7 +529,10 @@ pub enum ClientMsg {
     /// Currently only ring1 ↔ ring2 satisfies the check, but
     /// the wire shape stays generic. Server replies with a
     /// fresh `EquipmentSync` on success.
-    SwapEquipSlots { a: u8, b: u8 },
+    SwapEquipSlots {
+        a: u8,
+        b: u8,
+    },
 
     /// Mutate one slot of the player's persisted ability loadout.
     /// `slot_index` is the action-bar slot (0..6); `ability_id`
@@ -457,7 +542,10 @@ pub enum ClientMsg {
     /// replies with [`ServerMsg::Loadout`] so every client
     /// stays in sync with what the server thinks is equipped.
     /// Reliable on `Channel::Control`.
-    SetLoadoutSlot { slot_index: u8, ability_id: u8 },
+    SetLoadoutSlot {
+        slot_index: u8,
+        ability_id: u8,
+    },
 
     /// Spend one talent point on the node identified by
     /// [`crate::messages::TalentNodeId`]. Server validates the
@@ -468,7 +556,9 @@ pub enum ClientMsg {
     /// replies with a fresh [`ServerMsg::TalentsSync`] snapshot.
     /// Silent no-op on a rejected invest.
     /// Reliable on `Channel::Control`.
-    InvestTalent { talent_id: u16 },
+    InvestTalent {
+        talent_id: u16,
+    },
 
     /// Lesser-respec a single talent node — refund every rank
     /// of `talent_id` and return the points to the player's
@@ -483,7 +573,9 @@ pub enum ClientMsg {
     /// token-cost / inventory consumption is layered on top by
     /// the eventual consumable-item plumbing.
     /// Reliable on `Channel::Control`.
-    RespecTalent { talent_id: u16 },
+    RespecTalent {
+        talent_id: u16,
+    },
 
     /// Greater-respec — wipe every invested point in the tree
     /// back to rank 0 and return them to the unspent pool.
@@ -538,7 +630,9 @@ pub enum ClientMsg {
     /// no vote is active, the caster is dead, or the caster has
     /// already voted (no changing your mind). Reliable on
     /// `Channel::Control`.
-    RiftExitVoteCast { yes: bool },
+    RiftExitVoteCast {
+        yes: bool,
+    },
 
     /// Set the local player's revive-shrine channel intent.
     /// `Some(shrine)` means "I am holding F within range of
@@ -551,7 +645,9 @@ pub enum ClientMsg {
     /// channel itself only ticks while every living player on
     /// the floor has matching `Some` intent. Reliable on
     /// `Channel::Control`.
-    SetShrineChannel { shrine: Option<NetId> },
+    SetShrineChannel {
+        shrine: Option<NetId>,
+    },
 
     /// Player typed a chat message. Server validates length /
     /// rate limit, routes to the right recipient set based on
@@ -640,6 +736,31 @@ pub enum Gender {
     Female,
 }
 
+/// Cosmetic appearance choices for a character. Kept as a tiny
+/// wire struct so `rift-net` does not depend on `rift-game`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Appearance {
+    pub skin_tone: u8,
+    pub hair_style: u8,
+    pub eyebrow_style: u8,
+    pub hair_color: u8,
+    pub eyebrow_color: u8,
+    pub chest_size: u8,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            skin_tone: 0,
+            hair_style: 0,
+            eyebrow_style: 0,
+            hair_color: 16,
+            eyebrow_color: 16,
+            chest_size: 128,
+        }
+    }
+}
+
 /// One row in a [`ServerMsg::Authenticated`] roster. Decoupled from
 /// `rift_persistence::CharacterRecord` so rift-net stays free of a
 /// database dependency — the server fills these in from whatever
@@ -649,6 +770,8 @@ pub struct RosterEntry {
     pub character_name: String,
     pub class_id: String,
     pub gender: Gender,
+    #[serde(default)]
+    pub appearance: Appearance,
     pub level: u32,
     /// Six ability wire ids the player has slotted on the action
     /// bar. See `rift_game::loadout::Loadout`. Sent so the
@@ -935,6 +1058,7 @@ pub enum ServerMsg {
         character_name: String,
         class_id: String,
         gender: Gender,
+        appearance: Appearance,
     },
 
     /// A player disconnected. Clients remove the corresponding remote
@@ -1630,9 +1754,9 @@ pub enum EntityKind {
 /// Wire-serialisable rolled item. Reconstructable via
 /// `rift_game::loot::Item::from_blob`. `base_id` and the inner
 /// `affix_id` indices reference the static
-/// `rift_game::loot::BASE_ITEMS` and `AFFIX_POOL` tables — both
-/// sides are guaranteed to share the same build of `rift-game`,
-/// so indices are stable for one build.
+/// `rift_game::loot::BASE_ITEMS` and the contiguous affix wire space
+/// (`AFFIX_POOL` followed by `RESONANCE_POOL`; see
+/// `rift_game::loot::affixes::WIRE_AFFIX_COUNT`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ItemBlob {
     /// Index into `rift_game::loot::BASE_ITEMS`.
@@ -1641,7 +1765,8 @@ pub struct ItemBlob {
     /// Rare=2, Legendary=3).
     pub rarity: u8,
     pub ilvl: u16,
-    /// `(affix-pool index, rolled value)` pairs.
+    /// `(wire affix index, rolled value)` pairs: indices `0..N` are
+    /// `AFFIX_POOL`, then `RESONANCE_POOL`.
     pub affixes: Vec<(u16, f32)>,
     /// `true` if this drop rolled the rare "Anchored" trait.
     /// Anchored items skip the wipe-on-death loot reset and
@@ -1691,6 +1816,19 @@ pub struct ItemBlob {
     /// `None` so pre-Phase-5 senders decode cleanly.
     #[serde(default)]
     pub rift_touched: Option<(u16, f32, u16)>,
+    /// The single affix slot locked for enchanting rerolls.
+    /// `None` means the item has not been modified at the anvil.
+    #[serde(default)]
+    pub enchanted_affix_index: Option<u8>,
+}
+
+/// Item source accepted by the hub anvil. Stash items are
+/// intentionally absent: enchanting only targets carried or
+/// equipped gear.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EnchantSource {
+    Bag(u32),
+    Equip(u8),
 }
 
 /// Wire shape of a single stash tab. The stash is now a

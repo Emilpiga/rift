@@ -92,6 +92,12 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, _dt: 
             || selection_blocked;
     if !combat_blocked {
         crate::game::combat_system::tick(state, input, renderer, dt);
+    } else if state.floor.in_hub
+        && !is_ghost
+        && !crate::game::ghost_system::is_dead(&state.world, state.net.local_ghost_cached)
+        && !selection_blocked
+    {
+        crate::game::combat_system::tick_hub_passives(state, input, renderer);
     } else if is_ghost
         && (state.frame.targeting.is_some() || state.frame.entity_targeting.is_some())
     {

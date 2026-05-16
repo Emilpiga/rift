@@ -20,9 +20,9 @@
 //! becomes a trivial enum adapter — no string sniffing, no
 //! prefix lookup tables.
 
-use super::affixes::AffixEffect;
+use super::affixes::{AffixDef, AffixEffect};
 use super::item::{Item, RolledAffix};
-use super::roll::roll_percentile;
+use super::roll::{roll_percentile, roll_range};
 
 /// Semantic role of a single tooltip line.
 ///
@@ -72,6 +72,9 @@ pub enum TooltipKind {
 pub struct TooltipLine {
     pub text: String,
     pub kind: TooltipKind,
+    /// True for the affix line that was modified at the anvil.
+    /// Kept out of `text` so roll-quality suffix parsing stays intact.
+    pub enchanted: bool,
     /// `Some(p)` for affix rows whose roll has a non-degenerate
     /// range; `p` is the 0..1 percentile of the roll inside that
     /// range. `None` for header rows (Name, ItemLevel,
@@ -86,6 +89,7 @@ impl TooltipLine {
         Self {
             text: text.into(),
             kind,
+            enchanted: false,
             percentile: None,
         }
     }
@@ -94,6 +98,62 @@ impl TooltipLine {
         self.percentile = p;
         self
     }
+}
+
+fn compose_name_template(template: &'static str, value_part: &str) -> String {
+    if template.contains("{}") {
+        template.replace("{}", value_part)
+    } else {
+        template.to_string()
+    }
+}
+
+/// Single rolled value — matches [`RolledAffix::tooltip_parts`] substitution rules.
+pub(crate) fn affix_effect_value_placeholder(effect: AffixEffect, value: f32) -> String {
+    match effect {
+        AffixEffect::Stat(stat) => {
+            if stat.is_percent() {
+                format!("{:+.1}%", value * 100.0)
+            } else {
+                format!("{:+.0}", value)
+            }
+        }
+        AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_) => {
+            format!("{:+.0}%", value * 100.0)
+        }
+        AffixEffect::ExtraProjectiles(_) => format!("+{}", value.round() as i32),
+        AffixEffect::Proc(_, _) => format!("{:.0}%", value * 100.0),
+        AffixEffect::TransformAbility(_, _) => String::new(),
+    }
+}
+
+/// Ilvl-scaled roller range for anvil preview rows — keeps numeric conventions aligned with
+/// [`affix_effect_value_placeholder`] so hover lists match live tooltip formatting.
+pub(crate) fn affix_effect_range_placeholder(effect: AffixEffect, lo: f32, hi: f32) -> String {
+    match effect {
+        AffixEffect::Stat(stat) => {
+            if stat.is_percent() {
+                format!("{:+.1}-{:+.1}%", lo * 100.0, hi * 100.0)
+            } else {
+                format!("{:+.0}-{:+.0}", lo, hi)
+            }
+        }
+        AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_) => {
+            format!("{:+.0}-{:+.0}%", lo * 100.0, hi * 100.0)
+        }
+        AffixEffect::ExtraProjectiles(_) => {
+            format!("+{}-+{}", lo.round() as i32, hi.round() as i32)
+        }
+        AffixEffect::Proc(_, _) => format!("{:.0}-{:.0}%", lo * 100.0, hi * 100.0),
+        AffixEffect::TransformAbility(_, _) => String::new(),
+    }
+}
+
+/// One candidate line for the hub anvil reroll list — shares formatting rules with tooltips.
+pub fn enchant_candidate_preview(def: &AffixDef, ilvl: u32) -> String {
+    let (lo, hi) = roll_range(def, ilvl);
+    let value = affix_effect_range_placeholder(def.effect, lo, hi);
+    compose_name_template(def.name_template, &value)
 }
 
 impl RolledAffix {
@@ -120,27 +180,28 @@ impl RolledAffix {
     /// percentile alongside without round-tripping through a
     /// parsed band-name suffix.
     pub fn tooltip_parts(&self, ilvl: u32) -> (String, Option<f32>) {
-        let value_str = match self.def.effect {
-            AffixEffect::Stat(stat) => {
-                if stat.is_percent() {
-                    format!("{:+.1}%", self.value * 100.0)
-                } else {
-                    format!("{:+.0}", self.value)
-                }
-            }
-            AffixEffect::AmplifyAbilityDamage(_) | AffixEffect::ReduceAbilityCooldown(_) => {
-                format!("{:+.0}%", self.value * 100.0)
-            }
-            AffixEffect::ExtraProjectiles(_) => format!("+{}", self.value.round() as i32),
-            AffixEffect::Proc(_, _) => format!("{:.0}%", self.value * 100.0),
-            AffixEffect::TransformAbility(_, _) => String::new(),
-        };
-        let line = if self.def.name_template.contains("{}") {
-            self.def.name_template.replace("{}", &value_str)
-        } else {
-            self.def.name_template.to_string()
-        };
+        let value_str = affix_effect_value_placeholder(self.def.effect, self.value);
+        let line = compose_name_template(self.def.name_template, &value_str);
         (line, roll_percentile(self.def, ilvl, self.value))
+    }
+}
+
+fn mark_enchanted_affix_line(out: &mut [TooltipLine], item: &Item) {
+    let Some(idx) = item.enchanted_affix_index else {
+        return;
+    };
+    let Some(affix) = item.affixes.get(idx as usize) else {
+        return;
+    };
+    let plain = affix.tooltip(item.ilvl);
+    let (legendary_plain, _) = affix.tooltip_parts(item.ilvl);
+    let resonance = format!("◆ {}", plain);
+    let legendary = format!("★ {}", legendary_plain);
+    for line in out {
+        if line.text == plain || line.text == resonance || line.text == legendary {
+            line.enchanted = true;
+            return;
+        }
     }
 }
 
@@ -516,6 +577,8 @@ impl Item {
             ));
         }
 
+        mark_enchanted_affix_line(&mut out, self);
+
         // Synergy footer: list slotted abilities this item helps.
         if let Some(lo) = loadout {
             let mut hits = self.synergy_against(lo);
@@ -590,5 +653,25 @@ impl Item {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod enchant_preview_tests {
+    use crate::loot::affixes::AFFIX_POOL;
+    use crate::loot::item::RolledAffix;
+
+    use super::enchant_candidate_preview;
+
+    #[test]
+    fn enchant_candidate_preview_matches_tooltip_parts_for_transform() {
+        let def = AFFIX_POOL
+            .iter()
+            .find(|d| d.id == "transform_frost_ray_shatter")
+            .expect("fixture affix");
+        let preview = enchant_candidate_preview(def, 30);
+        let rolled = RolledAffix { def, value: 0.0 };
+        let (parts, _) = rolled.tooltip_parts(30);
+        assert_eq!(preview, parts);
     }
 }

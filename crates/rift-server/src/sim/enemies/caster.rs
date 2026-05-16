@@ -224,6 +224,7 @@ pub fn tick(
             net_id,
             WindupKind::CasterBolt,
             bolt_windup,
+            dir_to,
             outcome,
         );
     }

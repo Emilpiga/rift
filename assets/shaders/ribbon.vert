@@ -36,7 +36,9 @@ layout(location = 0) in vec2 inCorner;
 layout(location = 1) in vec4 inOrigin;       // xyz = origin, w = width
 layout(location = 2) in vec4 inTip;          // xyz = tip,    w = effect time
 layout(location = 3) in vec4 inParams;       // brightness, noise_strength, noise_scroll, noise_tile
-layout(location = 4) in vec4 inFlags;        // octaves, _, _, _
+layout(location = 4) in vec4 inFlags;        // x = noise octaves
+layout(location = 17) in vec4 inStylePack;
+layout(location = 18) in vec4 inStyleAux;
 
 // Cross gradient: 8 stops × vec4. Locations 5..12.
 layout(location = 5)  in vec4 inCross0;
@@ -63,6 +65,8 @@ layout(location = 2) out float vTime;
 layout(location = 3)  flat out vec4 vCross[8];
 layout(location = 11) flat out vec4 vLength[4];
 layout(location = 15) flat out vec4 vFlags;
+layout(location = 16) flat out vec4 vStylePack;
+layout(location = 17) flat out vec4 vStyleAux;
 
 void main() {
     vec3 origin = inOrigin.xyz;
@@ -118,5 +122,7 @@ void main() {
 
     vLength[0] = inLen0; vLength[1] = inLen1;
     vLength[2] = inLen2; vLength[3] = inLen3;
-    vFlags = inFlags;
+    vFlags     = inFlags;
+    vStylePack = inStylePack;
+    vStyleAux  = inStyleAux;
 }

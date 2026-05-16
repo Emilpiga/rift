@@ -565,9 +565,8 @@ pub fn decorate_rift(floor: &Floor, seed: u64) -> Vec<PlacedProp> {
 /// Called from [`Floor::hub`]. The hub gets a stash chest at
 /// the player's spawn-adjacent stash anchor (passed in by the
 /// caller — the chest's position is gameplay-driven, not
-/// derived from the dungeon grid) and nothing else: the hub
-/// is intentionally bare so the social space reads as a
-/// clean staging area rather than a decorated room.
+/// derived from the dungeon grid) plus a void-forge station
+/// beside it (same footprint as a dungeon [`PropId::Anvil`]).
 pub fn decorate_hub(floor: &Floor, seed: u64, stash_pos: Vec3) -> Vec<PlacedProp> {
     let _ = (floor, seed);
     let mut out = Vec::new();
@@ -580,6 +579,14 @@ pub fn decorate_hub(floor: &Floor, seed: u64, stash_pos: Vec3) -> Vec<PlacedProp
         pos: stash_pos,
         yaw: -std::f32::consts::FRAC_PI_6,
         scale: 0.9,
+        wall_dir: None,
+        light: false,
+    });
+    out.push(PlacedProp {
+        id: VoidForge,
+        pos: stash_pos + Vec3::new(1.6, 0.0, -0.35),
+        yaw: std::f32::consts::FRAC_PI_4,
+        scale: 1.0,
         wall_dir: None,
         light: false,
     });

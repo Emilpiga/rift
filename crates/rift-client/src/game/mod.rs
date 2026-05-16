@@ -45,7 +45,8 @@ pub mod weapon_visuals;
 pub use phases::{combat_phase, gameplay_phase, render_phase, ui_phase};
 pub use states::{floor_state, frame_state, player_state, rift_state, sub_state};
 pub use systems::{
-    combat_system, ghost_system, loot_system, portal_system, shrine_system, stash_system,
+    combat_system, enchant_system, ghost_system, loot_system, portal_system, shrine_system,
+    stash_system,
 };
 
 pub use player_state::PlayerState;

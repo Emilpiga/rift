@@ -106,6 +106,7 @@ pub struct RemoteProfile {
     pub character_name: String,
     pub class_id: String,
     pub gender: rift_net::messages::Gender,
+    pub appearance: rift_net::messages::Appearance,
 }
 
 impl NetClient {

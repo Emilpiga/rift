@@ -21,23 +21,35 @@
 //!
 //! ## Module layout
 //!
-//! - [`spec`]   — the pure data types (this file).
-//! - `runtime` — CPU-side simulator + GPU instance build.
-//! - `presets` — named effects (Frost Ray, RoF, dodge puff, ...).
+//! - [`spec`]    — the pure data types.
+//! - [`style`]   — art-direction presets ([`style::StylePreset`]).
+//! - [`builder`] — reusable chunks + [`builder::EffectBuilder`].
+//! - `runtime`   — CPU-side simulator + GPU instance build.
+//! - `presets`   — named effects (Frost Ray, RoF, dodge puff, ...).
 //!
 //! The legacy `particles` module is left in place during the
 //! migration so existing call sites keep working unchanged.
 
+pub mod builder;
 pub mod particle_renderer;
 pub mod presets;
 pub mod ribbon_renderer;
 pub mod runtime;
 pub mod spec;
+pub mod style;
+pub mod textures;
 
+pub use builder::EffectBuilder;
+pub use builder::{
+    EmissionProfile, ImpactArchetype, MotionProfile, ParticleArchetype, ProcExplosionArchetype,
+    VfxRole,
+};
+pub use style::{gpu_id, StyleGpuAux, StyleGpuPack, StylePreset, StyleProfile};
 pub use particle_renderer::ParticleVfxRenderer;
 pub use ribbon_renderer::RibbonRenderer;
 pub use runtime::{EffectId, VfxParticleInstance, VfxRibbonInstance, VfxSystem};
 pub use spec::{
-    BlendMode, Curve, CurveStop, Effect, EmissionMode, ForceField, Gradient, GradientStop, Layer,
-    ParticleSpec, RibbonNoise, RibbonSpec, SpawnShape, SpriteShape,
+    BlendMode, Curve, CurveStop, Effect, EmissionMode, ForceField, Gradient, GradientStop,
+    HybridMaterial, HybridProfile, HybridProfileKind, Layer, ParticleSpec, RibbonNoise,
+    RibbonSpec, SpawnShape, SpriteShape,
 };

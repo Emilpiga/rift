@@ -77,6 +77,7 @@ pub struct ClientProfile {
     pub character_name: String,
     pub class_id: String,
     pub gender: rift_net::messages::Gender,
+    pub appearance: rift_net::messages::Appearance,
 }
 
 /// One inbound chat line awaiting drain into the chat HUD.
@@ -739,6 +740,7 @@ impl NetClient {
             character_name: profile.character_name.clone(),
             class_id: profile.class_id.clone(),
             gender: profile.gender,
+            appearance: profile.appearance,
         };
         self.send(Channel::Control, &msg);
         log::info!(
@@ -807,6 +809,7 @@ impl NetClient {
                 character_name,
                 class_id,
                 gender,
+                appearance,
             } => {
                 if Some(net_id) == self.our_net_id {
                     // PlayerJoined for ourselves — server is just
@@ -824,6 +827,7 @@ impl NetClient {
                         character_name,
                         class_id,
                         gender,
+                        appearance,
                     },
                 );
             }

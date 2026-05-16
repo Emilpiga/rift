@@ -61,8 +61,14 @@ layout(location = 0) in vec2 inCorner; // [-0.5, 0.5]^2
 // Per-instance (binding 1) — must match VfxParticleInstance.
 layout(location = 1) in vec4 inPosSize;     // xyz = position, w = size
 layout(location = 2) in vec4 inColor;       // HDR rgba (alpha = opacity)
-layout(location = 3) in vec4 inMisc;        // x = seed, y = sprite (uint), z = blend, w = _pad
-layout(location = 4) in vec4 inVelSpin;     // xyz = world velocity, w = rotation phase
+layout(location = 3) in vec4 inMisc;        // x = seed, y = sprite (uint), z = blend, w = life_t
+layout(location = 4) in vec4 inOriginVel;   // x = spawn origin Y, yzw = velocity
+layout(location = 5) in float inSpin;       // rotation phase (radians)
+layout(location = 6) in vec4 inHybridMeta;  // texture slot, profile kind, p0, p1
+layout(location = 7) in vec4 inHybridParams;
+layout(location = 8) in vec4 inStylePack;
+layout(location = 9) in vec4 inStyleAux;
+layout(location = 10) in vec4 inRolePack;
 
 // Outputs to fragment shader.
 layout(location = 0) out vec4  vColor;
@@ -78,22 +84,43 @@ layout(location = 5) out float vFogFactor;
 // Per-pixel brightness multiplier — cuts very-near particles
 // slightly so they don't blow ACES into pure white.
 layout(location = 6) out float vDistDim;
+layout(location = 7) out float vLifeT;
+layout(location = 8) out float vWorldY;
+layout(location = 9) out float vOriginY;
+layout(location = 10) out vec2 vWorldXZ;
+layout(location = 11) flat out vec4 vHybridMeta;
+layout(location = 12) flat out vec4 vHybridParams;
+// Particle centre XZ — flat so billow UV is not sheared across the quad.
+layout(location = 13) flat out vec2 vWorldXZAnchor;
+layout(location = 14) flat out vec4 vStylePack;
+layout(location = 15) flat out vec4 vStyleAux;
+layout(location = 16) flat out vec4 vRolePack;
 
 void main() {
+    vStylePack    = inStylePack;
+    vStyleAux     = inStyleAux;
+    vRolePack     = inRolePack;
+    vHybridMeta   = inHybridMeta;
+    vHybridParams = inHybridParams;
+    vLifeT    = inMisc.w;
+    vOriginY  = inOriginVel.x;
     vec3 camRight = vec3(ubo.view[0][0], ubo.view[1][0], ubo.view[2][0]);
     vec3 camUp    = vec3(ubo.view[0][1], ubo.view[1][1], ubo.view[2][1]);
 
     float size = inPosSize.w;
     vec3  worldCentre = inPosSize.xyz;
+    vWorldXZAnchor = worldCentre.xz;
 
     // ---- Per-particle rotation ----
     // Rotate the (camRight, camUp) basis by `spin` so each
     // billboard tumbles independently. One sin/cos per vertex.
-    float spin = inVelSpin.w;
+    float spin = inSpin;
     float cs = cos(spin);
     float sn = sin(spin);
     vec3 axisR = camRight * cs + camUp * sn;
     vec3 axisU = camUp    * cs - camRight * sn;
+
+    uint spriteId = floatBitsToUint(inMisc.y);
 
     // ---- Motion stretch ----
     // Project the particle's world velocity into the camera's
@@ -103,7 +130,7 @@ void main() {
     // fast particles don't draw a kilometre-long line.
     // Faded in over 0.3..1.2 m/s so settled smoke / idling
     // embers don't smear in jitter directions.
-    vec3 vel = inVelSpin.xyz;
+    vec3 vel = inOriginVel.yzw;
     float velR = dot(vel, camRight);
     float velU = dot(vel, camUp);
     vec2  velScreen = vec2(velR, velU);
@@ -113,6 +140,26 @@ void main() {
                                 0.0, 2.0);
     stretchAmount *= smoothstep(0.30, 1.20, speed);
     vec2 stretchDir = (speed > 1e-4) ? velScreen / speed : vec2(0.0);
+
+    // Subtle world-up elongation for fire plumes (not smoke — stretch
+    // reads as streaks; smoke stays isotropic round billboards).
+    if (spriteId == 0u || spriteId == 9u) {
+        const vec3 worldUp = vec3(0.0, 1.0, 0.0);
+        vec2 upScreen = vec2(dot(worldUp, camRight), dot(worldUp, camUp));
+        float upLen = length(upScreen);
+        if (upLen > 1e-4) {
+            upScreen /= upLen;
+            float upVel = max(dot(vel, worldUp), 0.0);
+            float flameStretch = 0.11 + 0.05 * smoothstep(0.0, 1.8, upVel);
+            if (speed < 0.35) {
+                stretchDir = upScreen;
+                stretchAmount = max(stretchAmount, flameStretch);
+            } else {
+                stretchDir = normalize(stretchDir + upScreen * 0.45);
+                stretchAmount = min(stretchAmount + flameStretch * 0.55, 1.35);
+            }
+        }
+    }
 
     // ---- Wisp / SilkStrand: cylindrical billboard ----
     // The `Wisp` sprite (id 6) and `SilkStrand` sprite (id 7)
@@ -135,7 +182,65 @@ void main() {
     // We assemble the 3D world position here directly and
     // skip the generic 2D corner-stretch path below by
     // returning early at the end.
-    uint spriteId = floatBitsToUint(inMisc.y);
+    // Flame (9): world-up tongue, bottom-anchored. Whole billboard
+    // sways and leans with time + particle velocity so tongues
+    // bend as a unit instead of only shimmering inside UV space.
+    if (spriteId == 9u) {
+        const vec3 worldUp = vec3(0.0, 1.0, 0.0);
+        vec3 hAxis = camRight - worldUp * dot(camRight, worldUp);
+        float hLen = length(hAxis);
+        hAxis = (hLen > 1e-4) ? hAxis / hLen : vec3(1.0, 0.0, 0.0);
+
+        // Shorter reach than before — tall quads read as a flamethrower jet.
+        float stretch = 1.52;
+        float vSize = size * (1.0 + stretch);
+        float hSize = size * 0.46;
+
+        float lifeT = inMisc.w;
+        float h01 = inCorner.y + 0.5;
+        float phase = inMisc.x * 6.2831853;
+        float t = ubo.timeData.x * 0.42;
+
+        float lifeBulge = sin(lifeT * 3.1415927) * 0.28;
+        float widthScale = (1.0 + lifeBulge * smoothstep(0.10, 0.50, h01))
+                         * (1.0 - 0.22 * smoothstep(0.70, 1.0, lifeT));
+        float heightScale = mix(0.90, 1.05, smoothstep(0.0, 0.40, lifeT))
+                          * (1.0 + 0.08 * smoothstep(0.60, 1.0, lifeT) * h01);
+        hSize = hSize * widthScale;
+        vSize = vSize * heightScale;
+
+        float sway = (sin(t * 1.35 + phase + lifeT * 2.5) * 0.11
+                    + sin(t * 2.2 + phase * 1.4 - lifeT * 3.5) * 0.04) * h01 * h01;
+        float velSide = dot(inOriginVel.yzw, hAxis);
+        float velBend = clamp(velSide * 0.018, -0.06, 0.06) * h01 * h01;
+        float breathe = 1.0 + 0.04 * sin(t * 3.2 + phase * 0.9 + lifeT * 2.5)
+                            * smoothstep(0.0, 0.80, h01);
+
+        vec3 worldPos = worldCentre
+            + hAxis    * (inCorner.x * hSize + (sway + velBend) * vSize)
+            + worldUp  * (inCorner.y + 0.5) * vSize * breathe;
+
+        gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+        vWorldY = worldPos.y;
+
+        float fogStart = ubo.fogParams.x;
+        float fogEnd   = ubo.fogParams.y;
+        float fogDist  = length(ubo.fogOrigin.xyz - worldCentre);
+        float fogRaw   = clamp((fogDist - fogStart) / max(fogEnd - fogStart, 1e-3),
+                               0.0, 1.0);
+        vFogFactor = fogRaw * fogRaw;
+
+        float camDist = length(ubo.cameraPos.xyz - worldCentre);
+        vDistDim = mix(0.55, 1.0, smoothstep(0.4, 1.5, camDist));
+
+        vColor      = inColor;
+        vUv         = inCorner + 0.5;
+        vSprite     = spriteId;
+        vSeed       = inMisc.x;
+        vStretchDir = vec2(0.0, 1.0) * stretch;
+        return;
+    }
+
     if (spriteId == 6u || spriteId == 7u) {
         const vec3 worldUp = vec3(0.0, 1.0, 0.0);
 
@@ -169,6 +274,7 @@ void main() {
             + worldUp  * (inCorner.y + 0.5) * vSize;
 
         gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+        vWorldY = worldPos.y;
 
         // Per-pixel passthrough — same as the generic path.
         float fogStart = ubo.fogParams.x;
@@ -196,7 +302,7 @@ void main() {
 
     // ---- GroundCrack: flat XZ decal ----
     if (spriteId == 8u) {
-        float yaw = inVelSpin.w;
+        float yaw = inSpin;
         float cy = cos(yaw);
         float sy = sin(yaw);
         vec2 rotated = vec2(
@@ -208,6 +314,7 @@ void main() {
             + vec3(rotated.x * size, 0.0, rotated.y * size);
 
         gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+        vWorldY = worldPos.y;
 
         float fogStart = ubo.fogParams.x;
         float fogEnd   = ubo.fogParams.y;
@@ -224,6 +331,7 @@ void main() {
         vSprite     = spriteId;
         vSeed       = inMisc.x;
         vStretchDir = vec2(0.0);
+        vWorldXZ    = worldCentre.xz;
         return;
     }
 
@@ -234,7 +342,17 @@ void main() {
     // this collapses back to the original square. Wisps go
     // through this path even at zero velocity because the
     // override above sets `stretchAmount` independently.
+    // Smoke / hybrid billow: no motion stretch — velocity smear reads as streaks.
+    if (spriteId == 2u || spriteId == 10u) {
+        stretchAmount = 0.0;
+        stretchDir = vec2(0.0);
+    }
+
     vec2 corner = inCorner;
+    // Oversized quad so fade hits zero before the hard triangle edge.
+    if (spriteId == 2u || spriteId == 10u) {
+        corner *= 1.45;
+    }
     if (stretchAmount > 1e-4) {
         vec2 along  = stretchDir;
         vec2 across = vec2(-stretchDir.y, stretchDir.x);
@@ -248,6 +366,8 @@ void main() {
         + axisU * corner.y * size;
 
     gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
+    vWorldY  = worldPos.y;
+    vWorldXZ = worldPos.xz;
 
     // ---- Fog factor ----
     // Match `forward/main.glsl`'s player-anchored quadratic fog so

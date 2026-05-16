@@ -94,6 +94,14 @@ impl KeyLight {
         color: Vec3::new(2.10, 1.55, 0.95),
         ambient: 0.55,
     };
+
+    /// Cool violet directional fill for the void hub — matches
+    /// [`crate::SkyConfig::void_hub`] (no sun disc; soft rim light).
+    pub const VOID_HUB: Self = Self {
+        direction: Vec3::new(-0.42143446, 0.82380265, -0.38129958),
+        color: Vec3::new(1.55, 1.22, 2.05),
+        ambient: 0.40,
+    };
 }
 
 impl Default for KeyLight {

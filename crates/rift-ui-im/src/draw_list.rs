@@ -139,6 +139,25 @@ pub trait DrawList {
         screen_h: f32,
     );
 
+    /// Like [`Self::rounded_rect_px_radial`] but distance uses
+    /// the **Chebyshev** norm `max(|dx|/hx, |dy|/hy)` so iso-
+    /// contours are axis-aligned **squares** — better for
+    /// inventory slot vignettes on nearly square cells. Buttons
+    /// keep the elliptical [`Self::rounded_rect_px_radial`].
+    #[allow(clippy::too_many_arguments)]
+    fn rounded_rect_px_radial_square(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    );
+
     /// True rounded outline of constant pixel thickness —
     /// the corner runs are real arcs, unlike the four-edge-
     /// rect approximation in the Ui helper. Use for inset
@@ -234,7 +253,8 @@ pub trait DrawList {
 
     /// Rasterise `text` at pixel position `(x, y)` (top-left
     /// anchor of the first glyph's bbox), in `size`-pixel cap
-    /// height. Returns the advance width consumed.
+    /// height. `header_font` selects Share Tech vs PT Serif.
+    /// Returns the advance width consumed.
     fn text(
         &mut self,
         text: &str,
@@ -242,15 +262,14 @@ pub trait DrawList {
         y: f32,
         size: f32,
         color: [f32; 4],
+        header_font: bool,
         screen_w: f32,
         screen_h: f32,
     ) -> f32;
 
     /// Predict the rendered width of `text` at `size`-pixel cap
-    /// height. Pure measurement — no draw side-effects. Used by
-    /// widgets that need to right-align or centre text without
-    /// actually emitting it first.
-    fn measure_text(&self, text: &str, size: f32) -> f32;
+    /// height. `header_font` must match the face used when drawing.
+    fn measure_text(&self, text: &str, size: f32, header_font: bool) -> f32;
 
     /// Draw a previously-registered icon (e.g. an item / class
     /// glyph). `name` matches the key the engine registered the
@@ -259,6 +278,20 @@ pub trait DrawList {
     /// keep the source colours. Returns `false` on an unknown
     /// name so the caller can fall back to a placeholder.
     fn icon(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tint: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> bool;
+
+    /// Same atlas lookup as [`Self::icon`], but the renderer uses the texture as a
+    /// luminance × alpha mask for opacity; RGB comes only from `tint.rgb`.
+    fn icon_silhouette(
         &mut self,
         name: &str,
         x: f32,

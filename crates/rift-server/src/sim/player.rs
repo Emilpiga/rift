@@ -121,6 +121,9 @@ pub struct ServerPlayer {
     /// `DepositToStash` / `WithdrawFromStash` so out-of-band
     /// transfer requests are dropped server-side.
     pub stash_open: bool,
+    /// Whether the owner currently has an active anvil/enchant
+    /// session in the hub. Gates reroll requests server-side.
+    pub anvil_open: bool,
     /// Character level. Used by [`CharacterStats::compute`] for
     /// HP-per-level scaling.
     pub level: u32,
@@ -246,6 +249,7 @@ impl ServerPlayer {
             equipment,
             stash: vec![StashTab::fresh(0)],
             stash_open: false,
+            anvil_open: false,
             level: DEFAULT_LEVEL,
             character_id: None,
             attrs,

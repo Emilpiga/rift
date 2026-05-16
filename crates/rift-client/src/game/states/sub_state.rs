@@ -65,6 +65,11 @@ pub struct NetState {
     /// queued events are forwarded in order so a quick
     /// open-then-close double-tap survives.
     pub stash_session_requests: Vec<bool>,
+    /// Anvil session toggle requests, drained per frame.
+    pub anvil_session_requests: Vec<bool>,
+    /// Server-authoritative enchant reroll requests queued by
+    /// the inventory panel while the anvil is open.
+    pub pending_enchant_rerolls: Vec<(rift_net::messages::EnchantSource, u8)>,
     /// Loadout-slot mutations the binary forwards to the server
     /// as `ClientMsg::SetLoadoutSlot`. Each tuple is
     /// `(slot_index, ability_id)`. The server replies with
@@ -320,6 +325,8 @@ pub struct LootClientState {
     /// the inventory panel open in the UI layer; panel
     /// visibility itself stays in [`super::mp_inventory_ui`].
     pub stash_session: bool,
+    /// Local mirror of the hub anvil interaction state.
+    pub anvil_session: bool,
     /// Set when `equipment` was rewritten by an `EquipmentSync`
     /// but the local-player avatar's modular outfit attachments
     /// haven't been refreshed yet. Consumed by the binary's
@@ -359,6 +366,7 @@ impl LootClientState {
         // exists in the hub, and a stale "stash open" flag
         // would cause bag clicks to deposit into nothing.
         self.stash_session = false;
+        self.anvil_session = false;
         self.stash_tabs.clear();
     }
 }
@@ -410,6 +418,7 @@ pub enum StashRequest {
     EquipFromStash {
         tab_index: u8,
         stash_index: u32,
+        target_slot: Option<u8>,
     },
     /// Unequip the item in `slot` directly into a specific
     /// stash cell (mirror of `EquipFromStash`).
@@ -445,6 +454,7 @@ pub enum StashRequest {
 pub enum EquipRequest {
     Equip {
         inventory_index: u32,
+        target_slot: Option<u8>,
     },
     Unequip {
         slot: u8,

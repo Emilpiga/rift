@@ -103,6 +103,42 @@ impl SelectionState {
             })
     }
 
+    pub fn melee_auto_aim(&self, caster: Vec3, aim_dir: Vec3, range: f32) -> Option<Vec3> {
+        let aim = Vec3::new(aim_dir.x, 0.0, aim_dir.z).normalize_or_zero();
+        if aim.length_squared() < 1.0e-4 {
+            return None;
+        }
+
+        for reference in [self.hovered, self.selected].into_iter().flatten() {
+            let Some(candidate) = self.by_id(reference.net_id) else {
+                continue;
+            };
+            if candidate.reference.relation != SelectionRelation::Hostile {
+                continue;
+            }
+            if let Some(dir) = melee_dir_to_candidate(candidate, caster, aim, range, -0.35) {
+                return Some(dir);
+            }
+        }
+
+        let mut best: Option<(Vec3, f32)> = None;
+        for candidate in &self.candidates {
+            if candidate.reference.relation != SelectionRelation::Hostile {
+                continue;
+            }
+            let Some(dir) = melee_dir_to_candidate(candidate, caster, aim, range, 0.15) else {
+                continue;
+            };
+            let dist = xz_distance(candidate.position, caster);
+            let dot = dir.dot(aim);
+            let score = dot * 2.0 - dist / range.max(0.1);
+            if best.map_or(true, |(_, best_score)| score > best_score) {
+                best = Some((dir, score));
+            }
+        }
+        best.map(|(dir, _)| dir)
+    }
+
     pub fn refresh(
         &mut self,
         world: &hecs::World,
@@ -508,6 +544,35 @@ impl SelectionState {
             }
         }
     }
+}
+
+fn melee_dir_to_candidate(
+    candidate: &SelectionCandidate,
+    caster: Vec3,
+    aim: Vec3,
+    range: f32,
+    min_dot: f32,
+) -> Option<Vec3> {
+    let delta = Vec3::new(
+        candidate.position.x - caster.x,
+        0.0,
+        candidate.position.z - caster.z,
+    );
+    let dist = delta.length();
+    if dist <= 1.0e-4 || dist > range + candidate.radius + 0.45 {
+        return None;
+    }
+    let dir = delta / dist;
+    if dir.dot(aim) < min_dot {
+        return None;
+    }
+    Some(dir)
+}
+
+fn xz_distance(a: Vec3, b: Vec3) -> f32 {
+    let dx = a.x - b.x;
+    let dz = a.z - b.z;
+    (dx * dx + dz * dz).sqrt()
 }
 
 fn cursor_ray(input: &Input, renderer: &Renderer) -> Option<(Vec3, Vec3)> {

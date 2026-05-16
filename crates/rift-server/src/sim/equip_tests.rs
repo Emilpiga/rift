@@ -46,7 +46,7 @@ fn equip_succeeds_when_player_meets_requirement() {
     let req = item.required_level();
     let (mut sim, client) = setup(req, item);
     assert!(
-        sim.equip_from_bag(client, 0),
+        sim.equip_from_bag(client, 0, None),
         "equip should succeed when level >= required",
     );
     // Bag entry consumed (no displaced item, slot was empty).
@@ -72,7 +72,7 @@ fn equip_rejected_when_player_under_level() {
     assert!(req >= 2, "test invariant: ilvl-30 item asks for >=2");
     let (mut sim, client) = setup(1, item);
     assert!(
-        !sim.equip_from_bag(client, 0),
+        !sim.equip_from_bag(client, 0, None),
         "equip should reject when player level < required",
     );
     // Item must still be in the bag, weapon slot empty.
@@ -97,7 +97,7 @@ fn equip_at_exact_required_level_succeeds() {
     let req = item.required_level();
     let (mut sim, client) = setup(req, item);
     assert!(
-        sim.equip_from_bag(client, 0),
+        sim.equip_from_bag(client, 0, None),
         "boundary req == level should equip"
     );
 }
@@ -110,7 +110,7 @@ fn equip_one_under_required_level_fails() {
     assert!(req >= 2, "test needs req >= 2 to subtract 1");
     let (mut sim, client) = setup(req - 1, item);
     assert!(
-        !sim.equip_from_bag(client, 0),
+        !sim.equip_from_bag(client, 0, None),
         "boundary req - 1 should reject",
     );
 }
@@ -148,5 +148,25 @@ fn occupied_ring2_drop_replaces_ring2_not_ring1() {
             .map(|item| item.ilvl),
         Some(5),
         "old ring 2 item should land back in the original bag cell",
+    );
+}
+
+#[test]
+fn equip_both_rings_empty_honours_explicit_ring2() {
+    let bag_ring = rolled("ring_basic", 5, 99);
+    let (mut sim, client) = setup(30, bag_ring);
+    assert!(
+        sim.equip_from_bag(client, 0, Some(rift_game::loot::EquipSlot::Ring2.to_u8()),),
+        "explicit ring2 target should succeed",
+    );
+    let entity = *sim.sessions.get(&client).unwrap();
+    let p = sim.world.get::<&ServerPlayer>(entity).unwrap();
+    assert!(
+        p.equipment.get(rift_game::loot::EquipSlot::Ring1).is_none(),
+        "ring 1 must stay empty when user aimed at ring 2",
+    );
+    assert!(
+        p.equipment.get(rift_game::loot::EquipSlot::Ring2).is_some(),
+        "ring 2 should receive the equip",
     );
 }

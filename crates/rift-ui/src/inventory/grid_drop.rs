@@ -9,9 +9,9 @@
 //! wrong sub-cell.
 
 use rift_ui_im::{Color, Pos2, Rect, Ui};
-use rift_ui_types::inventory::{DragSource, InventoryAction};
+use rift_ui_types::inventory::{DragSource, EnchantSourceView, InventoryAction};
 
-use super::drag::{handle_drop, DropTarget};
+use super::drag::{forge_drop_blocked, handle_drop, DropTarget};
 
 /// Per-grid description.
 pub struct GridSpec<'a> {
@@ -200,6 +200,7 @@ pub fn snap_preview_and_resolve<F>(
     source_anchor_idx: Option<u32>,
     stash_open: bool,
     active_tab_u8: u8,
+    forge_anchor: Option<EnchantSourceView>,
     target_for: F,
     out_actions: &mut Vec<InventoryAction>,
     in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
@@ -218,7 +219,11 @@ where
     ) else {
         return false;
     };
-    let valid = resolved.is_legal(grid, src_w, src_h, source_anchor_idx);
+    let drag_pl = ui.drag_payload::<DragSource>().copied();
+    let tgt_preview = target_for.target(resolved.anchor_cell_idx);
+    let forge_clash = drag_pl.is_some_and(|pl| forge_drop_blocked(forge_anchor, pl, tgt_preview));
+    let mut valid = resolved.is_legal(grid, src_w, src_h, source_anchor_idx);
+    valid &= !forge_clash;
     let fill = if valid {
         Color::rgba(0.30, 0.95, 0.55, 0.18)
     } else {
@@ -238,6 +243,10 @@ where
         if valid {
             let target_idx = resolved.anchor_cell_idx;
             if Some(target_idx) != source_anchor_idx {
+                let tgt = target_for.target(target_idx);
+                if forge_drop_blocked(forge_anchor, drop.payload, tgt) {
+                    return consumed;
+                }
                 *in_transit = Some(rift_ui_types::inventory::InTransitSource::from_drag(
                     drop.payload,
                     active_tab_u8,

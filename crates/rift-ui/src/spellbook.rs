@@ -165,12 +165,12 @@ pub fn frame_spellbook(
     }
 
     Frame::inset(&theme)
-        .with_fill(Color::rgba(0.035, 0.032, 0.030, 0.86))
+        .with_fill(Color::rgba(0.045, 0.035, 0.072, 0.88))
         .show_only(ui, detail_rect);
     let focus = hovered_ability.or_else(|| selected_ability(view, state.selected_ability));
     draw_ability_detail(ui, detail_rect, focus, view.player_level, fit);
 
-    ui.draw_text(
+    ui.draw_header_text(
         Pos2::new(bar_strip_rect.x(), bar_strip_rect.y()),
         "ACTION BAR",
         theme.fonts.size_sm,
@@ -292,13 +292,13 @@ fn draw_lock_badge(ui: &mut Ui<'_>, tile_pos: Pos2, tile_size: f32, unlock_level
         pill_w,
         pill_h,
     );
-    ui.draw_rect(pill, Color::rgba(0.10, 0.025, 0.020, 0.92));
-    ui.draw_outline(pill, 1.0, Color::rgba(0.65, 0.22, 0.18, 0.86));
+    ui.draw_rect(pill, Color::rgba(0.12, 0.06, 0.22, 0.92));
+    ui.draw_outline(pill, 1.0, Color::rgba(0.58, 0.38, 0.88, 0.86));
     ui.draw_text(
         Pos2::new(pill.x() + 6.0 * fit, pill.y() + 2.0 * fit),
         &text,
         theme.fonts.size_sm,
-        Color::rgba(0.96, 0.56, 0.48, 1.0),
+        Color::rgba(0.88, 0.72, 1.0, 1.0),
     );
 }
 
@@ -321,7 +321,7 @@ fn draw_ability_detail(
         return;
     };
 
-    ui.draw_text(
+    ui.draw_header_text(
         Pos2::new(rect.x() + pad, rect.y() + pad),
         ability.name,
         theme.fonts.size_lg,
@@ -340,7 +340,7 @@ fn draw_ability_detail(
         if ability.unlocked {
             theme.colors.success
         } else {
-            Color::rgba(0.86, 0.46, 0.40, 1.0)
+            Color::rgba(0.76, 0.62, 0.95, 1.0)
         },
     );
 
@@ -391,7 +391,7 @@ fn draw_ability_detail(
         Pos2::new(rect.x() + pad, rect.y() + pad + 30.0 * fit),
         &stats,
         theme.fonts.size_sm,
-        Color::rgba(0.96, 0.78, 0.48, 1.0),
+        Color::rgba(0.92, 0.82, 1.0, 1.0),
     );
     ui.draw_text(
         Pos2::new(rect.x() + pad, rect.y() + pad + 58.0 * fit),
@@ -408,7 +408,7 @@ fn draw_ability_detail(
             Pos2::new(rect.x() + pad, rect.max.y - pad - 14.0 * fit),
             &lock_text,
             theme.fonts.size_sm,
-            Color::rgba(0.86, 0.46, 0.40, 1.0),
+            Color::rgba(0.76, 0.62, 0.95, 1.0),
         );
     }
 }

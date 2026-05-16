@@ -5,8 +5,12 @@
 //! Owned by [`super::state::GameState::frame`]; phase modules
 //! mutate these fields directly through the struct.
 
+use std::collections::HashMap;
+
 use crate::game::combat_system::{EntityTargeting, PlacedTargeting};
+use glam::Vec3;
 use rift_engine::ui::im::Rect;
+use rift_net::NetId;
 
 #[derive(Default)]
 pub struct FrameState {
@@ -91,6 +95,10 @@ pub struct FrameState {
     /// cast. Cleared at the top of every `ui_phase` tick so
     /// rects only ever survive one frame.
     pub hud_consume_rects: Vec<Rect>,
+    /// Wraith scream wind-up aim per caster. Impact VFX must
+    /// reuse this so the release matches the telegraph even if
+    /// the wire `dir` on the impact event differs.
+    pub wraith_scream_telegraph_aim: HashMap<NetId, Vec3>,
 }
 
 impl FrameState {
@@ -116,5 +124,6 @@ impl FrameState {
         self.party_click_target_name = None;
         self.party_click_target_net_id = None;
         self.hud_consume_rects.clear();
+        self.wraith_scream_telegraph_aim.clear();
     }
 }

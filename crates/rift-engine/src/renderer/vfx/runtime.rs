@@ -32,6 +32,7 @@ use super::spec::{
     SpawnShape, SpriteShape,
 };
 use crate::renderer::forward::PointLight;
+use crate::renderer::vfx::textures::pack_hybrid_instance;
 
 /// Stable handle for one active effect. Wraps a generational
 /// index so freed slots can be reused without aliasing old IDs.
@@ -62,14 +63,20 @@ pub struct VfxParticleInstance {
     pub seed: f32,
     /// `0` = soft glow, `1` = spark, `2` = smoke, `3` = shard,
     /// `4` = ring, `5` = streak, `6` = wisp, `7` = silk strand,
-    /// `8` = ground crack. Cast from [`SpriteShape`]
-    /// discriminant.
+    /// `8` = ground crack, `9` = flame tongue, `10` = textured hybrid.
+    /// Cast from [`SpriteShape`] discriminant when no hybrid; hybrid
+    /// layers always encode `Textured`.
     pub sprite: u32,
     /// `0` = alpha, `1` = additive, `2` = premultiplied. The
     /// renderer groups by this field so all alpha particles
     /// draw before any additive ones.
     pub blend: u32,
-    pub _pad: u32,
+    /// Normalised age in `[0, 1]` — `age / max_life`. Drives lifetime-
+    /// keyed shape morphing in the fragment shader (flame tongues).
+    pub life_t: f32,
+    /// World-space Y at spawn (`LiveParticle::origin`). Fragment
+    /// shader uses `position.y - origin_y` for height-based colour.
+    pub origin_y: f32,
     /// World-space velocity in m/s. Drives screen-space motion
     /// stretch in the vertex shader: fast-moving particles
     /// elongate along the projection of this vector onto the
@@ -84,6 +91,17 @@ pub struct VfxParticleInstance {
     /// `seed * TAU + age * spin_rate` so each particle
     /// continuously spins; the rate is inferred from `seed`.
     pub spin: f32,
+    /// Hybrid texture meta: x = texture slot, y = profile kind,
+    /// z/w = profile-specific (tile + flow, or flipbook cols/rows).
+    pub hybrid_meta: [f32; 4],
+    /// Hybrid params: flipbook fps in x; unused for tiling billow.
+    pub hybrid_params: [f32; 4],
+    /// GPU art direction — see [`crate::renderer::vfx::style::StyleGpuPack`].
+    pub style_pack: [f32; 4],
+    /// Secondary style knobs — [`crate::renderer::vfx::style::StyleGpuAux`].
+    pub style_aux: [f32; 4],
+    /// Semantic role id in `.x` ([`crate::renderer::vfx::builder::VfxRole::gpu_role_id`]).
+    pub role_pack: [f32; 4],
 }
 
 /// GPU-friendly per-ribbon instance. The renderer expands a quad
@@ -115,6 +133,10 @@ pub struct VfxRibbonInstance {
     /// 4 RGBA stops sampled along the *length* of the ribbon.
     /// All-ones if the spec didn't supply a length gradient.
     pub length: [[f32; 4]; 4],
+    /// GPU art direction — [`crate::renderer::vfx::style::StyleGpuPack`].
+    pub style_pack: [f32; 4],
+    /// Secondary style knobs — [`crate::renderer::vfx::style::StyleGpuAux`].
+    pub style_aux: [f32; 4],
 }
 
 /// One active effect in the system.
@@ -178,6 +200,9 @@ struct EffectInstance {
     /// Maximum live particle count seen across all this
     /// effect's layers since spawn. Used to drive
     /// `EffectLight::follow_particles`: light intensity tracks
+    /// Optional art-direction preset pushed to every particle
+    /// instance encoded from this effect.
+    style: Option<crate::renderer::vfx::style::StylePreset>,
     /// `live / peak`, so the light peaks when the impact has
     /// just spawned all its particles and decays in lockstep
     /// with the pool draining. Stays at the post-impact peak
@@ -301,6 +326,7 @@ impl VfxSystem {
             light,
             tip_light,
             inherit_velocity,
+            style,
         } = bundle;
         let mut layers: Vec<LayerState> = Vec::with_capacity(effect.layers.len());
         for (i, layer) in effect.layers.iter().enumerate() {
@@ -352,6 +378,7 @@ impl VfxSystem {
             anchor_velocity: Vec3::ZERO,
             peak_particle_count: 0,
             light_envelope: 0.0,
+            style,
         };
 
         let index = if let Some(slot) = self.free.pop() {
@@ -615,6 +642,7 @@ impl VfxSystem {
                                 anchor_vel,
                                 inherit,
                                 dt,
+                                inst.elapsed,
                                 inst.spawning,
                                 total_cap,
                             );
@@ -729,7 +757,16 @@ impl VfxSystem {
             for layer in &inst.layers {
                 match layer {
                     LayerState::Particles(p) => {
-                        encode_particle_instances(p, &mut self.particle_instances);
+                        let (style_pack, style_aux) = inst.style.map(|s| (s.gpu_pack(), s.gpu_pack_aux())).unwrap_or((
+                            crate::renderer::vfx::style::StylePreset::GPU_NONE,
+                            crate::renderer::vfx::style::StylePreset::GPU_AUX_NONE,
+                        ));
+                        encode_particle_instances(
+                            p,
+                            style_pack,
+                            style_aux,
+                            &mut self.particle_instances,
+                        );
                     }
                     LayerState::Ribbon(r) => {
                         // Ribbons stop emitting the instant
@@ -753,6 +790,13 @@ impl VfxSystem {
                             Some(n) => (n.strength, n.scroll, n.tile.max(1e-3), n.octaves as f32),
                             None => (0.0, 0.0, 1.0, 1.0),
                         };
+                        let (style_pack, style_aux) = inst
+                            .style
+                            .map(|s| (s.gpu_pack(), s.gpu_pack_aux()))
+                            .unwrap_or((
+                                crate::renderer::vfx::style::StylePreset::GPU_NONE,
+                                crate::renderer::vfx::style::StylePreset::GPU_AUX_NONE,
+                            ));
                         self.ribbon_instances.push(VfxRibbonInstance {
                             origin: [inst.origin.x, inst.origin.y, inst.origin.z, r.spec.width],
                             tip: [inst.tip.x, inst.tip.y, inst.tip.z, inst.elapsed],
@@ -760,6 +804,8 @@ impl VfxSystem {
                             flags: [noise_octaves, 0.0, 0.0, 0.0],
                             cross: r.cross_baked,
                             length: r.length_baked,
+                            style_pack,
+                            style_aux,
                         });
                     }
                 }
@@ -806,6 +852,7 @@ fn tick_particles(
     anchor_velocity: Vec3,
     inherit_velocity: f32,
     dt: f32,
+    effect_time: f32,
     spawning: bool,
     total_cap: usize,
 ) {
@@ -886,6 +933,8 @@ fn tick_particles(
                 origin,
                 orientation,
                 noise_phase,
+                effect_time,
+                part.age,
                 dt2,
             );
         }
@@ -904,6 +953,8 @@ fn apply_force(
     origin: Vec3,
     orientation: Quat,
     noise_phase: f32,
+    effect_time: f32,
+    part_age: f32,
     dt: f32,
 ) {
     match force {
@@ -946,6 +997,23 @@ fn apply_force(
             let nz = noise3(p + Vec3::new(0.0, 0.0, phase + 31.0));
             let acc = Vec3::new(ny - nz, nz - nx, nx - ny) * (*strength);
             *velocity += acc * dt;
+        }
+        ForceField::Turbulence {
+            frequency,
+            strength,
+        } => {
+            // Direct 3D noise on velocity — chaotic boil, not a
+            // smooth swirl. Time + age scroll the field so cores
+            // on tight spawn discs still flicker in place.
+            let scale = *frequency;
+            let p = *pos * scale;
+            let time = effect_time * scale * 0.55 + noise_phase + part_age * scale * 1.15;
+            let scroll = Vec3::new(time * 1.1, time * 1.65, time * 0.85);
+            let jx = noise3(p + scroll + Vec3::new(0.0, 13.0, 7.0));
+            let jy = noise3(p + scroll + Vec3::new(19.0, 0.0, 11.0));
+            let jz = noise3(p + scroll + Vec3::new(5.0, 23.0, 0.0));
+            let jitter = Vec3::new(jx, jy * 0.82 + 0.18, jz);
+            *velocity += jitter * (*strength) * dt;
         }
         ForceField::Wind { velocity: w } => {
             *velocity += *w * dt;
@@ -1103,10 +1171,9 @@ fn spawn_one(
     }
 }
 
-fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstance>) {
-    let blend = p.spec.blend as u32;
-    let sprite = match p.spec.sprite {
-        SpriteShape::SoftGlow => 0u32,
+fn sprite_to_gpu(sprite: SpriteShape) -> u32 {
+    match sprite {
+        SpriteShape::SoftGlow => 0,
         SpriteShape::Spark => 1,
         SpriteShape::Smoke => 2,
         SpriteShape::Shard => 3,
@@ -1115,7 +1182,34 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         SpriteShape::Wisp => 6,
         SpriteShape::SilkStrand => 7,
         SpriteShape::GroundCrack => 8,
+        SpriteShape::Flame => 9,
+        SpriteShape::Textured => 10,
+    }
+}
+
+fn encode_particle_instances(
+    p: &ParticlesState,
+    style_pack: [f32; 4],
+    style_aux: [f32; 4],
+    out: &mut Vec<VfxParticleInstance>,
+) {
+    let blend = p.spec.blend as u32;
+    let (sprite, hybrid_meta, hybrid_params) = if let Some(ref hybrid) = p.spec.hybrid {
+        let (meta, params) = pack_hybrid_instance(hybrid);
+        (sprite_to_gpu(SpriteShape::Textured), meta, params)
+    } else {
+        (
+            sprite_to_gpu(p.spec.sprite),
+            [0.0; 4],
+            [0.0; 4],
+        )
     };
+    let vert_sprite = p
+        .spec
+        .hybrid
+        .as_ref()
+        .map(|h| h.base_sprite)
+        .unwrap_or(p.spec.sprite);
     for q in &p.pool {
         if !q.alive() {
             continue;
@@ -1138,10 +1232,18 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
         // world-up into screen space / aligning to world XZ.
         // Any animated spin would tilt or rotate them visibly
         // after spawn, so keep their orientation stable.
-        let spin = if matches!(p.spec.sprite, SpriteShape::Wisp | SpriteShape::SilkStrand) {
+        let spin = if matches!(
+            vert_sprite,
+            SpriteShape::Wisp | SpriteShape::SilkStrand | SpriteShape::Flame
+        ) {
             0.0
-        } else if matches!(p.spec.sprite, SpriteShape::GroundCrack) {
+        } else if matches!(vert_sprite, SpriteShape::GroundCrack) {
             q.seed * std::f32::consts::TAU
+        } else if matches!(vert_sprite, SpriteShape::Smoke) {
+            // No billboard spin — rotation was exposing the radial
+            // disc mask as a spinning circle. Variation comes from
+            // seed-driven noise/warp inside `smokePuff` only.
+            0.0
         } else {
             q.seed * std::f32::consts::TAU + q.age * (0.4 + q.seed * 1.6)
         };
@@ -1152,9 +1254,20 @@ fn encode_particle_instances(p: &ParticlesState, out: &mut Vec<VfxParticleInstan
             seed: q.seed,
             sprite,
             blend,
-            _pad: 0,
+            life_t: q.life_t(),
+            origin_y: q.origin.y,
             velocity: q.velocity.to_array(),
             spin,
+            hybrid_meta,
+            hybrid_params,
+            style_pack,
+            style_aux,
+            role_pack: [
+                p.spec.vfx_role as f32,
+                0.0,
+                0.0,
+                0.0,
+            ],
         });
     }
 }
@@ -1292,7 +1405,7 @@ fn hash_u32(a: u32, b: u32) -> u32 {
 }
 
 /// Cheap hash-noise sampled at a 3D point. Returns ~[-1, 1].
-/// Used by [`ForceField::Curl`].
+/// Used by [`ForceField::Curl`] and [`ForceField::Turbulence`].
 fn noise3(p: Vec3) -> f32 {
     let i = p.floor();
     let f = p - i;
@@ -1353,6 +1466,8 @@ mod tests {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
+                hybrid: None,
+                vfx_role: 0,
             })],
         }
     }
@@ -1373,6 +1488,26 @@ mod tests {
             sys.tick(0.016, Some((Vec3::ZERO, 100.0)));
         }
         assert_eq!(sys.particle_instances().len(), 0);
+    }
+
+    #[test]
+    fn particle_instance_layout_matches_gpu() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(size_of::<VfxParticleInstance>(), 148);
+        assert_eq!(offset_of!(VfxParticleInstance, style_pack), 100);
+        assert_eq!(offset_of!(VfxParticleInstance, style_aux), 116);
+        assert_eq!(offset_of!(VfxParticleInstance, role_pack), 132);
+        assert_eq!(offset_of!(VfxParticleInstance, hybrid_params), 84);
+    }
+
+    #[test]
+    fn ribbon_instance_layout_matches_gpu() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(size_of::<VfxRibbonInstance>(), 288);
+        assert_eq!(offset_of!(VfxRibbonInstance, style_pack), 256);
+        assert_eq!(offset_of!(VfxRibbonInstance, style_aux), 272);
     }
 
     #[test]

@@ -127,6 +127,15 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input, dt: f
         &mut state.frame.hud_prompt,
         state.audio.as_mut(),
     );
+    crate::game::enchant_system::tick(
+        &state.world,
+        &state.floor_mgr,
+        input,
+        &mut state.inventory_ui,
+        &mut state.net,
+        &mut state.loot,
+        &mut state.frame.hud_prompt,
+    );
 
     // Ground loot: hover prompt + F-to-pick.
     crate::game::loot_system::tick(&state.world, &mut state.loot, &mut state.combat_text, input);

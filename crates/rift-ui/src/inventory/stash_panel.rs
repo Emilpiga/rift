@@ -182,36 +182,30 @@ pub fn render_stash_panel(
         }
         let hover_for_tip = ui.interact_hover(buy_id, brect);
         if hover_for_tip {
-            let cost_str = format!("Cost: {next_tab_cost} shards");
-            let have_str = format!("You have: {player_shards} shards");
-            let mut lines: Vec<TooltipLine<'_>> = Vec::with_capacity(3);
-            lines.push(TooltipLine::new(
-                &cost_str,
+            let short = next_tab_cost.saturating_sub(player_shards);
+            let main = format!("{player_shards} / {next_tab_cost} \u{25C6}");
+            let line_col = if can_buy_tab {
+                theme.colors.text
+            } else {
+                Color::rgba(0.95, 0.40, 0.35, 1.0)
+            };
+            let shortage_owned = (!can_buy_tab && owned_tabs < view.max_tabs && short > 0)
+                .then(|| format!("-{short}"));
+            let mut lines: Vec<TooltipLine<'_>> = vec![TooltipLine::new(
+                main.as_str(),
                 theme.fonts.size_sm,
-                theme.colors.text,
-            ));
-            lines.push(TooltipLine::new(
-                &have_str,
-                theme.fonts.size_sm,
-                if can_buy_tab {
-                    theme.colors.text_dim
-                } else {
-                    Color::rgba(0.95, 0.40, 0.35, 1.0)
-                },
-            ));
-            let short_str;
-            if !can_buy_tab && owned_tabs < view.max_tabs {
-                let short = next_tab_cost.saturating_sub(player_shards);
-                short_str = format!("Need {short} more");
+                line_col,
+            )];
+            if let Some(ref note) = shortage_owned {
                 lines.push(TooltipLine::new(
-                    &short_str,
+                    note.as_str(),
                     theme.fonts.size_sm,
                     Color::rgba(0.95, 0.40, 0.35, 1.0),
                 ));
             }
             Tooltip::new()
-                .header("Buy stash tab")
-                .min_width(160.0)
+                .header("Tab")
+                .min_width(120.0)
                 .anchor_to(brect)
                 .show(ui, Pos2::new(brect.max.x, brect.y()), &lines);
         }
@@ -473,6 +467,7 @@ pub fn render_stash_panel(
             source_anchor_idx,
             true,
             active_tab_u8,
+            None,
             DropTarget::Stash,
             out_actions,
             &mut out.in_transit_from_drop,
@@ -489,9 +484,9 @@ pub fn render_stash_panel(
             let idx = (row as u32) * STASH_COLS as u32 + col as u32;
             let pos = Pos2::new(grid_x + col as f32 * cell, grid_y + row as f32 * cell);
             let rect = Rect::from_xywh(pos.x, pos.y, cell, cell);
-            // Subtle gold outline + inset highlight per cell to
-            // match the bag/equipment slot styling.
-            ui.draw_outline(rect, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.55));
+            // Match bag grid: wash + full slot chrome (includes rim vignette).
+            ui.draw_rect(rect, super::bag_panel::bag_empty_cell_fill());
+            super::bag_panel::draw_cell_outline(ui, rect);
             let id = Id::root("inv").child(("stash_empty", active_idx, idx));
             let r = ItemSlot::new(cell)
                 .transparent_bg(true)
@@ -502,6 +497,7 @@ pub fn render_stash_panel(
                 true,
                 false,
                 active_tab_u8,
+                false,
                 false,
                 out_actions,
                 &mut out.in_transit_from_drop,
@@ -553,11 +549,12 @@ pub fn render_stash_panel(
                         cell,
                         cell,
                     );
-                    ui.draw_outline(cr, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.55));
+                    ui.draw_rect(cr, super::bag_panel::bag_empty_cell_fill());
+                    super::bag_panel::draw_cell_outline(ui, cr);
                 }
             }
         } else {
-            ui.draw_outline(rect, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.85));
+            super::bag_panel::draw_cell_outline(ui, rect);
         }
         let id = Id::root("inv").child(("stash", active_idx, idx as u32));
         let payload = Some(DragSource::Stash(idx as u32));
@@ -588,6 +585,7 @@ pub fn render_stash_panel(
             true,
             false,
             active_tab_u8,
+            false,
             false,
             out_actions,
             &mut out.in_transit_from_drop,
@@ -728,14 +726,19 @@ fn draw_stash_tab_button(
             rect.width() - 2.0,
             rect.height() * 0.30,
         ),
-        Color::rgba(1.0, 0.92, 0.72, if active { 0.22 } else { 0.12 }),
-        Color::rgba(1.0, 0.92, 0.72, 0.0),
+        Color::rgba(0.78, 0.74, 1.0, if active { 0.20 } else { 0.11 }),
+        Color::rgba(0.78, 0.74, 1.0, 0.0),
     );
 
     let outline = if active || picker_open {
-        Color::rgba(1.0, 0.74, 0.32, 0.90)
+        theme.colors.border_strong
     } else if hovered {
-        Color::rgba(0.90, 0.62, 0.30, 0.78)
+        Color::rgba(
+            theme.colors.accent.0[0],
+            theme.colors.accent.0[1],
+            theme.colors.accent.0[2],
+            0.72,
+        )
     } else {
         theme.colors.border_stone
     };
@@ -748,7 +751,7 @@ fn draw_stash_tab_button(
             rect.height() - 2.0,
         ),
         1.0,
-        Color::rgba(1.0, 0.92, 0.70, if active { 0.22 } else { 0.12 }),
+        Color::rgba(0.86, 0.82, 1.0, if active { 0.20 } else { 0.11 }),
     );
 
     ui.draw_rect(swatch, tab_color);
@@ -762,7 +765,12 @@ fn draw_stash_tab_button(
         swatch,
         1.0,
         if swatch_hover || picker_open {
-            Color::rgba(1.0, 0.86, 0.46, 0.95)
+            Color::rgba(
+                theme.colors.accent.0[0],
+                theme.colors.accent.0[1],
+                theme.colors.accent.0[2],
+                0.92,
+            )
         } else {
             Color::rgba(0.0, 0.0, 0.0, 0.82)
         },
@@ -850,7 +858,7 @@ fn draw_stash_color_dropdown(
         Color::rgba(0.0, 0.0, 0.0, 0.0),
         Color::rgba(0.0, 0.0, 0.0, 0.0),
     );
-    ui.draw_outline(rect, 1.5, Color::rgba(0.78, 0.62, 0.30, 0.78));
+    ui.draw_outline(rect, 1.5, Color::rgba(0.62, 0.48, 0.88, 0.78));
     ui.draw_outline(
         Rect::from_xywh(
             rect.x() + 2.0,
@@ -859,7 +867,7 @@ fn draw_stash_color_dropdown(
             rect.height() - 4.0,
         ),
         1.0,
-        Color::rgba(1.0, 0.90, 0.62, 0.12),
+        Color::rgba(0.82, 0.76, 1.0, 0.13),
     );
 
     let current = view

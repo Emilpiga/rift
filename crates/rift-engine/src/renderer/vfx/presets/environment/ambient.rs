@@ -3,121 +3,174 @@
 
 use glam::Vec3;
 
+use crate::renderer::vfx::builder::{particle, EffectBuilder};
 use crate::renderer::vfx::spec::*;
 
-/// Wall-torch flame — a continuous, looping fire plume that sits
-/// on a wall sconce. Three stacked layers compose the look:
+/// Wall-torch / candle flame — one fuzzy orange blob.
 ///
-/// 1. **Core flame**: short-lived bright HDR additive particles
-///    rising fast. Keeps the flame's silhouette tight and drives
-///    the bloom highlight.
-/// 2. **Outer flame**: longer-lived softer particles that drift
-///    upward and outward, giving the flame visible volume.
-/// 3. **Smoke wisp**: dim translucent puff that lingers above
-///    the flame, fading to nothing.
-///
-/// The effect is `duration: 0.0` (infinite) — gameplay code
-/// despawns it when the floor changes. All forces are vertical
-/// so the flame stays anchored to its wall position; the
-/// `Wind` force adds a tiny upward bias so even slow particles
-/// rise reliably.
+/// Overlapping `SoftGlow` + warm `Smoke` only. The `Flame` sprite is a
+/// world-up teardrop billboard; on sconces it reads as needles leaving
+/// a bright disc (see playtest screenshots). Torch fire is a volume that
+/// flickers in place: tight spawn disc, heavy drag, curl — no `Flame`.
 pub fn wall_torch() -> Effect {
-    Effect {
-        duration: 0.0,
-        layers: vec![
-            // Core flame — small, very bright, short life.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Disc { radius: 0.04 },
-                emission: EmissionMode::Continuous { rate: 55.0 },
-                speed: (1.6, 2.4),
-                lifetime: (0.18, 0.30),
+    EffectBuilder::persistent()
+        .layers(vec![
+            // 1. Hot Core (bright white-yellow, very fast, small)
+            particle(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.012 },
+                emission: EmissionMode::Continuous { rate: 45.0 },
+                speed: (0.15, 0.45),
+                lifetime: (0.12, 0.28),
                 forces: vec![
-                    // Upward acceleration so flames lick higher
-                    // as they age (negative gravity along Y).
                     ForceField::Gravity {
                         axis: Vec3::Y,
-                        strength: 4.5,
+                        strength: 3.2,
                     },
-                    ForceField::Drag { coefficient: 1.5 },
-                    // Subtle curl gives the flame its dancing
-                    // silhouette without expensive simulation.
+                    ForceField::Drag { coefficient: 2.8 },
                     ForceField::Curl {
-                        frequency: 4.0,
-                        strength: 1.6,
+                        frequency: 4.5,
+                        strength: 1.8,
+                    },
+                    ForceField::Turbulence {
+                        frequency: 12.0,
+                        strength: 0.8,
                     },
                 ],
-                size: Curve::from_stops([(0.00, 0.10), (0.30, 0.16), (1.00, 0.02)]),
-                // HDR amber → orange → dim red. Bright enough at
-                // birth (~3-4×) to drive bloom; tonemap brings
-                // the visible colour back to a clean orange.
+                size: Curve::from_stops([(0.0, 0.045), (0.4, 0.065), (1.0, 0.025)]),
                 color: Gradient::from_stops([
-                    (0.00, [4.5, 2.4, 0.6, 1.00]),
-                    (0.40, [3.0, 1.0, 0.2, 1.00]),
-                    (1.00, [0.6, 0.1, 0.0, 0.00]),
+                    (0.00, [4.5, 3.2, 1.8, 1.0]), // intense white-yellow
+                    (0.45, [3.8, 1.8, 0.6, 0.95]),
+                    (1.00, [1.2, 0.45, 0.15, 0.0]),
                 ]),
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-            // Outer flame — wider, dimmer, longer-lived. Reads
-            // as the flame's volume / aura.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Disc { radius: 0.09 },
-                emission: EmissionMode::Continuous { rate: 35.0 },
-                speed: (0.7, 1.2),
-                lifetime: (0.35, 0.55),
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            // 2. Main Flame Body (orange, medium)
+            particle(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.028 },
+                emission: EmissionMode::Continuous { rate: 38.0 },
+                speed: (0.08, 0.35),
+                lifetime: (0.25, 0.55),
+                forces: vec![
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 2.1,
+                    },
+                    ForceField::Drag { coefficient: 3.5 },
+                    ForceField::Curl {
+                        frequency: 3.2,
+                        strength: 2.2,
+                    },
+                    ForceField::Turbulence {
+                        frequency: 8.0,
+                        strength: 1.1,
+                    },
+                ],
+                size: Curve::from_stops([(0.0, 0.09), (0.35, 0.16), (0.8, 0.08), (1.0, 0.03)]),
+                color: Gradient::from_stops([
+                    (0.00, [3.2, 1.65, 0.45, 0.95]),
+                    (0.40, [2.4, 0.85, 0.22, 0.85]),
+                    (0.75, [1.1, 0.35, 0.08, 0.4]),
+                    (1.00, [0.6, 0.15, 0.04, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 0.95,
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            // 3. Outer Flame / Flicker (softer red-orange, wider)
+            particle(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.045 },
+                emission: EmissionMode::Continuous { rate: 18.0 },
+                speed: (0.04, 0.22),
+                lifetime: (0.45, 0.85),
+                forces: vec![
+                    ForceField::Gravity {
+                        axis: Vec3::Y,
+                        strength: 1.1,
+                    },
+                    ForceField::Drag { coefficient: 4.0 },
+                    ForceField::Curl {
+                        frequency: 2.0,
+                        strength: 1.6,
+                    },
+                ],
+                size: Curve::from_stops([(0.0, 0.13), (0.4, 0.24), (1.0, 0.11)]),
+                color: Gradient::from_stops([
+                    (0.00, [1.8, 0.75, 0.25, 0.7]),
+                    (0.5, [1.1, 0.45, 0.15, 0.55]),
+                    (1.00, [0.45, 0.12, 0.05, 0.0]),
+                ]),
+                sprite: SpriteShape::SoftGlow,
+                blend: BlendMode::Additive,
+                opacity: 0.8,
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            // 4. Bright Sparks / Embers (very important for realism)
+            particle(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.015 },
+                emission: EmissionMode::Continuous { rate: 7.0 },
+                speed: (0.25, 0.65),
+                lifetime: (0.18, 0.45),
                 forces: vec![
                     ForceField::Gravity {
                         axis: Vec3::Y,
                         strength: 2.8,
                     },
-                    ForceField::Drag { coefficient: 1.2 },
-                    ForceField::Curl {
-                        frequency: 2.5,
-                        strength: 1.0,
-                    },
+                    ForceField::Drag { coefficient: 1.8 },
                 ],
-                size: Curve::from_stops([(0.00, 0.16), (0.40, 0.22), (1.00, 0.04)]),
+                size: Curve::from_stops([(0.0, 0.035), (0.6, 0.018), (1.0, 0.008)]),
                 color: Gradient::from_stops([
-                    (0.00, [2.5, 1.0, 0.20, 0.85]),
-                    (0.50, [1.4, 0.45, 0.10, 0.55]),
-                    (1.00, [0.30, 0.08, 0.02, 0.00]),
+                    (0.0, [4.0, 2.8, 1.2, 1.0]),
+                    (0.7, [3.2, 1.6, 0.4, 0.9]),
+                    (1.0, [1.8, 0.6, 0.2, 0.0]),
                 ]),
-                sprite: SpriteShape::SoftGlow,
+                sprite: SpriteShape::SoftGlow, // or a small sharp sprite if available
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-            // Smoke wisp — slow rising dim grey puff. Alpha-
-            // blended so it can sit above the additive flame
-            // without blowing out.
-            Layer::Particles(ParticleSpec {
-                spawn: SpawnShape::Disc { radius: 0.08 },
-                emission: EmissionMode::Continuous { rate: 6.0 },
-                speed: (0.25, 0.45),
-                lifetime: (1.2, 1.8),
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            // 5. Smoke — overlapping windows into shared world volume.
+            particle(ParticleSpec {
+                spawn: SpawnShape::Disc { radius: 0.040 },
+                emission: EmissionMode::Continuous { rate: 16.0 },
+                speed: (0.04, 0.16),
+                lifetime: (0.85, 1.45),
                 forces: vec![
                     ForceField::Gravity {
                         axis: Vec3::Y,
-                        strength: 1.0,
+                        strength: 0.55,
                     },
-                    ForceField::Drag { coefficient: 0.6 },
+                    ForceField::Drag { coefficient: 2.0 },
                     ForceField::Curl {
-                        frequency: 1.2,
-                        strength: 0.6,
+                        frequency: 1.1,
+                        strength: 1.2,
+                    },
+                    ForceField::Turbulence {
+                        frequency: 2.5,
+                        strength: 0.35,
                     },
                 ],
-                size: Curve::from_stops([(0.00, 0.10), (0.50, 0.30), (1.00, 0.55)]),
+                size: Curve::from_stops([(0.0, 0.20), (0.35, 0.32), (1.0, 0.42)]),
                 color: Gradient::from_stops([
-                    (0.00, [0.10, 0.09, 0.08, 0.40]),
-                    (0.40, [0.08, 0.07, 0.06, 0.20]),
-                    (1.00, [0.04, 0.04, 0.04, 0.00]),
+                    (0.0, [0.25, 0.22, 0.20, 0.28]),
+                    (0.4, [0.18, 0.16, 0.15, 0.36]),
+                    (1.00, [0.08, 0.07, 0.07, 0.0]),
                 ]),
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
-                opacity: 1.0,
-            }),
-        ],
-    }
+                opacity: 0.78,
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Drifting sand haze — a wide-area ambient layer that sells
@@ -155,14 +208,13 @@ pub fn wall_torch() -> Effect {
 /// Infinite duration; gameplay code despawns it on hub
 /// teardown.
 pub fn sandstorm_haze() -> Effect {
-    Effect {
-        duration: 0.0,
-        layers: vec![
+    EffectBuilder::persistent()
+        .layers(vec![
             // Bulk drifting dust sheets — the main occlusion
             // layer. Disc spans the visible play arena from
             // the player's anchor, so the field of haze
             // travels with the camera.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Disc { radius: 22.0 },
                 // Bulk haze emission rate is the dominant
                 // fillrate cost in the hub: each sheet grows
@@ -233,14 +285,16 @@ pub fn sandstorm_haze() -> Effect {
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Fast low streaks \u2014 individual grains skimming
             // the ground. Halved emission rate (80 -> 40)
             // because each streak is a small alpha quad
             // rendered against the sky/dunes; the visual
             // cadence at 40/s already reads as "flickering
             // grain motion" without the fillrate stack.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Disc { radius: 14.0 },
                 emission: EmissionMode::Continuous { rate: 40.0 },
                 speed: (1.5, 3.0),
@@ -260,9 +314,11 @@ pub fn sandstorm_haze() -> Effect {
                 sprite: SpriteShape::Streak,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Rift-floor void embers — a slow, continuous field of
@@ -323,11 +379,10 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
     let wisp_mid = fog * 9.0 + chroma * 0.42;
     let wisp_tail = fog * 2.5 + chroma * 0.08;
 
-    Effect {
-        duration: 0.0,
-        layers: vec![
+    EffectBuilder::persistent()
+        .layers(vec![
             // Bulk motes — wide soft glow field.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 // Disc radius spans the visible play arena
                 // around the player. A bit beyond the
                 // typical room width so embers reliably
@@ -381,9 +436,11 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Hot sparks — sparser, brighter, faster.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Disc { radius: 14.0 },
                 // Very low rate — these are punctuation,
                 // not a stream.
@@ -419,7 +476,9 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
                 sprite: SpriteShape::Streak,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Drifting ash flakes — alpha-blended grey
             // motes falling slowly from above the player.
             // Counter-balances the rising embers with a
@@ -433,7 +492,7 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
             // overhead. Flakes spawned below the floor sink
             // unseen — only those born above the platform
             // contribute to the visible drift.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Column {
                     radius: 14.0,
                     height: 22.0,
@@ -488,7 +547,9 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // Distant void wisps — slow vertical columns of
             // dim crimson light at the silhouette horizon,
             // far from the player. Adds parallax depth: as
@@ -500,7 +561,7 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
             // `Wisp` sprite always renders world-up so each
             // particle reads as a tall ethereal strand
             // regardless of velocity.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Ring {
                     radius: 28.0,
                     thickness: 5.0,
@@ -545,7 +606,9 @@ pub fn rift_void_embers_tinted(fog_color: [f32; 3]) -> Effect {
                 sprite: SpriteShape::Wisp,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }

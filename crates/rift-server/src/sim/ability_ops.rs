@@ -194,7 +194,12 @@ impl Sim {
             "player cast emitted enemy-shaped effects",
         );
         for request in minion_summons {
-            minions::spawn_or_refresh(&mut self.world, request, &mut self.next_enemy_net_id);
+            minions::spawn_or_refresh(
+                &mut self.world,
+                &self.floor,
+                request,
+                &mut self.next_enemy_net_id,
+            );
         }
         // Apply queued heals — clamped at hp_max. Healing is
         // scaled by the target's healing-received multiplier

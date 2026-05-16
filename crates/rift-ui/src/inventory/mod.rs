@@ -19,14 +19,18 @@ mod stats_panel;
 mod tooltips;
 
 use rift_ui_im::{
-    widgets::{tooltip_at_mouse, TooltipLine},
+    widgets::{tooltip_at_mouse, TooltipLine, TooltipLineDecor},
     Button, ButtonSize, Color, Frame, Id, ImKey, Pad, PanelHeader, Pos2, Rect, Ui,
 };
 use rift_ui_types::inventory::{
-    DragSource, InventoryAction, InventoryUiState, InventoryView, ItemView,
+    DragSource, EnchantSourceView, InTransitSource, InventoryAction, InventoryUiState,
+    InventoryView, ItemView,
 };
 
-use self::bag_panel::{render_bag_grid, render_paperdoll, BagPanelIn};
+use self::bag_panel::{
+    paint_bag_in_transit_cover, render_bag_grid, render_paperdoll, BagPanelIn, PaperdollOut,
+};
+use self::drag::build_item_slot;
 use self::layout::{Layout, HEADER_H, PANEL_PAD_X, PANEL_PAD_Y};
 use self::stash_panel::{render_stash_panel, FilterStateRef, RenameStateRef, StashPanelIn};
 use self::stats_panel::render_stats_panel;
@@ -35,6 +39,9 @@ use self::tooltips::{
     render_item_tooltip_side_of,
 };
 use crate::icons::{draw_placeholder_icon, icon_rect_center, UiIcon};
+
+/// Atlas path [`assets/icons/ui/shard.png`] → overlay key `ui/shard`.
+pub(crate) const SHARD_ICON_ATLAS_KEY: &str = "ui/shard";
 
 /// Run one frame of the inventory drawer.
 ///
@@ -52,13 +59,14 @@ pub fn frame_inventory(
 ) -> (bool, Vec<InventoryAction>) {
     let mut actions: Vec<InventoryAction> = Vec::new();
     let stash_session = view.stash.is_some();
+    let enchant_session = view.enchant.is_some();
 
     if state.salvage_confirm_window_s <= 0.0 {
         state.salvage_confirm_window_s = 3.0;
     }
 
     // Tab toggles when no chest session is forcing the panel.
-    if ui.input().key_just_pressed(ImKey::Tab) && !stash_session {
+    if ui.input().key_just_pressed(ImKey::Tab) && !stash_session && !enchant_session {
         state.open = !state.open;
         if !state.open {
             actions.push(InventoryAction::Close);
@@ -67,6 +75,9 @@ pub fn frame_inventory(
     if stash_session {
         state.open = true;
         state.show_stash = true;
+    } else if enchant_session {
+        state.open = true;
+        state.show_stash = false;
     } else {
         // Stash is only accessible while interacting with a
         // chest — no manual toggle.
@@ -83,6 +94,8 @@ pub fn frame_inventory(
         state.color_picker_tab = None;
         state.salvage_armed_at = None;
         state.salvage_armed_bag_idx = None;
+        state.enchant_source = None;
+        state.enchant_affix = None;
         return (false, actions);
     }
 
@@ -90,7 +103,7 @@ pub fn frame_inventory(
         ui,
         view.bag_cols.max(1),
         view.bag_rows.max(1),
-        state.show_stats,
+        state.show_stats || enchant_session,
         state.show_stash || stash_session,
     );
 
@@ -157,7 +170,14 @@ pub fn frame_inventory(
         .and_then(|s| s.tabs.get(active_tab_u8 as usize))
         .map(|t| t.items)
         .unwrap_or(&[]);
-    let bag_in = BagPanelIn {
+
+    // Expire stale optimistic hides if the server reply never lands.
+    if state.in_transit_source.is_some() && time - state.in_transit_set_at > 0.40 {
+        state.in_transit_source = None;
+        state.in_transit_dest_rect = None;
+    }
+
+    let mut bag_in = BagPanelIn {
         items: view.items,
         equipment: view.equipment,
         stash_active: stash_active_items,
@@ -166,27 +186,11 @@ pub fn frame_inventory(
         stash_open: stash_session,
         active_tab_u8,
         in_transit: state.in_transit_source,
+        forge_anchor: view.enchant.as_ref().and_then(|e| e.selected_source),
+        void_forge_open: enchant_session,
     };
 
-    // ── Paperdoll ───────────────────────────────────
-    // Expire stale in-transit hides if the server reply
-    // didn't land within the timeout (lost packet, etc.).
-    if state.in_transit_source.is_some() && time - state.in_transit_set_at > 0.40 {
-        state.in_transit_source = None;
-        state.in_transit_dest_rect = None;
-    }
-    let hovered_equip = render_paperdoll(
-        ui,
-        &layout,
-        &bag_in,
-        &mut actions,
-        &mut state.in_transit_source,
-    );
-    if state.in_transit_source.is_some() {
-        state.in_transit_set_at = time;
-    }
-
-    // ── Bag grid ────────────────────────────────────
+    // ── Bag grid (before paperdoll so equip-to-bag hides apply same frame) ─
     let bag_out = render_bag_grid(
         ui,
         &layout,
@@ -199,6 +203,29 @@ pub fn frame_inventory(
         state.in_transit_set_at = time;
         state.in_transit_dest_rect = bag_out.in_transit_dest_rect_from_drop;
     }
+
+    bag_in.in_transit = state.in_transit_source;
+
+    // ── Paperdoll ───────────────────────────────────
+    let mut paper_out = PaperdollOut::default();
+    render_paperdoll(ui, &layout, &bag_in, &mut actions, &mut paper_out);
+    if let Some(src) = paper_out.in_transit_from_drop {
+        state.in_transit_source = Some(src);
+        state.in_transit_set_at = time;
+        if let Some(r) = paper_out.in_transit_dest_rect_from_drop {
+            state.in_transit_dest_rect = Some(r);
+        }
+    }
+
+    bag_in.in_transit = state.in_transit_source;
+    if matches!(
+        paper_out.in_transit_from_drop,
+        Some(InTransitSource::Bag(_))
+    ) {
+        paint_bag_in_transit_cover(ui, &layout, &bag_in, view.items);
+    }
+
+    let hovered_equip = paper_out.hovered_equip;
 
     // Salvage latch updates.
     if let Some(idx) = bag_out.salvage_press_bag_idx {
@@ -239,7 +266,32 @@ pub fn frame_inventory(
     }
 
     // ── Stats subsection (own drawer, left of inventory) ─
-    if state.show_stats {
+    if let Some(enchant) = view.enchant.as_ref() {
+        Frame::stone(&theme)
+            .with_padding(Pad::all(0.0))
+            .show_only(ui, layout.stats_drawer);
+        let header_h = HEADER_H * layout.fit;
+        let header = Rect::from_xywh(
+            layout.stats_drawer.x(),
+            layout.stats_drawer.y(),
+            layout.stats_drawer.width(),
+            header_h,
+        );
+        PanelHeader::new("VOID FORGE").show(ui, header);
+        let padded = layout.stats_drawer.shrink2(Pad::symmetric(
+            PANEL_PAD_X * layout.fit,
+            PANEL_PAD_Y * layout.fit,
+        ));
+        // Extra air under the title bar — socket motif reads cleaner when not crowded.
+        let below_header = 16.0 * layout.fit;
+        let inner = Rect::from_xywh(
+            padded.x(),
+            header.max.y + below_header,
+            padded.width(),
+            (padded.max.y - header.max.y - below_header).max(0.0),
+        );
+        render_enchant_panel(ui, inner, enchant, layout.fit, &mut actions);
+    } else if state.show_stats {
         Frame::stone(&theme)
             .with_padding(Pad::all(0.0))
             .show_only(ui, layout.stats_drawer);
@@ -488,7 +540,6 @@ pub fn frame_inventory(
     // the next inventory snapshot, producing a one-frame
     // "flicker on target before it lands".
     if let (Some(src), Some(rect_arr)) = (state.in_transit_source, state.in_transit_dest_rect) {
-        use rift_ui_types::inventory::InTransitSource;
         let item = match src {
             InTransitSource::Bag(idx) => view.items.get(idx as usize).and_then(|o| o.as_ref()),
             InTransitSource::Equip(slot) => {
@@ -554,7 +605,470 @@ pub fn frame_inventory(
         }
     }
 
+    if enchant_session {
+        let forge = state.enchant_source;
+        actions.retain(|act| {
+            !blocks_anvil_socket_flow(act) && !self::drag::forge_action_mutates_locked(forge, act)
+        });
+    }
+
     (true, actions)
+}
+
+fn blocks_anvil_socket_flow(action: &InventoryAction) -> bool {
+    matches!(
+        action,
+        InventoryAction::Equip { .. }
+            | InventoryAction::Unequip { .. }
+            | InventoryAction::UnequipToSlot { .. }
+            | InventoryAction::SwapEquip { .. }
+            | InventoryAction::DropToWorld { .. }
+            | InventoryAction::DropEquipToWorld { .. }
+            | InventoryAction::UseConsumable { .. }
+    )
+}
+
+/// Flat-top regular hexagon vertex `i` ∈ [0, 6), circumradius `r`.
+fn enchant_hex_vertex(cx: f32, cy: f32, r: f32, i: u32) -> Pos2 {
+    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_3;
+    Pos2::new(cx + r * a.cos(), cy + r * a.sin())
+}
+
+fn enchant_fill_hex(ui: &mut Ui<'_>, cx: f32, cy: f32, r: f32, color: Color) {
+    let c = Pos2::new(cx, cy);
+    for i in 0..6 {
+        let p0 = enchant_hex_vertex(cx, cy, r, i);
+        let p1 = enchant_hex_vertex(cx, cy, r, (i + 1) % 6);
+        ui.draw_triangle(c, p0, p1, color);
+    }
+}
+
+fn enchant_stroke_hex(ui: &mut Ui<'_>, cx: f32, cy: f32, r: f32, thickness: f32, color: Color) {
+    for i in 0..6 {
+        let p0 = enchant_hex_vertex(cx, cy, r, i);
+        let p1 = enchant_hex_vertex(cx, cy, r, (i + 1) % 6);
+        ui.draw_line(p0, p1, thickness, color);
+    }
+}
+
+/// Hex-framed forge socket: recessed well + layered outlines behind the drop square.
+fn draw_void_forge_socket_frame(
+    ui: &mut Ui<'_>,
+    cx: f32,
+    cy: f32,
+    hex_r: f32,
+    pit: Rect,
+    theme: &rift_ui_im::Theme,
+    fit: f32,
+) {
+    let a = theme.colors.accent.0;
+
+    // Plate under hex — subtle cool bloom so the forge reads as lit from below.
+    ui.draw_glow_disc(
+        Pos2::new(cx, cy),
+        hex_r * 1.05,
+        hex_r * 0.55,
+        Color::rgba(a[0] * 0.35, a[1] * 0.28, a[2] * 0.55, 0.14),
+    );
+
+    enchant_fill_hex(ui, cx, cy, hex_r, Color::rgba(0.045, 0.035, 0.09, 0.96));
+    enchant_stroke_hex(
+        ui,
+        cx,
+        cy,
+        hex_r * 0.985,
+        2.0 * fit.max(1.0),
+        Color::rgba(
+            (a[0] * 1.05).min(1.0),
+            (a[1] * 1.02).min(1.0),
+            (a[2] * 1.06).min(1.0),
+            0.78,
+        ),
+    );
+    enchant_stroke_hex(
+        ui,
+        cx,
+        cy,
+        hex_r * 0.92,
+        1.0 * fit.max(1.0),
+        Color::rgba(0.22, 0.14, 0.42, 0.55),
+    );
+
+    // Inner tapered hex — sells depth between rim and pit.
+    enchant_fill_hex(
+        ui,
+        cx,
+        cy,
+        hex_r * 0.76,
+        Color::rgba(0.02, 0.015, 0.045, 0.94),
+    );
+    enchant_stroke_hex(
+        ui,
+        cx,
+        cy,
+        hex_r * 0.74,
+        1.0 * fit.max(1.0),
+        Color::rgba(0.55, 0.48, 0.92, 0.22),
+    );
+
+    // Square pit: radial darkness + inset shadow / lip highlight.
+    let pit_r = (pit.height() * 0.12).clamp(4.0 * fit, 11.0 * fit);
+    let edge_c = theme.colors.bg_slot.0;
+    ui.draw_rounded_radial_rect(
+        pit,
+        pit_r,
+        Color::rgba(edge_c[0] * 0.35, edge_c[1] * 0.28, edge_c[2] * 0.52, 0.98),
+        Color::rgba(0.01, 0.008, 0.035, 0.97),
+    );
+
+    let ins = Rect::from_xywh(
+        pit.x() + 3.0 * fit,
+        pit.y() + 3.0 * fit,
+        (pit.width() - 6.0 * fit).max(0.0),
+        (pit.height() - 6.0 * fit).max(0.0),
+    );
+    if ins.width() > 2.0 && ins.height() > 2.0 {
+        let w = ins.width();
+        let h = ins.height();
+        ui.draw_rect(
+            Rect::from_xywh(ins.x(), ins.y(), w, (3.0 * fit).min(h * 0.22)),
+            Color::rgba(0.0, 0.0, 0.0, 0.62),
+        );
+        ui.draw_rect(
+            Rect::from_xywh(ins.x(), ins.y(), (3.0 * fit).min(w * 0.22), h),
+            Color::rgba(0.0, 0.0, 0.0, 0.62),
+        );
+        ui.draw_rect(
+            Rect::from_xywh(
+                ins.x(),
+                ins.max.y - (2.0 * fit).min(h * 0.12),
+                w,
+                (2.0 * fit).min(h * 0.12),
+            ),
+            Color::rgba(0.62, 0.56, 1.0, 0.07),
+        );
+        ui.draw_rect(
+            Rect::from_xywh(
+                ins.max.x - (2.0 * fit).min(w * 0.12),
+                ins.y(),
+                (2.0 * fit).min(w * 0.12),
+                h,
+            ),
+            Color::rgba(0.62, 0.56, 1.0, 0.07),
+        );
+    }
+
+    ui.draw_rounded_outline(pit, pit_r, 2.0 * fit.max(1.0), theme.colors.border_strong);
+    ui.draw_rounded_outline(
+        Rect::from_xywh(
+            pit.x() + 2.0 * fit,
+            pit.y() + 2.0 * fit,
+            (pit.width() - 4.0 * fit).max(0.0),
+            (pit.height() - 4.0 * fit).max(0.0),
+        ),
+        (pit_r - 2.0 * fit).max(1.0),
+        1.0,
+        Color::rgba(0.08, 0.05, 0.14, 0.85),
+    );
+}
+
+fn render_enchant_panel(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    view: &rift_ui_types::inventory::EnchantView<'_>,
+    fit: f32,
+    actions: &mut Vec<InventoryAction>,
+) {
+    let theme = *ui.theme();
+    let text_sm = theme.fonts.size_sm;
+    let gap_sm = 8.0 * fit;
+    let pad_top = 20.0 * fit;
+    // Space below the hex rim before item name / empty hint (motif extends past the square pit).
+    let pad_below_socket_motif = 22.0 * fit;
+
+    let socket_size = (88.0 * fit).clamp(72.0, 108.0);
+    let cx = rect.x() + rect.width() * 0.5;
+    let socket_top = rect.y() + pad_top;
+    let socket = Rect::from_xywh(cx - socket_size * 0.5, socket_top, socket_size, socket_size);
+    let sock_cy = socket.y() + socket.height() * 0.5;
+    let hex_r = socket_size * 0.52 + 14.0 * fit;
+    let motif_bottom = sock_cy + hex_r;
+
+    draw_void_forge_socket_frame(ui, cx, sock_cy, hex_r, socket, &theme, fit);
+
+    let sock_ia = build_item_slot(view.item)
+        .transparent_bg(true)
+        .interact::<DragSource>(
+            ui,
+            socket,
+            Id::root("inv").child("enchant_item_socket"),
+            None::<DragSource>,
+        );
+    if sock_ia.right_clicked && view.item.is_some() {
+        actions.push(InventoryAction::ClearEnchantForge);
+    }
+    if let Some(payload) = sock_ia.dropped.map(|d| d.payload) {
+        match payload {
+            DragSource::Bag(idx) => actions.push(InventoryAction::SelectEnchantSource {
+                source: EnchantSourceView::Bag(idx),
+            }),
+            DragSource::Equip(slot) => actions.push(InventoryAction::SelectEnchantSource {
+                source: EnchantSourceView::Equip(slot),
+            }),
+            DragSource::Stash(_) => {}
+        }
+    }
+
+    if view.item.is_none() {
+        let label = "\u{25C7}";
+        let sz = (socket_size * 0.38).clamp(theme.fonts.size_md, theme.fonts.size_lg + 4.0 * fit);
+        let lw = ui.measure_text(label, sz);
+        ui.draw_text(
+            Pos2::new(
+                socket.x() + (socket.width() - lw) * 0.5,
+                socket.y() + (socket.height() - sz) * 0.5 - 2.0 * fit,
+            ),
+            label,
+            sz,
+            Color::rgba(0.42, 0.38, 0.58, 0.55),
+        );
+    }
+
+    let mut y = motif_bottom + pad_below_socket_motif;
+
+    if let Some(name) = view.item_name {
+        let name_color = view
+            .item
+            .map(|it| {
+                let [r, g, b, a] = it.rarity_color;
+                Color::rgba(r, g, b, a.min(1.0))
+            })
+            .unwrap_or(theme.colors.text);
+        let nw = ui.measure_text(name, theme.fonts.size_md);
+        ui.draw_text(
+            Pos2::new(rect.x() + (rect.width() - nw).max(0.0) * 0.5, y),
+            name,
+            theme.fonts.size_md,
+            name_color,
+        );
+        y += theme.fonts.size_md + gap_sm;
+
+        if let Some(lock) = view.locked_affix_index {
+            let note = format!("Lane {} only · enchant-touched", lock + 1);
+            let banner = Rect::from_xywh(rect.x(), y, rect.width(), 22.0 * fit);
+            ui.draw_rounded_rect(banner, 4.0 * fit, Color::rgba(0.42, 0.18, 0.72, 0.12));
+            ui.draw_rounded_outline(banner, 4.0 * fit, 1.0, Color::rgba(0.62, 0.48, 0.88, 0.35));
+            let tw = ui.measure_text(&note, text_sm);
+            ui.draw_text(
+                Pos2::new(
+                    banner.x() + (banner.width() - tw).max(0.0) * 0.5,
+                    banner.y() + 5.0 * fit,
+                ),
+                &note,
+                text_sm,
+                theme.colors.text_dim,
+            );
+            y += 26.0 * fit;
+        }
+
+        let row_h = (32.0 * fit).max(text_sm + 12.0 * fit);
+        for affix in view.affixes {
+            if view
+                .locked_affix_index
+                .map(|lo| lo != affix.index)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let active = view.selected_affix == Some(affix.index);
+            let label = if affix.locked {
+                format!("{} · sealed", affix.text)
+            } else {
+                affix.text.to_string()
+            };
+            let r = Rect::from_xywh(rect.x(), y, rect.width(), row_h);
+            let resp = if active {
+                Button::active(&label)
+            } else {
+                Button::new(&label)
+            }
+            .size(ButtonSize::Small)
+            .show_with_id(ui, Id::root("inv").child(("enchant_affix", affix.index)), r);
+            if resp.clicked {
+                actions.push(InventoryAction::SelectEnchantAffix {
+                    affix_index: affix.index,
+                });
+            }
+            if resp.hovered {
+                enchant_options_tooltip(ui, affix.reroll_options, affix.reroll_excluded);
+            }
+            y += row_h + 4.0 * fit;
+        }
+
+        y += gap_sm * 0.5;
+        let prerequisites_met = view.selected_source.is_some()
+            && view.selected_affix.is_some()
+            && view
+                .locked_affix_index
+                .map(|lock| Some(lock) == view.selected_affix)
+                .unwrap_or(true);
+        let shards_ok = view.player_shards >= view.cost;
+        let can_reroll = prerequisites_met && shards_ok;
+
+        let cost_label = format!("{}", view.cost);
+        let r = Rect::from_xywh(rect.x(), y, rect.width(), row_h);
+        let resp = Button::primary("")
+            .compound_icon_row("Reroll", SHARD_ICON_ATLAS_KEY, cost_label.as_str())
+            .size(ButtonSize::Small)
+            .enabled(can_reroll)
+            .show_with_id(ui, Id::root("inv").child("enchant_reroll"), r);
+        if prerequisites_met && !shards_ok {
+            let wcol = theme.colors.warning.0;
+            ui.draw_outline(
+                resp.rect,
+                1.25,
+                Color::rgba(wcol[0], wcol[1], wcol[2], 0.48),
+            );
+        }
+        if prerequisites_met && !shards_ok && resp.hovered {
+            let need = view.cost.saturating_sub(view.player_shards);
+            let msg = format!(
+                "Not enough shards to reroll. Need {} more (cost {}, you have {}).",
+                need, view.cost, view.player_shards
+            );
+            let lines = [TooltipLine::new(
+                msg.as_str(),
+                theme.fonts.size_sm,
+                theme.colors.text,
+            )];
+            tooltip_at_mouse(ui, None, &lines);
+        }
+        if resp.clicked {
+            if let (Some(source), Some(affix_index)) = (view.selected_source, view.selected_affix) {
+                actions.push(InventoryAction::RerollAffix {
+                    source,
+                    affix_index,
+                });
+            }
+        }
+    } else {
+        let hint = "Drag or right-click gear";
+        let hh = (36.0 * fit).max(30.0);
+        let plate = Rect::from_xywh(rect.x(), y, rect.width(), hh);
+        ui.draw_rounded_rect(plate, 5.0 * fit, Color::rgba(0.06, 0.045, 0.11, 0.72));
+        ui.draw_rounded_outline(plate, 5.0 * fit, 1.0, Color::rgba(0.48, 0.38, 0.72, 0.28));
+        let hw = ui.measure_text(hint, text_sm);
+        ui.draw_text(
+            Pos2::new(
+                plate.x() + (plate.width() - hw).max(0.0) * 0.5,
+                plate.y() + (hh - text_sm) * 0.5,
+            ),
+            hint,
+            text_sm,
+            theme.colors.text_muted,
+        );
+    }
+}
+
+/// Max reroll outcome lines before "+ more" in forge tooltip.
+const VOID_FORGE_OUTCOME_PREVIEW_LINES: usize = 8;
+/// Max excluded-pool lines before "+ more excluded".
+const VOID_FORGE_EXCLUDED_PREVIEW_LINES: usize = 10;
+
+fn enchant_options_tooltip(
+    ui: &mut Ui<'_>,
+    options: &[String],
+    excluded: &[(String, &'static str)],
+) {
+    let theme = *ui.theme();
+
+    let outcome_overflow = options.len() > VOID_FORGE_OUTCOME_PREVIEW_LINES;
+    let more_excluded = excluded.len() > VOID_FORGE_EXCLUDED_PREVIEW_LINES;
+
+    let mut owned_strings: Vec<String> = Vec::new();
+    if outcome_overflow {
+        owned_strings.push(format!(
+            "… +{} more outcomes",
+            options.len() - VOID_FORGE_OUTCOME_PREVIEW_LINES
+        ));
+    }
+    for (preview, reason) in excluded.iter().take(VOID_FORGE_EXCLUDED_PREVIEW_LINES) {
+        owned_strings.push(format!("{preview} · {reason}"));
+    }
+    if more_excluded {
+        owned_strings.push(format!(
+            "… +{} more excluded",
+            excluded.len() - VOID_FORGE_EXCLUDED_PREVIEW_LINES
+        ));
+    }
+
+    let mut lines: Vec<TooltipLine<'_>> = Vec::new();
+
+    lines.push(TooltipLine::new(
+        "Can roll",
+        theme.fonts.size_sm,
+        theme.colors.text_dim,
+    ));
+    if options.is_empty() {
+        lines.push(TooltipLine::new(
+            "— none —",
+            theme.fonts.size_sm,
+            theme.colors.warning,
+        ));
+    } else {
+        for option in options.iter().take(VOID_FORGE_OUTCOME_PREVIEW_LINES) {
+            lines.push(TooltipLine::new(
+                option.as_str(),
+                theme.fonts.size_sm,
+                theme.colors.text,
+            ));
+        }
+        if outcome_overflow {
+            lines.push(TooltipLine::new(
+                owned_strings[0].as_str(),
+                theme.fonts.size_sm,
+                theme.colors.text_dim,
+            ));
+        }
+    }
+
+    lines.push(
+        TooltipLine::new("", theme.fonts.size_sm, theme.colors.text_dim)
+            .decor(TooltipLineDecor::Divider),
+    );
+
+    lines.push(TooltipLine::new(
+        "Excluded",
+        theme.fonts.size_sm,
+        theme.colors.text_dim,
+    ));
+
+    if excluded.is_empty() {
+        lines.push(TooltipLine::new(
+            "—",
+            theme.fonts.size_sm,
+            theme.colors.text_dim,
+        ));
+    } else {
+        let body_lo = usize::from(outcome_overflow);
+        let body_hi = owned_strings.len() - usize::from(more_excluded);
+        for i in body_lo..body_hi {
+            lines.push(TooltipLine::new(
+                owned_strings[i].as_str(),
+                theme.fonts.size_sm,
+                theme.colors.text_muted,
+            ));
+        }
+        if more_excluded {
+            lines.push(TooltipLine::new(
+                owned_strings.last().unwrap().as_str(),
+                theme.fonts.size_sm,
+                theme.colors.text_dim,
+            ));
+        }
+    }
+
+    tooltip_at_mouse(ui, Some("Reroll pool"), &lines);
 }
 
 #[derive(Default)]
@@ -689,44 +1203,27 @@ fn render_currency_bar(ui: &mut Ui<'_>, rect: Rect, shards: u32, fit: f32) {
         return;
     }
     let theme = *ui.theme();
-    // Compact badge: square, noticeably darker
-    // than the bag section behind it, with a thin warm-gold
-    // outline so it reads as a currency tag rather than a
-    // generic toolbar row.
-    ui.draw_rect(rect, Color::rgba(0.07, 0.055, 0.040, 0.92));
-    ui.draw_outline(rect, 1.0, Color::rgba(0.78, 0.62, 0.30, 0.65));
+    // Compact badge: darker than the bag slab, violet outline.
+    ui.draw_rect(rect, Color::rgba(0.08, 0.05, 0.14, 0.92));
+    ui.draw_outline(rect, 1.0, Color::rgba(0.62, 0.48, 0.88, 0.72));
 
     let pad = 10.0 * fit;
-    let glyph = "\u{25C6}";
-    let glyph_size = theme.fonts.size_md;
+    let icon_px = (rect.height() * 0.62).clamp(16.0, rect.height() * 0.78);
+    let iy = rect.y() + (rect.height() - icon_px) * 0.5;
+    let icon_rect = Rect::from_xywh(rect.x() + pad, iy, icon_px, icon_px);
+    ui.draw_icon(
+        icon_rect,
+        SHARD_ICON_ATLAS_KEY,
+        Color::rgba(0.94, 0.88, 1.0, 1.0),
+    );
     let amount = format_amount(shards);
     let amount_size = theme.fonts.size_md;
-    let glyph_color = Color::rgba(0.96, 0.70, 0.28, 1.0);
-
-    ui.draw_text(
-        Pos2::new(
-            rect.x() + pad,
-            rect.y() + (rect.height() - glyph_size) * 0.5,
-        ),
-        glyph,
-        glyph_size,
-        glyph_color,
-    );
-    let glyph_w = ui.measure_text(glyph, glyph_size);
-    let amount_x = rect.x() + pad + glyph_w + 6.0 * fit;
+    let amount_x = rect.x() + pad + icon_px + 6.0 * fit;
     ui.draw_text(
         Pos2::new(amount_x, rect.y() + (rect.height() - amount_size) * 0.5),
         &amount,
         amount_size,
         theme.colors.text,
-    );
-    let label_size = theme.fonts.size_sm;
-    let label_x = amount_x + ui.measure_text(&amount, amount_size) + 6.0 * fit;
-    ui.draw_text(
-        Pos2::new(label_x, rect.y() + (rect.height() - label_size) * 0.5),
-        "Shards",
-        label_size,
-        theme.colors.text_dim,
     );
 }
 

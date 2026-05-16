@@ -56,12 +56,12 @@ fn route_tint(route: TalentRouteView) -> Color {
     match route {
         // Hub passives wear a warm neutral so they read as
         // "everyone's nodes" instead of belonging to any class.
-        TalentRouteView::Hub => Color::rgba(0.78, 0.72, 0.55, 1.0),
+        TalentRouteView::Hub => Color::rgba(0.78, 0.74, 0.92, 1.0),
         TalentRouteView::Warrior => Color::rgba(0.85, 0.32, 0.28, 1.0),
         TalentRouteView::Mage => Color::rgba(0.32, 0.55, 0.90, 1.0),
         TalentRouteView::Healer => Color::rgba(0.42, 0.82, 0.50, 1.0),
         TalentRouteView::Summoner => Color::rgba(0.70, 0.45, 0.90, 1.0),
-        TalentRouteView::Synergy => Color::rgba(0.92, 0.70, 0.34, 1.0),
+        TalentRouteView::Synergy => Color::rgba(0.82, 0.62, 0.98, 1.0),
         TalentRouteView::Fifth => Color::rgba(0.48, 0.82, 0.86, 1.0),
     }
 }
@@ -204,11 +204,11 @@ pub fn frame_talent_panel(
             let s = |v: f32| transform.scale(v);
 
             // ── Palette ──
-            let stone = Color::rgba(0.46, 0.40, 0.30, 0.34);
-            let stone_dim = Color::rgba(0.38, 0.34, 0.26, 0.22);
-            let stone_bright = Color::rgba(0.66, 0.56, 0.38, 0.50);
-            let stone_glow = Color::rgba(0.78, 0.66, 0.42, 0.65);
-            let stone_dark = Color::rgba(0.06, 0.06, 0.08, 0.55);
+            let stone = Color::rgba(0.38, 0.28, 0.52, 0.36);
+            let stone_dim = Color::rgba(0.28, 0.22, 0.42, 0.24);
+            let stone_bright = Color::rgba(0.56, 0.42, 0.78, 0.52);
+            let stone_glow = Color::rgba(0.68, 0.52, 0.92, 0.62);
+            let stone_dark = Color::rgba(0.06, 0.05, 0.12, 0.55);
 
             // ── Polyline primitives ──
             let polar = |a: f32, r: f32| -> Pos2 {

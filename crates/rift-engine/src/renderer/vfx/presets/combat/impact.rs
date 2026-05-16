@@ -2,6 +2,7 @@
 
 use glam::Vec3;
 
+use crate::renderer::vfx::builder::{particle, EffectBuilder, SparkBurstOpts};
 use crate::renderer::vfx::spec::*;
 
 /// Generic hit spark — a small cone of bright sparks fired in
@@ -9,34 +10,9 @@ use crate::renderer::vfx::spec::*;
 /// melee hits. Tuned to mirror the legacy
 /// [`crate::renderer::particles::EmitterConfig::hit_spark`].
 pub fn hit_spark(normal: Vec3) -> Effect {
-    Effect {
-        duration: 0.05,
-        layers: vec![Layer::Particles(ParticleSpec {
-            spawn: SpawnShape::Cone {
-                axis: normal.normalize_or_zero(),
-                half_angle: 0.6,
-            },
-            emission: EmissionMode::Burst { count: 18 },
-            speed: (3.0, 6.5),
-            lifetime: (0.18, 0.32),
-            forces: vec![
-                ForceField::Drag { coefficient: 4.0 },
-                ForceField::Gravity {
-                    axis: -Vec3::Y,
-                    strength: 6.0,
-                },
-            ],
-            size: Curve::from_stops([(0.0, 0.06), (1.0, 0.0)]),
-            color: Gradient::from_stops([
-                (0.00, [4.0, 3.0, 1.5, 1.0]),
-                (0.40, [1.5, 0.8, 0.3, 0.8]),
-                (1.00, [0.6, 0.2, 0.1, 0.0]),
-            ]),
-            sprite: SpriteShape::Spark,
-            blend: BlendMode::Additive,
-            opacity: 1.0,
-        })],
-    }
+    EffectBuilder::new(0.05)
+        .spark_burst(SparkBurstOpts::hit(normal))
+        .finish()
 }
 
 /// Big visceral blood burst on death.
@@ -64,12 +40,11 @@ pub fn blood_splatter(up: Vec3) -> Effect {
     } else {
         Vec3::Y
     };
-    Effect {
-        duration: 0.05,
-        layers: vec![
+    EffectBuilder::oneshot()
+        .layers(vec![
             // 1. Initial dark crimson spurt — a few large soft
             //    puffs at the kill point.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 3 },
                 speed: (0.0, 0.6),
@@ -86,11 +61,13 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 2. Droplets — wide upward+outward cone, fast, heavy
             //    gravity. Low drag so they keep their momentum
             //    until gravity pulls them back down.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Cone {
                     axis,
                     half_angle: 1.05, // ~60° spread
@@ -114,10 +91,12 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 3. Mist — a few slow, soft, dark-red smoky puffs
             //    that drift up briefly and dissolve.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Burst { count: 6 },
                 speed: (0.4, 1.2),
@@ -137,9 +116,11 @@ pub fn blood_splatter(up: Vec3) -> Effect {
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Smaller blood spurt for non-fatal hits — few droplets, no
@@ -153,9 +134,8 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
     } else {
         Vec3::Y
     };
-    Effect {
-        duration: 0.05,
-        layers: vec![Layer::Particles(ParticleSpec {
+    EffectBuilder::oneshot()
+        .layers(vec![particle(ParticleSpec {
             spawn: SpawnShape::Cone {
                 axis,
                 half_angle: 0.85,
@@ -179,8 +159,10 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
             sprite: SpriteShape::SoftGlow,
             blend: BlendMode::Alpha,
             opacity: 1.0,
-        })],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    })])
+        .finish()
 }
 
 /// "Return to hell" — played when an enemy corpse leaves the
@@ -195,14 +177,13 @@ pub fn blood_hit_spurt(up: Vec3) -> Effect {
 /// 3. **Charcoal smoke** — a slow ground-hugging puff of dark
 ///    smoke that lingers ~0.8 s, hiding the vanish.
 pub fn enemy_soul_return() -> Effect {
-    Effect {
-        duration: 0.05,
-        layers: vec![
+    EffectBuilder::oneshot()
+        .layers(vec![
             // 1. Brimstone flash — short HDR burst. Sized to
             //    cover roughly the enemy's torso so the puff
             //    visually swallows the body on the despawn frame
             //    instead of looking like a small floating spark.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 6 },
                 speed: (0.0, 0.6),
@@ -217,12 +198,14 @@ pub fn enemy_soul_return() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 2. Embers — bright additive sparks rising then
             //    dragged back down (souls being pulled under).
             //    Wider cone + more particles + longer sparks so
             //    the upward column reads from across the room.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Cone {
                     axis: Vec3::Y,
                     half_angle: 1.05,
@@ -248,12 +231,14 @@ pub fn enemy_soul_return() -> Effect {
                 sprite: SpriteShape::Spark,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 3. Charcoal smoke — slow, dark, ground-hugging
             //    puff that hides the despawn frame. Doubled in
             //    size and count so a body-sized enemy gets a
             //    body-sized cloud.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Burst { count: 18 },
                 speed: (0.6, 1.7),
@@ -274,9 +259,11 @@ pub fn enemy_soul_return() -> Effect {
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Friendly summon dismissal — a compact violet/teal collapse used
@@ -285,10 +272,9 @@ pub fn enemy_soul_return() -> Effect {
 /// reads as a controlled arcane release rather than a hostile corpse.
 pub fn summon_despawn(scale: f32) -> Effect {
     let s = scale.max(0.25);
-    Effect {
-        duration: 0.05,
-        layers: vec![
-            Layer::Particles(ParticleSpec {
+    EffectBuilder::oneshot()
+        .layers(vec![
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Burst { count: 14 },
                 speed: (0.4 * s, 1.8 * s),
@@ -309,8 +295,10 @@ pub fn summon_despawn(scale: f32) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-            Layer::Particles(ParticleSpec {
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            particle(ParticleSpec {
                 spawn: SpawnShape::Ring {
                     radius: 0.35 * s,
                     thickness: 0.18 * s,
@@ -338,8 +326,10 @@ pub fn summon_despawn(scale: f32) -> Effect {
                 sprite: SpriteShape::Streak,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-            Layer::Particles(ParticleSpec {
+            hybrid: None,
+        vfx_role: 0,
+    }),
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 1 },
                 speed: (0.0, 0.0),
@@ -354,9 +344,11 @@ pub fn summon_despawn(scale: f32) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }
 
 /// Enemy arrival cue — played when a replicated enemy mesh is
@@ -369,13 +361,12 @@ pub fn summon_despawn(scale: f32) -> Effect {
 /// `1.0`, elites slightly larger, bosses much larger.
 pub fn enemy_summon_arrival(scale: f32) -> Effect {
     let s = scale.max(0.35);
-    Effect {
-        duration: 0.08,
-        layers: vec![
+    EffectBuilder::timed(0.08)
+        .layers(vec![
             // 1. Flat rift scar at the feet. Dark alpha base so
             //    the spawn has contact with the floor instead of
             //    reading as a mid-air particle cloud.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 1 },
                 speed: (0.0, 0.0),
@@ -390,12 +381,14 @@ pub fn enemy_summon_arrival(scale: f32) -> Effect {
                 sprite: SpriteShape::GroundCrack,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 2. Hot arcane edges inside the same fracture mask.
             //    Teal-violet keeps this distinct from fire/slam
             //    while still sitting in the game's supernatural
             //    rift language.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 1 },
                 speed: (0.0, 0.0),
@@ -411,11 +404,13 @@ pub fn enemy_summon_arrival(scale: f32) -> Effect {
                 sprite: SpriteShape::GroundCrack,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 3. Resolve flash around the torso. Brief and wide;
             //    it masks the first rendered pose without leaving
             //    a long-lived glow stuck to the enemy.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Burst { count: 10 },
                 speed: (0.0, 1.1 * s),
@@ -430,11 +425,13 @@ pub fn enemy_summon_arrival(scale: f32) -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 4. Smoke veil rising through the body. This is the
             //    cheap-but-effective pop hider: alpha smoke crosses
             //    the silhouette while the skinned mesh appears.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::TaperedColumn {
                     radius_base: 0.62 * s,
                     radius_top: 0.18 * s,
@@ -464,11 +461,13 @@ pub fn enemy_summon_arrival(scale: f32) -> Effect {
                 sprite: SpriteShape::Smoke,
                 blend: BlendMode::Alpha,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 5. Upward sparks, biased teal and violet. These give
             //    the cue a crisp read at distance and make the spawn
             //    feel energetic rather than just smoky.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Ring {
                     radius: 0.42 * s,
                     thickness: 0.30 * s,
@@ -498,7 +497,9 @@ pub fn enemy_summon_arrival(scale: f32) -> Effect {
                 sprite: SpriteShape::Streak,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }

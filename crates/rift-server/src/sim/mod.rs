@@ -939,6 +939,7 @@ mod grid_move_tests {
             unique_id: None,
             unique_pick: None,
             rift_touched: None,
+            enchanted_affix_index: None,
         }
     }
 

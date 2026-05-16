@@ -30,6 +30,10 @@ pub enum UiIcon {
     Monitor,
     Male,
     Female,
+    CaretLeft,
+    CaretRight,
+    CaretUp,
+    CaretDown,
 }
 
 pub fn draw_placeholder_icon(ui: &mut Ui<'_>, rect: Rect, icon: UiIcon, color: Color) {
@@ -546,6 +550,238 @@ pub fn draw_placeholder_icon(ui: &mut Ui<'_>, rect: Rect, icon: UiIcon, color: C
                 color,
             );
         }
+        UiIcon::CaretLeft => ui.draw_triangle(
+            Pos2::new(c.x - r * 0.75, c.y),
+            Pos2::new(c.x + r * 0.45, c.y - r * 0.85),
+            Pos2::new(c.x + r * 0.45, c.y + r * 0.85),
+            color,
+        ),
+        UiIcon::CaretRight => ui.draw_triangle(
+            Pos2::new(c.x + r * 0.75, c.y),
+            Pos2::new(c.x - r * 0.45, c.y - r * 0.85),
+            Pos2::new(c.x - r * 0.45, c.y + r * 0.85),
+            color,
+        ),
+        UiIcon::CaretUp => ui.draw_triangle(
+            Pos2::new(c.x, c.y - r * 0.72),
+            Pos2::new(c.x - r * 0.85, c.y + r * 0.38),
+            Pos2::new(c.x + r * 0.85, c.y + r * 0.38),
+            color,
+        ),
+        UiIcon::CaretDown => ui.draw_triangle(
+            Pos2::new(c.x, c.y + r * 0.72),
+            Pos2::new(c.x - r * 0.85, c.y - r * 0.38),
+            Pos2::new(c.x + r * 0.85, c.y - r * 0.38),
+            color,
+        ),
+    }
+}
+
+/// Line-art silhouette for an empty equipment paperdoll cell (`EquipSlotIdx.0`).
+/// Matches immediate-mode icon weight used by [`draw_placeholder_icon`].
+pub fn draw_equip_slot_placeholder(ui: &mut Ui<'_>, rect: Rect, slot_idx: u8, color: Color) {
+    let theme = *ui.theme();
+    let s = theme.scale;
+    let c = rect.center();
+    let w = rect.width().min(rect.height());
+    let r = w * 0.31;
+    let line = (1.48 * s).max(1.0);
+    let thin = (1.15 * s).max(1.0);
+
+    match slot_idx {
+        // Weapon — diagonal blade + guard hint.
+        0 => {
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.78, c.y + r * 0.88),
+                Pos2::new(c.x + r * 0.88, c.y - r * 0.78),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.35, c.y + r * 0.42),
+                Pos2::new(c.x + r * 0.42, c.y - r * 0.35),
+                thin,
+                color,
+            );
+        }
+        // Helm — dome + cheek plates + brim.
+        1 => {
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.68, c.y + r * 0.42),
+                Pos2::new(c.x - r * 0.55, c.y - r * 0.38),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r * 0.68, c.y + r * 0.42),
+                Pos2::new(c.x + r * 0.55, c.y - r * 0.38),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.55, c.y - r * 0.38),
+                Pos2::new(c.x + r * 0.55, c.y - r * 0.38),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.72, c.y + r * 0.42),
+                Pos2::new(c.x + r * 0.72, c.y + r * 0.42),
+                thin,
+                color,
+            );
+        }
+        // Chest — torso wedge + waist.
+        2 => {
+            ui.draw_line(
+                Pos2::new(c.x, c.y - r * 0.62),
+                Pos2::new(c.x - r * 0.62, c.y + r * 0.72),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x, c.y - r * 0.62),
+                Pos2::new(c.x + r * 0.62, c.y + r * 0.72),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.58, c.y + r * 0.48),
+                Pos2::new(c.x + r * 0.58, c.y + r * 0.48),
+                thin,
+                color,
+            );
+        }
+        // Legs — waist + two shafts.
+        3 => {
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.52, c.y - r * 0.58),
+                Pos2::new(c.x + r * 0.52, c.y - r * 0.58),
+                thin,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.28, c.y - r * 0.52),
+                Pos2::new(c.x - r * 0.38, c.y + r * 0.88),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r * 0.28, c.y - r * 0.52),
+                Pos2::new(c.x + r * 0.38, c.y + r * 0.88),
+                line,
+                color,
+            );
+        }
+        // Hands — paired glove blocks.
+        4 => {
+            let gw = r * 0.52;
+            let gh = r * 0.78;
+            ui.draw_outline(
+                Rect::from_xywh(c.x - r * 0.92, c.y - gh * 0.42, gw, gh),
+                thin,
+                color,
+            );
+            ui.draw_outline(
+                Rect::from_xywh(c.x + r * 0.92 - gw, c.y - gh * 0.42, gw, gh),
+                thin,
+                color,
+            );
+        }
+        // Boots — paired soles tilted outward.
+        5 => {
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.22, c.y - r * 0.52),
+                Pos2::new(c.x - r * 0.62, c.y + r * 0.82),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r * 0.22, c.y - r * 0.52),
+                Pos2::new(c.x + r * 0.62, c.y + r * 0.82),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.72, c.y + r * 0.82),
+                Pos2::new(c.x - r * 0.18, c.y + r * 0.82),
+                thin,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r * 0.18, c.y + r * 0.82),
+                Pos2::new(c.x + r * 0.72, c.y + r * 0.82),
+                thin,
+                color,
+            );
+        }
+        // Ring — circular band + facet core (finger A).
+        6 => {
+            let rr = r * 0.58;
+            let ring = Rect::from_xywh(c.x - rr, c.y - rr, rr * 2.0, rr * 2.0);
+            ui.draw_rounded_outline(ring, rr, thin, color);
+            ui.draw_line(
+                Pos2::new(c.x, c.y - rr * 0.35),
+                Pos2::new(c.x, c.y + rr * 0.35),
+                thin,
+                color,
+            );
+        }
+        // Second ring — offset facet so symmetric rings read differently at a glance.
+        7 => {
+            let rr = r * 0.58;
+            let ring = Rect::from_xywh(c.x - rr, c.y - rr, rr * 2.0, rr * 2.0);
+            ui.draw_rounded_outline(ring, rr, thin, color);
+            ui.draw_line(
+                Pos2::new(c.x - rr * 0.32, c.y - rr * 0.28),
+                Pos2::new(c.x + rr * 0.32, c.y + rr * 0.28),
+                thin,
+                color,
+            );
+        }
+        // Amulet — chain stub + teardrop pendant.
+        8 => {
+            ui.draw_line(
+                Pos2::new(c.x, c.y - r * 0.88),
+                Pos2::new(c.x, c.y - r * 0.18),
+                thin,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.42, c.y + r * 0.72),
+                Pos2::new(c.x, c.y - r * 0.12),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r * 0.42, c.y + r * 0.72),
+                Pos2::new(c.x, c.y - r * 0.12),
+                line,
+                color,
+            );
+        }
+        // Shoulders — mirrored pauldrons + collar tie.
+        9 => {
+            ui.draw_line(
+                Pos2::new(c.x - r, c.y + r * 0.22),
+                Pos2::new(c.x - r * 0.42, c.y - r * 0.48),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x + r, c.y + r * 0.22),
+                Pos2::new(c.x + r * 0.42, c.y - r * 0.48),
+                line,
+                color,
+            );
+            ui.draw_line(
+                Pos2::new(c.x - r * 0.42, c.y - r * 0.48),
+                Pos2::new(c.x + r * 0.42, c.y - r * 0.48),
+                thin,
+                color,
+            );
+        }
+        _ => draw_placeholder_icon(ui, icon_rect_center(rect, w * 0.52), UiIcon::Gear, color),
     }
 }
 

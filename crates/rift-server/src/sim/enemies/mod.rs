@@ -325,7 +325,15 @@ pub enum AiPhase {
     /// reaches zero. Centralised so timer-tick + telegraph
     /// emission don't get duplicated three times across the
     /// per-role tick functions.
-    Windup { kind: WindupKind, remaining: f32 },
+    /// `aim_dir` is the XZ unit direction snapshotted when the
+    /// wind-up begins — used so telegraph VFX and the resolve
+    /// (e.g. wraith scream) aim the same way even if the target
+    /// strafes during the timer.
+    Windup {
+        kind: WindupKind,
+        remaining: f32,
+        aim_dir: Vec3,
+    },
     /// Stalker is closing the distance toward its target. No
     /// timer; promoted to a `Windup { StalkerDash, .. }` once
     /// inside trigger range.
@@ -1066,12 +1074,15 @@ pub(crate) fn enter_windup(
     net_id: NetId,
     kind: WindupKind,
     duration: f32,
+    aim_dir: Vec3,
     outcome: &mut AiOutcome,
 ) {
     use rift_net::messages::WorldEvent;
+    let aim_dir = Vec3::new(aim_dir.x, 0.0, aim_dir.z).normalize_or(Vec3::Z);
     en.ai_phase = AiPhase::Windup {
         kind,
         remaining: duration,
+        aim_dir,
     };
     en.attack_anim_remaining = duration;
     outcome.events.push(WorldEvent::EnemyTelegraph {
@@ -1096,7 +1107,12 @@ pub(crate) fn tick_windup(
     kinematic: &mut Kinematic,
     dt: f32,
 ) -> Option<WindupKind> {
-    let AiPhase::Windup { kind, remaining } = en.ai_phase else {
+    let AiPhase::Windup {
+        kind,
+        remaining,
+        aim_dir,
+    } = en.ai_phase
+    else {
         return None;
     };
     let next = remaining - dt;
@@ -1109,6 +1125,7 @@ pub(crate) fn tick_windup(
         en.ai_phase = AiPhase::Windup {
             kind,
             remaining: next,
+            aim_dir,
         };
         None
     }

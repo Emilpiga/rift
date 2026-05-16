@@ -2,7 +2,9 @@
 //! flow split into named phases so each step is short and
 //! independently testable.
 
-use rift_net::{Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION};
+use rift_net::{
+    messages::Appearance, Channel, ClientId, Gender, NetId, ServerMsg, PROTOCOL_VERSION,
+};
 
 use super::{item_to_blob, place_at_slot_index};
 use crate::Server;
@@ -188,6 +190,7 @@ impl Server {
         character_name: String,
         class_id: String,
         gender: Gender,
+        appearance: Appearance,
     ) {
         let session_info = self
             .sessions
@@ -242,11 +245,17 @@ impl Server {
             &character_name,
             &class_id,
             gender,
+            appearance,
         );
         let net_id = self.spawn_player_session(from, &class_id);
         let loaded_bag = self.hydrate_player_state(from);
         self.send_initial_packets(from, net_id, &loaded_bag);
-        self.announce_join(from, net_id, character_name, class_id, gender);
+        let appearance = self
+            .sessions
+            .get(from)
+            .and_then(|s| s.appearance)
+            .unwrap_or_default();
+        self.announce_join(from, net_id, character_name, class_id, gender, appearance);
     }
 
     /// Resolve the persisted character row (or fall back to an
@@ -262,6 +271,7 @@ impl Server {
         character_name: &str,
         class_id: &str,
         gender: Gender,
+        appearance: Appearance,
     ) {
         // Block here on purpose: the load happens once per session
         // and we need level/xp before the world spawn. Falls back
@@ -274,13 +284,16 @@ impl Server {
             character_name,
             class_id,
             gender,
+            appearance,
         );
+        let appearance = super::persistence::appearance_from_record(&record);
         if let Some(s) = self.sessions.get_mut(from) {
             s.account_name = Some(account_key.to_string());
             s.account_display_name = Some(account_display.to_string());
             s.character_name = Some(character_name.to_string());
             s.class_id = Some(class_id.to_string());
             s.gender = Some(gender);
+            s.appearance = Some(appearance);
             s.record = Some(record);
         }
     }
@@ -367,6 +380,8 @@ impl Server {
                             .as_ref()
                             .map(|(id, v, d)| (id.as_str(), *v, *d)),
                     );
+                    item.enchanted_affix_index =
+                        r.enchanted_affix_index.and_then(|i| u8::try_from(i).ok());
                     match r.equipped_slot {
                         Some(b) => match rift_game::loot::EquipSlot::from_u8(b as u8) {
                             Some(slot) if rift_game::loot::Equipment::accepts(slot, &item) => {
@@ -451,6 +466,8 @@ impl Server {
                             .as_ref()
                             .map(|(id, v, d)| (id.as_str(), *v, *d)),
                     );
+                    item.enchanted_affix_index =
+                        r.enchanted_affix_index.and_then(|i| u8::try_from(i).ok());
                     let tab_idx = (r.tab_index as usize).min(tabs.len().saturating_sub(1));
                     if place_stash_row_at_slot_index(&mut tabs[tab_idx].items, r.slot_index, item) {
                         total_items += 1;
@@ -626,6 +643,7 @@ impl Server {
         character_name: String,
         class_id: String,
         gender: Gender,
+        appearance: Appearance,
     ) {
         let already_here: Vec<ServerMsg> = self
             .sessions
@@ -638,6 +656,7 @@ impl Server {
                     character_name: s.character_name.clone()?,
                     class_id: s.class_id.clone()?,
                     gender: s.gender?,
+                    appearance: s.appearance.unwrap_or_default(),
                 })
             })
             .collect();
@@ -671,6 +690,7 @@ impl Server {
             character_name: character_name.clone(),
             class_id,
             gender,
+            appearance,
         };
         self.broadcast(Channel::Control, &joined);
 

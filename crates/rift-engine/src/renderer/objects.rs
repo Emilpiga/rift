@@ -56,6 +56,8 @@ pub struct RenderObject {
     /// and reads the material set's normal / MR / AO / height
     /// bindings. `parallax_scale` enables parallax-occlusion
     /// when non-zero (typical 0.02–0.05 in world units).
+    /// Bit 11 (2048): void-hub rock dual-layer `textureGrad` blend in
+    /// `shadePbr` (see `assets/shaders/forward/pbr_lighting.glsl`).
     pub material_params: [f32; 4],
     /// Whether this object should be rasterised into the
     /// shadow passes (directional + cube atlas). Defaults to
@@ -763,6 +765,15 @@ impl Renderer {
     pub fn set_object_material_params(&mut self, obj_idx: usize, params: [f32; 4]) {
         if let Some(obj) = self.objects.get_mut(obj_idx) {
             obj.material_params = params;
+        }
+    }
+
+    /// RGBA tint at push-constant offset 64 — RGB multiplies the lit
+    /// result in the forward pass (`main.glsl`). Alpha is opacity for
+    /// translucent draws; keep at `1.0` for opaque meshes.
+    pub fn set_object_tint(&mut self, obj_idx: usize, tint: [f32; 4]) {
+        if let Some(obj) = self.objects.get_mut(obj_idx) {
+            obj.tint = tint;
         }
     }
 

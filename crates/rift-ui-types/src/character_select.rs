@@ -81,6 +81,12 @@ pub struct CreateFormView<'a> {
     /// game's `Gender` enum to keep this crate free of
     /// `rift-game` deps.
     pub gender_is_male: &'a mut bool,
+    pub skin_tone: &'a mut u8,
+    pub hair_style: &'a mut u8,
+    pub eyebrow_style: &'a mut u8,
+    pub hair_color: &'a mut u8,
+    pub eyebrow_color: &'a mut u8,
+    pub chest_size: &'a mut u8,
     /// Monotonic seconds; drives the text-field caret blink.
     pub anim_time: f32,
 }

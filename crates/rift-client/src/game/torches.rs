@@ -3,11 +3,11 @@
 //! Each torch is a candlestick-stand prop placed against a wall,
 //! a looping `wall_torch` flame VFX anchored to the top of the
 //! candle, and a warm [`PointLight`] to push interactive
-//! illumination onto nearby geometry. Because the renderer is
-//! hard-capped at 8 point lights
-//! ([`crate::game::torches::TorchSystem::update_lights`]),
-//! lights are re-selected each frame as the nearest 8 to the
-//! local player.
+//! illumination onto nearby geometry. The renderer can shade 16
+//! point lights but only the nearest 8 cast point shadows, so
+//! [`crate::game::torches::TorchSystem::update_lights`] uploads
+//! shadow-casting primaries first, then cheap unshadowed bounce/fill
+//! lights to break up uniform room falloff.
 
 use glam::Vec3;
 use rift_engine::assets::AssetServer;
@@ -53,6 +53,49 @@ fn theme_torch_lighting(theme: RoomTheme) -> (Vec3, f32) {
     }
 }
 
+fn torch_fill_lights(
+    primary: PointLight,
+    wall_dir: Vec3,
+    intensity_mul: f32,
+    phase: f32,
+) -> [PointLight; 2] {
+    let room_dir = if wall_dir.length_squared() > 0.25 {
+        -wall_dir.normalize()
+    } else {
+        Vec3::new(phase.cos(), 0.0, phase.sin())
+    };
+    let tangent = Vec3::new(-room_dir.z, 0.0, room_dir.x);
+    let side = if (phase * 1.37).sin() >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+
+    // Low, warm floor bounce under the torch. This gives nearby
+    // walls/props a local indirect-light pocket without spending a
+    // shadow slot or changing the primary flame radius.
+    let floor_bounce = PointLight {
+        position: Vec3::new(primary.position.x, 0.35, primary.position.z)
+            + room_dir * 0.85
+            + tangent * (0.35 * side),
+        color: primary.color * Vec3::new(1.10, 0.72, 0.42),
+        radius: 5.4,
+        intensity: 0.18 * intensity_mul,
+    };
+
+    // A slightly cooler side fill, offset into the room, breaks up
+    // the single amber falloff and gives room corners a seeded colour
+    // temperature shift.
+    let side_fill = PointLight {
+        position: primary.position + room_dir * 1.85 + tangent * (1.25 * side) - Vec3::Y * 0.35,
+        color: primary.color * Vec3::new(0.62, 0.78, 1.08),
+        radius: 6.8,
+        intensity: 0.10 * intensity_mul,
+    };
+
+    [floor_bounce, side_fill]
+}
+
 /// Find which room (if any) contains the given world XZ
 /// position. Returns `None` for tiles in corridors.
 fn room_at(floor: &Floor, x: f32, z: f32) -> Option<&rift_engine::dungeon::Room> {
@@ -84,6 +127,7 @@ fn insert_nearest<T: Copy>(nearest: &mut Vec<(f32, T)>, d2: f32, value: T, cap: 
 #[derive(Clone, Copy)]
 pub struct Torch {
     pub light: PointLight,
+    pub fill_lights: [PointLight; 2],
     pub vfx: EffectId,
     /// Per-torch audio emitter for the looping flame crackle.
     /// `None` when the audio system is unavailable or the
@@ -206,8 +250,16 @@ impl TorchSystem {
                 radius: 11.0,
                 intensity: 1.55 * intensity_mul,
             };
+            let flicker_phase = rng.frange(0.0, 100.0);
+            let fill_lights = torch_fill_lights(
+                light,
+                Vec3::new(ox as f32, 0.0, oz as f32),
+                intensity_mul,
+                flicker_phase,
+            );
             self.torches.push(Torch {
                 light,
+                fill_lights,
                 vfx,
                 // Audio emitter spawned by [`place_audio`]
                 // (caller threads the optional `AudioSystem`
@@ -217,7 +269,7 @@ impl TorchSystem {
                 // Spread phases over a wide range so the
                 // flicker sum-of-sines (with periods 0.7..3.1 s)
                 // is fully decorrelated across torches.
-                flicker_phase: rng.frange(0.0, 100.0),
+                flicker_phase,
             });
         }
     }
@@ -277,20 +329,20 @@ impl TorchSystem {
         const RANK_CAP: usize = 14;
         const RANK_FULL: usize = 12;
 
-        let mut scored: Vec<(f32, (PointLight, f32))> = Vec::with_capacity(RANK_CAP);
+        let mut scored: Vec<(f32, Torch)> = Vec::with_capacity(RANK_CAP);
         for torch in &self.torches {
             let d2 = torch.light.position.distance_squared(player_pos);
             if d2 <= max_d2 {
-                insert_nearest(
-                    &mut scored,
-                    d2,
-                    (torch.light, torch.flicker_phase),
-                    RANK_CAP,
-                );
+                insert_nearest(&mut scored, d2, *torch, RANK_CAP);
             }
         }
 
-        for (rank, (d2, (mut light, phase))) in scored.into_iter().enumerate() {
+        const SHADOW_PRIMARY_CAP: usize = 8;
+        const FILL_CAP: usize = 4;
+        let mut primaries: Vec<PointLight> = Vec::with_capacity(RANK_CAP);
+        let mut fills: Vec<PointLight> = Vec::with_capacity(FILL_CAP * 2);
+
+        for (rank, (d2, torch)) in scored.into_iter().enumerate() {
             // Fog-aligned distance fade. `dist_s` runs from 1.0
             // when the torch is at or inside `fog_start` to 0.0
             // at `fog_end`. The smoothstep curve matches the
@@ -316,6 +368,7 @@ impl TorchSystem {
                 rift_math::smoothstep(t)
             };
 
+            let mut light = torch.light;
             light.intensity *= dist_s * rank_s;
 
             // Flicker: a fast layer (high-freq jitter —
@@ -326,7 +379,7 @@ impl TorchSystem {
             // independently. Also pull the colour very
             // slightly toward red on dim moments so the
             // light reads as cooling embers between flares.
-            let t = time + phase;
+            let t = time + torch.flicker_phase;
             let fast = (t * 11.3).sin() * 0.5
                 + (t * 17.7 + 1.3).sin() * 0.3
                 + (t * 23.1 + 2.7).sin() * 0.2;
@@ -349,8 +402,29 @@ impl TorchSystem {
             // Skip uploading lights that round to invisible —
             // saves a slot for any genuinely-bright torch.
             if light.intensity > 0.005 {
-                renderer.point_lights.push(light);
+                primaries.push(light);
             }
+
+            if rank < FILL_CAP {
+                let fill_fade = dist_s * rank_s * (1.0 + flicker * 0.45).max(0.0);
+                for fill in torch.fill_lights {
+                    let mut fill = fill;
+                    fill.intensity *= fill_fade;
+                    if fill.intensity > 0.004 {
+                        fills.push(fill);
+                    }
+                }
+            }
+        }
+
+        for light in primaries.iter().take(SHADOW_PRIMARY_CAP) {
+            renderer.point_lights.push(*light);
+        }
+        for light in fills.iter().take(FILL_CAP) {
+            renderer.point_lights.push(*light);
+        }
+        for light in primaries.iter().skip(SHADOW_PRIMARY_CAP) {
+            renderer.point_lights.push(*light);
         }
     }
 

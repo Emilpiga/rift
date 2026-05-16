@@ -42,6 +42,24 @@ impl EquipSlotIdx {
             _ => "?",
         }
     }
+
+    /// `true` when equipment whose [`ItemView::equip_native_slot`] is
+    /// `Some(native)` may be dropped onto this paperdoll cell.
+    ///
+    /// Ring columns accept each other's native index (`6`\u2194`7`) so
+    /// ring bases that only advertise `Ring1` on wire still tint both
+    /// sockets during drag (mirrors inventory equip rules server-side).
+    pub fn accepts_equip_drag(self, native: Option<u8>) -> bool {
+        let Some(n) = native else {
+            return false;
+        };
+        if n == self.0 {
+            return true;
+        }
+        const RING_A: u8 = 6;
+        const RING_B: u8 = 7;
+        matches!((n, self.0), (RING_A, RING_B) | (RING_B, RING_A))
+    }
 }
 
 // ─── Tooltip line classification ─────────────────────────────
@@ -197,6 +215,7 @@ impl RollBand {
 pub struct TooltipLineView<'a> {
     pub text: &'a str,
     pub kind: TooltipLineKind,
+    pub enchanted: bool,
     /// `Some` for stat / affix lines that carry a named roll
     /// band suffix; the renderer uses
     /// [`RollBand::color_rgb`] to tint the line. `None` for
@@ -295,11 +314,20 @@ pub struct ItemView<'a> {
     /// dynamically from the union of these keys, so adding a
     /// new `Stat` variant in `rift-game` shows up automatically.
     pub stat_keys: &'a [&'static str],
+    /// `Some(equip slot index 0..=9)` for equippable gear, from the
+    /// item base. `None` for consumables.
+    /// Ring bases use index `6` (`Ring1`); [`EquipSlotIdx::accepts_equip_drag`]
+    /// still allows dropping onto ring column `7`.
+    pub equip_native_slot: Option<u8>,
     /// `true` when the item is a `ItemSlot::Consumable(_)` \u2014
     /// drives bag right-click routing (`UseConsumable` instead
     /// of `Equip` / `DepositToStash`) and disables salvage /
     /// equip affordances.
     pub is_consumable: bool,
+    /// While anvil / void forge has this item selected, block drag-
+    /// out and inventory mutations until the forge is cleared or the
+    /// selection is replaced via the forge socket.
+    pub forge_locked: bool,
 }
 
 // ─── Stash views ─────────────────────────────────────────────
@@ -405,6 +433,37 @@ pub struct InventoryView<'a> {
     /// bottom of the drawer. The bar is laid out wide enough
     /// to hold additional currencies as they're added.
     pub currency_shards: u32,
+    /// Active anvil enchanting panel, when the player is
+    /// interacting with the hub anvil.
+    pub enchant: Option<EnchantView<'a>>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EnchantSourceView {
+    Bag(u32),
+    Equip(EquipSlotIdx),
+}
+
+#[derive(Clone, Debug)]
+pub struct EnchantAffixView<'a> {
+    pub index: u8,
+    pub text: &'a str,
+    pub reroll_options: &'a [String],
+    /// Pool entries that cannot roll here — `(preview line, short reason)`.
+    pub reroll_excluded: &'a [(String, &'static str)],
+    pub locked: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnchantView<'a> {
+    pub selected_source: Option<EnchantSourceView>,
+    pub item: Option<&'a ItemView<'a>>,
+    pub item_name: Option<&'a str>,
+    pub affixes: &'a [EnchantAffixView<'a>],
+    pub selected_affix: Option<u8>,
+    pub locked_affix_index: Option<u8>,
+    pub player_shards: u32,
+    pub cost: u32,
 }
 
 // ─── Persistent UI state (host-owned) ────────────────────────
@@ -494,6 +553,8 @@ pub struct InventoryUiState {
     /// destination doesn't read as "empty" between drop and
     /// the server's authoritative state.
     pub in_transit_dest_rect: Option<[f32; 4]>,
+    pub enchant_source: Option<EnchantSourceView>,
+    pub enchant_affix: Option<u8>,
 }
 
 /// Compact mirror of the `DragSource` enum in `rift-ui` (kept
@@ -586,39 +647,69 @@ pub enum InventoryAction {
     /// User pressed Tab (or the panel decided to close itself).
     Close,
     /// Equip a bag item into its canonical slot.
-    Equip { inventory_index: u32 },
+    Equip {
+        inventory_index: u32,
+        /// Which paperdoll cell to fill ([`EquipSlotIdx`] `.0`). `None` keeps the
+        /// legacy behaviour where the server picks a default slot (first empty ring,
+        /// etc.) — used for click-to-equip.
+        target_slot: Option<u8>,
+    },
     /// Unequip into the next free bag slot.
-    Unequip { slot: u8 },
+    Unequip {
+        slot: u8,
+    },
     /// Unequip into a specific bag slot. The previous occupant,
     /// if any, swaps into the original equip slot.
-    UnequipToSlot { slot: u8, inventory_index: u32 },
+    UnequipToSlot {
+        slot: u8,
+        inventory_index: u32,
+    },
     /// Swap two equipment slots in place. Currently only used
     /// for ring1 ↔ ring2 (the only pair where both items
     /// remain legal after the swap); the server still
     /// validates both `Equipment::accepts` directions and
     /// rejects illegal combinations.
-    SwapEquip { a: u8, b: u8 },
+    SwapEquip {
+        a: u8,
+        b: u8,
+    },
     /// Swap two bag slots in place (reorder).
-    SwapBag { a: u32, b: u32 },
+    SwapBag {
+        a: u32,
+        b: u32,
+    },
     /// Drop a bag item onto the ground at the player's pos.
-    DropToWorld { inventory_index: u32 },
+    DropToWorld {
+        inventory_index: u32,
+    },
     /// Drop an equipped item directly onto the ground (skips
     /// the bag entirely). Emitted when the player drags an
     /// equipped slot outside the inventory drawer.
-    DropEquipToWorld { slot: u8 },
+    DropEquipToWorld {
+        slot: u8,
+    },
     /// Salvage a single bag item for shards.
-    Salvage { inventory_index: u32 },
+    Salvage {
+        inventory_index: u32,
+    },
     /// Bulk-salvage every non-anchored bag item ≤ `rarity_max`.
-    SalvageBulk { rarity_max: u8 },
+    SalvageBulk {
+        rarity_max: u8,
+    },
     /// Begin consuming the bag item at `inventory_index`. The
     /// host inspects the item's `ConsumableKind`: self-targeted
     /// kinds (e.g. `GreaterRespecToken`) fire the `UseItem`
     /// wire request immediately; two-step kinds (e.g.
     /// `LesserRespecToken`) enter a "pick a target" UI mode
     /// before pushing the request.
-    UseConsumable { inventory_index: u32 },
+    UseConsumable {
+        inventory_index: u32,
+    },
     /// Deposit a bag item into the active stash tab.
-    DepositToStash { inventory_index: u32, tab_index: u8 },
+    DepositToStash {
+        inventory_index: u32,
+        tab_index: u8,
+    },
     /// Deposit a bag item into a specific stash slot.
     DepositToStashSlot {
         inventory_index: u32,
@@ -626,7 +717,10 @@ pub enum InventoryAction {
         stash_index: u32,
     },
     /// Withdraw a stash item back into the bag.
-    WithdrawFromStash { tab_index: u8, stash_index: u32 },
+    WithdrawFromStash {
+        tab_index: u8,
+        stash_index: u32,
+    },
     /// Withdraw a stash item into a specific bag slot.
     WithdrawFromStashSlot {
         tab_index: u8,
@@ -635,7 +729,11 @@ pub enum InventoryAction {
     },
     /// Equip a stash item directly. Server swaps the
     /// previously-equipped item back into the freed stash cell.
-    EquipFromStash { tab_index: u8, stash_index: u32 },
+    EquipFromStash {
+        tab_index: u8,
+        stash_index: u32,
+        target_slot: Option<u8>,
+    },
     /// Unequip an equipped item directly into a specific
     /// stash cell.
     UnequipToStashSlot {
@@ -644,23 +742,49 @@ pub enum InventoryAction {
         stash_index: u32,
     },
     /// Swap two slots inside one stash tab.
-    SwapStash { tab_index: u8, a: u32, b: u32 },
+    SwapStash {
+        tab_index: u8,
+        a: u32,
+        b: u32,
+    },
     /// Switch the active stash tab. The widget also updates
     /// `state.active_stash_tab` so emission is purely
     /// informational; some hosts may want to telemetry it.
-    SwitchStashTab { tab_index: u8 },
+    SwitchStashTab {
+        tab_index: u8,
+    },
     /// Rename the given stash tab.
-    RenameTab { tab_index: u8, name: String },
+    RenameTab {
+        tab_index: u8,
+        name: String,
+    },
     /// Set the given stash tab's color. `color` is packed
     /// `0xRRGGBB`.
-    RecolorTab { tab_index: u8, color: u32 },
+    RecolorTab {
+        tab_index: u8,
+        color: u32,
+    },
     /// Purchase a new stash tab.
     BuyTab,
     /// Auto-sort the bag: server compacts by rarity desc,
     /// then ilvl desc, then footprint area desc.
     SortBag,
     /// Auto-sort one stash tab. Same ordering as `SortBag`.
-    SortStashTab { tab_index: u8 },
+    SortStashTab {
+        tab_index: u8,
+    },
+    SelectEnchantSource {
+        source: EnchantSourceView,
+    },
+    /// Clear the void-forge item selection (right-click on forge socket).
+    ClearEnchantForge,
+    SelectEnchantAffix {
+        affix_index: u8,
+    },
+    RerollAffix {
+        source: EnchantSourceView,
+        affix_index: u8,
+    },
 }
 
 /// `0xRRGGBB` palette offered by the stash tab color picker.

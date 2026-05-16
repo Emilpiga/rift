@@ -118,6 +118,38 @@ pub(super) fn write_combined_with_layout(
     }
 }
 
+/// Write a contiguous array of combined image samplers at `binding`.
+pub(super) fn write_combined_array(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    binding: u32,
+    views: &[vk::ImageView],
+    sampler: vk::Sampler,
+    layout: vk::ImageLayout,
+) {
+    if views.is_empty() {
+        return;
+    }
+    let image_info: Vec<_> = views
+        .iter()
+        .map(|&view| {
+            vk::DescriptorImageInfo::default()
+                .image_view(view)
+                .sampler(sampler)
+                .image_layout(layout)
+        })
+        .collect();
+    let write = vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(binding)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .descriptor_count(views.len() as u32)
+        .image_info(&image_info);
+    unsafe {
+        device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+    }
+}
+
 pub(super) fn create_sampled_set_layout(
     device: &ash::Device,
     input_count: u32,

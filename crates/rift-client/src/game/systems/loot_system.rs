@@ -288,6 +288,7 @@ pub fn on_loot_dropped(
     .map(|mut it| {
         it.unstable = blob.unstable;
         it.rift_touched = rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
+        it.enchanted_affix_index = blob.enchanted_affix_index;
         it
     }) else {
         log::warn!(
@@ -298,13 +299,13 @@ pub fn on_loot_dropped(
         return;
     };
 
-    let color = item.rarity.color();
+    let rarity = item.rarity;
     let pillar = renderer.vfx_system.spawn(
-        rift_engine::renderer::vfx::presets::loot_beam(color),
+        rift_engine::renderer::vfx::presets::loot_beam(rarity),
         position,
     );
     let base = renderer.vfx_system.spawn(
-        rift_engine::renderer::vfx::presets::loot_beam_base(color),
+        rift_engine::renderer::vfx::presets::loot_beam_base(rarity),
         position,
     );
     // Anchored drops get an extra orbital halo so the rare

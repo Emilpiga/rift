@@ -27,6 +27,14 @@ const QUAD_VERTICES: [[f32; 2]; 4] = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0
 
 const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
+#[inline]
+fn instance_cam_dist_sq(inst: &VfxParticleInstance, camera_pos: [f32; 3]) -> f32 {
+    let dx = inst.position[0] - camera_pos[0];
+    let dy = inst.position[1] - camera_pos[1];
+    let dz = inst.position[2] - camera_pos[2];
+    dx * dx + dy * dy + dz * dz
+}
+
 /// Blend grouping computed per-frame: `[alpha_first..additive_first)`
 /// is the alpha range, `[additive_first..end)` is the additive
 /// range. Premultiplied is folded into the alpha pipeline since
@@ -110,6 +118,7 @@ impl ParticleVfxRenderer {
         device: &ash::Device,
         allocator: &Arc<Mutex<Allocator>>,
         instances: &[VfxParticleInstance],
+        camera_pos: [f32; 3],
     ) -> Result<()> {
         if let Some(mut buf) = self.instance_buffers[frame].take() {
             buf.cleanup(device, allocator);
@@ -128,6 +137,13 @@ impl ParticleVfxRenderer {
                 sorted.push(*inst);
             }
         }
+        // Back-to-front for alpha smoke so overlapping quads
+        // composite into one volume instead of showing card edges.
+        sorted.sort_by(|a, b| {
+            let da = instance_cam_dist_sq(a, camera_pos);
+            let db = instance_cam_dist_sq(b, camera_pos);
+            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        });
         let alpha_count = sorted.len() as u32;
         for inst in instances {
             if inst.blend == 1 {
@@ -261,16 +277,12 @@ impl ParticleVfxRenderer {
         translucent_set_layout: vk::DescriptorSetLayout,
         shader_dir: &std::path::Path,
     ) -> Result<(vk::Pipeline, vk::Pipeline, vk::PipelineLayout)> {
-        let vert_src = std::fs::read_to_string(shader_dir.join("vfx_particle.vert"))?;
-        let frag_src = std::fs::read_to_string(shader_dir.join("vfx_particle.frag"))?;
+        let vert_path = shader_dir.join("vfx/particle/particle.vert");
+        let frag_path = shader_dir.join("vfx/particle/particle.frag");
 
-        let vert_spv =
-            hot_reload::compile_glsl(&vert_src, "vfx_particle.vert", shaderc::ShaderKind::Vertex)?;
-        let frag_spv = hot_reload::compile_glsl(
-            &frag_src,
-            "vfx_particle.frag",
-            shaderc::ShaderKind::Fragment,
-        )?;
+        let vert_spv = hot_reload::compile_glsl_file(&vert_path, shaderc::ShaderKind::Vertex)?;
+        let frag_spv =
+            hot_reload::compile_glsl_file(&frag_path, shaderc::ShaderKind::Fragment)?;
 
         let vert_module = crate::vulkan::pipeline::create_shader_module(device, &vert_spv)?;
         let frag_module = crate::vulkan::pipeline::create_shader_module(device, &frag_spv)?;
@@ -307,15 +319,22 @@ impl ParticleVfxRenderer {
         //   seed:     f32  @ 32
         //   sprite:   u32  @ 36
         //   blend:    u32  @ 40
-        //   _pad:     u32  @ 44
-        //   velocity: vec3 @ 48
-        //   spin:     f32  @ 60
+        //   life_t:   f32  @ 44
+        //   origin_y: f32  @ 48
+        //   velocity: vec3 @ 52
+        //   spin:          f32     @ 64
+        //   hybrid_meta:   [f32;4] @ 68
+        //   hybrid_params: [f32;4] @ 84
+        //   style_pack:    [f32;4] @ 100
+        //   style_aux:     [f32;4] @ 116
+        //   role_pack:     [f32;4] @ 132
         //
         // Vertex attributes pack `(position, size)` into a single
         // vec4 at offset 0 (location 1), `color` as vec4 at 16
-        // (location 2), `(seed, sprite, blend, _pad)` as vec4
-        // at offset 32 (location 3), and `(velocity, spin)` as
-        // vec4 at offset 48 (location 4). The fragment shader
+        // (location 2), `(seed, sprite, blend, life_t)` as vec4
+        // at offset 32 (location 3), `(origin_y, velocity)` as vec4
+        // at offset 48 (location 4), and `spin` at offset 64
+        // (location 5). The fragment shader
         // reads sprite via floatBitsToUint — the bytes are u32
         // verbatim regardless of the SFLOAT format.
         let attrs = [
@@ -347,7 +366,43 @@ impl ParticleVfxRenderer {
                 binding: 1,
                 location: 4,
                 format: vk::Format::R32G32B32A32_SFLOAT,
-                offset: 48, // velocity.xyz + spin.w
+                offset: 48, // origin_y + velocity.xyz
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 5,
+                format: vk::Format::R32_SFLOAT,
+                offset: 64, // spin — R32 only (hybrid_meta follows at 68)
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 6,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 68, // hybrid_meta
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 7,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 84, // hybrid_params
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 8,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 100, // style_pack
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 9,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 116, // style_aux
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 10,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 132, // role_pack
             },
         ];
 

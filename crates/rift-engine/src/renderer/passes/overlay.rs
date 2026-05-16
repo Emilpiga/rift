@@ -536,6 +536,14 @@ impl OverlayBatch {
     /// That's enough fidelity for the smooth top-down
     /// lighting effects we use here while costing the same
     /// vertex budget as the solid version.
+    ///
+    /// When `pin_rect_center` is true, the **axis-aligned**
+    /// centre pocket is triangulated as a fan from the
+    /// rectangle's geometric centre instead of a single quad.
+    /// A one-quad centre only interpolates corner colours; for
+    /// a Chebyshev (square) radial those corners often share
+    /// the same `d`, so the whole interior reads as a flat
+    /// wash — the fan fixes empty inventory slot vignettes.
     pub fn rounded_rect_px_color_fn<F: FnMut(f32, f32) -> [f32; 4]>(
         &mut self,
         x: f32,
@@ -544,6 +552,7 @@ impl OverlayBatch {
         h: f32,
         radius: f32,
         mut color_at: F,
+        pin_rect_center: bool,
         screen_w: f32,
         screen_h: f32,
     ) {
@@ -592,29 +601,91 @@ impl OverlayBatch {
             });
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         };
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let emit_center_fan = |verts: &mut Vec<OverlayVertex>,
+                               indices: &mut Vec<u32>,
+                               tl: (f32, f32),
+                               tr: (f32, f32),
+                               br: (f32, f32),
+                               bl: (f32, f32),
+                               color_at: &mut F| {
+            let cbase = verts.len() as u32;
+            verts.push(OverlayVertex {
+                position: to_ndc(cx, cy),
+                color: color_at(cx, cy),
+                uv,
+            });
+            for p in [tl, tr, br, bl] {
+                verts.push(OverlayVertex {
+                    position: to_ndc(p.0, p.1),
+                    color: color_at(p.0, p.1),
+                    uv,
+                });
+            }
+            // Same winding as `quad`: TL–TR–BR then TL–BR–BL.
+            indices.extend_from_slice(&[
+                cbase,
+                cbase + 1,
+                cbase + 2,
+                cbase,
+                cbase + 2,
+                cbase + 3,
+                cbase,
+                cbase + 3,
+                cbase + 4,
+                cbase,
+                cbase + 4,
+                cbase + 1,
+            ]);
+        };
         if r <= 0.0 {
-            // Single quad fast-path.
+            if pin_rect_center {
+                emit_center_fan(
+                    &mut self.vertices,
+                    &mut self.indices,
+                    (x, y),
+                    (x + w, y),
+                    (x + w, y + h),
+                    (x, y + h),
+                    &mut color_at,
+                );
+            } else {
+                // Single quad fast-path.
+                quad(
+                    &mut self.vertices,
+                    &mut self.indices,
+                    (x, y),
+                    (x + w, y),
+                    (x + w, y + h),
+                    (x, y + h),
+                    &mut color_at,
+                );
+            }
+            return;
+        }
+        // Centre pocket: quad or fan from true rect centre.
+        if pin_rect_center {
+            emit_center_fan(
+                &mut self.vertices,
+                &mut self.indices,
+                (x + r, y + r),
+                (x + w - r, y + r),
+                (x + w - r, y + h - r),
+                (x + r, y + h - r),
+                &mut color_at,
+            );
+        } else {
             quad(
                 &mut self.vertices,
                 &mut self.indices,
-                (x, y),
-                (x + w, y),
-                (x + w, y + h),
-                (x, y + h),
+                (x + r, y + r),
+                (x + w - r, y + r),
+                (x + w - r, y + h - r),
+                (x + r, y + h - r),
                 &mut color_at,
             );
-            return;
         }
-        // Centre quad.
-        quad(
-            &mut self.vertices,
-            &mut self.indices,
-            (x + r, y + r),
-            (x + w - r, y + r),
-            (x + w - r, y + h - r),
-            (x + r, y + h - r),
-            &mut color_at,
-        );
         // Top band.
         quad(
             &mut self.vertices,
@@ -799,6 +870,55 @@ impl OverlayBatch {
                     lerp(edge[3], centre[3], s),
                 ]
             },
+            false,
+            screen_w,
+            screen_h,
+        );
+    }
+
+    /// Chebyshev (square) radial on a rounded rect: `centre` at
+    /// the geometric centre, `edge` at the **square** boundary
+    /// in normalised coordinates — better for inventory slots
+    /// than [`Self::rounded_rect_px_radial`], whose flat ellipse
+    /// makes square cells read as a flat wash.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rounded_rect_px_radial_square(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let hx = (w * 0.5).max(1.0);
+        let hy = (h * 0.5).max(1.0);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        self.rounded_rect_px_color_fn(
+            x,
+            y,
+            w,
+            h,
+            radius,
+            |px, py| {
+                let nx = ((px - cx) / hx).abs();
+                let ny = ((py - cy) / hy).abs();
+                let d = nx.max(ny).min(1.0);
+                let t = 1.0 - d;
+                let s = t * t * (3.0 - 2.0 * t);
+                [
+                    lerp(edge[0], centre[0], s),
+                    lerp(edge[1], centre[1], s),
+                    lerp(edge[2], centre[2], s),
+                    lerp(edge[3], centre[3], s),
+                ]
+            },
+            true,
             screen_w,
             screen_h,
         );
@@ -904,13 +1024,11 @@ impl OverlayBatch {
     }
 
     /// Filled rounded rect with an elliptical radial gradient
-    /// AND a procedural cloud-noise modulation applied per
-    /// fragment in the shader. Same primitive cost as
-    /// [`Self::rounded_rect_px_radial`] — we just emit a
-    /// sentinel UV (`-1, -1`) so the shader knows to apply
-    /// noise. Use for any panel/button surface that should
-    /// read as textured stone or hammered metal rather than
-    /// flat gradient.
+    /// AND a procedural **glass** modulation in the fragment
+    /// shader. Vertices carry **packed panel UVs** in a
+    /// negative range (see `overlay.frag`) so the shader can
+    /// build edge fresnel, top highlights, and frost without
+    /// sampling the font atlas.
     #[allow(clippy::too_many_arguments)]
     pub fn rounded_rect_px_radial_noisy(
         &mut self,
@@ -929,11 +1047,6 @@ impl OverlayBatch {
         let ax = (w * 0.50).max(1.0);
         let ay = (h * 0.30).max(1.0);
         let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-        // Replace UV with the noise sentinel so the shader
-        // turns on its noise path. We can't reuse
-        // `rounded_rect_px_color_fn` directly because that
-        // emits white-pixel UVs — so we duplicate the
-        // tessellation here with the sentinel UV inline.
         if w <= 0.0 || h <= 0.0 {
             return;
         }
@@ -954,9 +1067,19 @@ impl OverlayBatch {
                 lerp(edge[3], centre[3], s),
             ]
         };
-        // Sentinel UV — fragment shader treats UV.x < 0 as
-        // "apply procedural noise + sample white".
-        const NOISE_UV: [f32; 2] = [-1.0, -1.0];
+        // Pack panel-local UV ∈ [0,1]^2 into a negative band so
+        // `overlay.frag` skips the atlas but can recover `(u,v)`
+        // for glass edge / fresnel (avoid glow-disc / glow-line bands).
+        const GLASS_UV_A: f32 = -0.985;
+        const GLASS_UV_B: f32 = -0.015;
+        let glass_uv = |px: f32, py: f32| -> [f32; 2] {
+            let lu = ((px - x) / w.max(1e-6)).clamp(0.0, 1.0);
+            let lv = ((py - y) / h.max(1e-6)).clamp(0.0, 1.0);
+            [
+                GLASS_UV_A + (GLASS_UV_B - GLASS_UV_A) * lu,
+                GLASS_UV_A + (GLASS_UV_B - GLASS_UV_A) * lv,
+            ]
+        };
         let quad = |verts: &mut Vec<OverlayVertex>,
                     indices: &mut Vec<u32>,
                     p0: (f32, f32),
@@ -967,22 +1090,22 @@ impl OverlayBatch {
             verts.push(OverlayVertex {
                 position: to_ndc(p0.0, p0.1),
                 color: color_at(p0.0, p0.1),
-                uv: NOISE_UV,
+                uv: glass_uv(p0.0, p0.1),
             });
             verts.push(OverlayVertex {
                 position: to_ndc(p1.0, p1.1),
                 color: color_at(p1.0, p1.1),
-                uv: NOISE_UV,
+                uv: glass_uv(p1.0, p1.1),
             });
             verts.push(OverlayVertex {
                 position: to_ndc(p2.0, p2.1),
                 color: color_at(p2.0, p2.1),
-                uv: NOISE_UV,
+                uv: glass_uv(p2.0, p2.1),
             });
             verts.push(OverlayVertex {
                 position: to_ndc(p3.0, p3.1),
                 color: color_at(p3.0, p3.1),
-                uv: NOISE_UV,
+                uv: glass_uv(p3.0, p3.1),
             });
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         };
@@ -1053,7 +1176,7 @@ impl OverlayBatch {
             self.vertices.push(OverlayVertex {
                 position: to_ndc(cx, cy),
                 color: color_at(cx, cy),
-                uv: NOISE_UV,
+                uv: glass_uv(cx, cy),
             });
             let step = HALF_PI / segments as f32;
             for i in 0..=segments {
@@ -1063,7 +1186,7 @@ impl OverlayBatch {
                 self.vertices.push(OverlayVertex {
                     position: to_ndc(px, py),
                     color: color_at(px, py),
-                    uv: NOISE_UV,
+                    uv: glass_uv(px, py),
                 });
                 if i > 0 {
                     let prev = centre_idx + i;
@@ -1135,7 +1258,7 @@ impl OverlayBatch {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    /// Bevelled stone disc with an indented dark-to-tint radial
+    /// Bevelled void-glass disc with an indented dark-to-tint radial
     /// gradient and a shader-rasterised glow halo. One quad,
     /// the fragment shader does everything via SDF math + the
     /// `[-2.0, -1.0]` UV sentinel.
@@ -1286,6 +1409,7 @@ impl OverlayBatch {
         y: f32,
         size: f32,
         color: [f32; 4],
+        header_font: bool,
         screen_w: f32,
         screen_h: f32,
     ) -> f32 {
@@ -1294,10 +1418,10 @@ impl OverlayBatch {
         let mut cursor_x = x;
 
         for ch in text.chars() {
-            let Some(glyph) = self.font.glyph(ch) else {
+            let Some(glyph) = self.font.glyph_for(header_font, ch) else {
                 // Unknown char — still advance by a half-em
                 // so cursor positioning matches `measure_text`.
-                cursor_x += self.font.advance(ch) * scale;
+                cursor_x += self.font.advance_for(header_font, ch) * scale;
                 continue;
             };
             // Empty bitmap (e.g. space): advance only.
@@ -1348,9 +1472,12 @@ impl OverlayBatch {
     }
 
     /// Measure text width in pixels without drawing.
-    pub fn measure_text(&self, text: &str, size: f32) -> f32 {
+    pub fn measure_text(&self, text: &str, size: f32, header_font: bool) -> f32 {
         let scale = size / self.font.raster_px;
-        text.chars().map(|c| self.font.advance(c)).sum::<f32>() * scale
+        text.chars()
+            .map(|c| self.font.advance_for(header_font, c))
+            .sum::<f32>()
+            * scale
     }
 
     /// Draw a registered icon at pixel position (top-left origin).
@@ -1398,6 +1525,57 @@ impl OverlayBatch {
             position: [ndc_x, ndc_y + ndc_h],
             color: tint,
             uv: [u0, v1],
+        });
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        true
+    }
+
+    /// Same as [`Self::icon`] but the fragment shader treats the texture as a
+    /// monochrome mask (luminance × alpha → opacity) tinted by `fragColor.rgb` — no hue from
+    /// the source PNG. UVs are biased on **U** by `3.0`; keep this in sync with
+    /// `overlay.frag`'s `ICON_SILHOUETTE_U_BIAS`.
+    pub fn icon_silhouette(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tint: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> bool {
+        const ICON_SILHOUETTE_U_BIAS: f32 = 3.0;
+        let Some(&[u0, v0, u1, v1]) = self.icon_uv.read().unwrap().get(name) else {
+            return false;
+        };
+        let bu0 = u0 + ICON_SILHOUETTE_U_BIAS;
+        let bu1 = u1 + ICON_SILHOUETTE_U_BIAS;
+        let ndc_x = (x / screen_w) * 2.0 - 1.0;
+        let ndc_y = (y / screen_h) * 2.0 - 1.0;
+        let ndc_w = (w / screen_w) * 2.0;
+        let ndc_h = (h / screen_h) * 2.0;
+        let base = self.vertices.len() as u32;
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x, ndc_y],
+            color: tint,
+            uv: [bu0, v0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x + ndc_w, ndc_y],
+            color: tint,
+            uv: [bu1, v0],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x + ndc_w, ndc_y + ndc_h],
+            color: tint,
+            uv: [bu1, v1],
+        });
+        self.vertices.push(OverlayVertex {
+            position: [ndc_x, ndc_y + ndc_h],
+            color: tint,
+            uv: [bu0, v1],
         });
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1470,9 +1648,9 @@ impl OverlayRenderer {
         shader_dir: &std::path::Path,
     ) -> Result<Self> {
         // Build the overlay atlas in two stages:
-        //   1. Synchronously paint the font glyphs (top-left
-        //      97x48 region) so the loading screen \u2014 which
-        //      starts drawing the very next frame \u2014 has working
+        //   1. Synchronously paint the font glyphs (top font
+        //      band of the atlas) so the loading screen — which
+        //      starts drawing the very next frame — has working
         //      glyph UVs.
         //   2. Stream icon PNGs in across many frames via
         //      [`Self::step_load_icons`] so decode + resampling
@@ -2490,6 +2668,23 @@ impl rift_ui_im::DrawList for OverlayBatch {
         );
     }
 
+    fn rounded_rect_px_radial_square(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        edge: [f32; 4],
+        centre: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        OverlayBatch::rounded_rect_px_radial_square(
+            self, x, y, w, h, radius, edge, centre, screen_w, screen_h,
+        );
+    }
+
     fn rounded_outline_px(
         &mut self,
         x: f32,
@@ -2582,14 +2777,25 @@ impl rift_ui_im::DrawList for OverlayBatch {
         y: f32,
         size: f32,
         color: [f32; 4],
+        header_font: bool,
         screen_w: f32,
         screen_h: f32,
     ) -> f32 {
-        OverlayBatch::text(self, text, x, y, size, color, screen_w, screen_h)
+        OverlayBatch::text(
+            self,
+            text,
+            x,
+            y,
+            size,
+            color,
+            header_font,
+            screen_w,
+            screen_h,
+        )
     }
 
-    fn measure_text(&self, text: &str, size: f32) -> f32 {
-        OverlayBatch::measure_text(self, text, size)
+    fn measure_text(&self, text: &str, size: f32, header_font: bool) -> f32 {
+        OverlayBatch::measure_text(self, text, size, header_font)
     }
 
     fn icon(
@@ -2604,5 +2810,19 @@ impl rift_ui_im::DrawList for OverlayBatch {
         screen_h: f32,
     ) -> bool {
         OverlayBatch::icon(self, name, x, y, w, h, tint, screen_w, screen_h)
+    }
+
+    fn icon_silhouette(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tint: [f32; 4],
+        screen_w: f32,
+        screen_h: f32,
+    ) -> bool {
+        OverlayBatch::icon_silhouette(self, name, x, y, w, h, tint, screen_w, screen_h)
     }
 }

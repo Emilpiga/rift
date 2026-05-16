@@ -263,6 +263,27 @@ impl SkyConfig {
             void_depth_strength: 0.0,
         }
     }
+
+    /// Hub / character-select void aesthetic: deep violet dome, no sun,
+    /// optional abyss band below the horizon. Drive `cloud_flash` from the
+    /// client hub storm while `cloud_strength` stays at zero (clear-sky
+    /// lightning path in `sky.frag`).
+    pub fn void_hub() -> Self {
+        Self {
+            enabled: true,
+            zenith: [0.018, 0.008, 0.038],
+            horizon: [0.032, 0.012, 0.055],
+            ground: [0.014, 0.006, 0.028],
+            sun_dir: Vec3::new(0.0, 1.0, 0.0),
+            sun_size: 1.0,
+            sun_strength: 0.0,
+            horizon_falloff: 3.25,
+            cloud_strength: 0.0,
+            cloud_flash: 0.0,
+            cloud_flash_color: Vec3::new(0.72, 0.62, 1.05),
+            void_depth_strength: 0.42,
+        }
+    }
 }
 
 /// Push-constant struct sent to `sky.frag`. Matches the layout in

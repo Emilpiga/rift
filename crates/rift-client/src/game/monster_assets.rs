@@ -8,7 +8,10 @@
 //! animation in the file to the monster's own skeleton so gameplay
 //! systems can name them at runtime.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use rift_engine::animation_profile::{AnimBindings, MONSTER_PROFILE};
 use rift_engine::ash::vk;
@@ -41,6 +44,7 @@ pub struct MonsterAsset {
 #[derive(Default)]
 pub struct MonsterCache {
     assets: HashMap<MonsterRole, Option<MonsterAsset>>,
+    attempted: HashSet<MonsterRole>,
 }
 
 impl MonsterCache {
@@ -49,7 +53,20 @@ impl MonsterCache {
     }
 
     pub fn slot_mut(&mut self, role: MonsterRole) -> &mut Option<MonsterAsset> {
+        self.attempted.insert(role);
         self.assets.entry(role).or_insert(None)
+    }
+
+    /// Ensure a role has been attempted at least once. This is a
+    /// recovery path for state resets that rebuild `FloorManager`
+    /// after the app-level loading screen has already completed.
+    pub fn ensure_loaded(&mut self, role: MonsterRole) {
+        if self.attempted.contains(&role) {
+            return;
+        }
+        let asset = load_role(role);
+        self.attempted.insert(role);
+        self.assets.insert(role, asset);
     }
 
     /// Free GPU resources owned by every loaded monster role.  Must be
@@ -86,7 +103,7 @@ impl MonsterCache {
         // "tried and failed". Caller drives the iteration explicitly via
         // `next_pending_role`, so we don't need that here — instead the
         // caller tracks progress with `LoadPhase`.
-        self.get(role).is_some()
+        self.attempted.contains(&role)
     }
 }
 

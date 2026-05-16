@@ -1,6 +1,6 @@
 //! Point-light shadow atlas (omnidirectional cube shadows).
 //!
-//! Single image of format `R32_SFLOAT`, dimensions `384 × 384 × (6 ×
+//! Single image of format `R32_SFLOAT`, dimensions `1024 × 1024 × (6 ×
 //! MAX_POINT_SHADOWS)`, with `CUBE_COMPATIBLE` flags so it can be sampled
 //! as a `samplerCubeArray` in the main fragment shader. Each face stores
 //! a *linear distance* from the light, normalized to the light's radius
@@ -17,7 +17,7 @@
 //! Sampling (in `forward/shadow_sampling.glsl`): a plain `samplerCubeArray` (no
 //! comparison sampler) returns the stored normalized distance for any
 //! direction. The receiver computes its own normalized distance to the
-//! light and compares with a small bias + 4-tap stochastic PCF for soft
+//! light and compares with a small bias + 5-tap stochastic PCF for soft
 //! contact shadows around chests, walls, and props.
 
 use anyhow::Result;
@@ -34,8 +34,8 @@ use crate::vulkan::pipeline as pipe;
 
 /// Maximum number of simultaneous shadow-casting point lights. The atlas
 /// allocates `6 * MAX_POINT_SHADOWS` cube-face layers, so increasing this
-/// scales memory and worst-case render cost linearly. At 384² R32 + D32,
-/// 8 lights uses ~27 MiB color + 1 MiB depth.
+/// scales memory and worst-case render cost linearly. At 1024² R32 + D32,
+/// 8 lights uses ~192 MiB color + 1 MiB depth.
 ///
 /// Sized to comfortably fit every torch within the typical dungeon
 /// fog radius (~24 m × ~6 m torch spacing). Below this number the
@@ -46,12 +46,12 @@ pub const MAX_POINT_SHADOWS: usize = 8;
 /// Per-face resolution of the cube atlas. Rift rooms can have
 /// several torch/portal shadows active while skinned monsters keep
 /// nearby slots dirty, so this pass can dominate in-dungeon frame
-/// time. 384² keeps contact shadows readable at the gameplay camera
-/// while rendering ~44% fewer fragments than 512² per cube face.
+/// time. 1024² maximizes texel density on torch shadows; cost scales
+/// with face pixels (~4× vs 512²).
 ///
-/// Memory cost: 8 lights × 6 faces × 384² × 4 bytes ≈ 27 MiB
+/// Memory cost: 8 lights × 6 faces × 1024² × 4 bytes ≈ 192 MiB
 /// color + 1 MiB depth.
-pub const POINT_SHADOW_SIZE: u32 = 384;
+pub const POINT_SHADOW_SIZE: u32 = 1024;
 
 /// Color attachment format. R32_SFLOAT gives floating-point precision
 /// for normalized distances and is universally supported as a color

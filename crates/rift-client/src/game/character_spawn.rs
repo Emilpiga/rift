@@ -22,7 +22,7 @@ use rift_engine::ecs::components::{
 use rift_engine::renderer::mesh::SkinnedMesh;
 use rift_engine::{Mesh, Renderer};
 
-use rift_game::character::Gender;
+use rift_game::character::{CharacterAppearance, Gender};
 
 use super::avatar_cosmetics::{self, is_body_mesh_name, AvatarCosmeticsCache};
 
@@ -64,6 +64,7 @@ impl AnimLibraryCache {
 pub struct CharacterSpawn {
     pub position: Vec3,
     pub gender: Gender,
+    pub appearance: CharacterAppearance,
     /// Movement speed handed to the `Player` component (used by SP
     /// `player_input_system` for the local player; remote players
     /// don't read it but it's convenient to keep one shape).
@@ -94,7 +95,8 @@ pub fn spawn_character_entity(
         mesh_path,
         |node, mesh| is_body_mesh_name(node, mesh),
     ) {
-        Ok(skinned) => {
+        Ok(mut skinned) => {
+            avatar_cosmetics::apply_body_shape(&mut skinned, cfg.gender, cfg.appearance);
             let idx = renderer.add_skinned_mesh(
                 &skinned.bind_vertices,
                 &skinned.vertex_skin,
@@ -107,6 +109,10 @@ pub fn spawn_character_entity(
                 rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
             ) {
                 log::warn!("Character texture load failed: {}", e);
+            }
+            if let Some(obj) = renderer.objects.get_mut(idx) {
+                let tint = avatar_cosmetics::skin_tint(cfg.appearance.skin_tone);
+                obj.tint = [tint.x, tint.y, tint.z, 1.0];
             }
             let comp = Skinned {
                 mesh: Arc::new(skinned),
@@ -316,7 +322,14 @@ pub fn spawn_character_entity(
     // Dress the avatar with white eyes, eyebrows, and per-gender
     // hair before returning. Idempotent + cached, so cheap on
     // every subsequent spawn of the same gender.
-    avatar_cosmetics::apply_avatar_cosmetics(world, renderer, cosmetics, entity, cfg.gender);
+    avatar_cosmetics::apply_avatar_cosmetics(
+        world,
+        renderer,
+        cosmetics,
+        entity,
+        cfg.gender,
+        cfg.appearance,
+    );
 
     Ok(entity)
 }

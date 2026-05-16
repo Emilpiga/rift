@@ -101,7 +101,7 @@ fn render_item_tooltip_inner(
                 }
                 TooltipLineKind::Legendary => Color::rgba(1.00, 0.70, 0.20, 1.0),
                 TooltipLineKind::LegendaryBannerEdge => Color::rgba(0.0, 0.0, 0.0, 0.0),
-                TooltipLineKind::LegendaryFlavor => Color::rgba(0.85, 0.70, 0.45, 0.85),
+                TooltipLineKind::LegendaryFlavor => Color::rgba(0.82, 0.72, 0.98, 0.88),
                 TooltipLineKind::Resonance => Color::rgba(0.78, 0.55, 1.00, 1.0),
                 TooltipLineKind::RiftTouched => Color::rgba(1.00, 0.45, 0.95, 1.0),
                 TooltipLineKind::Anchored => Color::rgba(1.00, 0.82, 0.25, 1.0),
@@ -146,12 +146,15 @@ fn render_item_tooltip_inner(
                 TooltipLineKind::Divider => TooltipLineDecor::Divider,
                 _ => TooltipLineDecor::Text,
             };
+            let header_font = matches!(l.kind, TooltipLineKind::Name);
             TooltipLine {
                 text: l.text,
                 size,
                 color,
                 decor,
+                enchanted: l.enchanted,
                 badge,
+                header_font,
             }
         })
         .collect();
@@ -210,7 +213,9 @@ fn render_compare_delta_inner(
             size: theme.fonts.size_md,
             color: theme.colors.text_dim,
             decor: TooltipLineDecor::Text,
+            enchanted: false,
             badge: None,
+            header_font: false,
         }];
     } else {
         lines = rows
@@ -224,14 +229,16 @@ fn render_compare_delta_inner(
                     Color::rgba(0.96, 0.40, 0.40, 1.0)
                 },
                 decor: TooltipLineDecor::Text,
+                enchanted: false,
                 badge: None,
+                header_font: false,
             })
             .collect();
     }
 
     let mut t = Tooltip::new()
         .header("Change vs equipped")
-        .header_color(Color::rgba(0.95, 0.85, 0.55, 1.0))
+        .header_color(Color::rgba(0.88, 0.80, 1.0, 1.0))
         .min_width(220.0)
         .pad(10.0);
     if let Some(r) = anchor_rect {

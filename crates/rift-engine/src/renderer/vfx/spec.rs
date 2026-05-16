@@ -13,7 +13,8 @@
 //! - [`ForceField`] composes external forces (gravity, drag,
 //!   orbit, curl noise) per layer.
 //! - [`SpriteShape`] selects the procedural fragment shape
-//!   (soft glow, hard spark, smoky puff). No texture assets yet.
+//!   (soft glow, hard spark, smoky puff). Optional [`HybridMaterial`]
+//!   layers authored textures (billow, flipbooks) on top.
 //!
 //! All of these are `Clone + Debug` and cheap to copy; effects
 //! are intended to be `pub const fn` builders the gameplay
@@ -164,6 +165,8 @@ pub struct EffectBundle {
     /// flight path instead of clumping at the projectile.
     /// Typical values 0.5..0.9 for projectile trails.
     pub inherit_velocity: f32,
+    /// Art-direction preset baked at build time (Phase 3: also drives GPU style uniform).
+    pub style: Option<crate::renderer::vfx::style::StylePreset>,
 }
 
 impl From<Effect> for EffectBundle {
@@ -173,6 +176,7 @@ impl From<Effect> for EffectBundle {
             light: None,
             tip_light: None,
             inherit_velocity: 0.0,
+            style: None,
         }
     }
 }
@@ -241,6 +245,21 @@ pub struct ParticleSpec {
     /// Multiplier on the sprite's procedural alpha. Lets a
     /// single gradient/sprite drive several visual densities.
     pub opacity: f32,
+    /// Optional authored texture + procedural shell (curl flow,
+    /// lighting, soft-particle). When set, the GPU path uses
+    /// [`SpriteShape::Textured`] regardless of `sprite` (which
+    /// still drives vertex behaviour via [`HybridMaterial::base_sprite`]).
+    pub hybrid: Option<HybridMaterial>,
+    /// Semantic role for GPU accent (`VfxRole::gpu_role_id`). `0` = legacy / chunk-authored.
+    pub vfx_role: u8,
+}
+
+impl ParticleSpec {
+    #[inline]
+    pub fn with_vfx_role(mut self, role: u8) -> Self {
+        self.vfx_role = role;
+        self
+    }
 }
 
 /// How the spawner emits particles over time.
@@ -336,6 +355,12 @@ pub enum ForceField {
     /// length in metres; `strength` is acceleration scale.
     /// Phase advances with effect time so the field animates.
     Curl { frequency: f32, strength: f32 },
+    /// High-frequency chaotic jitter — direct hash-noise kicks on
+    /// velocity (not divergence-free, unlike [`ForceField::Curl`]).
+    /// Reads as boil / flicker in fire; pair with drag so speed
+    /// stays bounded. `frequency` ≈ 1 / feature size in metres;
+    /// `strength` scales the noise sample (m/s²-ish after `dt`).
+    Turbulence { frequency: f32, strength: f32 },
     /// Constant directional velocity bias added each frame —
     /// useful for trail particles that should drift along a
     /// beam without inheriting per-particle randomness.
@@ -597,6 +622,73 @@ pub enum SpriteShape {
     /// fragments, and noisy scorched fill so large slam/meteor
     /// impacts read as damage in the world rather than UI rings.
     GroundCrack = 8,
+    /// World-up flame tongue — narrow cylindrical billboard with a
+    /// teardrop silhouette, centreline wobble, and noise-eroded
+    /// edges. Designed for torches and ambient fire so each
+    /// particle reads as a lick of flame rather than a radial disc.
+    Flame = 9,
+    /// Authored texture + procedural shell. Set [`ParticleSpec::hybrid`]
+    /// for texture index and sampling profile; use `base_sprite` on
+    /// the hybrid material for vertex motion (smoke stretch, spin, …).
+    Textured = 10,
+}
+
+/// How a hybrid particle samples its bound texture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HybridProfile {
+    /// Tiling density field with world-space flow (smoke billow).
+    TilingBillow {
+        /// World-metres per texture repeat (scroll / coherence).
+        tile: f32,
+        /// Curl-noise UV warp strength.
+        flow_strength: f32,
+        /// Fraction of one texture tile mapped across the billboard
+        /// (`~0.4` = one billow blob on the card; uses `fract()` tiling).
+        puff_footprint: f32,
+    },
+    /// Grid atlas animation.
+    Flipbook {
+        cols: u8,
+        rows: u8,
+        frame_start: u8,
+        frame_count: u8,
+        fps: f32,
+        looped: bool,
+    },
+}
+
+/// GPU profile kind — matches `HybridProfileGpu::kind` in shaders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum HybridProfileKind {
+    TilingBillow = 0,
+    Flipbook = 1,
+}
+
+/// Authored texture slot + sampling profile for [`ParticleSpec::hybrid`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridMaterial {
+    /// Index into the engine `vfxTextures[]` array (see [`crate::renderer::vfx::textures::VfxTextureId`]).
+    pub texture: u32,
+    pub profile: HybridProfile,
+    /// Vertex / motion behaviour while the fragment path is textured.
+    pub base_sprite: SpriteShape,
+}
+
+impl HybridMaterial {
+    /// Default hybrid smoke using `assets/vfx/smoke_billow.png` (slot 0).
+    pub fn smoke_billow() -> Self {
+        Self {
+            texture: 0,
+            profile: HybridProfile::TilingBillow {
+                // Zero tile/footprint = sample uv 0–1 as authored (one puff per card).
+                tile: 0.0,
+                flow_strength: 0.22,
+                puff_footprint: 1.0,
+            },
+            base_sprite: SpriteShape::Smoke,
+        }
+    }
 }
 
 impl Default for SpriteShape {

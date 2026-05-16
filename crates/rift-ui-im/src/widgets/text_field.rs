@@ -96,6 +96,7 @@ impl<'a> TextField<'a> {
         let pad_x = 12.0;
         let pad_y = (rect.height() - text_size) * 0.5;
         let text_origin = Pos2::new(rect.x() + pad_x, rect.y() + pad_y);
+        let inner_w = (rect.width() - pad_x * 2.0).max(0.0);
 
         // ── Focus management ────────────────────────────────
         let was_focused = ui.state().focus == Some(id);
@@ -138,33 +139,39 @@ impl<'a> TextField<'a> {
         // Mouse hit-testing converts an x-pixel into a byte
         // offset. We measure prefixes char-by-char and pick
         // the closest boundary.
-        let hit_byte_offset = |ui: &mut Ui<'_>, x_px: f32, value: &str| -> usize {
-            let click_x = (x_px - text_origin.x).max(0.0);
-            let mut best = 0usize;
-            let mut best_dx = click_x.abs();
-            let mut acc = 0.0f32;
-            for (idx, _) in value.char_indices() {
-                let prefix = &value[..idx];
-                let w = ui.measure_text(prefix, text_size);
-                let dx = (w - click_x).abs();
-                if dx < best_dx {
-                    best_dx = dx;
-                    best = idx;
+        let hit_byte_offset =
+            |ui: &mut Ui<'_>, x_px: f32, value: &str, visible_start: usize| -> usize {
+                let click_x = (x_px - text_origin.x).max(0.0);
+                let mut best = visible_start.min(value.len());
+                let mut best_dx = click_x.abs();
+                let mut acc = 0.0f32;
+                for (idx, _) in value.char_indices() {
+                    if idx < visible_start {
+                        continue;
+                    }
+                    let prefix = &value[..idx];
+                    let w = ui.measure_text(&prefix[visible_start..], text_size);
+                    let dx = (w - click_x).abs();
+                    if dx < best_dx {
+                        best_dx = dx;
+                        best = idx;
+                    }
+                    acc = w;
                 }
-                acc = w;
-            }
-            // End of string — also a valid caret position.
-            let _ = acc;
-            let total_w = ui.measure_text(value, text_size);
-            let dx = (total_w - click_x).abs();
-            if dx < best_dx {
-                best = value.len();
-            }
-            best
-        };
+                // End of string — also a valid caret position.
+                let _ = acc;
+                let total_w = ui.measure_text(&value[visible_start.min(value.len())..], text_size);
+                let dx = (total_w - click_x).abs();
+                if dx < best_dx {
+                    best = value.len();
+                }
+                best
+            };
 
         if focused && pressed_in_field {
-            let off = hit_byte_offset(ui, mp.x, value);
+            let caret = ui.state().text_selection.caret.min(value.len());
+            let (visible_start, _) = visible_text_range(ui, value, text_size, inner_w, caret);
+            let off = hit_byte_offset(ui, mp.x, value, visible_start);
             let shift = is_shift_held(ui);
             let mut sel = ui.state().text_selection;
             sel.caret = off;
@@ -176,7 +183,9 @@ impl<'a> TextField<'a> {
         } else if focused && ui.state().text_drag && ui.input().left_mouse_held() {
             // Drag-extend. Anchor stays put (set on press),
             // caret follows the cursor.
-            let off = hit_byte_offset(ui, mp.x, value);
+            let caret = ui.state().text_selection.caret.min(value.len());
+            let (visible_start, _) = visible_text_range(ui, value, text_size, inner_w, caret);
+            let off = hit_byte_offset(ui, mp.x, value, visible_start);
             let mut sel = ui.state().text_selection;
             sel.caret = off;
             ui.state_mut().text_selection = sel;
@@ -199,19 +208,37 @@ impl<'a> TextField<'a> {
 
         // ── Draw frame ──────────────────────────────────────
         let (edge, centre) = if focused {
+            let b = theme.colors.bg_panel_alt.0;
             (
-                Color::rgba(0.060, 0.044, 0.032, 0.98),
-                Color::rgba(0.215, 0.145, 0.080, 0.98),
+                Color::rgba(b[0] * 0.42, b[1] * 0.38, b[2] * 0.52, 0.98),
+                Color::rgba(
+                    (b[0] * 1.08).min(1.0),
+                    (b[1] * 1.04).min(1.0),
+                    (b[2] * 1.14).min(1.0),
+                    0.98,
+                ),
             )
         } else if hovered {
+            let h = theme.colors.bg_slot_hover.0;
             (
-                Color::rgba(0.055, 0.048, 0.040, 0.97),
-                Color::rgba(0.175, 0.130, 0.085, 0.97),
+                Color::rgba(h[0] * 0.48, h[1] * 0.44, h[2] * 0.56, 0.97),
+                Color::rgba(
+                    (h[0] * 0.96).min(1.0),
+                    (h[1] * 0.93).min(1.0),
+                    (h[2] * 1.06).min(1.0),
+                    0.97,
+                ),
             )
         } else {
+            let b = theme.colors.bg_panel_alt.0;
             (
-                Color::rgba(0.045, 0.040, 0.035, 0.96),
-                Color::rgba(0.125, 0.100, 0.072, 0.96),
+                Color::rgba(b[0] * 0.52, b[1] * 0.48, b[2] * 0.62, 0.96),
+                Color::rgba(
+                    (b[0] * 0.92).min(1.0),
+                    (b[1] * 0.88).min(1.0),
+                    (b[2] * 0.98).min(1.0),
+                    0.96,
+                ),
             )
         };
         let mid = Color::rgba(
@@ -237,8 +264,8 @@ impl<'a> TextField<'a> {
             let band_h = (rect.height() * 0.24).clamp(3.0, 10.0);
             ui.draw_gradient_rect(
                 Rect::from_xywh(inner_x, rect.y() + 1.0, inner_w, band_h),
-                Color::rgba(1.0, 0.92, 0.72, if focused { 0.22 } else { 0.14 }),
-                Color::rgba(1.0, 0.92, 0.72, 0.01),
+                Color::rgba(0.82, 0.78, 1.0, if focused { 0.20 } else { 0.12 }),
+                Color::rgba(0.82, 0.78, 1.0, 0.01),
             );
 
             let shadow_h = (rect.height() * 0.28).clamp(3.0, 11.0);
@@ -250,11 +277,16 @@ impl<'a> TextField<'a> {
         }
 
         let outline_color = if focused {
-            Color::rgba(0.96, 0.62, 0.28, 0.88)
+            theme.colors.border_strong
         } else if hovered {
-            Color::rgba(0.78, 0.50, 0.25, 0.70)
+            Color::rgba(
+                theme.colors.accent.0[0],
+                theme.colors.accent.0[1],
+                theme.colors.accent.0[2],
+                0.62,
+            )
         } else {
-            theme.colors.border_stone
+            theme.colors.border
         };
         ui.draw_outline(rect, 1.5, outline_color);
         ui.draw_outline(
@@ -265,21 +297,38 @@ impl<'a> TextField<'a> {
                 (rect.height() - 2.0).max(0.0),
             ),
             1.0,
-            Color::rgba(0.94, 0.70, 0.36, if focused { 0.30 } else { 0.18 }),
+            Color::rgba(0.76, 0.68, 1.0, if focused { 0.28 } else { 0.16 }),
         );
         draw_input_corner_cuts(ui, rect, if focused { 0.46 } else { 0.28 });
 
         // ── Draw text + selection + caret ───────────────────
-        let inner_w = (rect.width() - pad_x * 2.0).max(0.0);
+        let sel = ui.state().text_selection;
+        let caret = sel.caret.min(value.len());
+        let (visible_start, visible_end) = if focused {
+            visible_text_range(ui, value, text_size, inner_w, caret)
+        } else {
+            (0, value.len())
+        };
         if focused {
-            let sel = ui.state().text_selection;
             if sel.has_range() {
                 let (a, b) = sel.range();
-                let pre = ui.measure_text(&value[..a], text_size);
-                let mid = ui.measure_text(&value[a..b], text_size);
-                let sx = text_origin.x + pre;
-                let sel_rect = Rect::from_xywh(sx, text_origin.y - 1.0, mid, text_size + 2.0);
-                ui.draw_rect(sel_rect, Color::rgba(0.95, 0.55, 0.18, 0.34));
+                let a = a.max(visible_start).min(visible_end);
+                let b = b.max(visible_start).min(visible_end);
+                if a < b {
+                    let pre = ui.measure_text(&value[visible_start..a], text_size);
+                    let mid = ui.measure_text(&value[a..b], text_size);
+                    let sx = text_origin.x + pre;
+                    let sel_rect = Rect::from_xywh(sx, text_origin.y - 1.0, mid, text_size + 2.0);
+                    ui.draw_rect(
+                        sel_rect,
+                        Color::rgba(
+                            theme.colors.accent.0[0],
+                            theme.colors.accent.0[1],
+                            theme.colors.accent.0[2],
+                            0.30,
+                        ),
+                    );
+                }
             }
         }
         if value.is_empty() {
@@ -290,23 +339,24 @@ impl<'a> TextField<'a> {
                 inner_w,
                 theme.colors.text_dim,
             );
+        } else if focused {
+            ui.draw_text(
+                text_origin,
+                &value[visible_start..visible_end],
+                text_size,
+                theme.colors.text,
+            );
         } else {
-            // No horizontal scroll for now — the field clamps
-            // to `max_chars`, and stash-tab names cap at 18,
-            // so `inner_w` always fits the value. (When/if a
-            // longer-input use case appears, add scroll-to-
-            // caret here.)
-            ui.draw_text(text_origin, value, text_size, theme.colors.text);
+            ui.draw_text_ellipsized(text_origin, value, text_size, inner_w, theme.colors.text);
         }
         if focused {
-            let sel = ui.state().text_selection;
             // Caret — solid while a selection is active so
             // the player can see the active edge clearly,
             // blinking otherwise.
             if self.caret {
                 let on = sel.has_range() || ((time * 2.0) as i32) % 2 == 0;
                 if on {
-                    let pre = ui.measure_text(&value[..sel.caret.min(value.len())], text_size);
+                    let pre = ui.measure_text(&value[visible_start..caret], text_size);
                     let cx = text_origin.x + pre;
                     let glyph_w = ui.measure_text("M", text_size);
                     ui.draw_rect(
@@ -332,7 +382,7 @@ impl<'a> TextField<'a> {
 
 fn draw_input_corner_cuts(ui: &mut Ui<'_>, rect: Rect, alpha: f32) {
     let cut = (rect.height() * 0.23).clamp(5.0, 10.0);
-    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
+    let col = Color::rgba(0.72, 0.62, 0.98, alpha * 0.95);
     let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.62);
     ui.draw_line(
         Pos2::new(rect.x() + 1.0, rect.y() + cut),
@@ -389,7 +439,7 @@ fn draw_input_corner_cuts(ui: &mut Ui<'_>, rect: Rect, alpha: f32) {
 /// Apply this frame's keyboard input to `value` + the focused
 /// selection state. Caller guarantees a text field owns focus.
 fn apply_keyboard_edits(ui: &mut Ui<'_>, value: &mut String, max_chars: usize) {
-    let ctrl = is_ctrl_held(ui);
+    let ctrl = is_ctrl_held(ui) && !is_altgr_held(ui);
     let shift = is_shift_held(ui);
 
     // 1) Modifier-only chords (Ctrl+A) — process before navigation
@@ -642,6 +692,50 @@ fn is_ctrl_held(ui: &Ui<'_>) -> bool {
         || ui.input().is_key_held_raw(ImKey::ControlRight)
 }
 
+fn is_altgr_held(ui: &Ui<'_>) -> bool {
+    ui.input().is_key_held_raw(ImKey::AltRight)
+}
+
+fn visible_text_range(
+    ui: &Ui<'_>,
+    value: &str,
+    text_size: f32,
+    max_width: f32,
+    caret: usize,
+) -> (usize, usize) {
+    if value.is_empty() || ui.measure_text(value, text_size) <= max_width {
+        return (0, value.len());
+    }
+
+    let caret = nearest_char_boundary(value, caret.min(value.len()));
+    let mut start = 0usize;
+    let caret_pad = ui.measure_text("M", text_size) * 0.5;
+    while start < caret && ui.measure_text(&value[start..caret], text_size) > max_width - caret_pad
+    {
+        start = next_char_boundary(value, start);
+    }
+
+    let mut end = start;
+    for (idx, ch) in value[start..].char_indices() {
+        let next = start + idx + ch.len_utf8();
+        if ui.measure_text(&value[start..next], text_size) > max_width {
+            break;
+        }
+        end = next;
+    }
+    if end < caret {
+        end = caret;
+    }
+    (start, end)
+}
+
+fn nearest_char_boundary(s: &str, mut byte: usize) -> usize {
+    while byte > 0 && !s.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
 /// Convenience constructor with sensible defaults. Equivalent to
 /// `TextField::new(id).max_chars(max).placeholder(p).show(...)`.
 pub fn text_field(
@@ -676,9 +770,9 @@ pub fn title(ui: &mut Ui<'_>, pos: Pos2, text: &str) -> Rect {
     let theme = *ui.theme();
     let size = theme.fonts.size_xl;
     // Drop a 1 px shadow under the title so it reads on top
-    // of the noisy stone background like the buttons do.
+    // of the void-glass panel behind it.
     let shadow = crate::Color::rgba(0.0, 0.0, 0.0, 0.55);
-    let _ = ui.draw_text(Pos2::new(pos.x + 1.0, pos.y + 1.0), text, size, shadow);
-    let w = ui.draw_text(pos, text, size, theme.colors.text);
+    let _ = ui.draw_header_text(Pos2::new(pos.x + 1.0, pos.y + 1.0), text, size, shadow);
+    let w = ui.draw_header_text(pos, text, size, theme.colors.text);
     Rect::from_xywh(pos.x, pos.y, w, size)
 }

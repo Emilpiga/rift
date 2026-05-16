@@ -5,7 +5,7 @@
 //! pipeline + tooltip builder). The struct definition and the
 //! gameplay-derived accessors stay in `item.rs`.
 
-use super::affixes::AFFIX_POOL;
+use super::affixes::{affix_def_by_wire_index, wire_index_for_affix};
 use super::item::{Item, LootProvenance, RolledAffix, RolledRiftTouched};
 use super::rarity::Rarity;
 
@@ -27,9 +27,9 @@ impl Item {
     /// # Panics
     ///
     /// Panics if `self.base` doesn't live inside [`super::BASE_ITEMS`]
-    /// or one of the rolled affix defs doesn't live inside
-    /// [`AFFIX_POOL`]. Both invariants are guaranteed for items
-    /// produced by [`Item::roll`].
+    /// or any rolled affix def is missing from the wire contiguous
+    /// index space [`super::affixes::WIRE_AFFIX_COUNT`]. Both hold
+    /// for items produced by [`Item::roll`].
     pub fn to_wire(
         &self,
     ) -> (
@@ -42,8 +42,8 @@ impl Item {
         Option<u8>,
     ) {
         // Match by `id` rather than pointer identity — `BASE_ITEMS`
-        // and `AFFIX_POOL` are `pub const` slices, so each access
-        // can produce a fresh copy with different addresses.
+        // and the affix wire space (`AFFIX_POOL` then `RESONANCE_POOL`)
+        // use stable ordering within one build.
         let base_id = super::items::BASE_ITEMS
             .iter()
             .position(|b| b.id == self.base.id)
@@ -52,10 +52,8 @@ impl Item {
             .affixes
             .iter()
             .map(|a| {
-                let id = AFFIX_POOL
-                    .iter()
-                    .position(|d| d.id == a.def.id)
-                    .expect("affix id not in AFFIX_POOL") as u16;
+                let id =
+                    wire_index_for_affix(a.def).expect("affix id missing from wire index space");
                 (id, a.value)
             })
             .collect();
@@ -101,7 +99,7 @@ impl Item {
         };
         let mut rolled = Vec::with_capacity(affixes.len());
         for &(id, value) in affixes {
-            let def = AFFIX_POOL.get(id as usize)?;
+            let def = affix_def_by_wire_index(id)?;
             rolled.push(RolledAffix { def, value });
         }
         Some(Self {
@@ -125,6 +123,7 @@ impl Item {
             // post-construction; bare reconstructions (tests,
             // debug paths) come out without a rift-touched line.
             rift_touched: None,
+            enchanted_affix_index: None,
         })
     }
 
@@ -188,7 +187,7 @@ impl Item {
         };
         let mut rolled = Vec::with_capacity(affixes.len());
         for (id, value) in affixes {
-            let def = AFFIX_POOL.iter().find(|d| d.id == id.as_str())?;
+            let def = super::affixes::lookup(id.as_str())?;
             rolled.push(RolledAffix { def, value: *value });
         }
         Some(Self {
@@ -219,6 +218,7 @@ impl Item {
             // a carrying row come out without a rift-touched
             // line.
             rift_touched: None,
+            enchanted_affix_index: None,
         })
     }
 
@@ -277,5 +277,62 @@ impl Item {
             value,
             depth: depth.max(0) as u16,
         })
+    }
+}
+
+#[cfg(test)]
+mod wire_index_tests {
+    use super::Item;
+    use crate::loot::affixes::{
+        affix_def_by_wire_index, is_resonance, wire_index_for_affix, AFFIX_POOL, RESONANCE_POOL,
+    };
+    use crate::loot::{LootRng, Rarity, BASE_ITEMS};
+
+    #[test]
+    fn main_and_resonance_indices_are_disjoint_bijections() {
+        for (i, def) in AFFIX_POOL.iter().enumerate() {
+            let w =
+                wire_index_for_affix(def).unwrap_or_else(|| panic!("missing wire idx {}", def.id));
+            assert_eq!(w as usize, i);
+            assert_eq!(affix_def_by_wire_index(w).unwrap().id, def.id);
+        }
+        let off = AFFIX_POOL.len();
+        for (j, def) in RESONANCE_POOL.iter().enumerate() {
+            let w =
+                wire_index_for_affix(def).unwrap_or_else(|| panic!("missing wire idx {}", def.id));
+            assert_eq!(w as usize, off + j);
+            assert_eq!(affix_def_by_wire_index(w).unwrap().id, def.id);
+        }
+    }
+
+    #[test]
+    fn resonance_item_round_trips_to_wire() {
+        let base = BASE_ITEMS.iter().find(|b| b.id == "staff_basic").unwrap();
+        let mut rng = LootRng::new(77_777);
+        for _ in 0..25_000 {
+            let item = Item::roll(base, Rarity::Rare, 28, &mut rng);
+            if !item.affixes.iter().any(|a| is_resonance(a.def)) {
+                continue;
+            }
+            let (bid, rarity, ilvl, affixes, anchored, unique_id, unique_pick) = item.to_wire();
+            let rebuilt = Item::from_wire(
+                bid,
+                rarity,
+                ilvl,
+                &affixes,
+                anchored,
+                None,
+                unique_id,
+                unique_pick,
+            )
+            .expect("decode");
+            assert_eq!(item.affixes.len(), rebuilt.affixes.len());
+            for (a, b) in item.affixes.iter().zip(rebuilt.affixes.iter()) {
+                assert_eq!(a.def.id, b.def.id);
+                assert!((a.value - b.value).abs() < 1e-5);
+            }
+            return;
+        }
+        panic!("expected at least one resonance line within trial budget");
     }
 }

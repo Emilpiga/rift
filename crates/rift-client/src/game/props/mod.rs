@@ -36,6 +36,10 @@ use rift_engine::{AssetServer, Mesh, Renderer};
 
 use render_meta::{render_meta, RenderMaterial};
 
+/// Multiplies the forge mesh albedo in the cel path — deep violet with a
+/// slight blue lift so it reads as void-tempered metal, not workshop steel.
+const VOID_FORGE_MESH_TINT: [f32; 4] = [0.52, 0.34, 1.08, 1.0];
+
 /// Centralised prop GPU resource manager: mesh cache (via
 /// [`AssetServer`]) and shared-material descriptor sets,
 /// plus the rendering entry points the floor manager calls
@@ -135,7 +139,7 @@ impl Props {
             return self.render_stash_chest(renderer, placed);
         }
         let rm = render_meta(placed.id);
-        self.render_raw(
+        let idx = self.render_raw(
             renderer,
             rm.gltf,
             rm.material,
@@ -143,7 +147,11 @@ impl Props {
             placed.yaw,
             rm.asset_scale * placed.scale,
             placed.wall_dir,
-        )
+        )?;
+        if placed.id == PropId::VoidForge {
+            renderer.set_object_tint(idx, VOID_FORGE_MESH_TINT);
+        }
+        Some(idx)
     }
 
     /// Low-level render entry used by `render_one` and the
@@ -387,6 +395,7 @@ pub fn hub_asset_paths() -> Vec<&'static str> {
         PebbleRound2,
         PebbleRound4,
         StashChest,
+        VoidForge,
         CandleStickStand,
     ]
     .iter()

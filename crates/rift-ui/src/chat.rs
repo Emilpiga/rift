@@ -20,7 +20,7 @@ use rift_ui_im::{
 };
 use rift_ui_types::chat::{ChatAction, ChatView};
 
-use crate::icons::{draw_placeholder_icon, icon_rect_left, UiIcon};
+use crate::icons::{draw_placeholder_icon, icon_rect_center, icon_rect_left, UiIcon};
 
 /// Render the chat scrollback + input field + channel
 /// selector. Returns a list of host-actionable events; multiple
@@ -71,19 +71,11 @@ pub fn frame_chat(
 
     // Channel button drawn to the left of the input field in
     // the standard Button styling used everywhere else in the
-    // app. The label combines the channel short-name with a
-    // small chevron so the click affordance reads.
-    let button_label = format!(
-        "  {}  {}",
-        view.channel_short,
-        if view.picker_open {
-            "\u{25B2}"
-        } else {
-            "\u{25BC}"
-        }
-    );
+    // app. The chevron is an icon so it doesn't depend on font
+    // glyph coverage.
+    let button_label = format!("  {}", view.channel_short);
     let button_w =
-        (ui.measure_text(&button_label, theme.fonts.size_md) + 42.0 * scale).max(88.0 * scale);
+        (ui.measure_text(&button_label, theme.fonts.size_md) + 58.0 * scale).max(88.0 * scale);
     let button_rect = Rect::from_xywh(input_rect.x(), input_rect.y(), button_w, input_h);
     let button_id = Id::root("chat").child("channel_btn");
     let btn_resp = Button::new(&button_label)
@@ -114,6 +106,24 @@ pub fn frame_chat(
         ui,
         icon_rect_left(button_rect, 18.0 * scale, 12.0 * scale),
         UiIcon::Whisper,
+        theme.colors.text,
+    );
+    draw_placeholder_icon(
+        ui,
+        icon_rect_center(
+            Rect::from_xywh(
+                button_rect.max.x - 28.0 * scale,
+                button_rect.y(),
+                22.0 * scale,
+                button_rect.height(),
+            ),
+            11.0 * scale,
+        ),
+        if view.picker_open {
+            UiIcon::CaretUp
+        } else {
+            UiIcon::CaretDown
+        },
         theme.colors.text,
     );
 
@@ -203,7 +213,7 @@ fn draw_picker(
         picker_h,
     );
     Frame::panel(theme)
-        .with_fill(Color::rgba(0.05, 0.06, 0.09, 0.95))
+        .with_fill(Color::rgba(0.06, 0.05, 0.12, 0.96))
         .show_only(ui, picker_rect);
 
     let mut any_row_hovered = false;
@@ -222,9 +232,9 @@ fn draw_picker(
         }
         let active = opt.id == view.channel;
         let fill = if hovered {
-            Color::rgba(0.20, 0.25, 0.35, 0.90)
+            Color::rgba(0.28, 0.22, 0.42, 0.92)
         } else if active {
-            Color::rgba(0.15, 0.18, 0.26, 0.85)
+            Color::rgba(0.22, 0.18, 0.34, 0.88)
         } else {
             Color::rgba(0.0, 0.0, 0.0, 0.0)
         };

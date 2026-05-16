@@ -384,9 +384,15 @@ impl NetClient {
     /// with fresh `InventorySync` + `EquipmentSync` after
     /// applying the swap; the client never optimistically
     /// mutates its mirror.
-    pub fn request_equip_item(&mut self, inventory_index: u32) {
-        log::debug!("net: -> EquipItem idx={inventory_index}");
-        self.send(Channel::Control, &ClientMsg::EquipItem { inventory_index });
+    pub fn request_equip_item(&mut self, inventory_index: u32, target_slot: Option<u8>) {
+        log::debug!("net: -> EquipItem idx={inventory_index} target_slot={target_slot:?}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::EquipItem {
+                inventory_index,
+                target_slot,
+            },
+        );
     }
 
     /// Ask the server to move whatever's currently in `slot`
@@ -410,6 +416,31 @@ impl NetClient {
     pub fn request_close_stash(&mut self) {
         log::debug!("net: -> CloseStash");
         self.send(Channel::Control, &ClientMsg::CloseStash);
+    }
+
+    pub fn request_open_anvil(&mut self) {
+        log::debug!("net: -> OpenAnvil");
+        self.send(Channel::Control, &ClientMsg::OpenAnvil);
+    }
+
+    pub fn request_close_anvil(&mut self) {
+        log::debug!("net: -> CloseAnvil");
+        self.send(Channel::Control, &ClientMsg::CloseAnvil);
+    }
+
+    pub fn request_reroll_affix(
+        &mut self,
+        source: rift_net::messages::EnchantSource,
+        affix_index: u8,
+    ) {
+        log::debug!("net: -> RerollAffix source={source:?} affix={affix_index}");
+        self.send(
+            Channel::Control,
+            &ClientMsg::RerollAffix {
+                source,
+                affix_index,
+            },
+        );
     }
 
     /// Move the bag item at `inventory_index` into stash tab
@@ -493,13 +524,21 @@ impl NetClient {
     }
 
     /// Equip a stash item directly (bypassing the bag).
-    pub fn request_equip_from_stash(&mut self, tab_index: u8, stash_index: u32) {
-        log::debug!("net: -> EquipFromStash tab={tab_index} idx={stash_index}");
+    pub fn request_equip_from_stash(
+        &mut self,
+        tab_index: u8,
+        stash_index: u32,
+        target_slot: Option<u8>,
+    ) {
+        log::debug!(
+            "net: -> EquipFromStash tab={tab_index} idx={stash_index} target_slot={target_slot:?}"
+        );
         self.send(
             Channel::Control,
             &ClientMsg::EquipFromStash {
                 tab_index,
                 stash_index,
+                target_slot,
             },
         );
     }

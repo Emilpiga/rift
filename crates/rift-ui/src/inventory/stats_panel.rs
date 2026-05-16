@@ -2,7 +2,7 @@
 //! inventory drawer.
 
 use rift_ui_im::widgets::tooltip::{tooltip_at_mouse, TooltipLine};
-use rift_ui_im::{Color, Pos2, Rect, Ui};
+use rift_ui_im::{Color, Pos2, Rect, Ui, UiTextFont};
 use rift_ui_types::inventory::StatsView;
 
 pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit: f32) {
@@ -21,7 +21,7 @@ pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit
     let mut y = body.y();
     let text_size = theme.fonts.size_md;
     let row_h = text_size + 6.0 * fit;
-    let header_col = Color::rgba(0.95, 0.85, 0.55, 1.0);
+    let header_col = theme.colors.accent;
     let mp = ui.mouse_pos();
     // Tooltip string + anchor label captured during the
     // section pass so we can defer rendering until after the
@@ -32,7 +32,7 @@ pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit
         if y + row_h > body.max.y {
             break;
         }
-        ui.draw_text(
+        ui.draw_header_text(
             Pos2::new(body.x(), y),
             section.header,
             text_size,
@@ -48,15 +48,16 @@ pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit
                 .value_color
                 .map(|[r, g, b, a]| Color::rgba(r, g, b, a))
                 .unwrap_or(theme.colors.text);
-            let vw = ui.measure_text(row.value, text_size);
+            let vw = ui.measure_text_for(row.value, text_size, UiTextFont::Body);
             let gap = 8.0_f32 * fit;
             let label_max = (body.width() - vw - gap).max(0.0);
-            ui.draw_text_ellipsized(
+            ui.draw_text_ellipsized_for(
                 Pos2::new(body.x(), y),
                 row.label,
                 text_size,
                 label_max,
-                theme.colors.text_dim,
+                theme.colors.stat_label,
+                UiTextFont::Header,
             );
             ui.draw_text(
                 Pos2::new(body.max.x - vw, y),
@@ -80,7 +81,7 @@ pub fn render_stats_panel(ui: &mut Ui<'_>, rect: Rect, view: &StatsView<'_>, fit
 
     if let Some((label, tip)) = hovered_tip {
         let lines = [
-            TooltipLine::new(label, theme.fonts.size_md, theme.colors.text),
+            TooltipLine::new(label, theme.fonts.size_md, theme.colors.stat_label),
             TooltipLine::new(tip, theme.fonts.size_sm, theme.colors.text_dim),
         ];
         tooltip_at_mouse(ui, None, &lines);

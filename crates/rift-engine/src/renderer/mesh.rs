@@ -575,6 +575,18 @@ impl Mesh {
     /// Generate a batched dungeon floor from tile positions.
     /// Uses checker pattern with slight color variation for visual interest.
     pub fn dungeon_floor(positions: &[Vec3], floor_num: u32) -> Self {
+        Self::dungeon_floor_with_edge_contrast(None, positions, floor_num)
+    }
+
+    /// Dungeon floor mesh with optional per-vertex edge staining
+    /// where walkable tiles border void/wall. The contrast is baked
+    /// into vertex colour so the existing PBR floor material carries
+    /// the boundary instead of relying on a separate coplanar overlay.
+    pub fn dungeon_floor_with_edge_contrast(
+        floor: Option<&rift_dungeon::Floor>,
+        positions: &[Vec3],
+        floor_num: u32,
+    ) -> Self {
         const SUBDIV: u32 = 4;
         let verts_per_tile = ((SUBDIV + 1) * (SUBDIV + 1)) as usize;
         let indices_per_tile = (SUBDIV * SUBDIV * 6) as usize;
@@ -597,6 +609,41 @@ impl Mesh {
             // Subtle variation using position hash
             let hash = ((ix.wrapping_mul(7) ^ iz.wrapping_mul(13)) % 100) as f32 / 800.0;
             let color = base_color + Vec3::splat(hash);
+            let edge_mask_for = |local_x: f32, local_z: f32| -> f32 {
+                let Some(floor) = floor else { return 0.0 };
+                let tx = pos.x.round() as i32;
+                let tz = pos.z.round() as i32;
+                if tx < 0 || tz < 0 || tx as usize >= floor.width || tz as usize >= floor.depth {
+                    return 0.0;
+                }
+                if !floor.tiles[tz as usize * floor.width + tx as usize].is_walkable() {
+                    return 0.0;
+                }
+                let is_walkable = |x: i32, z: i32| -> bool {
+                    if x < 0 || z < 0 || x as usize >= floor.width || z as usize >= floor.depth {
+                        return false;
+                    }
+                    floor.tiles[z as usize * floor.width + x as usize].is_walkable()
+                };
+                let edge = |dist: f32| -> f32 {
+                    let t = (dist / 0.34).clamp(0.0, 1.0);
+                    1.0 - (t * t * (3.0 - 2.0 * t))
+                };
+                let mut m: f32 = 0.0;
+                if !is_walkable(tx - 1, tz) {
+                    m = m.max(edge(local_x + 0.5));
+                }
+                if !is_walkable(tx + 1, tz) {
+                    m = m.max(edge(0.5 - local_x));
+                }
+                if !is_walkable(tx, tz - 1) {
+                    m = m.max(edge(local_z + 0.5));
+                }
+                if !is_walkable(tx, tz + 1) {
+                    m = m.max(edge(0.5 - local_z));
+                }
+                m
+            };
 
             // pos.y carries the tile's elevation (set by
             // dungeon::Floor::floor_positions); we lay the
@@ -610,6 +657,10 @@ impl Mesh {
                     let tx = x as f32 / SUBDIV as f32;
                     let local_x = -0.5 + tx;
                     let world = *pos + Vec3::new(local_x, 0.0, local_z);
+                    let edge = edge_mask_for(local_x, local_z);
+                    let cold_wear = Vec3::new(0.050, 0.075, 0.130);
+                    let color = color.lerp(cold_wear, edge * 0.82)
+                        + Vec3::new(0.030, 0.055, 0.105) * edge.powf(3.0);
                     vertices.push(Vertex {
                         position: world,
                         normal: Vec3::Y,
@@ -627,6 +678,334 @@ impl Mesh {
                     let c = a + row;
                     let d = c + 1;
                     indices.extend_from_slice(&[a, d, b, a, c, d]);
+                }
+            }
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Animated abyss rim painted just inside walkable tiles that
+    /// border non-walkable space. This is intentionally separate
+    /// from the PBR floor mesh: the floor's authored texture and
+    /// fog can swallow subtle vertex-colour stains, but this strip
+    /// gives the abyss boundary an explicit readable silhouette.
+    pub fn dungeon_floor_edge_rim(floor: &rift_dungeon::Floor, fog_color: Vec3) -> Self {
+        use rift_dungeon::ELEVATION_STEP;
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut supported = vec![false; floor.width * floor.depth];
+        for z in 0..floor.depth {
+            for x in 0..floor.width {
+                let i = z * floor.width + x;
+                supported[i] = floor.tiles[i].is_walkable();
+            }
+        }
+        for pos in floor.wall_positions() {
+            let x = pos.x as usize;
+            let z = pos.z as usize;
+            if x < floor.width && z < floor.depth {
+                supported[z * floor.width + x] = true;
+            }
+        }
+
+        let is_supported = |x: i32, z: i32| -> bool {
+            if x < 0 || z < 0 || x as usize >= floor.width || z as usize >= floor.depth {
+                return false;
+            }
+            supported[z as usize * floor.width + x as usize]
+        };
+        let mut emit_strip = |x: usize, z: usize, corners: [(f32, f32, Vec3); 4]| {
+            let i = z * floor.width + x;
+            let y = if floor.tiles[i].is_walkable() {
+                floor.elevation[i] as f32 * ELEVATION_STEP
+            } else {
+                0.0
+            } + 0.010;
+            let base = vertices.len() as u32;
+            for (lx, lz, color) in corners {
+                let world = Vec3::new(x as f32 + lx, y, z as f32 + lz);
+                vertices.push(Vertex {
+                    position: world,
+                    normal: Vec3::Y,
+                    color,
+                    uv: Vec2::new(world.x, world.z),
+                });
+            }
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        };
+
+        // Keep the geometry nearly hairline. The shader supplies
+        // the glow; if this strip gets physically wide it reads
+        // as extra floor material hanging over the void.
+        let peak = fog_color.max_element().max(0.001);
+        let chroma = fog_color / peak;
+        let hot = fog_color * 2.45 + chroma * 0.045;
+        let cold = fog_color * 0.18;
+        let w = 0.045;
+
+        for z in 0..floor.depth {
+            for x in 0..floor.width {
+                if !is_supported(x as i32, z as i32) {
+                    continue;
+                }
+                let left = !is_supported(x as i32 - 1, z as i32);
+                let right = !is_supported(x as i32 + 1, z as i32);
+                let north = !is_supported(x as i32, z as i32 - 1);
+                let south = !is_supported(x as i32, z as i32 + 1);
+
+                if left {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, -0.5, cold),
+                            (-0.5, -0.5, hot),
+                            (-0.5, 0.5, hot),
+                            (-0.5 - w, 0.5, cold),
+                        ],
+                    );
+                }
+                if right {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, -0.5, hot),
+                            (0.5 + w, -0.5, cold),
+                            (0.5 + w, 0.5, cold),
+                            (0.5, 0.5, hot),
+                        ],
+                    );
+                }
+                if north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5, -0.5 - w, cold),
+                            (0.5, -0.5 - w, cold),
+                            (0.5, -0.5, hot),
+                            (-0.5, -0.5, hot),
+                        ],
+                    );
+                }
+                if south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5, 0.5, hot),
+                            (0.5, 0.5, hot),
+                            (0.5, 0.5 + w, cold),
+                            (-0.5, 0.5 + w, cold),
+                        ],
+                    );
+                }
+                if left && north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, -0.5 - w, cold),
+                            (-0.5, -0.5 - w, cold),
+                            (-0.5, -0.5, hot),
+                            (-0.5 - w, -0.5, cold),
+                        ],
+                    );
+                }
+                if right && north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, -0.5 - w, cold),
+                            (0.5 + w, -0.5 - w, cold),
+                            (0.5 + w, -0.5, cold),
+                            (0.5, -0.5, hot),
+                        ],
+                    );
+                }
+                if right && south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, 0.5, hot),
+                            (0.5 + w, 0.5, cold),
+                            (0.5 + w, 0.5 + w, cold),
+                            (0.5, 0.5 + w, cold),
+                        ],
+                    );
+                }
+                if left && south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, 0.5, cold),
+                            (-0.5, 0.5, hot),
+                            (-0.5, 0.5 + w, cold),
+                            (-0.5 - w, 0.5 + w, cold),
+                        ],
+                    );
+                }
+            }
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Soft dark apron outside the dungeon outline. This is not
+    /// a material surface; the forward shader treats it as an
+    /// atmospheric contact shadow so the ocean reads separated
+    /// below the platform rather than flush with the floor edge.
+    pub fn dungeon_void_edge_shadow(floor: &rift_dungeon::Floor, fog_color: Vec3) -> Self {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut supported = vec![false; floor.width * floor.depth];
+        for z in 0..floor.depth {
+            for x in 0..floor.width {
+                let i = z * floor.width + x;
+                supported[i] = floor.tiles[i].is_walkable();
+            }
+        }
+        for pos in floor.wall_positions() {
+            let x = pos.x as usize;
+            let z = pos.z as usize;
+            if x < floor.width && z < floor.depth {
+                supported[z * floor.width + x] = true;
+            }
+        }
+
+        let is_supported = |x: i32, z: i32| -> bool {
+            if x < 0 || z < 0 || x as usize >= floor.width || z as usize >= floor.depth {
+                return false;
+            }
+            supported[z as usize * floor.width + x as usize]
+        };
+        let mut emit_strip = |x: usize, z: usize, corners: [(f32, f32, Vec3); 4]| {
+            let base = vertices.len() as u32;
+            for (lx, lz, color) in corners {
+                let world = Vec3::new(x as f32 + lx, 0.006, z as f32 + lz);
+                vertices.push(Vertex {
+                    position: world,
+                    normal: Vec3::Y,
+                    color,
+                    uv: Vec2::new(world.x, world.z),
+                });
+            }
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        };
+
+        let hot = fog_color * 0.62;
+        let cold = Vec3::ZERO;
+        let w = 0.62;
+        for z in 0..floor.depth {
+            for x in 0..floor.width {
+                if !is_supported(x as i32, z as i32) {
+                    continue;
+                }
+                let left = !is_supported(x as i32 - 1, z as i32);
+                let right = !is_supported(x as i32 + 1, z as i32);
+                let north = !is_supported(x as i32, z as i32 - 1);
+                let south = !is_supported(x as i32, z as i32 + 1);
+                if left {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, -0.5, cold),
+                            (-0.5, -0.5, hot),
+                            (-0.5, 0.5, hot),
+                            (-0.5 - w, 0.5, cold),
+                        ],
+                    );
+                }
+                if right {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, -0.5, hot),
+                            (0.5 + w, -0.5, cold),
+                            (0.5 + w, 0.5, cold),
+                            (0.5, 0.5, hot),
+                        ],
+                    );
+                }
+                if north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5, -0.5 - w, cold),
+                            (0.5, -0.5 - w, cold),
+                            (0.5, -0.5, hot),
+                            (-0.5, -0.5, hot),
+                        ],
+                    );
+                }
+                if south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5, 0.5, hot),
+                            (0.5, 0.5, hot),
+                            (0.5, 0.5 + w, cold),
+                            (-0.5, 0.5 + w, cold),
+                        ],
+                    );
+                }
+                if left && north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, -0.5 - w, cold),
+                            (-0.5, -0.5 - w, cold),
+                            (-0.5, -0.5, hot),
+                            (-0.5 - w, -0.5, cold),
+                        ],
+                    );
+                }
+                if right && north {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, -0.5 - w, cold),
+                            (0.5 + w, -0.5 - w, cold),
+                            (0.5 + w, -0.5, cold),
+                            (0.5, -0.5, hot),
+                        ],
+                    );
+                }
+                if right && south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (0.5, 0.5, hot),
+                            (0.5 + w, 0.5, cold),
+                            (0.5 + w, 0.5 + w, cold),
+                            (0.5, 0.5 + w, cold),
+                        ],
+                    );
+                }
+                if left && south {
+                    emit_strip(
+                        x,
+                        z,
+                        [
+                            (-0.5 - w, 0.5, cold),
+                            (-0.5, 0.5, hot),
+                            (-0.5, 0.5 + w, cold),
+                            (-0.5 - w, 0.5 + w, cold),
+                        ],
+                    );
                 }
             }
         }

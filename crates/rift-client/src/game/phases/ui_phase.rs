@@ -70,6 +70,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         fps_y + 1.0,
         fps_size,
         [0.0, 0.0, 0.0, 0.6],
+        false,
         sw,
         sh,
     );
@@ -79,6 +80,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         fps_y,
         fps_size,
         [1.0, 1.0, 0.85, 0.95],
+        false,
         sw,
         sh,
     );
@@ -144,7 +146,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // and the host would then mis-read the state as "no
     // modal open" and pop the pause menu.
     let pre_spellbook_open = state.spellbook.open();
-    let pre_inventory_open = state.inventory_ui.open && !state.loot.stash_session;
+    let pre_inventory_open =
+        state.inventory_ui.open && !state.loot.stash_session && !state.loot.anvil_session;
     let pre_talents_open = state.talents_panel.open;
     // Clear last frame's HUD click-swallow rects before any
     // HUD widget repopulates them. `combat_phase` already read
@@ -258,7 +261,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         &mut state.spellbook,
         &mut state.inventory_ui.open,
         &mut state.pause,
-        state.loot.stash_session,
+        state.loot.stash_session || state.loot.anvil_session,
         exit_vote_active_for_controls,
         &mut state.frame.hud_consume_rects,
     );
@@ -273,6 +276,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     state.meters.frame(&mut ui, in_rift);
 
     if !state.loot.stash_session
+        && !state.loot.anvil_session
         && ui
             .input()
             .key_just_pressed(rift_engine::ui::im::ImKey::KeyI)
@@ -289,6 +293,8 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
         state.loot.stash_session,
         &state.loot.stash_tabs,
         &mut state.loot.pending_stash_requests,
+        state.loot.anvil_session,
+        &mut state.net.pending_enchant_rerolls,
         &state.player_state,
         &mut state.net.pending_consume_bag_idx,
         &mut state.talents_panel.open,
@@ -298,6 +304,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // Suppressed while a stash session is active so B doesn't
     // double-bind alongside the inventory drag context.
     if !state.loot.stash_session
+        && !state.loot.anvil_session
         && ui
             .input()
             .key_just_pressed(rift_engine::ui::im::ImKey::KeyB)
@@ -338,7 +345,7 @@ pub fn tick(state: &mut GameState, renderer: &mut Renderer, input: &Input) {
     // read, the close N would be swallowed by the very flag
     // the panel set on its own behalf.
     let exit_vote_active = state.exit_vote.as_ref().map(|v| v.active).unwrap_or(false);
-    if !state.loot.stash_session && !exit_vote_active {
+    if !state.loot.stash_session && !state.loot.anvil_session && !exit_vote_active {
         let n_open = !pre_talents_open
             && ui
                 .input()
@@ -683,8 +690,8 @@ fn render_minimap_controls(
     ui.draw_rounded_radial_rect_noisy(
         toolbar,
         0.0,
-        Color::rgba(0.015, 0.017, 0.022, 0.88),
-        Color::rgba(0.070, 0.058, 0.045, 0.88),
+        Color::rgba(0.045, 0.035, 0.072, 0.88),
+        Color::rgba(0.098, 0.068, 0.138, 0.88),
     );
     ui.draw_outline(toolbar, 1.0, theme.colors.border_stone);
     consume_rects.push(toolbar);
@@ -828,13 +835,13 @@ fn icon_button(
     let hovered = ui.interact_hover(id, rect);
     let clicked = enabled && hovered && ui.input().left_clicked();
     let base = if !enabled {
-        Color::rgba(0.045, 0.045, 0.050, 0.74)
+        Color::rgba(0.05, 0.04, 0.09, 0.76)
     } else if active {
-        Color::rgba(0.30, 0.18, 0.10, 0.96)
+        Color::rgba(0.22, 0.12, 0.38, 0.96)
     } else if hovered {
-        Color::rgba(0.18, 0.145, 0.095, 0.94)
+        Color::rgba(0.14, 0.10, 0.26, 0.94)
     } else {
-        Color::rgba(0.095, 0.082, 0.065, 0.90)
+        Color::rgba(0.09, 0.07, 0.14, 0.90)
     };
     ui.draw_rounded_rect(rect, 3.0 * theme.scale, base);
     ui.draw_rounded_outline(rect, 3.0 * theme.scale, 1.0, theme.colors.border_stone);
@@ -843,7 +850,7 @@ fn icon_button(
             rect,
             3.0 * theme.scale,
             if attention { 2.0 } else { 1.4 },
-            Color::rgba(0.95, 0.72, 0.28, if attention { 0.80 } else { 0.55 }),
+            Color::rgba(0.78, 0.62, 1.0, if attention { 0.82 } else { 0.58 }),
         );
     }
     draw_tool_icon(ui, rect, icon, enabled, attention);
@@ -885,12 +892,12 @@ fn draw_tool_icon(
     let s = theme.scale;
     let c = rect.center();
     let color = if enabled {
-        Color::rgba(0.93, 0.84, 0.64, 1.0)
+        Color::rgba(0.86, 0.82, 0.98, 1.0)
     } else {
         theme.colors.text_dim
     };
     let accent = if attention {
-        Color::rgba(1.0, 0.74, 0.22, 1.0)
+        Color::rgba(0.95, 0.82, 1.0, 1.0)
     } else {
         color
     };

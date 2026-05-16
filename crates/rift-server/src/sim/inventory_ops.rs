@@ -22,7 +22,12 @@ impl Sim {
     /// Returns `true` on success. `false` indicates a no-op: bad
     /// index, item has no compatible slot, or the player isn't
     /// connected.
-    pub fn equip_from_bag(&mut self, client_id: ClientId, inventory_index: usize) -> bool {
+    pub fn equip_from_bag(
+        &mut self,
+        client_id: ClientId,
+        inventory_index: usize,
+        target_slot: Option<u8>,
+    ) -> bool {
         let Some(&entity) = self.sessions.get(&client_id) else {
             return false;
         };
@@ -59,7 +64,7 @@ impl Sim {
             p.inventory[inventory_index] = Some(item);
             return false;
         }
-        let Some(slot) = p.equipment.default_slot(&item) else {
+        let Some(slot) = p.equipment.resolve_equip_slot(&item, target_slot) else {
             // Bag-only item (consumable) with no target slot.
             // Restore the bag entry and bail — the equip
             // request was never legal.

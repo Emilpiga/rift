@@ -323,12 +323,12 @@ fn resolution_row(
         );
 
         ui.with_layer(Layer::Tooltip, |ui| {
-            ui.draw_rect(list_rect, Color::rgba(0.025, 0.022, 0.020, 0.98));
+            ui.draw_rect(list_rect, Color::rgba(0.04, 0.032, 0.068, 0.98));
             ui.draw_line(
                 list_rect.min,
                 rift_ui_im::Pos2::new(list_rect.max.x, list_rect.min.y),
                 1.0 * sc,
-                Color::rgba(0.82, 0.58, 0.25, 0.75),
+                Color::rgba(0.68, 0.52, 0.92, 0.78),
             );
 
             for (i, resolution) in resolutions.iter().take(list_len).enumerate() {
@@ -344,13 +344,13 @@ fn resolution_row(
                 hovered_dropdown |= hovered;
 
                 let fill = if selected_option {
-                    Color::rgba(0.34, 0.12, 0.08, 0.98)
+                    Color::rgba(0.22, 0.12, 0.36, 0.98)
                 } else if hovered {
-                    Color::rgba(0.25, 0.18, 0.10, 0.98)
+                    Color::rgba(0.16, 0.10, 0.28, 0.98)
                 } else if i % 2 == 0 {
-                    Color::rgba(0.10, 0.075, 0.052, 0.98)
+                    Color::rgba(0.08, 0.06, 0.14, 0.98)
                 } else {
-                    Color::rgba(0.075, 0.058, 0.045, 0.98)
+                    Color::rgba(0.06, 0.048, 0.10, 0.98)
                 };
                 ui.draw_rect(option_rect, fill);
 
@@ -451,11 +451,11 @@ fn volume_slider(ui: &mut Ui<'_>, id: Id, rect: Rect, value: f32) -> Option<f32>
     // Track background.
     let track_color = Color::rgba(0.10, 0.10, 0.12, 0.85);
     let fill_color = if dragging {
-        Color::rgba(0.95, 0.75, 0.30, 1.0)
+        Color::rgba(0.82, 0.62, 1.0, 1.0)
     } else if hover {
-        Color::rgba(0.85, 0.65, 0.25, 1.0)
+        Color::rgba(0.72, 0.52, 0.92, 1.0)
     } else {
-        Color::rgba(0.75, 0.55, 0.20, 1.0)
+        Color::rgba(0.62, 0.44, 0.86, 1.0)
     };
     ui.draw_rect(rect, track_color);
 
@@ -472,9 +472,9 @@ fn volume_slider(ui: &mut Ui<'_>, id: Id, rect: Rect, value: f32) -> Option<f32>
     let thumb_y = rect.center().y - thumb_h * 0.5;
     let thumb_rect = Rect::from_xywh(thumb_x, thumb_y, thumb_w, thumb_h);
     let thumb_color = if dragging {
-        Color::rgba(1.0, 0.95, 0.85, 1.0)
+        Color::rgba(0.94, 0.90, 1.0, 1.0)
     } else {
-        Color::rgba(0.95, 0.90, 0.80, 0.95)
+        Color::rgba(0.88, 0.84, 0.98, 0.95)
     };
     ui.draw_rect(thumb_rect, thumb_color);
 

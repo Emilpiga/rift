@@ -64,6 +64,9 @@ pub struct UniformBuffers {
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
+    gpu_cleaned: bool,
+    cleanup_device: ash::Device,
+    cleanup_allocator: Arc<Mutex<Allocator>>,
 }
 
 impl UniformBuffers {
@@ -173,6 +176,9 @@ impl UniformBuffers {
             descriptor_pool,
             descriptor_sets,
             descriptor_set_layout,
+            gpu_cleaned: false,
+            cleanup_device: device.clone(),
+            cleanup_allocator: Arc::clone(allocator),
         })
     }
 
@@ -268,12 +274,28 @@ impl UniformBuffers {
     }
 
     pub fn cleanup(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+        if self.gpu_cleaned {
+            return;
+        }
+        self.gpu_cleaned = true;
         for buf in &mut self.buffers {
             buf.cleanup(device, allocator);
         }
+        self.buffers.clear();
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         }
+    }
+}
+
+impl Drop for UniformBuffers {
+    fn drop(&mut self) {
+        if self.gpu_cleaned {
+            return;
+        }
+        let device = self.cleanup_device.clone();
+        let allocator = Arc::clone(&self.cleanup_allocator);
+        self.cleanup(&device, &allocator);
     }
 }

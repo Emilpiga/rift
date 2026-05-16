@@ -5,6 +5,20 @@ use rift_client::auth::Signer;
 use rift_client::game::{EquipRequest, GameState, NetTransitionRequest, StashRequest};
 use rift_client::net_client::{ClientProfile, NetClient};
 use rift_engine::{App, Input, LoadStatus, Renderer, Window};
+
+fn appearance_to_net(
+    appearance: rift_game::character::CharacterAppearance,
+) -> rift_net::messages::Appearance {
+    rift_net::messages::Appearance {
+        skin_tone: appearance.skin_tone,
+        hair_style: appearance.hair_style,
+        eyebrow_style: appearance.eyebrow_style,
+        hair_color: appearance.hair_color,
+        eyebrow_color: appearance.eyebrow_color,
+        chest_size: appearance.chest_size,
+    }
+}
+
 struct RiftApp {
     state: GameState,
     /// Networking session. The client cannot start without one
@@ -825,18 +839,33 @@ impl RiftApp {
                 return;
             }
             rift_game::abilities::id::WRAITH_SCREAM_WINDUP => {
-                let scream_dir = aim.normalize_or_zero();
+                use rift_engine::renderer::vfx::presets::{
+                    wraith_scream_telegraph, wraith_scream_telegraph_anchor,
+                };
+                let scream_aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or_zero();
+                self.state
+                    .frame
+                    .wraith_scream_telegraph_aim
+                    .insert(caster, scream_aim);
                 renderer.vfx_system.spawn(
-                    rift_engine::renderer::vfx::presets::wraith_scream_telegraph(aim, 0.48),
-                    cast_origin + scream_dir * 0.55 + Vec3::new(0.0, 0.95, 0.0),
+                    wraith_scream_telegraph(scream_aim, 0.48),
+                    wraith_scream_telegraph_anchor(cast_origin, scream_aim),
                 );
                 return;
             }
             rift_game::abilities::id::WRAITH_SCREAM_IMPACT => {
-                let scream_dir = aim.normalize_or_zero();
+                use rift_engine::renderer::vfx::presets::{
+                    wraith_scream_impact, wraith_scream_impact_anchor,
+                };
+                let scream_aim = self
+                    .state
+                    .frame
+                    .wraith_scream_telegraph_aim
+                    .remove(&caster)
+                    .unwrap_or_else(|| Vec3::new(aim.x, 0.0, aim.z).normalize_or_zero());
                 renderer.vfx_system.spawn_bundle(
-                    rift_engine::renderer::vfx::presets::wraith_scream_impact(aim),
-                    cast_origin + scream_dir * 0.70 + Vec3::new(0.0, 0.95, 0.0),
+                    wraith_scream_impact(scream_aim),
+                    wraith_scream_impact_anchor(cast_origin, scream_aim),
                 );
                 return;
             }
@@ -963,6 +992,7 @@ impl RiftApp {
                 character_name: profile.name,
                 class_id: "hero".to_string(),
                 gender,
+                appearance: appearance_to_net(profile.appearance),
             });
         }
 
@@ -1036,8 +1066,11 @@ impl RiftApp {
             .collect::<Vec<_>>()
         {
             match req {
-                EquipRequest::Equip { inventory_index } => {
-                    net.request_equip_item(inventory_index);
+                EquipRequest::Equip {
+                    inventory_index,
+                    target_slot,
+                } => {
+                    net.request_equip_item(inventory_index, target_slot);
                 }
                 EquipRequest::Unequip { slot } => {
                     net.request_unequip_item(slot);
@@ -1091,6 +1124,26 @@ impl RiftApp {
             } else {
                 net.request_close_stash();
             }
+        }
+        for open in state
+            .net
+            .anvil_session_requests
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            if open {
+                net.request_open_anvil();
+            } else {
+                net.request_close_anvil();
+            }
+        }
+        for (source, affix_index) in state
+            .net
+            .pending_enchant_rerolls
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            net.request_reroll_affix(source, affix_index);
         }
 
         // Loadout-slot changes. Pushed by the spellbook UI; the
@@ -1273,8 +1326,9 @@ impl RiftApp {
                 StashRequest::EquipFromStash {
                     tab_index,
                     stash_index,
+                    target_slot,
                 } => {
-                    net.request_equip_from_stash(tab_index, stash_index);
+                    net.request_equip_from_stash(tab_index, stash_index, target_slot);
                 }
                 StashRequest::UnequipToStashSlot {
                     slot,
@@ -1371,6 +1425,7 @@ impl RiftApp {
                             it.unstable = b.unstable;
                             it.rift_touched =
                                 rift_game::loot::Item::rift_touched_from_wire(b.rift_touched);
+                            it.enchanted_affix_index = b.enchanted_affix_index;
                             it
                         })
                     })
@@ -1407,6 +1462,7 @@ impl RiftApp {
                     it.unstable = blob.unstable;
                     it.rift_touched =
                         rift_game::loot::Item::rift_touched_from_wire(blob.rift_touched);
+                    it.enchanted_affix_index = blob.enchanted_affix_index;
                     it
                 }) else {
                     continue;
@@ -1475,6 +1531,7 @@ impl RiftApp {
                                     it.rift_touched = rift_game::loot::Item::rift_touched_from_wire(
                                         b.rift_touched,
                                     );
+                                    it.enchanted_affix_index = b.enchanted_affix_index;
                                     it
                                 })
                             })

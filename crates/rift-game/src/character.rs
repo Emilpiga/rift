@@ -46,12 +46,36 @@ impl Gender {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CharacterAppearance {
+    pub skin_tone: u8,
+    pub hair_style: u8,
+    pub eyebrow_style: u8,
+    pub hair_color: u8,
+    pub eyebrow_color: u8,
+    pub chest_size: u8,
+}
+
+impl Default for CharacterAppearance {
+    fn default() -> Self {
+        Self {
+            skin_tone: 0,
+            hair_style: 0,
+            eyebrow_style: 0,
+            hair_color: 16,
+            eyebrow_color: 16,
+            chest_size: 128,
+        }
+    }
+}
+
 /// Persistent (well, soon-to-be-persistent) per-character profile.
 /// PlayerState is rebuilt from this each time the character is loaded.
 #[derive(Clone, Debug)]
 pub struct CharacterProfile {
     pub name: String,
     pub gender: Gender,
+    pub appearance: CharacterAppearance,
     pub level: u32,
     /// Indices into `crate::loot::BASE_ITEMS` for the items
     /// this character currently has equipped, as advertised by
@@ -66,6 +90,7 @@ impl CharacterProfile {
         Self {
             name,
             gender,
+            appearance: CharacterAppearance::default(),
             level: 1,
             equipped_base_ids: Vec::new(),
         }

@@ -88,6 +88,8 @@ pub enum PropId {
 
     // ---- Special ----
     StashChest,
+    /// Hub-only forge: same footprint as [`Anvil`]; client gives it void styling.
+    VoidForge,
 }
 
 /// How the placement algorithm should choose this prop's yaw
@@ -231,6 +233,7 @@ pub const fn meta(id: PropId) -> PropMeta {
         PebbleRound4 => passable(Free),
         // ---- Special ----
         StashChest => solid(Free, 0.40, 0.30, 0.30),
+        VoidForge => solid(Free, 0.40, 0.35, 0.20),
     }
 }
 

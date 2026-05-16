@@ -118,7 +118,7 @@ impl<'a> Banner<'a> {
             BannerStyle::None => Pad::ZERO,
         });
 
-        let text_w = ui.measure_text(self.text, text_size);
+        let text_w = ui.measure_header_text(self.text, text_size);
         let inner_w = text_w.max(self.min_width.unwrap_or(0.0));
         let outer_w = inner_w + pad.left + pad.right;
         let outer_h = text_size + pad.top + pad.bottom;
@@ -133,8 +133,8 @@ impl<'a> Banner<'a> {
                     frame = frame.with_fill(c);
                 }
                 frame.show(ui, rect, |ui, body| {
-                    let tw = ui.measure_text(self.text, text_size);
-                    ui.draw_text(
+                    let tw = ui.measure_header_text(self.text, text_size);
+                    ui.draw_header_text(
                         Pos2::new(body.x() + (inner_w - tw) * 0.5, body.y()),
                         self.text,
                         text_size,
@@ -143,10 +143,10 @@ impl<'a> Banner<'a> {
                 });
             }
             BannerStyle::Pill => {
-                let fill = self.fill.unwrap_or(Color::rgba(0.08, 0.10, 0.16, 0.80));
+                let fill = self.fill.unwrap_or(theme.colors.bg_panel);
                 ui.draw_rounded_rect(rect, theme.spacing.corner_radius, fill);
-                let tw = ui.measure_text(self.text, text_size);
-                ui.draw_text(
+                let tw = ui.measure_header_text(self.text, text_size);
+                ui.draw_header_text(
                     Pos2::new(
                         rect.x() + (rect.width() - tw) * 0.5,
                         rect.y() + (rect.height() - text_size) * 0.5,
@@ -157,8 +157,8 @@ impl<'a> Banner<'a> {
                 );
             }
             BannerStyle::None => {
-                let tw = ui.measure_text(self.text, text_size);
-                ui.draw_text(
+                let tw = ui.measure_header_text(self.text, text_size);
+                ui.draw_header_text(
                     Pos2::new((screen.x - tw) * 0.5, outer_y),
                     self.text,
                     text_size,

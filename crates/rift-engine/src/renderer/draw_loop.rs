@@ -929,6 +929,11 @@ impl Renderer {
             &self.device.device,
             &self.allocator,
             self.vfx_system.particle_instances(),
+            [
+                ubo.camera_pos[0],
+                ubo.camera_pos[1],
+                ubo.camera_pos[2],
+            ],
         )?;
 
         // ---- Compute screen-space post inputs (CPU math) ----

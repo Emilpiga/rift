@@ -10,8 +10,15 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 /// Wire-format version. Increment on any breaking message change.
 ///
 /// Version history (most recent first):
-/// - **v5** (2026-05-11): `Hello.auth: AuthCredential` enum
-///   collapsed to `Hello.auth_ticket: Vec<u8>`. Dev and Steam
+/// - v13 (2026-05-15): `EquipItem` / `EquipFromStash` carry optional `target_slot`
+///   so drag-to-paperdoll picks ring 2 vs ring 1 explicitly.
+/// - v12 (2026-05-15): `ItemBlob` affix ids now span main + resonance
+///   pools as one contiguous index space (`AFFIX_POOL` then
+///   `RESONANCE_POOL`).
+/// - v11 (2026-05-15): added anvil enchanting request messages and
+///   enchanted item metadata.
+/// - v10 (2026-05-15): character appearance added to roster,
+///   enter-world, and player-joined messages.
 /// - v7 (2026-05-11): added `ClientMsg::SortInventory` and
 ///   `ClientMsg::SortStashTab` for one-click auto-sort.
 /// - v6 (2026-05-11): added `ClientMsg::EquipFromStash` and
@@ -28,7 +35,7 @@ pub const PROTOCOL_ID: u64 = 0x5249_4654_4352_5731; // "RIFTCRW1"
 ///   trip.
 /// - v3: previous schema (free-form `account_name` string,
 ///   pre-Hello `RequestRoster` lookup).
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 13;
 
 /// Hard cap on simultaneous connected clients per server. Matches the
 /// design target of 4-player co-op (one slot is the host on a listen

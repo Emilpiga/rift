@@ -265,7 +265,7 @@ fn equip_self_binds_legacy_bag_item() {
         let mut p = sim.world.get::<&mut ServerPlayer>(entity).unwrap();
         p.inventory.push(Some(item));
     }
-    assert!(sim.equip_from_bag(owner, 0), "equip should succeed");
+    assert!(sim.equip_from_bag(owner, 0, None), "equip should succeed");
     let p = sim.world.get::<&ServerPlayer>(entity).unwrap();
     let equipped = p
         .equipment

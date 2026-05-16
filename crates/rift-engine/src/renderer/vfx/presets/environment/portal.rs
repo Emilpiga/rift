@@ -2,6 +2,7 @@
 
 use glam::Vec3;
 
+use crate::renderer::vfx::builder::{particle, EffectBuilder};
 use crate::renderer::vfx::spec::*;
 
 /// Particle accompaniment for the dimensional rift mesh.
@@ -33,16 +34,15 @@ pub const PORTAL_CENTRE_Y: f32 = 1.05;
 pub fn portal_vortex() -> Effect {
     // Ring axis: portal mesh lies in XY, normal +Z.
     let ring_axis = Vec3::Z;
-    Effect {
-        duration: 0.0,
-        layers: vec![
+    EffectBuilder::persistent()
+        .layers(vec![
             // 1. Inward-falling ash. Born on a slightly larger
             //    ring than the rift's silhouette and pulled
             //    tangentially+inward; lifetime long enough to
             //    streak across the disc before fading. Curl
             //    gives each particle a wobbly, drifting path
             //    rather than a clean radial line.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::RingAxis {
                     radius: 1.55,
                     thickness: 0.50,
@@ -89,7 +89,9 @@ pub fn portal_vortex() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }

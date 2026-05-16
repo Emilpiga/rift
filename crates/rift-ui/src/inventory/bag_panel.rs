@@ -2,8 +2,9 @@
 //!
 //! Paperdoll: each `EquipSlotIdx` is laid out at the
 //! position from `PAPERDOLL_LAYOUT`. Empty slots draw a
-//! placeholder with the slot label; filled slots draw the
-//! item icon stretched to the slot rectangle.
+//! recessed well plus a flat-tinted loot atlas glyph (slot-
+//! keyed); filled slots draw the item icon stretched to the
+//! slot rectangle.
 //!
 //! Bag: a flush grid of `bag_cols × bag_rows` outlined cells.
 //! Items are first-fit-packed by `pack_bag` and rendered as
@@ -16,10 +17,12 @@
 //! fire — that's the bug behind "I can't unequip by dragging
 //! to an empty bag slot".
 
-use rift_ui_im::{Color, Frame, Id, ItemSlot, Pad, Pos2, Rect, Stroke, Ui};
-use rift_ui_types::inventory::{DragSource, EquipSlotIdx, InventoryAction, ItemView};
+use rift_ui_im::{Color, Frame, Id, ItemSlot, Pad, Rect, Stroke, Ui};
+use rift_ui_types::inventory::{
+    DragSource, EnchantSourceView, EquipSlotIdx, InTransitSource, InventoryAction, ItemView,
+};
 
-use super::drag::{build_item_slot, route_slot_capture, DropTarget};
+use super::drag::{build_item_slot, route_slot_capture, route_slot_capture_equip_dest, DropTarget};
 use super::grid_drop::{snap_preview_and_resolve, GridSpec};
 use super::layout::{pack_bag, Layout};
 
@@ -34,6 +37,11 @@ pub struct BagPanelIn<'a> {
     pub bag_rows: u8,
     pub stash_open: bool,
     pub active_tab_u8: u8,
+    /// Forge-selected bag index / equip slot while void forge is open.
+    /// Drives snap-anchor rejection + slot chrome so the item stays put.
+    pub forge_anchor: Option<EnchantSourceView>,
+    /// Void forge panel visible — right-click gear sends [`InventoryAction::SelectEnchantSource`].
+    pub void_forge_open: bool,
     /// Optimistic source-hide: when set, the renderer hides
     /// the matching slot so the player doesn't see the item
     /// pop back to its source between drop and the server's
@@ -62,30 +70,35 @@ pub struct BagPanelOut {
     pub in_transit_dest_rect_from_drop: Option<[f32; 4]>,
 }
 
-/// Warm honey-gold used for slot outlines. Reads as etched
-/// metal against the carved-stone container behind it.
-const GOLD_OUTLINE: Color = Color::rgba(0.78, 0.62, 0.30, 0.85);
-/// Slightly brighter highlight drawn 1 px inside the gold
-/// stroke so the cell reads as inset rather than painted on.
-const INSET_HIGHLIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.10);
+/// Violet accent used for slot outlines (matches void chrome).
+const ACCENT_OUTLINE: Color = Color::rgba(0.62, 0.48, 0.92, 0.88);
+/// Inner highlight — cool lavender, not warm cream.
+const INSET_HIGHLIGHT: Color = Color::rgba(0.78, 0.72, 1.0, 0.12);
 /// 1px dark band painted along the top + left edges inside
 /// a cell so it reads as recessed into the stone slab.
 /// Pairs with [`CELL_INSET_LIGHT`] on the opposing edges.
 const CELL_INSET_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.55);
-/// 1px cream highlight along the bottom + right edges of a
+/// 1px cool highlight along the bottom + right edges of a
 /// cell. Together with the top/left shadow it sells the
 /// bevel without a full gradient.
-const CELL_INSET_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.08);
+const CELL_INSET_LIGHT: Color = Color::rgba(0.72, 0.68, 0.98, 0.10);
 /// Inner-shadow band the [`draw_section_chrome`] helper
 /// paints along the top + left edges of a section so the
 /// niche reads as carved into the drawer rather than tiled
 /// on top of it.
 const SECTION_INNER_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.42);
+/// Per-slot rim vignette (drawn **on top of** the cell wash,
+/// **under** the violet slot outline). The section-level slab
+/// sits entirely beneath opaque / semi-opaque cell fills, so
+/// a grid-wide radial never reads — this path hits every slot
+/// that uses [`draw_cell_outline`].
+const SLOT_VIGNETTE_EDGE: Color = Color::rgba(0.06, 0.04, 0.14, 0.45);
+const SLOT_VIGNETTE_CENTRE: Color = Color::rgba(0.0, 0.0, 0.0, 0.0);
 /// Highlight band along the bottom + right edges of a
 /// section, matching `SECTION_INNER_SHADOW` on the opposing
 /// edges so the niche reads as recessed at every viewing
 /// distance.
-const SECTION_INNER_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.06);
+const SECTION_INNER_LIGHT: Color = Color::rgba(0.70, 0.64, 0.96, 0.08);
 /// Empty equipment-slot fill. The equipment container has a
 /// stone texture; each slot gets a darker overlay so the
 /// slot grid pops against the slab without losing the
@@ -95,12 +108,14 @@ fn equip_slot_fill() -> Color {
     Color::rgba(0.0, 0.0, 0.0, 0.42)
 }
 
-/// Empty bag-cell fill. Lighter than `equip_slot_fill` so the
-/// hierarchy reads bag < equipment when scanned: the bag is
-/// the inventory you live in, equipment is the smaller,
-/// more important set.
-fn bag_empty_fill() -> Color {
+/// Wash used under empty bag / stash slot chrome (re-exported
+/// for stash grid parity with the bag).
+pub(super) fn bag_empty_cell_fill() -> Color {
     Color::rgba(0.0, 0.0, 0.0, 0.22)
+}
+
+fn bag_empty_fill() -> Color {
+    bag_empty_cell_fill()
 }
 
 /// Draw the textured stone backing used by both the bag and
@@ -108,9 +123,11 @@ fn bag_empty_fill() -> Color {
 /// gradient slightly so the equipment slab reads as a
 /// recessed niche behind the bag.
 ///
-/// In addition to the carved-stone fill + border, paints a
-/// 1px dark band along the top + left edges of the inside
-/// rect (and a matching lit band along the bottom + right).
+/// In addition to the carved-stone fill + border, paints the
+/// thin top/left shadow and bottom/right highlight strips on
+/// the section bounds. (Per-slot depth is handled in
+/// [`draw_cell_outline`], which paints **after** each cell's
+/// fill so it stays visible.)
 /// This gives the section a clear recessed feel against the
 /// drawer behind it — without it the section + drawer both
 /// use the same stone fill and blend into one surface at
@@ -134,11 +151,12 @@ pub(super) fn draw_section_chrome(
         .with_padding(Pad::all(0.0))
         .show_only(ui, rect);
 
+    let w = rect.width();
+    let h = rect.height();
+
     // Inner shadow / bevel. Two pixels thick to read at
     // normal viewing distance; thinner on cells (1px) so the
     // hierarchy stays section > cell when scanned.
-    let w = rect.width();
-    let h = rect.height();
     if w > 8.0 && h > 8.0 {
         // Top dark band
         ui.draw_rect(
@@ -163,13 +181,26 @@ pub(super) fn draw_section_chrome(
     }
 }
 
-/// Outline a single slot cell: gold-toned outer stroke plus
-/// a 1px brighter inset that fakes a chiselled bevel, and a
-/// 1px inner-shadow on top + left (with a matching highlight
-/// on the bottom + right) so the cell reads as a recessed
-/// well rather than a stamped rectangle.
-fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
-    ui.draw_outline(rect, 1.0, GOLD_OUTLINE);
+/// Outline a single slot cell: soft rim vignette (so depth
+/// survives the cell wash), then violet outer stroke, inset
+/// highlight, and inner bevel bands.
+pub(super) fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
+    let mw = rect.width();
+    let mh = rect.height();
+    if mw >= 4.0 && mh >= 4.0 {
+        let pad = 1.0_f32;
+        let inner = rift_ui_im::Rect::from_xywh(
+            rect.x() + pad,
+            rect.y() + pad,
+            (mw - 2.0 * pad).max(0.0),
+            (mh - 2.0 * pad).max(0.0),
+        );
+        if inner.width() >= 3.0 && inner.height() >= 3.0 {
+            let cr = (inner.width().min(inner.height()) * 0.18).clamp(2.5_f32, 10.0_f32);
+            ui.draw_rounded_radial_square_rect(inner, cr, SLOT_VIGNETTE_EDGE, SLOT_VIGNETTE_CENTRE);
+        }
+    }
+    ui.draw_outline(rect, 1.0, ACCENT_OUTLINE);
     let inset = rift_ui_im::Rect::from_xywh(
         rect.x() + 1.0,
         rect.y() + 1.0,
@@ -180,7 +211,7 @@ fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
 
     // Inner bevel: 1px dark band on top + left, 1px light
     // band on bottom + right. Sized off the inset rect so it
-    // sits cleanly inside the gold outline.
+    // sits cleanly inside the accent outline.
     let w = inset.width();
     let h = inset.height();
     if w > 2.0 && h > 2.0 {
@@ -203,21 +234,262 @@ fn draw_cell_outline(ui: &mut Ui<'_>, rect: rift_ui_im::Rect) {
     }
 }
 
+/// Recessed “socket” inside each paperdoll cell — graded fill +
+/// top/left shadow + opposing rim light (matches void-slot chrome).
+fn draw_paperdoll_socket_inset(ui: &mut Ui<'_>, rect: Rect, fit: f32) {
+    let pad = (rect.width().min(rect.height()) * 0.055)
+        .clamp(2.5 * fit, 8.0 * fit)
+        .max(2.0);
+    let inner = Rect::from_xywh(
+        rect.x() + pad,
+        rect.y() + pad,
+        (rect.width() - 2.0 * pad).max(0.0),
+        (rect.height() - 2.0 * pad).max(0.0),
+    );
+    if inner.width() < 6.0 || inner.height() < 6.0 {
+        return;
+    }
+    let cr = (inner.height() * 0.11).clamp(2.5 * fit, 9.0 * fit);
+    ui.draw_rounded_gradient_rect(
+        inner,
+        cr,
+        Color::rgba(0.026, 0.020, 0.052, 0.80),
+        Color::rgba(0.068, 0.050, 0.108, 0.92),
+    );
+    let w = inner.width();
+    let h = inner.height();
+    let band = (2.0 * fit).max(1.0);
+    ui.draw_rect(
+        Rect::from_xywh(inner.x(), inner.y(), w, band.min(h * 0.24)),
+        Color::rgba(0.0, 0.0, 0.0, 0.54),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(inner.x(), inner.y(), band.min(w * 0.22), h),
+        Color::rgba(0.0, 0.0, 0.0, 0.54),
+    );
+    let lip = (1.6 * fit).max(1.0);
+    ui.draw_rect(
+        Rect::from_xywh(
+            inner.x(),
+            inner.max.y - lip.min(h * 0.18),
+            w,
+            lip.min(h * 0.18),
+        ),
+        Color::rgba(0.58, 0.52, 0.95, 0.072),
+    );
+    ui.draw_rect(
+        Rect::from_xywh(
+            inner.max.x - lip.min(w * 0.18),
+            inner.y(),
+            lip.min(w * 0.18),
+            h,
+        ),
+        Color::rgba(0.58, 0.52, 0.95, 0.072),
+    );
+}
+
+/// Matches [`draw_paperdoll_socket_inset`] padding so empty-slot art can sit inside the
+/// gradient well rather than the outer cell chrome.
+fn paperdoll_socket_inner_bounds(rect: Rect, fit: f32) -> Rect {
+    let pad = (rect.width().min(rect.height()) * 0.055)
+        .clamp(2.5 * fit, 8.0 * fit)
+        .max(2.0);
+    Rect::from_xywh(
+        rect.x() + pad,
+        rect.y() + pad,
+        (rect.width() - 2.0 * pad).max(0.0),
+        (rect.height() - 2.0 * pad).max(0.0),
+    )
+}
+
+/// Atlas keys under `assets/icons/` (mirrors `rift_game::loot::items` base icons).
+fn equip_slot_placeholder_icon_key(slot_idx: u8) -> &'static str {
+    match slot_idx {
+        0 => "loot/Weapons/1",
+        1 => "loot/Helmets/Helmet_1",
+        2 => "loot/BodyArmor/BodyArmor_1",
+        3 => "loot/Pants/Pants_1",
+        4 => "loot/Gloves/Gloves_1",
+        5 => "loot/Boots/Boots_1",
+        6 | 7 => "loot/Rings/Ring_1",
+        8 => "loot/Necklaces/Necklace_1",
+        9 => "loot/Shoulders/Shoulders_1",
+        _ => "loot/BodyArmor/BodyArmor_1",
+    }
+}
+
+/// Uniform multiply tint — slightly below the socket gradient floor (~0.068 / 0.05 / 0.108)
+/// so the glyph reads as one muted silhouette on the paperdoll slate.
+const PAPERDOLL_EMPTY_ICON_TINT: Color = Color::rgba(0.048, 0.042, 0.072, 0.76);
+
+/// Icon rect filling the socket well with proportional horizontal / vertical
+/// insets so tall slots (weapon / chest `2×3`) keep the silhouette's aspect.
+fn paperdoll_empty_icon_rect(cell: Rect, fit: f32) -> Option<Rect> {
+    let inner = paperdoll_socket_inner_bounds(cell, fit);
+    if inner.width() < 12.0 || inner.height() < 12.0 {
+        return None;
+    }
+    let mx = (inner.width() * 0.11).clamp(3.5 * fit, 11.0 * fit);
+    let my = (inner.height() * 0.11).clamp(3.5 * fit, 11.0 * fit);
+    let w = (inner.width() - 2.0 * mx).max(0.0);
+    let h = (inner.height() - 2.0 * my).max(0.0);
+    if w < 10.0 || h < 10.0 {
+        return None;
+    }
+    let icon_r = Rect::from_xywh(inner.x() + mx, inner.y() + my, w, h);
+    Some(optical_nudge_empty_icon_rect(icon_r, fit))
+}
+
+/// Socket shading is heavier top-left; nudge the square slightly down-right so it reads centered.
+fn optical_nudge_empty_icon_rect(icon_r: Rect, fit: f32) -> Rect {
+    let u = icon_r.width().min(icon_r.height());
+    let nx = (u * 0.014).clamp(0.4 * fit, 1.6 * fit);
+    let ny = (u * 0.022).clamp(0.6 * fit, 2.4 * fit);
+    Rect::from_xywh(
+        icon_r.x() + nx,
+        icon_r.y() + ny,
+        icon_r.width(),
+        icon_r.height(),
+    )
+}
+
+/// Small inset “chip” behind the tinted atlas glyph so it sits slightly recessed in the well.
+fn draw_empty_paperdoll_icon_chip(ui: &mut Ui<'_>, icon_r: Rect, fit: f32) {
+    let cr = (icon_r.height() * 0.14).clamp(2.5 * fit, 7.0 * fit);
+    ui.draw_rounded_rect(icon_r, cr, Color::rgba(0.0, 0.0, 0.0, 0.22));
+    let w = icon_r.width();
+    let h = icon_r.height();
+    if w <= 4.0 || h <= 4.0 {
+        return;
+    }
+    ui.draw_rect(
+        Rect::from_xywh(icon_r.x() + 1.0, icon_r.y() + 1.0, w - 2.0, 1.0),
+        CELL_INSET_SHADOW,
+    );
+    ui.draw_rect(
+        Rect::from_xywh(icon_r.x() + 1.0, icon_r.y() + 1.0, 1.0, h - 2.0),
+        CELL_INSET_SHADOW,
+    );
+    ui.draw_rect(
+        Rect::from_xywh(icon_r.x() + 1.0, icon_r.max.y - 2.0, w - 2.0, 1.0),
+        CELL_INSET_LIGHT,
+    );
+    ui.draw_rect(
+        Rect::from_xywh(icon_r.max.x - 2.0, icon_r.y() + 1.0, 1.0, h - 2.0),
+        CELL_INSET_LIGHT,
+    );
+}
+
+/// Covers a bag anchor with empty-cell chrome after a bag-to-equip drop, when the bag grid
+/// was painted before the paperdoll consumed the release (same-frame ordering).
+pub(super) fn paint_bag_in_transit_cover(
+    ui: &mut Ui<'_>,
+    layout: &Layout,
+    bag_in: &BagPanelIn<'_>,
+    items: &[Option<ItemView<'_>>],
+) {
+    let Some(InTransitSource::Bag(idx)) = bag_in.in_transit else {
+        return;
+    };
+    let cols = bag_in.bag_cols;
+    let rows = bag_in.bag_rows;
+    let placements = pack_bag(
+        items,
+        |_, it: &ItemView<'_>| (it.cell_w.max(1), it.cell_h.max(1)),
+        cols,
+        rows,
+    );
+    let Some(Some((x, y, w, h))) = placements.get(idx as usize) else {
+        return;
+    };
+    let rect = layout.bag_rect(*x, *y, *w, *h);
+    ui.draw_rect(rect, bag_empty_fill());
+    draw_cell_outline(ui, rect);
+}
+
+#[derive(Clone, Copy)]
+enum DragPaperdollHint {
+    Inactive,
+    NonEquipPayload,
+    Gear(Option<u8>),
+}
+
+fn drag_paperdoll_hint<'a>(ui: &Ui<'_>, bag_in: &BagPanelIn<'a>) -> DragPaperdollHint {
+    let Some(src) = ui.drag_payload::<DragSource>().copied() else {
+        return DragPaperdollHint::Inactive;
+    };
+    let cell = match src {
+        DragSource::Bag(i) => bag_in.items.get(i as usize),
+        DragSource::Equip(s) => bag_in.equipment.get(s.0 as usize),
+        DragSource::Stash(i) => bag_in.stash_active.get(i as usize),
+    };
+    let Some(it) = cell.and_then(|o| o.as_ref()) else {
+        return DragPaperdollHint::Inactive;
+    };
+    if it.is_consumable {
+        return DragPaperdollHint::NonEquipPayload;
+    }
+    DragPaperdollHint::Gear(it.equip_native_slot)
+}
+
+fn draw_paperdoll_drag_affordance(
+    ui: &mut Ui<'_>,
+    rect: Rect,
+    slot: EquipSlotIdx,
+    hovered: bool,
+    hint: DragPaperdollHint,
+    fit: f32,
+    theme: &rift_ui_im::Theme,
+) {
+    let DragPaperdollHint::Gear(native) = hint else {
+        return;
+    };
+    let pad = (2.0 * fit).max(1.0);
+    let shell = Rect::from_xywh(
+        rect.x() + pad,
+        rect.y() + pad,
+        (rect.width() - 2.0 * pad).max(0.0),
+        (rect.height() - 2.0 * pad).max(0.0),
+    );
+    if shell.width() < 4.0 || shell.height() < 4.0 {
+        return;
+    }
+    let sr = (shell.height() * 0.085).clamp(2.0 * fit.min(6.0), 7.0);
+
+    if slot.accepts_equip_drag(native) {
+        let s = theme.colors.success.0;
+        ui.draw_rounded_rect(shell, sr, Color::rgba(s[0], s[1], s[2], 0.055));
+        return;
+    }
+
+    if native.is_some() && hovered {
+        ui.draw_rounded_rect(shell, sr, Color::rgba(0.85, 0.20, 0.22, 0.045));
+    }
+}
+
+#[derive(Default)]
+pub struct PaperdollOut {
+    pub hovered_equip: Option<EquipSlotIdx>,
+    pub in_transit_from_drop: Option<rift_ui_types::inventory::InTransitSource>,
+    pub in_transit_dest_rect_from_drop: Option<[f32; 4]>,
+}
+
 pub fn render_paperdoll(
     ui: &mut Ui<'_>,
     layout: &Layout,
     bag_in: &BagPanelIn<'_>,
     out_actions: &mut Vec<InventoryAction>,
-    in_transit: &mut Option<rift_ui_types::inventory::InTransitSource>,
-) -> Option<EquipSlotIdx> {
+    out: &mut PaperdollOut,
+) {
     let theme = *ui.theme();
-    let mut hovered_equip: Option<EquipSlotIdx> = None;
+    out.hovered_equip = None;
 
     // Section background — carved-stone slab, darker than the
     // bag so the equipment niche reads as recessed.
     draw_section_chrome(ui, &theme, layout.paperdoll, true);
 
     let slot_fill = equip_slot_fill();
+    let drag_hint = drag_paperdoll_hint(ui, bag_in);
 
     for i in 0..EquipSlotIdx::COUNT {
         let slot = EquipSlotIdx(i as u8);
@@ -225,13 +497,22 @@ pub fn render_paperdoll(
         let id = Id::root("inv").child(("equip", i));
         let item = bag_in.equipment.get(i).and_then(|o| o.as_ref());
 
-        // Cell chrome: darker fill + gold outline.
+        // Cell chrome: darker fill + recessed inner well + accent outline.
         ui.draw_rect(rect, slot_fill);
+        draw_paperdoll_socket_inset(ui, rect, layout.fit);
         draw_cell_outline(ui, rect);
+
+        let hovered_prep = ui.interact_hover(id, rect);
+        draw_paperdoll_drag_affordance(ui, rect, slot, hovered_prep, drag_hint, layout.fit, &theme);
 
         // ALWAYS call interact — `payload=None` for empty
         // slots still registers the rect as a drop target.
-        let payload = item.map(|_| DragSource::Equip(slot));
+        let drag_payload = item.map(|_| DragSource::Equip(slot));
+        let payload = if item.map(|it| it.forge_locked).unwrap_or(false) {
+            None
+        } else {
+            drag_payload
+        };
         // Hide the source slot while it's being dragged so
         // only the in-flight ghost is visible.
         let dragging_this = matches!(ui.drag_payload::<DragSource>().copied(), Some(DragSource::Equip(s)) if s.0 == slot.0);
@@ -257,44 +538,39 @@ pub fn render_paperdoll(
                 .interact::<DragSource>(ui, rect, id, payload)
         };
         let hovered = r.response.hovered;
-        route_slot_capture(
-            r,
-            DropTarget::Equip {
-                slot,
-                occupied: item.is_some(),
-            },
-            bag_in.stash_open,
-            false,
-            bag_in.active_tab_u8,
-            false,
-            out_actions,
-            in_transit,
-        );
+        let forge_locked = item.map(|it| it.forge_locked).unwrap_or(false);
+        if !forge_locked {
+            route_slot_capture_equip_dest(
+                r,
+                DropTarget::Equip {
+                    slot,
+                    occupied: item.is_some(),
+                },
+                bag_in.stash_open,
+                false,
+                bag_in.active_tab_u8,
+                false,
+                bag_in.void_forge_open,
+                out_actions,
+                &mut out.in_transit_from_drop,
+                &mut out.in_transit_dest_rect_from_drop,
+                rect,
+            );
+        }
 
         if item.is_some() {
             if hovered {
-                hovered_equip = Some(slot);
+                out.hovered_equip = Some(slot);
             }
-        } else {
-            // Empty-slot label centered.
-            let label = slot.label();
-            let lw = ui.measure_text(label, theme.fonts.size_sm);
-            let max_w = (rect.width() - 4.0 * layout.fit).max(0.0);
-            let draw_w = lw.min(max_w);
-            ui.draw_text_ellipsized(
-                Pos2::new(
-                    rect.x() + (rect.width() - draw_w) * 0.5,
-                    rect.y() + (rect.height() - theme.fonts.size_sm) * 0.5,
-                ),
-                label,
-                theme.fonts.size_sm,
-                max_w,
-                theme.colors.text_muted,
+        } else if let Some(icon_r) = paperdoll_empty_icon_rect(rect, layout.fit) {
+            draw_empty_paperdoll_icon_chip(ui, icon_r, layout.fit);
+            ui.draw_icon_silhouette(
+                icon_r,
+                equip_slot_placeholder_icon_key(slot.0),
+                PAPERDOLL_EMPTY_ICON_TINT,
             );
         }
     }
-
-    hovered_equip
 }
 
 pub fn render_bag_grid(
@@ -381,6 +657,7 @@ pub fn render_bag_grid(
             source_anchor_idx,
             bag_in.stash_open,
             bag_in.active_tab_u8,
+            bag_in.forge_anchor,
             DropTarget::Bag,
             out_actions,
             &mut out.in_transit_from_drop,
@@ -420,6 +697,7 @@ pub fn render_bag_grid(
                 false,
                 bag_in.active_tab_u8,
                 false,
+                bag_in.void_forge_open,
                 out_actions,
                 &mut out.in_transit_from_drop,
             );
@@ -432,12 +710,17 @@ pub fn render_bag_grid(
         let Some(item) = slot_opt.as_ref() else {
             continue;
         };
+        let forge_locked = item.forge_locked;
         let Some((x, y, w, h)) = placements[idx] else {
             continue;
         };
         let rect = layout.bag_rect(x, y, w, h);
         let id = Id::root("inv").child(("bag", idx as u32));
-        let payload = Some(DragSource::Bag(idx as u32));
+        let payload = if forge_locked {
+            None
+        } else {
+            Some(DragSource::Bag(idx as u32))
+        };
 
         // Transparent: let the stone frame and the rarity
         // outline carry the visual weight.
@@ -479,15 +762,17 @@ pub fn render_bag_grid(
         };
         let hovered = r.response.hovered;
 
-        if r.response.pressed && ui.ctrl_held() {
+        let salvage_allowed = !item.forge_locked;
+        if salvage_allowed && r.response.pressed && ui.ctrl_held() {
             out.salvage_press_bag_idx = Some(idx as u32);
         }
         let armed_for_this =
             armed_bag_idx_in == Some(idx as u32) || out.salvage_press_bag_idx == Some(idx as u32);
-        let ctrl_release = armed_for_this && (r.clicked || r.response.drag_released);
+        let ctrl_release =
+            salvage_allowed && armed_for_this && (r.clicked || r.response.drag_released);
         if ctrl_release {
             out.salvage_release_bag_idx = Some(idx as u32);
-        } else {
+        } else if !forge_locked {
             route_slot_capture(
                 r,
                 DropTarget::Bag(idx as u32),
@@ -495,6 +780,7 @@ pub fn render_bag_grid(
                 false,
                 bag_in.active_tab_u8,
                 item.is_consumable,
+                bag_in.void_forge_open,
                 out_actions,
                 &mut out.in_transit_from_drop,
             );

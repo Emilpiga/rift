@@ -25,25 +25,41 @@ fn roll_value(def: &AffixDef, ilvl: u32, rng: &mut LootRng) -> f32 {
     }
 }
 
-/// The `(min, max)` magnitude range an affix can roll at the given
-/// item-level. Used both by [`Item::roll`] (indirectly via
-/// [`roll_value`]) and tooltip rendering — the player sees what
-/// part of the range a drop landed on.
+/// The `[min, max]` magnitude range an affix can roll at the given
+/// item-level (rolls sample **inclusively** at both ends — see
+/// [`super::rng::LootRng::frange`]). Used both by [`Item::roll`]
+/// (indirectly via [`roll_value`]) and tooltip rendering — the
+/// player sees what part of the range a drop landed on.
 pub fn roll_range(def: &AffixDef, ilvl: u32) -> (f32, f32) {
     let scale = ilvl.saturating_sub(1) as f32 * def.ilvl_scale;
     (def.roll.0 + scale, def.roll.1 + scale)
 }
 
-/// Where `value` lands in `(lo, hi)`, expressed as a 0..1 fraction.
+/// Where `value` lands in `[lo, hi]`, expressed as a 0..1 fraction.
 /// Returns `None` when the range is degenerate (Transform / fixed
 /// rolls — there's no scale to talk about).
+///
+/// For **flat** (non-percent) [`Stat`] affixes, uses the same rounding as
+/// tooltip display (`round()` on lo/hi/value) so tier bands align with
+/// values shown as whole numbers (e.g. +9 max matches `Perfect`).
 pub fn roll_percentile(def: &AffixDef, ilvl: u32, value: f32) -> Option<f32> {
     let (lo, hi) = roll_range(def, ilvl);
     if (hi - lo).abs() < 1e-6 {
-        None
-    } else {
-        Some(((value - lo) / (hi - lo)).clamp(0.0, 1.0))
+        return None;
     }
+    if let AffixEffect::Stat(stat) = def.effect {
+        if !stat.is_percent() {
+            let lo_d = lo.round();
+            let hi_d = hi.round();
+            let v_d = value.round();
+            let denom = hi_d - lo_d;
+            if denom.abs() < 1e-6 {
+                return None;
+            }
+            return Some(((v_d - lo_d) / denom).clamp(0.0, 1.0));
+        }
+    }
+    Some(((value - lo) / (hi - lo)).clamp(0.0, 1.0))
 }
 
 /// Sample a rift-touched line for a kill at `floor_index`. Returns
@@ -160,6 +176,7 @@ impl Item {
                 unique_id: None,
                 unique_pick: None,
                 rift_touched: None,
+                enchanted_affix_index: None,
             };
         }
 
@@ -495,6 +512,41 @@ impl Item {
             // `RolledRiftTouched` when the floor gate + chance
             // gate both pass.
             rift_touched: None,
+            enchanted_affix_index: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frange_inclusive_formula_hits_hi_at_max_unit() {
+        // Mirrors [`LootRng::frange`]: `t = u / MASK` reaches `1.0` when `u == MASK`.
+        const MASK: u64 = (1u64 << 24) - 1;
+        let t_max = MASK as f32 / MASK as f32;
+        assert!((t_max - 1.0).abs() < 1e-6);
+        let lo = 10.0f32;
+        let hi = 20.0f32;
+        let at_max = lo + (hi - lo) * t_max;
+        assert!((at_max - hi).abs() < 1e-4);
+    }
+
+    #[test]
+    fn roll_percentile_flat_stat_matches_display_rounding() {
+        let def = AFFIX_POOL
+            .iter()
+            .find(|d| d.id == "flat_strength")
+            .expect("flat_strength affix");
+        // ilvl 3 → lo=5.2 hi=9.2; value 8.94 rounds to +9 like the tooltip.
+        let p = roll_percentile(def, 3, 8.94).expect("non-degenerate");
+        assert!(
+            (p - 1.0).abs() < 1e-5,
+            "rounded bands treat +9 at hi_round=9 as perfect (got {p})"
+        );
+        // Continuous mapping would be ~(8.94 - 5.2) / 4.0 ≈ 0.935 < 0.95.
+        let continuous = (8.94_f32 - 5.2) / (9.2 - 5.2);
+        assert!(continuous < 0.95);
     }
 }

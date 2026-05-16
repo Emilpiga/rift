@@ -200,6 +200,11 @@ impl<A: App> ApplicationHandler for WinitApp<A> {
                     }
                 }
             }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                for ch in text.chars() {
+                    self.input.on_char(ch);
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 self.input.on_mouse_button(button, pressed);
@@ -478,25 +483,27 @@ pub fn draw_forged_loading_panel(
     let panel_y = sh * 0.50 - 76.0;
 
     let title_size = 30.0;
-    let title_w = batch.measure_text(title, title_size);
+    let title_w = batch.measure_text(title, title_size, true);
     batch.text(
         title,
         panel_x + (panel_w - title_w) * 0.5,
         panel_y,
         title_size,
         [0.94, 0.84, 0.68, 1.0],
+        true,
         sw,
         sh,
     );
 
     let subtitle_size = 13.0;
-    let subtitle_w = batch.measure_text(subtitle, subtitle_size);
+    let subtitle_w = batch.measure_text(subtitle, subtitle_size, false);
     batch.text(
         subtitle,
         panel_x + (panel_w - subtitle_w) * 0.5,
         panel_y + 42.0,
         subtitle_size,
         [0.58, 0.53, 0.46, 1.0],
+        false,
         sw,
         sh,
     );
@@ -586,13 +593,14 @@ pub fn draw_forged_loading_panel(
 
     let pct = format!("{:>3}%", (displayed_progress * 100.0).round() as i32);
     let pct_size = 13.0;
-    let pct_w = batch.measure_text(&pct, pct_size);
+    let pct_w = batch.measure_text(&pct, pct_size, false);
     batch.text(
         &pct,
         bar_x + bar_w - pct_w,
         bar_y + bar_h + 18.0,
         pct_size,
         [0.70, 0.62, 0.50, 1.0],
+        false,
         sw,
         sh,
     );
@@ -604,6 +612,7 @@ pub fn draw_forged_loading_panel(
         bar_y + bar_h + 18.0,
         label_size,
         [0.70, 0.66, 0.58, 1.0],
+        false,
         sw,
         sh,
     );

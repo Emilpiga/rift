@@ -86,7 +86,8 @@ use passes::{
     create_bloom_pass, create_composite_pass, create_scene_pass, create_translucent_pass,
 };
 use resources::{
-    build_post_pipeline, create_fbs, create_fbs_single, write_combined, write_combined_with_layout,
+    build_post_pipeline, create_fbs, create_fbs_single, write_combined, write_combined_array,
+    write_combined_with_layout,
     OffscreenImage,
 };
 
@@ -110,7 +111,9 @@ const BLOOM_COMBINED_IMAGE_SAMPLERS_PER_IMAGE: u32 = 3;
 const COMPOSITE_DESCRIPTOR_SETS_PER_IMAGE: u32 = 1;
 const COMPOSITE_COMBINED_IMAGE_SAMPLERS_PER_IMAGE: u32 = 4;
 const TRANSLUCENT_DESCRIPTOR_SETS_PER_IMAGE: u32 = 1;
-const TRANSLUCENT_COMBINED_IMAGE_SAMPLERS_PER_IMAGE: u32 = 1;
+/// Depth (binding 0) + hybrid VFX texture array (binding 1, count = MAX_VFX_TEXTURES).
+const TRANSLUCENT_COMBINED_IMAGE_SAMPLERS_PER_IMAGE: u32 =
+    1 + crate::renderer::vfx::textures::MAX_VFX_TEXTURES;
 
 /// Tunable bloom parameters. Game code can mutate these per
 /// biome / cinematic / debug overlay.
@@ -474,11 +477,18 @@ impl PostProcessing {
         };
         // Translucent set: single binding (depth sampler) at
         // set=1 of ribbon + particle pipelines.
-        let translucent_bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+        let translucent_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(crate::renderer::vfx::textures::MAX_VFX_TEXTURES)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
         let translucent_set_layout = unsafe {
             device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&translucent_bindings),
@@ -1014,6 +1024,25 @@ impl PostProcessing {
     /// Record generic post graph nodes that run between the HDR
     /// scene and final composite. Each node writes an intermediate
     /// texture that the final composite samples cheaply.
+    /// Bind hybrid VFX texture slots for particles (set 1 / binding 1 array).
+    pub fn bind_vfx_texture_array(
+        &self,
+        device: &ash::Device,
+        views: &[vk::ImageView],
+        sampler: vk::Sampler,
+    ) {
+        for &set in &self.translucent_in_sets {
+            write_combined_array(
+                device,
+                set,
+                1,
+                views,
+                sampler,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+        }
+    }
+
     pub fn record_post_graph(
         &self,
         device: &ash::Device,

@@ -43,20 +43,10 @@ pub struct EnvTextures {
     /// Authored PBR ground tile material used for dungeon floors.
     /// Loaded lazily by [`Self::ensure_ground_tiles`].
     pub ground_tiles_set: Option<vk::DescriptorSet>,
-    /// Authored desert-rocks **basecolor only** texture used
-    /// for the hub-platform surface. Loaded lazily by
-    /// [`Self::ensure_desert_rocks`]. We deliberately bind
-    /// only the colour map here — the giant disc is viewed
-    /// from above so PBR specular wanders distractingly across
-    /// it as the camera shifts, and parallax/normal-mapping
-    /// don't pay off at this scale either. The cel-shading
-    /// path produces a calm, painterly look instead.
-    /// Authored sand PBR pack used for the hub platform
-    /// disc. Lazy-loaded by [`Self::ensure_desert_rocks`].
-    /// The sand pack ships only basecolor / normal / roughness
-    /// / AO / height (no metallic) — the MR atlas decoder
-    /// substitutes a constant zero-metallic channel, which is
-    /// what we want for desert sand anyway.
+    /// Void hub / character-select platform: **ground_tiles_rock**
+    /// PBR pack (`assets/textures/ground_tiles_rock/`). The field
+    /// name is historical (`desert_rocks_set`); see
+    /// [`Self::ensure_desert_rocks`].
     pub desert_rocks_set: Option<vk::DescriptorSet>,
     /// Authored PBR cliff-rocks material used for the
     /// procedural mountain-ring terrain around the hub.
@@ -316,41 +306,37 @@ impl EnvTextures {
         }
     }
 
-    /// Lazy-initialise the desert-rocks **basecolor only**
-    /// texture used for the hub-platform surface. We
-    /// deliberately skip the PBR channels here: the disc is
-    /// viewed from far overhead, so PBR specular highlights
-    /// wander distractingly across it as the camera moves,
-    /// and normal/height detail is invisible at that distance.
-    /// Cel-shading on the basecolor gives a calm painterly
-    /// finish at a fraction of the per-fragment cost.
-    /// Lazy-initialise the authored sand PBR pack used to
-    /// surface the hub platform disc. The pack ships no
-    /// metallic map (sand is fully dielectric), so we pass
-    /// `None` for that channel and let the MR atlas decoder
-    /// fill in a zero metallic value.
+    /// Lazy-initialise the void-hub **ground_tiles_rock** PBR
+    /// pack (`assets/textures/ground_tiles_rock/`). See
+    /// [`Self::desert_rocks_set`] for why the field name stayed.
     pub fn ensure_desert_rocks(&mut self, renderer: &mut Renderer) {
         if self.desert_rocks_set.is_some() {
             return;
         }
         use std::path::Path;
         let result = renderer.upload_shared_pbr_material(rift_engine::PbrSource::FilesSplitMr {
-            basecolor: Path::new("assets/textures/sand/sand_04_color_2k.png"),
-            normal: Some(Path::new("assets/textures/sand/sand_04_normal_gl_2k.png")),
-            metallic: None,
-            roughness: Some(Path::new("assets/textures/sand/sand_04_roughness_2k.png")),
-            ao: Some(Path::new(
-                "assets/textures/sand/sand_04_ambient_occlusion_2k.png",
+            basecolor: Path::new("assets/textures/ground_tiles_rock/ground_tiles_01_color_2k.png"),
+            normal: Some(Path::new(
+                "assets/textures/ground_tiles_rock/ground_tiles_01_normal_gl_2k.png",
             )),
-            height: Some(Path::new("assets/textures/sand/sand_04_height_2k.png")),
+            metallic: None,
+            roughness: Some(Path::new(
+                "assets/textures/ground_tiles_rock/ground_tiles_01_roughness_2k.png",
+            )),
+            ao: Some(Path::new(
+                "assets/textures/ground_tiles_rock/ground_tiles_01_ambient_occlusion_2k.png",
+            )),
+            height: Some(Path::new(
+                "assets/textures/ground_tiles_rock/ground_tiles_01_height_2k.png",
+            )),
         });
         match result {
             Ok((mut texs, set)) => {
-                log::info!("env: bound sand PBR pack (hub platform)");
+                log::info!("env: bound ground_tiles_rock PBR (void hub / char-select)");
                 self.textures.append(&mut texs);
                 self.desert_rocks_set = Some(set);
             }
-            Err(e) => log::warn!("env sand PBR upload failed: {}", e),
+            Err(e) => log::warn!("env ground_tiles_rock PBR upload failed: {}", e),
         }
     }
 
@@ -546,9 +532,11 @@ impl EnvTextures {
                             Ok((mut texs, set)) => {
                                 self.textures.append(&mut texs);
                                 self.desert_rocks_set = Some(set);
-                                log::info!("env: bound sand PBR pack (worker)");
+                                log::info!("env: bound ground_tiles_rock PBR (worker)");
                             }
-                            Err(e) => log::warn!("env sand PBR decoded upload failed: {}", e),
+                            Err(e) => {
+                                log::warn!("env ground_tiles_rock PBR decoded upload failed: {}", e)
+                            }
                         }
                         uploaded_this_tick = true;
                     }
@@ -646,10 +634,12 @@ impl DecodeWorker {
         // (hub disc, mountains) bind first.
         type Job = Box<dyn FnOnce() -> DecodeOutput + Send + 'static>;
         let jobs: Vec<Job> = vec![
-            Box::new(|| match decode_pbr_pack("sand", &SAND_PATHS) {
-                DecodeOutput::Pbr(_, pack) => DecodeOutput::DesertRocks(pack),
-                other => other,
-            }),
+            Box::new(
+                || match decode_pbr_pack("ground_tiles_rock", &GROUND_TILES_ROCK_PATHS) {
+                    DecodeOutput::Pbr(_, pack) => DecodeOutput::DesertRocks(pack),
+                    other => other,
+                },
+            ),
             Box::new(|| decode_pbr_pack("cliff_rocks", &CLIFF_ROCKS_PATHS)),
             Box::new(|| decode_pbr_pack("ground_tiles", &GROUND_TILES_PATHS)),
             Box::new(|| decode_pbr_pack("bricks_wall", &BRICKS_WALL_PATHS)),
@@ -689,15 +679,13 @@ struct PbrPackPaths {
     height: Option<&'static str>,
 }
 
-const SAND_PATHS: PbrPackPaths = PbrPackPaths {
-    basecolor: "assets/textures/sand/sand_04_color_2k.png",
-    normal: Some("assets/textures/sand/sand_04_normal_gl_2k.png"),
-    // Sand is dielectric — no metallic map is shipped, so
-    // the MR atlas builder substitutes zero metallic.
+const GROUND_TILES_ROCK_PATHS: PbrPackPaths = PbrPackPaths {
+    basecolor: "assets/textures/ground_tiles_rock/ground_tiles_01_color_2k.png",
+    normal: Some("assets/textures/ground_tiles_rock/ground_tiles_01_normal_gl_2k.png"),
     metallic: None,
-    roughness: Some("assets/textures/sand/sand_04_roughness_2k.png"),
-    ao: Some("assets/textures/sand/sand_04_ambient_occlusion_2k.png"),
-    height: Some("assets/textures/sand/sand_04_height_2k.png"),
+    roughness: Some("assets/textures/ground_tiles_rock/ground_tiles_01_roughness_2k.png"),
+    ao: Some("assets/textures/ground_tiles_rock/ground_tiles_01_ambient_occlusion_2k.png"),
+    height: Some("assets/textures/ground_tiles_rock/ground_tiles_01_height_2k.png"),
 };
 
 const CLIFF_ROCKS_PATHS: PbrPackPaths = PbrPackPaths {

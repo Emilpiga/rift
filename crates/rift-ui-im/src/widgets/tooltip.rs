@@ -25,9 +25,9 @@ pub enum TooltipLineDecor {
     /// Ordinary text line.
     #[default]
     Text,
-    /// Gold horizontal rule. Text is ignored.
+    /// Accent horizontal rule (void chrome). Text is ignored.
     Divider,
-    /// Top edge of a legendary banner — gold gradient
+    /// Top edge of a legendary banner — accent gradient
     /// (transparent → opaque → transparent) rule and marks the
     /// start of a darker inset backdrop drawn behind every
     /// `BannerBody` line that follows until [`BannerEdgeBottom`].
@@ -49,6 +49,8 @@ pub struct TooltipLine<'a> {
     pub size: f32,
     pub color: Color,
     pub decor: TooltipLineDecor,
+    /// Paint a subtle purple center-fade band behind this row.
+    pub enchanted: bool,
     /// When `Some`, the renderer splits the line text at the
     /// last `"  "` (two spaces) and draws the tail as a filled
     /// rounded pill ("badge") with this colour as the fill —
@@ -56,6 +58,9 @@ pub struct TooltipLine<'a> {
     /// (`▴ Fine`, `▴▴▴ Perfect`, …) as a visual chip rather
     /// than trailing text.
     pub badge: Option<Color>,
+    /// When true, line text (and head segment before a badge)
+    /// uses the Share Tech header face (item names, etc.).
+    pub header_font: bool,
 }
 
 impl<'a> TooltipLine<'a> {
@@ -65,8 +70,16 @@ impl<'a> TooltipLine<'a> {
             size,
             color,
             decor: TooltipLineDecor::Text,
+            enchanted: false,
             badge: None,
+            header_font: false,
         }
+    }
+
+    /// Builder: draw this line with the header typeface.
+    pub fn with_header_font(mut self, yes: bool) -> Self {
+        self.header_font = yes;
+        self
     }
 
     /// Builder: set the per-line decoration. See
@@ -83,7 +96,7 @@ impl<'a> TooltipLine<'a> {
         self
     }
 
-    /// `true` if this line should render as a gold horizontal
+    /// `true` if this line should render as an accent horizontal
     /// rule rather than text. Honours both the explicit
     /// [`TooltipLineDecor::Divider`] tag and the legacy `─`
     /// character-detection so callers that pre-date the decor
@@ -136,7 +149,7 @@ impl<'a> Default for Tooltip<'a> {
     fn default() -> Self {
         Self {
             header: None,
-            header_color: Color::rgba(0.95, 0.76, 0.44, 1.0),
+            header_color: Color::rgba(0.73, 0.63, 1.0, 1.0),
             fill: Color::rgba(0.02, 0.03, 0.05, 0.96),
             pad: 8.0,
             min_width: 180.0,
@@ -216,7 +229,7 @@ impl<'a> Tooltip<'a> {
         // Extra vertical breathing room around each divider
         // so affix groups read as distinct sections.
         let divider_margin = 4.0 * theme.scale;
-        // Gradient gold rule slot used for legendary banner
+        // Gradient accent rule slot used for legendary banner
         // edges — a touch taller than a regular divider so the
         // gradient reads, and with a bit more margin so the
         // banner reads as its own framed box.
@@ -237,7 +250,7 @@ impl<'a> Tooltip<'a> {
         // get a slightly taller slot than a normal line.
         let mut max_w = self
             .header
-            .map(|h| ui.measure_text(h, theme.fonts.size_md))
+            .map(|h| ui.measure_header_text(h, theme.fonts.size_md))
             .unwrap_or(0.0);
         let mut body_h = 0.0_f32;
         for ln in lines {
@@ -262,7 +275,11 @@ impl<'a> Tooltip<'a> {
                     }
                     _ => (ln.text, None),
                 };
-                let head_w = ui.measure_text(head, ln.size);
+                let head_w = if ln.header_font {
+                    ui.measure_header_text(head, ln.size)
+                } else {
+                    ui.measure_text(head, ln.size)
+                };
                 let badge_w = badge_text
                     .map(|t| {
                         let bf = ln.size * 0.82;
@@ -343,8 +360,8 @@ impl<'a> Tooltip<'a> {
                     rect.width() - 4.0,
                     11.0 * theme.scale,
                 ),
-                Color::rgba(1.0, 0.86, 0.55, 0.13),
-                Color::rgba(1.0, 0.86, 0.55, 0.0),
+                Color::rgba(0.72, 0.68, 1.0, 0.13),
+                Color::rgba(0.72, 0.68, 1.0, 0.0),
             );
             ui.draw_gradient_rect(
                 Rect::from_xywh(
@@ -376,14 +393,23 @@ impl<'a> Tooltip<'a> {
             // full-width header so the panel still owns a crisp
             // silhouette instead of the header overwriting it.
             ui.draw_rounded_outline(rect, 0.0, 2.0, theme.colors.border_stone);
-            ui.draw_outline(rect, 1.0, Color::rgba(0.80, 0.58, 0.28, 0.68));
+            ui.draw_outline(
+                rect,
+                1.0,
+                Color::rgba(
+                    theme.colors.accent.0[0],
+                    theme.colors.accent.0[1],
+                    theme.colors.accent.0[2],
+                    0.42,
+                ),
+            );
             let inset = Rect::from_xywh(
                 rect.x() + 2.0,
                 rect.y() + 2.0,
                 (rect.width() - 4.0).max(0.0),
                 (rect.height() - 4.0).max(0.0),
             );
-            ui.draw_rounded_outline(inset, 0.0, 1.0, Color::rgba(1.0, 0.92, 0.84, 0.12));
+            ui.draw_rounded_outline(inset, 0.0, 1.0, Color::rgba(0.82, 0.78, 1.0, 0.14));
             draw_tooltip_corner_cuts(ui, rect, theme.scale, 0.36);
 
             // Pre-scan to locate any legendary banner spans so
@@ -425,7 +451,7 @@ impl<'a> Tooltip<'a> {
             // a horizontal 0 → full → 0 alpha mask of a dark
             // translucent fill so it fades into the surrounding
             // stone background instead of reading as a hard
-            // rectangle. Mirrors the gold edge rule's gradient
+            // rectangle. Mirrors the accent edge rule's gradient
             // so the banner reads as one coherent ornament.
             for &(top_y, bot_y) in &banner_spans {
                 let plate_l = rect.x() + pad - banner_inset;
@@ -443,25 +469,23 @@ impl<'a> Tooltip<'a> {
 
             for ln in lines {
                 if ln.is_divider() {
-                    // Gold separator with the same horizontal
-                    // 0 → full → 0 alpha mask as the legendary
-                    // banner edges so every divider in the
-                    // tooltip reads as one consistent ornament,
-                    // just at different sizes.
+                    // Accent separator — same horizontal fade mask as
+                    // legendary banner edges for consistent chrome.
                     cursor_y += divider_margin;
                     let mid_y = cursor_y + divider_h * 0.5 - 1.0;
                     let span_l = rect.x() + pad;
                     let span_r = rect.max.x - pad;
                     let mid_x = (span_l + span_r) * 0.5;
-                    let gold = Color::rgba(0.78, 0.62, 0.30, 0.85);
-                    let clear = Color::rgba(0.78, 0.62, 0.30, 0.0);
+                    let ac = theme.colors.accent;
+                    let rule = Color::rgba(ac.0[0], ac.0[1], ac.0[2], 0.82);
+                    let clear = Color::rgba(ac.0[0], ac.0[1], ac.0[2], 0.0);
                     let row_l = Rect::from_xywh(span_l, mid_y, mid_x - span_l, 1.0);
                     let row_r = Rect::from_xywh(mid_x, mid_y, span_r - mid_x, 1.0);
-                    ui.draw_grad4_rect(row_l, clear, gold, clear, gold);
-                    ui.draw_grad4_rect(row_r, gold, clear, gold, clear);
+                    ui.draw_grad4_rect(row_l, clear, rule, clear, rule);
+                    ui.draw_grad4_rect(row_r, rule, clear, rule, clear);
                     cursor_y += divider_h + divider_margin;
                 } else if ln.is_banner_edge_top() || ln.is_banner_edge_bottom() {
-                    // Horizontal gold-gradient rule: transparent
+                    // Horizontal accent-gradient rule: transparent
                     // → opaque → transparent across the tooltip
                     // width. Drawn as two side-by-side gradient
                     // rects (left half transparent→opaque, right
@@ -473,14 +497,34 @@ impl<'a> Tooltip<'a> {
                     let span_l = rect.x() + pad - banner_inset;
                     let span_r = rect.max.x - pad + banner_inset;
                     let mid_x = (span_l + span_r) * 0.5;
-                    let gold = Color::rgba(1.0, 0.82, 0.36, 0.95);
-                    let clear = Color::rgba(1.0, 0.82, 0.36, 0.0);
+                    let ac = theme.colors.accent;
+                    let hi = Color::rgba(
+                        (ac.0[0] * 1.06).min(1.0),
+                        (ac.0[1] * 1.04).min(1.0),
+                        (ac.0[2] * 1.02).min(1.0),
+                        0.92,
+                    );
+                    let clear = Color::rgba(ac.0[0], ac.0[1], ac.0[2], 0.0);
                     let row_l = Rect::from_xywh(span_l, mid_y, mid_x - span_l, 2.0);
                     let row_r = Rect::from_xywh(mid_x, mid_y, span_r - mid_x, 2.0);
-                    ui.draw_grad4_rect(row_l, clear, gold, clear, gold);
-                    ui.draw_grad4_rect(row_r, gold, clear, gold, clear);
+                    ui.draw_grad4_rect(row_l, clear, hi, clear, hi);
+                    ui.draw_grad4_rect(row_r, hi, clear, hi, clear);
                     cursor_y += banner_edge_h + banner_edge_margin;
                 } else {
+                    if ln.enchanted {
+                        let band_pad = 3.0 * theme.scale;
+                        let band_top = cursor_y - band_pad * 0.5;
+                        let band_h = ln.size + band_pad;
+                        let span_l = rect.x() + pad - 2.0 * theme.scale;
+                        let span_r = rect.max.x - pad + 2.0 * theme.scale;
+                        let mid_x = (span_l + span_r) * 0.5;
+                        let purple = Color::rgba(0.62, 0.28, 0.95, 0.24);
+                        let clear = Color::rgba(0.62, 0.28, 0.95, 0.0);
+                        let row_l = Rect::from_xywh(span_l, band_top, mid_x - span_l, band_h);
+                        let row_r = Rect::from_xywh(mid_x, band_top, span_r - mid_x, band_h);
+                        ui.draw_grad4_rect(row_l, clear, purple, clear, purple);
+                        ui.draw_grad4_rect(row_r, purple, clear, purple, clear);
+                    }
                     // Optional trailing badge: split off the
                     // tail after the last `"  "` (two spaces)
                     // and render it inside a small filled
@@ -503,7 +547,16 @@ impl<'a> Tooltip<'a> {
                         }
                         _ => (ln.text, None),
                     };
-                    ui.draw_text(Pos2::new(rect.x() + pad, cursor_y), head, ln.size, ln.color);
+                    if ln.header_font {
+                        ui.draw_header_text(
+                            Pos2::new(rect.x() + pad, cursor_y),
+                            head,
+                            ln.size,
+                            ln.color,
+                        );
+                    } else {
+                        ui.draw_text(Pos2::new(rect.x() + pad, cursor_y), head, ln.size, ln.color);
+                    }
                     if let (Some(tail), Some(fill)) = (badge_text, ln.badge) {
                         // Badge sits aligned to the right edge of
                         // the tooltip body. Slightly smaller than
@@ -563,7 +616,7 @@ pub fn tooltip_at_mouse(ui: &mut Ui<'_>, header: Option<&str>, lines: &[TooltipL
 
 fn draw_tooltip_corner_cuts(ui: &mut Ui<'_>, rect: Rect, scale: f32, alpha: f32) {
     let cut = (9.0 * scale).clamp(6.0, 11.0);
-    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
+    let col = Color::rgba(0.68, 0.58, 0.98, alpha);
     let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.64);
     ui.draw_line(
         Pos2::new(rect.x() + 2.0, rect.y() + cut),
@@ -650,7 +703,9 @@ pub fn item_tooltip_lines<'a>(
             },
             color: if i == 0 { rarity } else { theme.colors.text },
             decor: TooltipLineDecor::Text,
+            enchanted: false,
             badge: None,
+            header_font: i == 0,
         })
         .collect()
 }

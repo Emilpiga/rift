@@ -152,12 +152,10 @@ float samplePointShadowBiased(
     vec3 dir = toFrag / max(fragDist, 1e-4);
 
     // Slope-scaled bias: cosine-grazing surfaces need a larger
-    // bias to avoid acne. The constant 0.0025 is in normalized
-    // distance units (i.e. ~0.0125 m on a 5 m torch radius), the
-    // typical scale of cube-atlas texel projection at our 512²
-    // per face.
+    // bias to avoid acne. Slightly tighter than before now that cube
+    // faces are 1024² (smaller normalized texel footprint).
     float NdotL = max(dot(N, -dir), 0.0);
-    float bias = max(0.0040 * (1.0 - NdotL), 0.0010);
+    float bias = max(0.0029 * (1.0 - NdotL), 0.00065);
 
     // Cheap path for low-value samples. Near a torch's falloff edge
     // or at a grazing receiver, the light contribution is already
@@ -167,7 +165,7 @@ float samplePointShadowBiased(
     float distFade = smoothstep(0.24, 0.90, normFrag);
     float grazing = 1.0 - clamp(NdotL, 0.0, 1.0);
     if (normFrag > 0.78 || NdotL < 0.18) {
-        float fastSoftness = mix(0.00035, 0.00175, distFade) * (1.0 + grazing * 0.25);
+        float fastSoftness = mix(0.00022, 0.00105, distFade) * (1.0 + grazing * 0.18);
         return pointShadowCompare(lightIdx, dir, normFrag, bias, fastSoftness);
     }
 
@@ -189,19 +187,16 @@ float samplePointShadowBiased(
     vec3 tu = tuRaw * rcs + tvRaw * rsn;
     vec3 tv = -tuRaw * rsn + tvRaw * rcs;
 
-    // Keep nearby contacts tight, then broaden the angular
-    // kernel as the receiver approaches the light's range.
-    float k = mix(0.0030, 0.0075, distFade) * (1.0 + grazing * 0.20);
-    // Manual compare softness turns the binary R32 distance
-    // test into a narrow transition. It removes the 9-level
-    // banding without making fully-shadowed interiors glow.
-    float softness = mix(0.00025, 0.00140, distFade) * (1.0 + grazing * 0.25);
+    // Tighter angular kernel + compare softness — sharper silhouettes on
+    // 1024² cube faces (still 5 taps + world-stable rotation).
+    float k = mix(0.00185, 0.0048, distFade) * (1.0 + grazing * 0.14);
+    float softness = mix(0.00014, 0.00088, distFade) * (1.0 + grazing * 0.16);
 
-    float occ = pointShadowCompare(lightIdx, dir, normFrag, bias, softness) * 0.36;
-    occ += pointShadowCompare(lightIdx, dir + tu * k, normFrag, bias, softness) * 0.16;
-    occ += pointShadowCompare(lightIdx, dir - tu * k, normFrag, bias, softness) * 0.16;
-    occ += pointShadowCompare(lightIdx, dir + tv * k, normFrag, bias, softness) * 0.16;
-    occ += pointShadowCompare(lightIdx, dir - tv * k, normFrag, bias, softness) * 0.16;
+    float occ = pointShadowCompare(lightIdx, dir, normFrag, bias, softness) * 0.44;
+    occ += pointShadowCompare(lightIdx, dir + tu * k, normFrag, bias, softness) * 0.14;
+    occ += pointShadowCompare(lightIdx, dir - tu * k, normFrag, bias, softness) * 0.14;
+    occ += pointShadowCompare(lightIdx, dir + tv * k, normFrag, bias, softness) * 0.14;
+    occ += pointShadowCompare(lightIdx, dir - tv * k, normFrag, bias, softness) * 0.14;
     return occ;
 }
 

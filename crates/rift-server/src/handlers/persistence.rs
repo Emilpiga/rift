@@ -3,7 +3,7 @@
 //! roster lookups. These are split out of `main.rs` so the
 //! database integration points live in one file.
 
-use rift_net::messages::{RosterEntry, ServerMsg};
+use rift_net::messages::{Appearance, RosterEntry, ServerMsg};
 use rift_net::{ClientId, Gender};
 use rift_persistence::{CharacterRecord, Uuid};
 
@@ -90,6 +90,7 @@ impl Server {
         character_name: &str,
         class_id: &str,
         gender: Gender,
+        appearance: Appearance,
     ) -> CharacterRecord {
         let gender_id = gender_to_i16(gender);
         if let Some(handle) = &self.persistence {
@@ -99,6 +100,7 @@ impl Server {
                 character_name.to_string(),
                 class_id.to_string(),
                 gender_id,
+                appearance_to_i16_array(appearance),
             ) {
                 Ok(rec) => {
                     log::info!(
@@ -137,6 +139,7 @@ impl Server {
             shards: 0,
             talents: Vec::new(),
             talent_unspent: 1,
+            appearance: appearance_to_i16_array(appearance),
         }
     }
 
@@ -177,10 +180,12 @@ impl Server {
                                 .map(|p| p as u16)
                         })
                         .collect();
+                    let appearance = appearance_from_record(&r);
                     RosterEntry {
                         character_name: r.name,
                         class_id: r.class_id,
                         gender: gender_from_i16(r.gender),
+                        appearance,
                         level: r.level.max(0) as u32,
                         loadout: loadout_to_u8(r.loadout),
                         deepest_cleared_floor: r.deepest_cleared_floor.max(0) as u32,
@@ -216,5 +221,31 @@ impl Server {
         if count > 0 {
             log::debug!("persistence: auto-save queued for {count} character(s)");
         }
+    }
+}
+
+pub(crate) fn appearance_from_record(r: &CharacterRecord) -> Appearance {
+    appearance_from_i16_array(r.appearance)
+}
+
+pub(crate) fn appearance_to_i16_array(a: Appearance) -> [i16; 6] {
+    [
+        i16::from(a.skin_tone),
+        i16::from(a.hair_style),
+        i16::from(a.eyebrow_style),
+        i16::from(a.hair_color),
+        i16::from(a.eyebrow_color),
+        i16::from(a.chest_size),
+    ]
+}
+
+fn appearance_from_i16_array(a: [i16; 6]) -> Appearance {
+    Appearance {
+        skin_tone: a[0].clamp(0, u8::MAX as i16) as u8,
+        hair_style: a[1].clamp(0, u8::MAX as i16) as u8,
+        eyebrow_style: a[2].clamp(0, u8::MAX as i16) as u8,
+        hair_color: a[3].clamp(0, u8::MAX as i16) as u8,
+        eyebrow_color: a[4].clamp(0, u8::MAX as i16) as u8,
+        chest_size: a[5].clamp(0, u8::MAX as i16) as u8,
     }
 }

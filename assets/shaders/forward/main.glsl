@@ -38,6 +38,43 @@ bool shouldDiscardWallXray(uint flags) {
     return stipple < mask - 0.05;
 }
 
+vec3 shadeAbyssRim() {
+    vec2 p = fragWorldPos.xz;
+    float t = ubo.timeData.x;
+
+    float slow = sin(p.x * 2.35 + p.y * 0.70 - t * 0.82);
+    float cross = sin(p.y * 3.10 - p.x * 0.55 + t * 0.54);
+    float wave = 0.5 + 0.5 * (slow * 0.65 + cross * 0.35);
+    float thread = smoothstep(0.72, 0.98, wave);
+
+    float glintWave = sin((p.x + p.y) * 7.0 - t * 1.85);
+    float glint = smoothstep(0.86, 1.0, 0.5 + 0.5 * glintWave) * thread;
+
+    vec3 theme = max(fragColor, vec3(0.0));
+    float peak = max(max(theme.r, theme.g), max(theme.b, 0.001));
+    vec3 chroma = clamp(theme / peak, vec3(0.0), vec3(1.0));
+    float edge = smoothstep(0.045, 0.22, peak);
+    vec3 body = theme * (0.28 + thread * 0.08);
+    vec3 crest = chroma * peak * (1.58 + thread * 1.88 + glint * 0.62);
+    return (body + crest) * edge;
+}
+
+float abyssRimAlpha() {
+    float peak = max(max(fragColor.r, fragColor.g), fragColor.b);
+    return smoothstep(0.035, 0.24, peak);
+}
+
+vec3 shadeVoidEdgeShadow() {
+    vec3 theme = max(fragColor, vec3(0.0));
+    return theme * 0.44;
+}
+
+float voidEdgeShadowAlpha() {
+    float peak = max(max(fragColor.r, fragColor.g), fragColor.b);
+    float a = smoothstep(0.035, 0.24, peak);
+    return a * a * 0.88;
+}
+
 void main() {
     // Bit-test the flags float to pick a shading path. Using
     // floatBitsToUint so we can pack other booleans into the
@@ -50,6 +87,9 @@ void main() {
     bool portrait = (flags & 32u) != 0u;
     bool hovered = (flags & 64u) != 0u;
     bool outlinePass = (flags & 128u) != 0u;
+    bool unlit = (flags & 256u) != 0u;
+    bool abyssRim = (flags & 512u) != 0u;
+    bool voidEdgeShadow = (flags & 1024u) != 0u;
 
     if (outlinePass) {
         outColor = vec4(1.0, 1.0, 1.0, push.tint.a);
@@ -68,9 +108,12 @@ void main() {
     }
 
     vec3 lighting;
-    if (useRift)      lighting = shadeRift();
-    else if (usePbr)  lighting = shadePbr();
-    else              lighting = shadeCel();
+    if (abyssRim)            lighting = shadeAbyssRim();
+    else if (voidEdgeShadow) lighting = shadeVoidEdgeShadow();
+    else if (unlit)          lighting = fragColor;
+    else if (useRift)        lighting = shadeRift();
+    else if (usePbr)         lighting = shadePbr();
+    else                     lighting = shadeCel();
 
     // Distance fog (player-anchored). The rift is a hole
     // through reality — fog still applies (so you can't see
@@ -82,6 +125,8 @@ void main() {
     float fogFactor = fogRaw;
     fogFactor = fogFactor * fogFactor;
     if (useRift) fogFactor *= 0.35;
+    if (abyssRim) fogFactor *= 0.20;
+    if (voidEdgeShadow) fogFactor *= 0.20;
     if (portrait) fogFactor = 0.0;
 
     vec3 finalColor = mix(lighting, ubo.fogColor.rgb, fogFactor);
@@ -97,9 +142,20 @@ void main() {
         finalColor += outline * rim * pulse * strength;
     }
 
+    float outAlpha = push.tint.a;
+    if (abyssRim) {
+        outAlpha *= abyssRimAlpha();
+    }
+    if (voidEdgeShadow) {
+        outAlpha *= voidEdgeShadowAlpha();
+        if (outAlpha < 0.01) {
+            discard;
+        }
+    }
+
     if (portrait) {
         outColor = vec4(finalColor, 1.0);
     } else {
-        outColor = vec4(finalColor * push.tint.rgb, push.tint.a);
+        outColor = vec4(finalColor * push.tint.rgb, outAlpha);
     }
 }

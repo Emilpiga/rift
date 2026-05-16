@@ -730,6 +730,33 @@ pub fn resonance_attribute(def: &AffixDef) -> Option<families::Attribute> {
     affix_attribute(def)
 }
 
+/// Contiguous wire indices for rolled lines in [`crate::loot::item::Item::affixes`]:
+/// all of [`AFFIX_POOL`], then all of [`RESONANCE_POOL`]. Rift-touched
+/// bonuses use [`crate::loot::item::Item::rift_touched_to_wire`] instead.
+pub const WIRE_AFFIX_COUNT: usize = AFFIX_POOL.len() + RESONANCE_POOL.len();
+
+/// Decode a wire-encoded affix index (see [`WIRE_AFFIX_COUNT`]).
+pub fn affix_def_by_wire_index(idx: u16) -> Option<&'static AffixDef> {
+    let i = idx as usize;
+    if i < AFFIX_POOL.len() {
+        AFFIX_POOL.get(i)
+    } else {
+        RESONANCE_POOL.get(i.checked_sub(AFFIX_POOL.len())?)
+    }
+}
+
+/// Encode a rolled affix for the wire `(u16 id, f32 value)` tuples.
+pub fn wire_index_for_affix(def: &AffixDef) -> Option<u16> {
+    if let Some(i) = AFFIX_POOL.iter().position(|d| d.id == def.id) {
+        return Some(i as u16);
+    }
+    let offset = AFFIX_POOL.len();
+    RESONANCE_POOL
+        .iter()
+        .position(|d| d.id == def.id)
+        .map(|j| (offset + j) as u16)
+}
+
 /// Look up an affix by stable id. `O(n)` — used for save-game
 /// rehydration, not hot paths. Searches both [`AFFIX_POOL`] and
 /// [`RESONANCE_POOL`] so a persisted resonance line rehydrates
@@ -802,8 +829,10 @@ pub enum AffixCategory {
     /// `Stat(PhysicalDamage | FireDamage | IceDamage | LightningDamage)`.
     Element,
     /// `Stat(Strength | Agility | Intellect)` — flat attribute
-    /// points. The second trio axis; family-locked to the
-    /// base's declared attribute (or wildcard).
+    /// points. The second trio axis. **Drops** respect the base's
+    /// [`super::families::BaseFamily::attribute`] lock (or wildcard);
+    /// **anvil rerolls** may pivot across all three primaries
+    /// ([`crate::loot::enchant::reroll_affix`]).
     Attribute,
     /// Anything in [`RESONANCE_POOL`] — a damage-axis line that
     /// **breaks the family lock by design**. Rolled in its own

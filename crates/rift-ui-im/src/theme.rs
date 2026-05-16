@@ -89,46 +89,42 @@ impl Theme {
 }
 
 impl Theme {
-    /// Default dark palette. Warm carved-stone surfaces with
-    /// bronze focus/hover chrome. Shared widgets should read
-    /// as forged ARPG UI, not modern rounded slate cards.
+    /// Default dark palette. Deep void surfaces with violet
+    /// chrome — sleek panels that read as crystal / rift glass
+    /// rather than carved stone.
     pub const DARK: Theme = Theme {
         colors: Colors {
-            // Surface stack: warm near-black stone with a
-            // bronze lift for recessed/hovered controls.
-            bg_panel: Color::rgba8(24, 22, 20, 245),
-            bg_panel_alt: Color::rgba8(34, 30, 25, 245),
-            bg_slot: Color::rgba8(18, 15, 12, 235),
-            bg_slot_hover: Color::rgba8(46, 34, 22, 240),
-            border: Color::rgba8(88, 68, 42, 120),
-            border_strong: Color::rgba8(230, 148, 62, 210),
-            text: Color::rgba8(232, 234, 245, 255),
-            text_dim: Color::rgba8(186, 174, 150, 255),
-            text_muted: Color::rgba8(132, 118, 94, 255),
-            accent: Color::rgba8(218, 145, 64, 255),
-            success: Color::rgba8(86, 211, 146, 255),
-            warning: Color::rgba8(245, 184, 92, 255),
-            danger: Color::rgba8(244, 96, 108, 255),
-            shadow: Color::rgba8(0, 0, 0, 100),
+            // Surface stack: blue-violet blacks with a soft
+            // amethyst lift on hover.
+            bg_panel: Color::rgba8(14, 10, 22, 248),
+            bg_panel_alt: Color::rgba8(22, 16, 34, 248),
+            bg_slot: Color::rgba8(10, 8, 18, 242),
+            bg_slot_hover: Color::rgba8(36, 26, 58, 245),
+            border: Color::rgba8(72, 58, 112, 130),
+            border_strong: Color::rgba8(196, 168, 255, 230),
+            text: Color::rgba8(238, 234, 252, 255),
+            text_dim: Color::rgba8(188, 178, 218, 255),
+            text_muted: Color::rgba8(120, 108, 150, 255),
+            // Character stats drawer: left-column names — high-chroma
+            // magenta-violet so they never read as the same near-white as values.
+            stat_label: Color::rgba8(255, 118, 252, 255),
+            accent: Color::rgba8(186, 154, 255, 255),
+            success: Color::rgba8(96, 224, 176, 255),
+            warning: Color::rgba8(255, 196, 112, 255),
+            danger: Color::rgba8(255, 112, 138, 255),
+            shadow: Color::rgba8(8, 4, 18, 120),
 
-            // ── Stone palette ────────────────────────────
-            // Floating panels that should read as carved
-            // stone (character-select roster, hub kiosks,
-            // inventory drawers).
-            bg_stone: Color::rgba8(46, 44, 42, 245),
-            bg_stone_alt: Color::rgba8(58, 55, 52, 245),
-            border_stone: Color::rgba8(28, 26, 24, 255),
+            // Floating slabs (inventory, character select, modals).
+            bg_stone: Color::rgba8(26, 20, 42, 248),
+            bg_stone_alt: Color::rgba8(34, 26, 54, 248),
+            border_stone: Color::rgba8(12, 8, 22, 255),
 
-            // ── Red action palette ───────────────────────
-            // Distinct from `danger`: `danger` is the muted
-            // pink-red “type-to-confirm” destructive ramp;
-            // these tokens drive deliberate primary action
-            // buttons (Play / Enter World / Confirm) when
-            // the screen calls for a forge-iron aesthetic.
-            red: Color::rgba8(196, 28, 30, 255), // base fill — saturated crimson
-            red_hover: Color::rgba8(228, 44, 44, 255), // brighter on hover
-            red_smudge: Color::rgba8(78, 10, 12, 230), // very dark, painted inside fill
-            red_inset: Color::rgba8(255, 96, 80, 255), // brighter inset highlight
+            // Primary action buttons — deep magenta-red that
+            // still pops on violet panels.
+            red: Color::rgba8(180, 36, 92, 255),
+            red_hover: Color::rgba8(214, 56, 118, 255),
+            red_smudge: Color::rgba8(48, 12, 36, 235),
+            red_inset: Color::rgba8(255, 140, 188, 255),
         },
         spacing: Spacing {
             pad_sm: Pad::all(6.0),
@@ -138,7 +134,7 @@ impl Theme {
             gap_md: 8.0,
             gap_lg: 14.0,
             border_thickness: 1.0,
-            corner_radius: 0.0,
+            corner_radius: 6.0,
         },
         fonts: Fonts {
             size_sm: 12.0,
@@ -171,13 +167,15 @@ pub struct Colors {
     pub text: Color,
     pub text_dim: Color,
     pub text_muted: Color,
+    /// Stat / affix names in the stats drawer (high-chroma; pairs with body-sized values).
+    pub stat_label: Color,
     pub accent: Color,
     pub success: Color,
     pub warning: Color,
     pub danger: Color,
     pub shadow: Color,
 
-    // Stone-panel tokens.
+    // Heavy floating-panel tokens (slate / void slab).
     pub bg_stone: Color,
     pub bg_stone_alt: Color,
     pub border_stone: Color,

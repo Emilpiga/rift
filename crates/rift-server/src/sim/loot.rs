@@ -222,6 +222,7 @@ pub fn drop_for_enemy(
             unique_id: unique_id.map(|s| s.to_string()),
             unique_pick,
             rift_touched: item.rift_touched_to_wire(),
+            enchanted_affix_index: item.enchanted_affix_index,
         };
 
         let loot = ServerLoot {

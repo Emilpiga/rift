@@ -3,7 +3,7 @@
 //! `rift_ui_types::hud` so no `rift_game` types appear here.
 //!
 //! Visual language matches the inventory: carved-stone frame
-//! chrome, gold hairlines, theme.scale-driven sizing. Bars use
+//! violet chrome, theme.scale-driven sizing. Bars use
 //! `rift_ui_im::ProgressBar`; the bar stack is wrapped in a
 //! `Frame::stone` so it reads as a single plaque-mounted
 //! cluster rather than three floating rectangles.

@@ -284,24 +284,33 @@ pub fn clear_markers(world: &mut World) {
 }
 
 /// Push the ghost tint onto the local player's renderer
-/// slots when `local_ghost_cached` is true; otherwise force
-/// them back to opaque white. Touches the base `Renderable`
+/// slots when `local_ghost_cached` is true; otherwise restore
+/// the authored body tint. Touches the base `Renderable`
 /// slot plus every visible `SkinnedAttachments` piece (so
 /// outfit gear ghosts together with the body). Cheap O(N)
 /// over the local avatar's attachments — runs every frame
 /// from `update_render` so a respawn snaps back to opaque
 /// without a one-frame flicker.
-pub fn apply_tint(world: &World, renderer: &mut Renderer, local_ghost_cached: bool) {
+pub fn apply_tint(
+    world: &World,
+    renderer: &mut Renderer,
+    local_ghost_cached: bool,
+    body_tint: [f32; 4],
+) {
     // Pale cyan-white at 40% alpha. RGB > 1.0 in the cyan
     // channels gives the lit colour a faint spectral lift even
     // after the multiply (lit * tint), since the forward
     // pipeline outputs HDR before tonemap.
     const GHOST_TINT: [f32; 4] = [0.75, 0.92, 1.05, 0.40];
-    const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-    let tint = if local_ghost_cached {
+    let base_tint = if local_ghost_cached {
         GHOST_TINT
     } else {
-        OPAQUE
+        body_tint
+    };
+    let attachment_tint = if local_ghost_cached {
+        GHOST_TINT
+    } else {
+        [1.0, 1.0, 1.0, 1.0]
     };
 
     // Drive the post-composite ghost-view effect (desat + cool
@@ -320,14 +329,14 @@ pub fn apply_tint(world: &World, renderer: &mut Renderer, local_ghost_cached: bo
     // Base mesh.
     if let Ok(r) = world.get::<&Renderable>(entity) {
         if let Some(obj) = renderer.objects.get_mut(r.object_index) {
-            obj.tint = tint;
+            obj.tint = base_tint;
         }
     }
     // Outfit attachments.
     if let Ok(attach) = world.get::<&SkinnedAttachments>(entity) {
         for piece in &attach.pieces {
             if let Some(obj) = renderer.objects.get_mut(piece.object_index) {
-                obj.tint = tint;
+                obj.tint = attachment_tint;
             }
         }
     }

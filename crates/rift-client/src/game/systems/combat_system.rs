@@ -115,6 +115,23 @@ pub fn tick(state: &mut GameState, input: &Input, renderer: &mut Renderer, dt: f
     tick_ability_keybinds(state, input, renderer, player_pos, aim_dir);
 }
 
+/// Hub-safe ability input. Keeps passive movement abilities
+/// available without enabling hostile casts or target modes in the
+/// sanctuary scene.
+pub fn tick_hub_passives(state: &mut GameState, input: &Input, renderer: &mut Renderer) {
+    let player_pos = state
+        .world
+        .query::<(&Transform, &Player, &LocalPlayer)>()
+        .iter()
+        .map(|(_, (t, _, _))| t.position)
+        .next();
+    let Some(player_pos) = player_pos else {
+        return;
+    };
+    let aim_dir = crate::game::cursor::aim_dir(input, renderer, player_pos);
+    tick_roll(state, input, renderer, player_pos, aim_dir);
+}
+
 /// Drive the placed-ability targeting indicator. Returns
 /// `true` if the caller should bail out of this frame's combat
 /// tick (placement was confirmed / cancelled, or the indicator
@@ -643,7 +660,15 @@ fn tick_ability_keybinds(
             break;
         }
 
-        send_cast(state, renderer, &ability_clone, player_pos, aim_dir, input);
+        let cast_aim_dir = melee_assisted_aim(state, &ability_clone, player_pos, aim_dir);
+        send_cast(
+            state,
+            renderer,
+            &ability_clone,
+            player_pos,
+            cast_aim_dir,
+            input,
+        );
         if i == 0 {
             let _ = state
                 .selection
@@ -688,7 +713,7 @@ fn tick_ability_keybinds(
         // other client-runnable effect.
         crate::game::ability::trigger_local_cast(
             &ability_clone,
-            aim_dir,
+            cast_aim_dir,
             player_pos,
             &mut state.world,
             renderer,
@@ -696,13 +721,18 @@ fn tick_ability_keybinds(
         );
     }
 
-    // Space → Evasive Roll. Roll is a passive bound to a
-    // fixed key rather than the action bar; it lives on
-    // `AbilitySlot::roll` and shares the same cooldown /
-    // local-feedback path as a normal slotted ability. The
-    // ability itself is `TargetingMode::Instant` with no
-    // resource cost, so we skip the placed / entity-pick /
-    // affordability paths entirely.
+    tick_roll(state, input, renderer, player_pos, aim_dir);
+}
+
+fn tick_roll(
+    state: &mut GameState,
+    input: &Input,
+    renderer: &mut Renderer,
+    player_pos: Vec3,
+    aim_dir: Vec3,
+) {
+    // Space → Evasive Roll. Roll is a passive bound to a fixed
+    // key rather than the action bar.
     if input.key_just_pressed(KeyCode::Space) {
         if let Some(ability) = state.player_state.abilities.try_use_roll() {
             let ability_clone = ability.clone();
@@ -717,6 +747,24 @@ fn tick_ability_keybinds(
             );
         }
     }
+}
+
+fn melee_assisted_aim(
+    state: &GameState,
+    ability: &Ability,
+    player_pos: Vec3,
+    aim_dir: Vec3,
+) -> Vec3 {
+    let Some(def) = abilities::lookup(ability.wire_id) else {
+        return aim_dir;
+    };
+    if !matches!(def.kind, abilities::AbilityKind::MeleeArc { .. }) {
+        return aim_dir;
+    }
+    state
+        .selection
+        .melee_auto_aim(player_pos, aim_dir, ability.range)
+        .unwrap_or(aim_dir)
 }
 
 /// Push a `NetCastRequest` for `ability` into the outbound

@@ -265,12 +265,14 @@ pub fn tick(
             // enter_windup; pad it post-windup to keep the
             // attack clip running through the swing follow-
             // through.
+            let aim = to_target_raw.normalize_or_zero();
             enter_windup(
                 en,
                 kinematic,
                 net_id,
                 WindupKind::BruteMelee,
                 spec.windup_dur,
+                aim,
                 outcome,
             );
             en.attack_anim_remaining = spec.windup_dur + ATTACK_ANIM_DUR;

@@ -8,6 +8,7 @@
 
 use glam::Vec3;
 
+use crate::renderer::vfx::builder::{particle, EffectBuilder};
 use crate::renderer::vfx::spec::*;
 
 /// "Rapture" — played at a remote player's last known position
@@ -37,14 +38,13 @@ use crate::renderer::vfx::spec::*;
 ///    the beam reads as anchored to the world rather than
 ///    floating in mid-air.
 pub fn player_rapture() -> Effect {
-    Effect {
-        // Spawn-side duration. Particle lifetimes outlive this
-        // so the beam continues rising after emission stops.
-        duration: 0.05,
-        layers: vec![
+    // Spawn-side duration. Particle lifetimes outlive this
+    // so the beam continues rising after emission stops.
+    EffectBuilder::oneshot()
+        .layers(vec![
             // 1. Body flash — short HDR burst that engulfs the
             //    avatar silhouette on the despawn frame.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Sphere,
                 emission: EmissionMode::Burst { count: 14 },
                 speed: (0.4, 1.6),
@@ -59,7 +59,9 @@ pub fn player_rapture() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 2. Ascending pillar — the beam itself.
             //    `SilkStrand` is the same sprite the loot
             //    beam uses; here we want a one-shot bolt
@@ -68,7 +70,7 @@ pub fn player_rapture() -> Effect {
             //    centre with strong upward velocity. The
             //    billboard orients along the spawn velocity,
             //    so the strand's long axis points at the sky.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Point,
                 emission: EmissionMode::Burst { count: 3 },
                 // Fast upward shot. Speed is the magnitude of
@@ -99,13 +101,15 @@ pub fn player_rapture() -> Effect {
                 sprite: SpriteShape::SilkStrand,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 3. Rising sparks — fast additive Spark sprites
             //    streaking up alongside the pillar so the
             //    upward motion reads at distance and through
             //    fog, even when the SilkStrand strands are
             //    behind walls.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Column {
                     radius: 0.18,
                     height: 0.40,
@@ -130,12 +134,14 @@ pub fn player_rapture() -> Effect {
                 sprite: SpriteShape::Spark,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
+            hybrid: None,
+        vfx_role: 0,
+    }),
             // 4. Ground halo — a low, soft glow at the feet so
             //    the beam reads as rooted to the floor at the
             //    moment it fires, not floating mid-air. Brief
             //    so it doesn't outlive the bolt.
-            Layer::Particles(ParticleSpec {
+            particle(ParticleSpec {
                 spawn: SpawnShape::Disc { radius: 0.55 },
                 emission: EmissionMode::Burst { count: 18 },
                 speed: (0.0, 0.4),
@@ -149,7 +155,9 @@ pub fn player_rapture() -> Effect {
                 sprite: SpriteShape::SoftGlow,
                 blend: BlendMode::Additive,
                 opacity: 1.0,
-            }),
-        ],
-    }
+            hybrid: None,
+        vfx_role: 0,
+    }),
+        ])
+        .finish()
 }

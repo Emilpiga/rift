@@ -18,7 +18,9 @@ layout(location = 1) in vec4 vParams;        // brightness, noise_strength, nois
 layout(location = 2) in float vTime;
 layout(location = 3) flat in vec4 vCross[8];
 layout(location = 11) flat in vec4 vLength[4];
-layout(location = 15) flat in vec4 vFlags;
+layout(location = 15) flat in vec4 vFlags; // x = noise octaves
+layout(location = 16) flat in vec4 vStylePack;
+layout(location = 17) flat in vec4 vStyleAux;
 
 layout(location = 0) out vec4 outColor;
 
@@ -72,6 +74,8 @@ float fbm(vec2 p, int octaves) {
     return sum;
 }
 
+#include "ribbon_style.glsl"
+
 void main() {
     float u = vUv.x;
     float v = vUv.y;
@@ -114,6 +118,8 @@ void main() {
 
     vec3 rgb = crossCol.rgb * lengthVal.rgb * brightness * n * pulse;
     float a  = crossCol.a * lengthVal.a * gauss * edgeBreak;
+
+    applyRibbonStyle(vStylePack, vStyleAux, u, v, vTime, rgb, a);
 
     outColor = vec4(rgb * a, a);
 }

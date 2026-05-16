@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rift_net::{ClientId, Gender, NetId};
+use rift_net::{messages::Appearance, ClientId, Gender, NetId};
 use rift_persistence::CharacterRecord;
 
 use crate::chat::ChatRateLimit;
@@ -39,6 +39,7 @@ pub struct ClientSession {
     /// Profile fields (set on Hello). `None` until welcomed.
     pub class_id: Option<String>,
     pub gender: Option<Gender>,
+    pub appearance: Option<Appearance>,
     /// Net id assigned to this player by the simulation. `None`
     /// until the player has been spawned (post-Hello).
     pub net_id: Option<NetId>,
@@ -66,6 +67,7 @@ impl ClientSession {
             account_display_name: None,
             class_id: None,
             gender: None,
+            appearance: None,
             net_id: None,
             record: None,
             mute_list: HashSet::new(),

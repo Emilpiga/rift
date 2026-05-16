@@ -111,6 +111,30 @@ impl Texture {
         pixels: &[u8],
         format: vk::Format,
     ) -> Result<Self> {
+        Self::from_rgba_with_format_address(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            width,
+            height,
+            pixels,
+            format,
+            vk::SamplerAddressMode::REPEAT,
+        )
+    }
+
+    pub fn from_rgba_with_format_address(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        format: vk::Format,
+        address_mode: vk::SamplerAddressMode,
+    ) -> Result<Self> {
         let image_size = (width * height * 4) as vk::DeviceSize;
 
         // Mip chain depth: floor(log2(max(w,h))) + 1. Without
@@ -430,9 +454,9 @@ impl Texture {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .address_mode_u(address_mode)
+            .address_mode_v(address_mode)
+            .address_mode_w(address_mode)
             .anisotropy_enable(true)
             .max_anisotropy(16.0)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
@@ -799,13 +823,34 @@ impl Texture {
         command_pool: vk::CommandPool,
         path: P,
     ) -> Result<Self> {
-        Self::from_file_with_format(
+        Self::from_file_with_format_address(
             device,
             allocator,
             queue,
             command_pool,
             path,
             vk::Format::R8G8B8A8_UNORM,
+            vk::SamplerAddressMode::REPEAT,
+        )
+    }
+
+    /// Linear data file with clamped edges — for hybrid VFX cards
+    /// where repeat would show seams at the billboard boundary.
+    pub fn from_file_linear_clamp<P: AsRef<std::path::Path>>(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        path: P,
+    ) -> Result<Self> {
+        Self::from_file_with_format_address(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            path,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::SamplerAddressMode::CLAMP_TO_EDGE,
         )
     }
 
@@ -816,6 +861,26 @@ impl Texture {
         command_pool: vk::CommandPool,
         path: P,
         format: vk::Format,
+    ) -> Result<Self> {
+        Self::from_file_with_format_address(
+            device,
+            allocator,
+            queue,
+            command_pool,
+            path,
+            format,
+            vk::SamplerAddressMode::REPEAT,
+        )
+    }
+
+    fn from_file_with_format_address<P: AsRef<std::path::Path>>(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        path: P,
+        format: vk::Format,
+        address_mode: vk::SamplerAddressMode,
     ) -> Result<Self> {
         let original = path.as_ref();
         let resolved = crate::renderer::asset_decode::resolve_asset_path(original)
@@ -832,7 +897,7 @@ impl Texture {
             h,
             format,
         );
-        Self::from_rgba_with_format(
+        Self::from_rgba_with_format_address(
             device,
             allocator,
             queue,
@@ -841,6 +906,7 @@ impl Texture {
             h,
             &pixels,
             format,
+            address_mode,
         )
     }
 

@@ -17,6 +17,7 @@
 use super::color::Color;
 use super::rect::{Pos2, Rect};
 use crate::draw_list::DrawList;
+use crate::text_font::UiTextFont;
 
 /// Z-ordering buckets. Lower variants render first (i.e. behind).
 /// Order matters: it's also the iteration order used by `flush`.
@@ -89,6 +90,14 @@ pub(super) enum DrawCmd {
         edge: Color,
         centre: Color,
     },
+    /// Like [`DrawCmd::RadialRect`] but Chebyshev distance so
+    /// falloff is square in pixel space (slot vignettes).
+    RadialSquareRect {
+        rect: Rect,
+        radius: f32,
+        edge: Color,
+        centre: Color,
+    },
     /// Same as `RadialRect` but the fragment shader applies
     /// procedural noise so the surface reads as textured.
     RadialNoisyRect {
@@ -111,11 +120,15 @@ pub(super) enum DrawCmd {
         y: f32,
         size: f32,
         color: Color,
+        font: UiTextFont,
     },
     Icon {
         name: String,
         rect: Rect,
         tint: Color,
+        /// When true, atlas pixels contribute only luminance × alpha; RGB comes
+        /// solely from `tint` (see `overlay.frag` silhouette branch).
+        silhouette: bool,
     },
     /// Straight line segment with butt caps, rendered as a
     /// rotated quad. Used for graph edges in panels like the
@@ -271,6 +284,24 @@ impl LayerBuf {
                             screen_h,
                         );
                     }
+                    DrawCmd::RadialSquareRect {
+                        rect,
+                        radius,
+                        edge,
+                        centre,
+                    } => {
+                        batch.rounded_rect_px_radial_square(
+                            rect.x(),
+                            rect.y(),
+                            rect.width(),
+                            rect.height(),
+                            radius,
+                            edge.to_array(),
+                            centre.to_array(),
+                            screen_w,
+                            screen_h,
+                        );
+                    }
                     DrawCmd::RadialNoisyRect {
                         rect,
                         radius,
@@ -313,20 +344,49 @@ impl LayerBuf {
                         y,
                         size,
                         color,
+                        font,
                     } => {
-                        batch.text(&text, x, y, size, color.to_array(), screen_w, screen_h);
-                    }
-                    DrawCmd::Icon { name, rect, tint } => {
-                        batch.icon(
-                            &name,
-                            rect.x(),
-                            rect.y(),
-                            rect.width(),
-                            rect.height(),
-                            tint.to_array(),
+                        batch.text(
+                            &text,
+                            x,
+                            y,
+                            size,
+                            color.to_array(),
+                            font == UiTextFont::Header,
                             screen_w,
                             screen_h,
                         );
+                    }
+                    DrawCmd::Icon {
+                        name,
+                        rect,
+                        tint,
+                        silhouette,
+                    } => {
+                        let ta = tint.to_array();
+                        if silhouette {
+                            batch.icon_silhouette(
+                                &name,
+                                rect.x(),
+                                rect.y(),
+                                rect.width(),
+                                rect.height(),
+                                ta,
+                                screen_w,
+                                screen_h,
+                            );
+                        } else {
+                            batch.icon(
+                                &name,
+                                rect.x(),
+                                rect.y(),
+                                rect.width(),
+                                rect.height(),
+                                ta,
+                                screen_w,
+                                screen_h,
+                            );
+                        }
                     }
                     DrawCmd::Line {
                         p0,

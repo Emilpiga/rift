@@ -138,8 +138,8 @@ pub fn render_exit_vote(
         .unwrap_or(false);
 
     frame.show(ui, rect, |ui, body| {
-        let title_w = ui.measure_text(title, title_size);
-        ui.draw_text(
+        let title_w = ui.measure_header_text(title, title_size);
+        ui.draw_header_text(
             Pos2::new(body.x() + (body.width() - title_w) / 2.0, body.y()),
             title,
             title_size,

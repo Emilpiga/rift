@@ -97,6 +97,9 @@ pub struct Item {
     /// that didn't pass the per-drop chance gate
     /// ([`super::affixes::RIFT_TOUCHED_CHANCE`]).
     pub rift_touched: Option<RolledRiftTouched>,
+    /// The one affix slot this item has been enchanted to
+    /// reroll. Once set, only this slot can be rerolled again.
+    pub enchanted_affix_index: Option<u8>,
 }
 
 /// One realised rift-touched bonus line. Carries the floor
@@ -260,6 +263,7 @@ mod tests {
             unique_id: None,
             unique_pick: None,
             rift_touched: None,
+            enchanted_affix_index: None,
         };
         assert_eq!(item.required_level(), 1);
     }
@@ -280,6 +284,7 @@ mod tests {
             unique_id: None,
             unique_pick: None,
             rift_touched: None,
+            enchanted_affix_index: None,
         };
         assert_eq!(item.required_level(), 30);
     }
@@ -319,6 +324,7 @@ mod tests {
             unique_id: None,
             unique_pick: None,
             rift_touched: None,
+            enchanted_affix_index: None,
         };
         assert_eq!(item.required_level(), a_high.min_ilvl.max(1));
     }
@@ -348,6 +354,7 @@ mod tests {
             unique_id: None,
             unique_pick: None,
             rift_touched: None,
+            enchanted_affix_index: None,
         };
         assert_eq!(item_a.required_level(), 20);
 
@@ -367,6 +374,7 @@ mod tests {
                 unique_id: None,
                 unique_pick: None,
                 rift_touched: None,
+                enchanted_affix_index: None,
             };
             assert_eq!(item_b.required_level(), high.min_ilvl);
         }

@@ -29,7 +29,9 @@ use rift_engine::{
 };
 use std::sync::Arc;
 
-use rift_game::character::{CharacterProfile, CharacterRoster, Gender, MAX_CHARACTERS};
+use rift_game::character::{
+    CharacterAppearance, CharacterProfile, CharacterRoster, Gender, MAX_CHARACTERS,
+};
 use rift_game::hero;
 use rift_ui_types::character_select as ui_view;
 
@@ -74,6 +76,7 @@ enum ViewKind {
 struct CreateForm {
     name: String,
     gender: Gender,
+    appearance: CharacterAppearance,
 }
 
 impl CreateForm {
@@ -81,6 +84,7 @@ impl CreateForm {
         Self {
             name: String::new(),
             gender: Gender::Female,
+            appearance: CharacterAppearance::default(),
         }
     }
 }
@@ -118,6 +122,7 @@ pub struct CharacterSelect {
 struct PreviewState {
     entity: hecs::Entity,
     gender: Gender,
+    appearance: CharacterAppearance,
     hidden_frames_remaining: u8,
 }
 
@@ -160,6 +165,14 @@ impl CharacterSelect {
                 rift_net::messages::Gender::Female => Gender::Female,
             };
             let mut profile = CharacterProfile::new(e.character_name, gender);
+            profile.appearance = CharacterAppearance {
+                skin_tone: e.appearance.skin_tone,
+                hair_style: e.appearance.hair_style,
+                eyebrow_style: e.appearance.eyebrow_style,
+                hair_color: e.appearance.hair_color,
+                eyebrow_color: e.appearance.eyebrow_color,
+                chest_size: e.appearance.chest_size,
+            };
             profile.level = e.level;
             profile.equipped_base_ids = e.equipped_base_ids;
             self.roster.add(profile);
@@ -185,21 +198,23 @@ impl CharacterSelect {
     /// is handled separately by [`Self::frame`].
     pub fn tick_preview(&mut self, world: &mut hecs::World, renderer: &mut Renderer, dt: f32) {
         self.rotation_t += dt;
-        let desired_gender = self.desired_preview_gender();
-        self.ensure_preview(world, renderer, desired_gender);
+        let desired = self.desired_preview_config();
+        self.ensure_preview(world, renderer, desired);
         self.update_preview_camera(world, renderer);
     }
 
-    fn desired_preview_gender(&self) -> Option<Gender> {
+    fn desired_preview_config(&self) -> Option<(Gender, CharacterAppearance)> {
         match &self.view {
             ViewKind::LoadingRoster => None,
-            ViewKind::Create => Some(self.create_form.gender),
+            ViewKind::Create => Some((self.create_form.gender, self.create_form.appearance)),
             ViewKind::Roster => self
                 .selected_idx
                 .and_then(|i| self.roster.get(i))
                 .or_else(|| self.roster.slots().first())
-                .map(|p| p.gender),
-            ViewKind::DeleteConfirm { idx } => self.roster.get(*idx).map(|p| p.gender),
+                .map(|p| (p.gender, p.appearance)),
+            ViewKind::DeleteConfirm { idx } => {
+                self.roster.get(*idx).map(|p| (p.gender, p.appearance))
+            }
         }
     }
 
@@ -224,8 +239,10 @@ impl CharacterSelect {
     /// Currently-alive preview avatar entity + the gender it
     /// was spawned with. `None` between view changes when
     /// `tick_preview` is about to rebuild it.
-    pub fn preview_entity(&self) -> Option<(hecs::Entity, Gender)> {
-        self.preview_state.as_ref().map(|s| (s.entity, s.gender))
+    pub fn preview_entity(&self) -> Option<(hecs::Entity, Gender, CharacterAppearance)> {
+        self.preview_state
+            .as_ref()
+            .map(|s| (s.entity, s.gender, s.appearance))
     }
 
     /// Keep a freshly-spawned preview invisible until GPU skinning has
@@ -256,12 +273,35 @@ impl CharacterSelect {
         &mut self,
         world: &mut hecs::World,
         renderer: &mut Renderer,
-        desired: Option<Gender>,
+        desired: Option<(Gender, CharacterAppearance)>,
     ) {
+        let Some((gender, appearance)) = desired else {
+            if let Some(prev) = self.preview_state.take() {
+                collapse_preview_render_slots(world, renderer, prev.entity);
+                let _ = world.despawn(prev.entity);
+            }
+            return;
+        };
+
+        if let Some(prev) = self.preview_state.as_ref() {
+            if prev.gender == gender {
+                if prev.appearance != appearance {
+                    let entity = prev.entity;
+                    if self.refresh_preview_entity(world, renderer, entity, gender, appearance) {
+                        if let Some(prev) = self.preview_state.as_mut() {
+                            prev.appearance = appearance;
+                            prev.hidden_frames_remaining = 0;
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
         let needs_rebuild = match (&self.preview_state, desired) {
             (None, None) => false,
             (Some(_), None) | (None, Some(_)) => true,
-            (Some(s), Some(g)) => s.gender != g,
+            (Some(s), Some((g, a))) => s.gender != g || s.appearance != a,
         };
         if !needs_rebuild {
             return;
@@ -270,15 +310,91 @@ impl CharacterSelect {
             collapse_preview_render_slots(world, renderer, prev.entity);
             let _ = world.despawn(prev.entity);
         }
-        if let Some(gender) = desired {
-            if let Some(entity) = self.spawn_preview_entity(world, renderer, gender) {
-                self.preview_state = Some(PreviewState {
-                    entity,
-                    gender,
-                    hidden_frames_remaining: 4,
-                });
+        if let Some(entity) = self.spawn_preview_entity(world, renderer, gender, appearance) {
+            self.preview_state = Some(PreviewState {
+                entity,
+                gender,
+                appearance,
+                hidden_frames_remaining: 4,
+            });
+        }
+    }
+
+    fn refresh_preview_entity(
+        &mut self,
+        world: &mut hecs::World,
+        renderer: &mut Renderer,
+        entity: hecs::Entity,
+        gender: Gender,
+        appearance: CharacterAppearance,
+    ) -> bool {
+        let Some(skinned) = load_preview_skinned(gender, appearance) else {
+            return false;
+        };
+        let (_, tex_path) = hero::base_model_paths(gender);
+
+        let mut initial_palette = Vec::new();
+        let mut initial_joint_worlds = Vec::new();
+        let mut initial_vertices = Vec::new();
+        {
+            let animator = world.get::<&Animator>(entity).ok();
+            if let Some(animator) = animator.as_deref() {
+                animation::build_bone_palette(
+                    animator,
+                    &skinned.joints,
+                    &mut initial_palette,
+                    Some(&mut initial_joint_worlds),
+                );
+                skinned.skin_to(&initial_palette, &mut initial_vertices);
             }
         }
+
+        let obj_idx = match renderer.add_skinned_mesh(
+            &skinned.bind_vertices,
+            &skinned.vertex_skin,
+            &skinned.indices,
+            Mat4::IDENTITY,
+            0.0,
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("Preview mesh refresh upload failed: {}", e);
+                return false;
+            }
+        };
+        if !initial_vertices.is_empty() {
+            if let Err(e) = renderer.prime_skinned_mesh_output(obj_idx, &initial_vertices) {
+                log::warn!("Preview refresh idle-pose upload failed: {}", e);
+            }
+            renderer.update_palette(obj_idx, &initial_palette);
+        }
+        if let Err(e) = renderer.set_object_texture(
+            obj_idx,
+            rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
+        ) {
+            log::warn!("Preview refresh texture load failed: {}", e);
+        }
+        if let Some(obj) = renderer.objects.get_mut(obj_idx) {
+            let tint = super::avatar_cosmetics::skin_tint(appearance.skin_tone);
+            obj.tint = [tint.x, tint.y, tint.z, 1.0];
+        }
+
+        let old_obj_idx = world
+            .get::<&Renderable>(entity)
+            .map(|r| r.object_index)
+            .unwrap_or(usize::MAX);
+        if let Ok(mut renderable) = world.get::<&mut Renderable>(entity) {
+            renderable.object_index = obj_idx;
+        }
+        if let Ok(mut comp) = world.get::<&mut Skinned>(entity) {
+            comp.mesh = Arc::new(skinned);
+            comp.scratch.clear();
+            comp.joint_worlds = initial_joint_worlds;
+        }
+        if old_obj_idx < renderer.objects.len() {
+            renderer.free_skinned_mesh(old_obj_idx);
+        }
+        true
     }
 
     fn spawn_preview_entity(
@@ -286,17 +402,10 @@ impl CharacterSelect {
         world: &mut hecs::World,
         renderer: &mut Renderer,
         gender: Gender,
+        appearance: CharacterAppearance,
     ) -> Option<hecs::Entity> {
-        let (model_path, tex_path) = hero::base_model_paths(gender);
-        let skinned = match SkinnedMesh::from_gltf_filtered(model_path, |node, mesh| {
-            super::avatar_cosmetics::is_body_mesh_name(node, mesh)
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Preview model load failed ({:?}): {}", gender, e);
-                return None;
-            }
-        };
+        let (_, tex_path) = hero::base_model_paths(gender);
+        let skinned = load_preview_skinned(gender, appearance)?;
 
         let clips = self.load_clips_lazy();
         let mut anim_set = AnimationSet::default();
@@ -351,6 +460,10 @@ impl CharacterSelect {
             rift_engine::TextureSource::File(std::path::Path::new(tex_path)),
         ) {
             log::warn!("Preview texture load failed: {}", e);
+        }
+        if let Some(obj) = renderer.objects.get_mut(obj_idx) {
+            let tint = super::avatar_cosmetics::skin_tint(appearance.skin_tone);
+            obj.tint = [tint.x, tint.y, tint.z, 1.0];
         }
 
         let comp = Skinned {
@@ -420,11 +533,10 @@ impl CharacterSelect {
         // entity lives at the origin, so returning from a far-away floor must
         // re-anchor here or the non-player skinning LOD updates it at 15-30 Hz.
         renderer.fog_origin = Vec3::ZERO;
-        // Atmosphere + backdrop disc + dune ring + drifting
-        // sand haze are owned by `FloorManager` and installed
-        // by `transition::update_character_select` so the
-        // sandstorm visual recipe stays in one place (shared
-        // with `generate_hub`).
+        // Atmosphere + backdrop disc + dune ring + void lightning
+        // are owned by `FloorManager` and installed by
+        // `transition::update_character_select` so the void-hub
+        // visual recipe stays in one place (shared with `generate_hub`).
     }
 
     // ─── Per-frame UI ────────────────────────────────────────────────
@@ -522,6 +634,12 @@ impl CharacterSelect {
         let mut view = ui_view::CreateFormView {
             name: &mut self.create_form.name,
             gender_is_male: &mut gender_is_male,
+            skin_tone: &mut self.create_form.appearance.skin_tone,
+            hair_style: &mut self.create_form.appearance.hair_style,
+            eyebrow_style: &mut self.create_form.appearance.eyebrow_style,
+            hair_color: &mut self.create_form.appearance.hair_color,
+            eyebrow_color: &mut self.create_form.appearance.eyebrow_color,
+            chest_size: &mut self.create_form.appearance.chest_size,
             anim_time: self.rotation_t,
         };
         let action = rift_ui::character_select::frame_create(ui, &mut view);
@@ -538,7 +656,8 @@ impl CharacterSelect {
             ui_view::CreateAction::Confirm => {
                 let trimmed = self.create_form.name.trim().to_string();
                 if !trimmed.is_empty() {
-                    let profile = CharacterProfile::new(trimmed, self.create_form.gender);
+                    let mut profile = CharacterProfile::new(trimmed, self.create_form.gender);
+                    profile.appearance = self.create_form.appearance;
                     self.roster.add(profile);
                     // New character becomes the selection so
                     // the panel-level Play button is
@@ -585,6 +704,21 @@ impl CharacterSelect {
             }
         }
     }
+}
+
+fn load_preview_skinned(gender: Gender, appearance: CharacterAppearance) -> Option<SkinnedMesh> {
+    let (model_path, _) = hero::base_model_paths(gender);
+    let mut skinned = match SkinnedMesh::from_gltf_filtered(model_path, |node, mesh| {
+        super::avatar_cosmetics::is_body_mesh_name(node, mesh)
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("Preview model load failed ({:?}): {}", gender, e);
+            return None;
+        }
+    };
+    super::avatar_cosmetics::apply_body_shape(&mut skinned, gender, appearance);
+    Some(skinned)
 }
 
 /// Zero out the renderer model matrices of every dynamic-mesh

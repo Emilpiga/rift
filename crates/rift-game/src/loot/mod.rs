@@ -45,6 +45,7 @@
 pub mod ability_mods;
 pub mod affixes;
 pub mod drops;
+pub mod enchant;
 pub mod equipment;
 pub mod families;
 pub mod inventory;
@@ -68,6 +69,10 @@ pub use drops::{
     table_for, BaseItemSelector, LootEntry, LootTable, SlotFilter, BOSS_TABLE, BRUTE_TABLE,
     CASTER_TABLE, ELITE_TABLE, STALKER_TABLE,
 };
+pub use enchant::{
+    reroll_affix, reroll_candidate_tooltips, reroll_entropy_seed, reroll_excluded_previews,
+    EnchantError,
+};
 pub use equipment::Equipment;
 pub use families::{Attribute, BaseFamily, Element};
 pub use inventory::{Inventory, Loadout};
@@ -80,5 +85,5 @@ pub use rarity::salvage_yield;
 pub use rarity::Rarity;
 pub use rng::LootRng;
 pub use roll::{roll_percentile, roll_range, roll_rift_touched, ANCHORED_CHANCE};
-pub use tooltip::{TooltipKind, TooltipLine};
+pub use tooltip::{enchant_candidate_preview, TooltipKind, TooltipLine};
 pub use uniques::{BespokeId, LegendaryEffect, UniqueDef, UniqueRoll, UNIQUES};

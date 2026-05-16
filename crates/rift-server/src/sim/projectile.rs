@@ -53,6 +53,11 @@ pub struct ServerProjectile {
     pub net_id: NetId,
     pub ability_id: AbilityWireId,
     pub owner: NetId,
+    /// Optional alternate actor that should receive enemy threat
+    /// for this projectile. Minion attacks meter/proc through
+    /// their summoning owner (`owner`) but should pull aggro onto
+    /// the minion body, not the player standing behind it.
+    pub threat_owner: Option<NetId>,
     pub team: Team,
     /// Attacker kind for the TAKEN-tab breakdown. For
     /// `Team::Enemy` projectiles this is the casting enemy's
@@ -136,6 +141,7 @@ pub(super) struct Hit {
     /// the ECS at apply time so we don't have to thread the
     /// entity through every hit construction site.
     pub attacker: NetId,
+    pub threat_attacker: Option<NetId>,
     /// Wire-stable id of the source ability, from
     /// `rift_game::abilities::id::*`. `255` ("Other") for
     /// hits we can't attribute (today: nothing — every hit
@@ -281,6 +287,7 @@ pub fn tick(
                             enemy_net_id: *en_net_id,
                             enemy_pos: *en_pos,
                             attacker: proj.owner,
+                            threat_attacker: proj.threat_owner,
                             ability_id: proj.ability_id,
                             damage: proj.damage,
                             crit_chance: proj.crit_chance,
@@ -456,6 +463,7 @@ pub fn tick_aoe(
                             enemy_net_id: *en_net_id,
                             enemy_pos: *en_pos,
                             attacker: zone_owner,
+                            threat_attacker: None,
                             ability_id: zone.ability_id,
                             damage: zone_dmg,
                             crit_chance: zone_crit_chance,
@@ -572,15 +580,28 @@ pub(super) fn apply_hits_to_enemies(
     hits: Vec<Hit>,
     ctx: &mut super::combat_ctx::CombatCtx<'_>,
 ) {
-    // Build a one-shot NetId → Entity map of live players so
-    // the aggro-on-hit notify below can resolve the attacker
-    // without hitting the ECS query path once per hit. Done
-    // inline (cheap; player count is small) so callers don't
-    // have to thread it through.
+    // Build one-shot NetId → Entity maps. Owner credit remains
+    // player-only for meters/procs, but threat may point at a
+    // player-owned minion so enemies can actually peel onto it.
     let attacker_lookup: Vec<(NetId, Entity)> = world
         .query::<(&super::player::ServerPlayer, &NetIdentity)>()
         .iter()
         .map(|(e, (_p, identity))| (identity.net_id, e))
+        .collect();
+    let threat_lookup: Vec<(NetId, Entity)> = world
+        .query::<(
+            &NetIdentity,
+            Option<&super::player::ServerPlayer>,
+            Option<&super::minions::ServerMinion>,
+        )>()
+        .iter()
+        .filter_map(|(e, (identity, player, minion))| {
+            if player.is_some() || minion.is_some() {
+                Some((identity.net_id, e))
+            } else {
+                None
+            }
+        })
         .collect();
 
     let mut dead: Vec<(Entity, NetId, Vec3)> = Vec::new();
@@ -604,6 +625,10 @@ pub(super) fn apply_hits_to_enemies(
         let attacker_entity = attacker_lookup
             .iter()
             .find(|(nid, _)| *nid == hit.attacker)
+            .map(|(_, e)| *e);
+        let threat_attacker_entity = threat_lookup
+            .iter()
+            .find(|(nid, _)| *nid == hit.threat_attacker.unwrap_or(hit.attacker))
             .map(|(_, e)| *e);
         let mut killed = false;
         if let Ok((en, vitals)) = world.query_one_mut::<(&mut ServerEnemy, &mut Vitals)>(hit.enemy)
@@ -650,7 +675,7 @@ pub(super) fn apply_hits_to_enemies(
             // hits weigh proportionally. Skipped on death (the
             // corpse won't aggro anyone).
             if !died {
-                if let Some(ae) = attacker_entity {
+                if let Some(ae) = threat_attacker_entity {
                     *en.threat.entry(ae).or_insert(0.0) += scaled;
                 }
             }
@@ -728,7 +753,7 @@ pub(super) fn apply_hits_to_enemies(
                 // we still have the attacker NetId in scope;
                 // the actual mutation runs after the loop so
                 // we don't double-borrow `world`.
-                if let Some(ae) = attacker_entity {
+                if let Some(ae) = threat_attacker_entity {
                     aggro_alerts.push((hit.enemy, ae));
                 }
             }

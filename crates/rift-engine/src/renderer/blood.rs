@@ -147,6 +147,10 @@ pub struct BloodField {
     /// frame. Read by `record_splat_pass`.
     pub frame_instance_counts: [u32; MAX_FRAMES_IN_FLIGHT],
 
+    gpu_cleaned: bool,
+    cleanup_device: ash::Device,
+    cleanup_allocator: Arc<Mutex<Allocator>>,
+
     // ---- World-to-UV transform ----
     /// Set when a floor binds a real field. `Vec4::ZERO` means no
     /// active field; the forward shader treats this as a no-op.
@@ -448,6 +452,9 @@ impl BloodField {
             pending: Vec::with_capacity(MAX_INSTANCES),
             scheduled: Vec::with_capacity(MAX_INSTANCES),
             frame_instance_counts: [0; MAX_FRAMES_IN_FLIGHT],
+            gpu_cleaned: false,
+            cleanup_device: device.clone(),
+            cleanup_allocator: Arc::clone(allocator),
             world_xform: Vec4::ZERO,
             floor_y: 0.0,
             floor_y_max: 0.0,
@@ -1258,9 +1265,14 @@ impl BloodField {
     }
 
     pub fn cleanup(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+        if self.gpu_cleaned {
+            return;
+        }
+        self.gpu_cleaned = true;
         for buf in &mut self.instance_buffers {
             buf.cleanup(device, allocator);
         }
+        self.instance_buffers.clear();
         unsafe {
             device.destroy_pipeline(self.splat_pipeline, None);
             device.destroy_pipeline_layout(self.splat_pipeline_layout, None);
@@ -1276,6 +1288,17 @@ impl BloodField {
             allocator.lock().unwrap().free(alloc).ok();
         }
         self.mask.cleanup(device, allocator);
+    }
+}
+
+impl Drop for BloodField {
+    fn drop(&mut self) {
+        if self.gpu_cleaned {
+            return;
+        }
+        let device = self.cleanup_device.clone();
+        let allocator = Arc::clone(&self.cleanup_allocator);
+        self.cleanup(&device, &allocator);
     }
 }
 

@@ -251,9 +251,9 @@ fn render_portal_ready_banner(ui: &mut Ui<'_>) {
     let subtitle = "ENTER THE PORTAL";
     let title_size = 15.0 * s;
     let subtitle_size = 10.0 * s;
-    let title_w = ui.measure_text(title, title_size);
-    let subtitle_w = ui.measure_text(subtitle, subtitle_size);
-    ui.draw_text(
+    let title_w = ui.measure_header_text(title, title_size);
+    let subtitle_w = ui.measure_header_text(subtitle, subtitle_size);
+    ui.draw_header_text(
         Pos2::new(
             rect.x() + (rect.width() - title_w) * 0.5,
             rect.y() + 9.0 * s,
@@ -262,7 +262,7 @@ fn render_portal_ready_banner(ui: &mut Ui<'_>) {
         title_size,
         Color::rgba(1.0, 0.86, 0.58, 0.98),
     );
-    ui.draw_text(
+    ui.draw_header_text(
         Pos2::new(
             rect.x() + (rect.width() - subtitle_w) * 0.5,
             rect.y() + 31.0 * s,

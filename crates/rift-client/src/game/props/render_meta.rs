@@ -134,5 +134,6 @@ pub const fn render_meta(id: PropId) -> RenderMeta {
             ),
             asset_scale: 1.0,
         },
+        VoidForge => metal("assets/models/fantasy-props/Exports/glTF/Anvil.gltf"),
     }
 }

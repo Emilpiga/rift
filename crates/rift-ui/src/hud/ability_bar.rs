@@ -44,14 +44,11 @@ pub const VITALS_BOTTOM_OFFSET_BASE: f32 = PLAQUE_H_BASE + BOTTOM_GAP_BASE;
 // crate is structured around its own private cell helpers
 // (see `inventory::bag_panel::draw_cell_outline`).
 const EMPTY_CELL_FILL: Color = Color::rgba(0.0, 0.0, 0.0, 0.32);
-const GOLD_OUTLINE: Color = Color::rgba(0.78, 0.62, 0.30, 0.85);
-const INSET_HIGHLIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.10);
-// Inset shadow inside the slot border. Painted as a 1px dark
-// band along the top + left edges, with a matching cream
-// highlight along the bottom + right, so the cell reads as
-// recessed into the stone plaque rather than stamped on top.
+const ACCENT_OUTLINE: Color = Color::rgba(0.62, 0.48, 0.92, 0.88);
+const INSET_HIGHLIGHT: Color = Color::rgba(0.78, 0.72, 1.0, 0.12);
+// Inset shadow inside the slot border.
 const INSET_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.55);
-const INSET_LIGHT: Color = Color::rgba(1.0, 0.95, 0.82, 0.08);
+const INSET_LIGHT: Color = Color::rgba(0.72, 0.68, 0.98, 0.10);
 
 /// Render the six-slot action bar centered horizontally,
 /// anchored just above the bottom edge of the screen. Returns
@@ -77,7 +74,7 @@ pub fn frame_ability_bar(ui: &mut Ui<'_>, view: &AbilityBarView<'_>) -> Option<H
     let plaque_y = screen.y - plaque_h - BOTTOM_OFFSET_BASE * s;
     let plaque_rect = Rect::from_xywh(plaque_x, plaque_y, plaque_w, plaque_h);
 
-    // Same carved-stone treatment as the vitals plaque above,
+    // Same void plaque treatment as the vitals cluster above,
     // so the two HUD clusters read as one continuous surface.
     Frame::stone(&theme)
         .with_padding(Pad::all(plaque_pad))
@@ -147,11 +144,14 @@ pub fn frame_ability_bar(ui: &mut Ui<'_>, view: &AbilityBarView<'_>) -> Option<H
         // both tooltip surfaces read at the same scale
         // when the player flicks between them.
         let mut lines: Vec<TooltipLine<'_>> = Vec::with_capacity(6);
-        lines.push(TooltipLine::new(
-            tip.name,
-            theme.fonts.size_lg,
-            Color::rgba(1.0, 0.9, 0.5, 1.0),
-        ));
+        lines.push(
+            TooltipLine::new(
+                tip.name,
+                theme.fonts.size_lg,
+                Color::rgba(0.88, 0.82, 1.0, 1.0),
+            )
+            .with_header_font(true),
+        );
         lines.push(TooltipLine::new(
             tip.description,
             theme.fonts.size_md,
@@ -161,14 +161,14 @@ pub fn frame_ability_bar(ui: &mut Ui<'_>, view: &AbilityBarView<'_>) -> Option<H
             lines.push(TooltipLine::new(
                 d.as_str(),
                 theme.fonts.size_md,
-                Color::rgba(0.95, 0.78, 0.55, 0.95),
+                Color::rgba(0.82, 0.76, 0.98, 0.95),
             ));
         }
         if let Some(ref c) = tip.crit_line {
             lines.push(TooltipLine::new(
                 c.as_str(),
                 theme.fonts.size_md,
-                Color::rgba(0.72, 0.68, 0.55, 0.85),
+                Color::rgba(0.72, 0.68, 0.88, 0.88),
             ));
         }
         if let Some(ref p) = tip.projectiles_line {
@@ -182,16 +182,15 @@ pub fn frame_ability_bar(ui: &mut Ui<'_>, view: &AbilityBarView<'_>) -> Option<H
             lines.push(TooltipLine::new(
                 t.as_str(),
                 theme.fonts.size_md,
-                // Legendary-orange to match unique-item
-                // tooltip flavour lines.
-                Color::rgba(0.95, 0.55, 0.25, 0.95),
+                // Rift / legendary tint — violet-gold.
+                Color::rgba(0.95, 0.62, 0.98, 0.95),
             ));
         }
         if let Some(ref b) = tip.bonus_line {
             lines.push(TooltipLine::new(
                 b.as_str(),
                 theme.fonts.size_md,
-                Color::rgba(0.95, 0.55, 0.25, 0.95),
+                Color::rgba(0.92, 0.58, 0.95, 0.95),
             ));
         }
         if let Some(ref c) = tip.cost_line {
@@ -238,7 +237,7 @@ fn draw_one_slot(
         sb = sb
             .enabled(false)
             .fallback_glyph('\u{1F512}')
-            .fallback_color(Color::rgba(0.74, 0.66, 0.48, 0.82));
+            .fallback_color(Color::rgba(0.74, 0.68, 0.92, 0.82));
     } else {
         if slot.cooldown_remaining > 0.001 {
             sb = sb.cooldown(slot.cooldown_remaining);
@@ -275,8 +274,8 @@ fn draw_locked_slot_badge(ui: &mut Ui<'_>, rect: Rect, unlock_level: u32) {
             rect.width() - 4.0 * s,
             rect.height() - 4.0 * s,
         ),
-        Color::rgba(0.03, 0.025, 0.020, 0.34),
-        Color::rgba(0.06, 0.050, 0.040, 0.44),
+        Color::rgba(0.05, 0.03, 0.10, 0.34),
+        Color::rgba(0.08, 0.05, 0.14, 0.44),
         Color::rgba(0.00, 0.00, 0.00, 0.62),
         Color::rgba(0.00, 0.00, 0.00, 0.48),
     );
@@ -294,10 +293,10 @@ fn draw_locked_slot_badge(ui: &mut Ui<'_>, rect: Rect, unlock_level: u32) {
     );
     ui.draw_gradient_rect(
         chip,
-        Color::rgba(0.18, 0.145, 0.095, 0.94),
-        Color::rgba(0.060, 0.050, 0.040, 0.96),
+        Color::rgba(0.22, 0.14, 0.36, 0.94),
+        Color::rgba(0.08, 0.05, 0.14, 0.96),
     );
-    ui.draw_outline(chip, 1.0 * s, Color::rgba(0.72, 0.58, 0.32, 0.72));
+    ui.draw_outline(chip, 1.0 * s, Color::rgba(0.62, 0.52, 0.92, 0.75));
     let text_pos = Pos2::new(
         chip.x() + (chip.width() - tw) * 0.5,
         chip.y() + (chip.height() - font) * 0.5,
@@ -308,7 +307,7 @@ fn draw_locked_slot_badge(ui: &mut Ui<'_>, rect: Rect, unlock_level: u32) {
         font,
         Color::rgba(0.0, 0.0, 0.0, 0.72),
     );
-    ui.draw_text(text_pos, &label, font, Color::rgba(0.92, 0.80, 0.56, 0.96));
+    ui.draw_text(text_pos, &label, font, Color::rgba(0.88, 0.84, 0.98, 0.96));
 }
 
 fn draw_cooldown_accent(ui: &mut Ui<'_>, rect: Rect, remaining: f32) {
@@ -336,30 +335,25 @@ fn draw_cooldown_accent(ui: &mut Ui<'_>, rect: Rect, remaining: f32) {
     let edge_y = (inset.y() + drain_h).min(inset.max.y - 1.0 * s);
     ui.draw_gradient_rect(
         Rect::from_xywh(inset.x(), edge_y - 1.0 * s, inset.width(), 2.0 * s),
-        Color::rgba(1.0, 0.76, 0.34, 0.86),
-        Color::rgba(0.70, 0.32, 0.10, 0.66),
+        Color::rgba(0.56, 0.42, 0.98, 0.86),
+        Color::rgba(0.32, 0.18, 0.62, 0.72),
     );
     ui.draw_grad4_rect(
         Rect::from_xywh(inset.x(), inset.y(), inset.width(), inset.height()),
-        Color::rgba(0.95, 0.55, 0.18, 0.10),
-        Color::rgba(0.95, 0.55, 0.18, 0.04),
+        Color::rgba(0.72, 0.48, 0.98, 0.12),
+        Color::rgba(0.52, 0.28, 0.88, 0.05),
         Color::rgba(0.0, 0.0, 0.0, 0.00),
         Color::rgba(0.0, 0.0, 0.0, 0.00),
     );
-    ui.draw_outline(rect, 1.5 * s, Color::rgba(0.90, 0.56, 0.24, 0.62));
+    ui.draw_outline(rect, 1.5 * s, Color::rgba(0.72, 0.52, 0.95, 0.62));
 }
 
 /// Inventory-style cell chrome shared by every ability slot,
-/// empty or occupied: dark fill, gold outer outline, cream
-/// inset highlight, plus a 1px inset shadow on the top and
-/// left edges (with a matching highlight on the bottom and
-/// right) so the cell reads as recessed into the stone
-/// plaque. Mirrors the look of an equipment slot in the
-/// paperdoll grid so the two HUD surfaces match.
+/// dark fill, violet outer outline, lavender inset highlight,
+/// plus a 1px inset shadow on the top and left edges.
 fn draw_slot_chrome(ui: &mut Ui<'_>, rect: Rect) {
-    // Base: dark wash + gold outline + cream inset.
     ui.draw_rect(rect, EMPTY_CELL_FILL);
-    ui.draw_outline(rect, 1.0, GOLD_OUTLINE);
+    ui.draw_outline(rect, 1.0, ACCENT_OUTLINE);
     let inset = Rect::from_xywh(
         rect.x() + 1.0,
         rect.y() + 1.0,
@@ -369,7 +363,7 @@ fn draw_slot_chrome(ui: &mut Ui<'_>, rect: Rect) {
     ui.draw_outline(inset, 1.0, INSET_HIGHLIGHT);
 
     // Inset shadow / bevel: 1px dark band along the top and
-    // left edges of the inner rect, 1px cream highlight
+    // left edges of the inner rect, 1px cool lavender highlight
     // along the bottom and right. Reads as a recessed cell
     // when scanned at a glance.
     let w = inset.width();

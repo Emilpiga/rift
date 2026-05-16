@@ -4,13 +4,13 @@
 //! id pattern. Returns a [`Response`] so callers do
 //! `if ui.button("Save").clicked { ... }`.
 //!
-//! Visual state mapping:
-//!  - idle      → `theme.colors.bg_panel_alt`
-//!  - hovered   → `theme.colors.bg_slot_hover`
-//!  - pressed   → `theme.colors.accent` (mid-press tint)
-//!  - disabled  → `theme.colors.bg_slot` with dimmed text
-//!  - primary   → `theme.colors.accent` fill (or hovered variant)
-//!  - danger    → `theme.colors.danger`
+//! Visual state mapping (rounded void glass):
+//!  - `Normal`    → violet-tint neutral slab + hover lift
+//!  - `Primary`   → accent gradient
+//!  - `Danger`    → danger gradient
+//!  - `Active`    → accent gradient + strong border when idle
+//!  - `Red`       → radial red CTA
+//!  - disabled    → flat muted rounded rect
 //!
 //! Use the builder methods on [`Button`] to choose a variant and
 //! enable/disable the widget; pass the constructed value to
@@ -26,20 +26,15 @@ use super::super::ui::Ui;
 /// only (text colour stays `theme.colors.text` for legibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
-    /// Default neutral surface.
+    /// Default neutral glass surface.
     Normal,
     /// Action button (Confirm, Play, Equip).
     Primary,
     /// Destructive action (Delete, Drop).
     Danger,
-    /// Pressed-toggle (gender selector showing the active option).
+    /// Selected toggle — accent-tinted glass (tabs, gender).
     Active,
-    /// Forge-iron red surface: red fill with darker smudges
-    /// painted inside, a brighter inset highlight along the
-    /// top, and a near-black border that matches the stone
-    /// panel chrome to create a sunken-into-the-panel feel.
-    /// Used for the headline action on a stone-panel screen
-    /// (Play, Enter World).
+    /// Headline CTA — glossy radial red on violet chrome.
     Red,
 }
 
@@ -93,6 +88,8 @@ pub struct Button<'a> {
     pub enabled: bool,
     pub min_size: (f32, f32),
     pub padding: Option<Pad>,
+    /// When set, draws `left · atlas icon · right` centered instead of [`Self::label`].
+    pub compound_icon_row: Option<(&'a str, &'a str, &'a str)>,
 }
 
 impl<'a> Button<'a> {
@@ -104,6 +101,7 @@ impl<'a> Button<'a> {
             enabled: true,
             min_size: (0.0, 0.0),
             padding: None,
+            compound_icon_row: None,
         }
     }
 
@@ -128,7 +126,7 @@ impl<'a> Button<'a> {
         }
     }
 
-    /// Forge-iron red surface; see [`ButtonVariant::Red`].
+    /// Saturated red CTA; see [`ButtonVariant::Red`].
     pub fn red(label: &'a str) -> Self {
         Self {
             variant: ButtonVariant::Red,
@@ -164,6 +162,12 @@ impl<'a> Button<'a> {
 
     pub fn padding(mut self, p: Pad) -> Self {
         self.padding = Some(p);
+        self
+    }
+
+    /// Centered row: `left` text, registered atlas `icon_key`, then `right` text (e.g. cost).
+    pub fn compound_icon_row(mut self, left: &'a str, icon_key: &'a str, right: &'a str) -> Self {
+        self.compound_icon_row = Some((left, icon_key, right));
         self
     }
 
@@ -203,158 +207,170 @@ impl<'a> Button<'a> {
             ui.state_mut().pressed_button = None;
         }
 
-        // Every enabled button uses the same ARPG surface recipe:
-        //   1. Sharp rectangular forged-metal fill with a
-        //      horizontal centre lift, so rows of buttons read
-        //      as carved controls instead of soft pills.
-        //   2. Top bevel + bottom shadow bands.
-        //   3. Heavy dark outer line, gold inner hairline, and
-        //      clipped corner ticks for a more crafted border.
-        // Disabled buttons stay flat so the affordance reads
-        // immediately as "not interactable".
+        // Rounded void-glass buttons: vertical gradient body,
+        // optional radial for red CTA, cool gloss + depth bands,
+        // violet chrome outlines — uniform with panel frames.
+        let corner_r = (theme.spacing.corner_radius * 0.92)
+            .min(rect.height() * 0.5)
+            .max(2.5);
+
         if self.enabled {
-            // Variant-specific (edge, centre, label-tone)
-            // palette. Edge is the darker base, centre is the
-            // brighter hotspot. Hover lifts the centre, pressed
-            // inverts edge↔centre so the button reads recessed.
-            let (base_edge, base_centre, hover_centre) = match self.variant {
-                ButtonVariant::Red => (
-                    theme.colors.red_smudge,
-                    theme.colors.red,
-                    theme.colors.red_hover,
-                ),
-                ButtonVariant::Primary => {
-                    let a = theme.colors.accent;
-                    (
-                        Color::rgba(a.0[0] * 0.45, a.0[1] * 0.45, a.0[2] * 0.45, 1.0),
-                        Color::rgba(a.0[0] * 0.85, a.0[1] * 0.85, a.0[2] * 0.85, 1.0),
-                        a,
-                    )
+            match self.variant {
+                ButtonVariant::Red => {
+                    let edge_base = theme.colors.red_smudge;
+                    let centre_base = if hovered {
+                        theme.colors.red_hover
+                    } else {
+                        theme.colors.red
+                    };
+                    let (edge, centre) = if pressed {
+                        (
+                            Color::rgba(
+                                edge_base.0[0] * 0.58,
+                                edge_base.0[1] * 0.58,
+                                edge_base.0[2] * 0.58,
+                                edge_base.0[3],
+                            ),
+                            Color::rgba(
+                                centre_base.0[0] * 0.58,
+                                centre_base.0[1] * 0.58,
+                                centre_base.0[2] * 0.58,
+                                centre_base.0[3],
+                            ),
+                        )
+                    } else {
+                        (edge_base, centre_base)
+                    };
+                    ui.draw_rounded_radial_rect(rect, corner_r, edge, centre);
                 }
-                ButtonVariant::Danger => {
-                    let d = theme.colors.danger;
-                    (
-                        Color::rgba(d.0[0] * 0.45, d.0[1] * 0.45, d.0[2] * 0.45, 1.0),
-                        Color::rgba(d.0[0] * 0.85, d.0[1] * 0.85, d.0[2] * 0.85, 1.0),
-                        d,
-                    )
-                }
-                ButtonVariant::Active => {
-                    // Toggle-on state (gender picker, tab
-                    // headers): mirror the Red CTA palette so
-                    // the "this option is selected" affordance
-                    // matches the screen's headline action,
-                    // never the accent-blue used for hover
-                    // links. Sharing the recipe also means the
-                    // active toggle and the Confirm/Play CTA
-                    // visually rhyme — the same forge-iron
-                    // chrome on both reads as "these belong
-                    // together" instead of two different
-                    // styles fighting for attention.
-                    (
-                        theme.colors.red_smudge,
-                        theme.colors.red,
-                        theme.colors.red_hover,
-                    )
-                }
-                ButtonVariant::Normal => (
-                    Color::rgba(0.075, 0.062, 0.052, 0.96),
-                    Color::rgba(0.20, 0.165, 0.125, 0.96),
-                    Color::rgba(0.30, 0.225, 0.140, 0.98),
-                ),
-            };
-            let (edge, centre) = if pressed {
-                // Pressed: uniformly darker than the rest
-                // state so the button reads as pushed-in
-                // without inverting the rim (which produced
-                // a bright halo) or stripping the gradient
-                // (which produced a flat plate).
-                let de = Color::rgba(
-                    base_edge.0[0] * 0.55,
-                    base_edge.0[1] * 0.55,
-                    base_edge.0[2] * 0.55,
-                    base_edge.0[3],
-                );
-                let dc = Color::rgba(
-                    base_centre.0[0] * 0.55,
-                    base_centre.0[1] * 0.55,
-                    base_centre.0[2] * 0.55,
-                    base_centre.0[3],
-                );
-                (de, dc)
-            } else if hovered {
-                (base_edge, hover_centre)
-            } else {
-                (base_edge, base_centre)
-            };
-            let mid = Color::rgba(
-                (centre.0[0] * 1.08).min(1.0),
-                (centre.0[1] * 1.08).min(1.0),
-                (centre.0[2] * 1.08).min(1.0),
-                centre.0[3],
-            );
-            let left = Rect::from_xywh(rect.x(), rect.y(), rect.width() * 0.5, rect.height());
-            let right = Rect::from_xywh(
-                rect.x() + rect.width() * 0.5,
-                rect.y(),
-                rect.width() * 0.5,
-                rect.height(),
-            );
-            ui.draw_grad4_rect(left, edge, mid, edge, centre);
-            ui.draw_grad4_rect(right, mid, edge, centre, edge);
+                ButtonVariant::Normal
+                | ButtonVariant::Primary
+                | ButtonVariant::Danger
+                | ButtonVariant::Active => {
+                    let (idle_top, idle_bot) = match self.variant {
+                        ButtonVariant::Normal => {
+                            let b = theme.colors.bg_panel_alt.0;
+                            (
+                                Color::rgba(
+                                    (b[0] * 1.10).min(1.0),
+                                    (b[1] * 1.06).min(1.0),
+                                    (b[2] * 1.14).min(1.0),
+                                    b[3],
+                                ),
+                                Color::rgba(b[0] * 0.50, b[1] * 0.48, b[2] * 0.58, b[3]),
+                            )
+                        }
+                        ButtonVariant::Primary | ButtonVariant::Active => {
+                            let a = theme.colors.accent.0;
+                            (
+                                Color::rgba(
+                                    (a[0] * 1.05).min(1.0),
+                                    (a[1] * 1.05).min(1.0),
+                                    (a[2] * 1.08).min(1.0),
+                                    1.0,
+                                ),
+                                Color::rgba(a[0] * 0.36, a[1] * 0.36, a[2] * 0.46, 1.0),
+                            )
+                        }
+                        ButtonVariant::Danger => {
+                            let d = theme.colors.danger.0;
+                            (
+                                Color::rgba(
+                                    (d[0] * 1.02).min(1.0),
+                                    (d[1] * 1.02).min(1.0),
+                                    (d[2] * 1.04).min(1.0),
+                                    1.0,
+                                ),
+                                Color::rgba(d[0] * 0.38, d[1] * 0.38, d[2] * 0.42, 1.0),
+                            )
+                        }
+                        ButtonVariant::Red => unreachable!(),
+                    };
 
-            // Top + bottom bevel bands. Pressed keeps a
-            // softer version of both (alpha halved) so the
-            // surface still reads as forged metal instead of
-            // a flat plate, but the bands clearly recede.
-            let pressed_dim = if pressed { 0.45 } else { 1.0 };
-            {
-                let inset = 2.0;
-                let inner_x = rect.x() + inset;
-                let inner_w = rect.width() - inset * 2.0;
-                if inner_w > 4.0 {
-                    let band_h = (rect.height() * 0.28).clamp(3.0, 12.0);
-                    let band_y = rect.y() + 1.0;
-                    ui.draw_gradient_rect(
-                        Rect::from_xywh(inner_x, band_y, inner_w, band_h),
-                        Color::rgba(1.0, 0.96, 0.88, 0.28 * pressed_dim),
-                        Color::rgba(1.0, 0.96, 0.88, 0.02 * pressed_dim),
-                    );
+                    let (mut top, mut bot) = (idle_top, idle_bot);
+                    if hovered {
+                        match self.variant {
+                            ButtonVariant::Normal => {
+                                let h = theme.colors.bg_slot_hover.0;
+                                top = Color::rgba(
+                                    (h[0] * 1.08).min(1.0),
+                                    (h[1] * 1.06).min(1.0),
+                                    (h[2] * 1.12).min(1.0),
+                                    h[3],
+                                );
+                                bot = Color::rgba(h[0] * 0.55, h[1] * 0.52, h[2] * 0.62, h[3]);
+                            }
+                            ButtonVariant::Primary | ButtonVariant::Active => {
+                                let a = theme.colors.accent.0;
+                                top = theme.colors.accent;
+                                bot = Color::rgba(a[0] * 0.42, a[1] * 0.42, a[2] * 0.52, 1.0);
+                            }
+                            ButtonVariant::Danger => {
+                                let d = theme.colors.danger.0;
+                                top = theme.colors.danger;
+                                bot = Color::rgba(d[0] * 0.45, d[1] * 0.45, d[2] * 0.48, 1.0);
+                            }
+                            ButtonVariant::Red => unreachable!(),
+                        }
+                    }
+                    if pressed {
+                        top = Color::rgba(
+                            top.0[0] * 0.58,
+                            top.0[1] * 0.58,
+                            top.0[2] * 0.58,
+                            top.0[3],
+                        );
+                        bot = Color::rgba(
+                            bot.0[0] * 0.58,
+                            bot.0[1] * 0.58,
+                            bot.0[2] * 0.58,
+                            bot.0[3],
+                        );
+                    }
+                    ui.draw_rounded_gradient_rect(rect, corner_r, top, bot);
 
-                    let shadow_h = (rect.height() * 0.26).clamp(3.0, 11.0);
-                    let shadow_y = rect.max.y - shadow_h - 1.0;
-                    let bottom_alpha = if pressed { 0.55 } else { 0.45 };
-                    ui.draw_gradient_rect(
-                        Rect::from_xywh(inner_x, shadow_y, inner_w, shadow_h),
-                        Color::rgba(0.0, 0.0, 0.0, 0.0),
-                        Color::rgba(0.0, 0.0, 0.0, bottom_alpha),
-                    );
+                    let pressed_dim = if pressed { 0.42 } else { 1.0 };
+                    let inset = 2.0_f32;
+                    let inner_w = rect.width() - inset * 2.0;
+                    if inner_w > 4.0 {
+                        let gh = (rect.height() * 0.30).clamp(2.0, 12.0);
+                        let gloss_r = (corner_r - 1.5).max(0.0);
+                        ui.draw_rounded_gradient_rect(
+                            Rect::from_xywh(rect.x() + inset, rect.y() + 1.0, inner_w, gh),
+                            gloss_r,
+                            Color::rgba(0.92, 0.90, 1.0, 0.11 * pressed_dim),
+                            Color::rgba(0.92, 0.90, 1.0, 0.0),
+                        );
+                        let shadow_h = (rect.height() * 0.28).clamp(2.0, 11.0);
+                        ui.draw_rounded_gradient_rect(
+                            Rect::from_xywh(
+                                rect.x() + inset,
+                                rect.max.y - shadow_h - 1.0,
+                                inner_w,
+                                shadow_h,
+                            ),
+                            gloss_r,
+                            Color::rgba(0.0, 0.0, 0.0, 0.0),
+                            Color::rgba(0.0, 0.0, 0.0, if pressed { 0.48 } else { 0.38 }),
+                        );
+                    }
                 }
             }
         } else {
-            // Disabled: flat, muted, noticeably darker than
-            // any active state so the affordance reads as
-            // "not interactable" against any panel colour.
-            // Pulls from `bg_stone` instead of the cool slate
-            // panel tokens so disabled buttons stay inside the
-            // carved-stone material family.
             let p = theme.colors.bg_stone.0;
-            let disabled_fill = Color::rgba(p[0] * 0.60, p[1] * 0.60, p[2] * 0.60, p[3]);
-            ui.draw_rect(rect, disabled_fill);
+            let disabled_fill = Color::rgba(p[0] * 0.58, p[1] * 0.58, p[2] * 0.62, p[3]);
+            ui.draw_rounded_rect(rect, corner_r, disabled_fill);
         }
 
-        // Outline. Every enabled button gets the dark stone
-        // border (so all chrome reads as forged into the
-        // panel); hover/active swap to the brighter strong
-        // border to telegraph state.
         let (outline_color, outline_thickness) = match (self.enabled, hovered, self.variant) {
             (false, _, _) => (theme.colors.border, theme.spacing.border_thickness),
-            (true, _, ButtonVariant::Active) => (Color::rgba(0.96, 0.52, 0.22, 0.82), 1.5),
-            (true, true, _) => (Color::rgba(0.90, 0.62, 0.30, 0.84), 1.5),
-            (true, false, _) => (theme.colors.border_stone, 1.5),
+            (true, true, _) => (theme.colors.border_strong, 1.5),
+            (true, false, ButtonVariant::Active) => (theme.colors.border_strong, 1.5),
+            (true, false, _) => (theme.colors.border, 1.5),
         };
         ui.draw_outline(rect, outline_thickness, outline_color);
         if self.enabled {
+            let inner_line_a = if pressed { 0.14 } else { 0.26 };
             ui.draw_outline(
                 Rect::from_xywh(
                     rect.x() + 1.0,
@@ -363,14 +379,10 @@ impl<'a> Button<'a> {
                     (rect.height() - 2.0).max(0.0),
                 ),
                 1.0,
-                Color::rgba(0.94, 0.70, 0.36, if pressed { 0.18 } else { 0.34 }),
+                Color::rgba(0.72, 0.62, 0.98, inner_line_a),
             );
         }
 
-        // Inner hairline 1 px inside the outer border. Reads
-        // as a forged-bevel framing line. Stays on for
-        // pressed (alpha halved) so the chrome is consistent
-        // across rest / hover / pressed.
         if self.enabled {
             let inner = Rect::from_xywh(
                 rect.x() + 2.0,
@@ -378,66 +390,103 @@ impl<'a> Button<'a> {
                 (rect.width() - 4.0).max(0.0),
                 (rect.height() - 4.0).max(0.0),
             );
-            let hairline_a = if pressed { 0.09 } else { 0.18 };
-            ui.draw_outline(inner, 1.0, Color::rgba(1.0, 0.92, 0.84, hairline_a));
-            draw_corner_cuts(ui, rect, if pressed { 0.34 } else { 0.58 });
+            let hairline_a = if pressed { 0.10 } else { 0.20 };
+            ui.draw_outline(inner, 1.0, Color::rgba(0.88, 0.84, 1.0, hairline_a));
         }
 
-        // Centred label. Two-stage overflow guard so a button
-        // can never render text outside its own rect:
-        //   1. If the natural width at the size-preset font
-        //      would overflow, shrink the font proportionally,
-        //      floored at 70% of base for legibility.
-        //   2. If even at the floor size the text still
-        //      overflows (very narrow rect / very long label),
-        //      hard-ellipsize the string at that size.
+        // Label row — optional `[left · atlas icon · right]` centered layout,
+        // otherwise classic single centered [`Self::label`].
         let base_size = self.size.font_size(&theme);
         let inset = (theme.spacing.gap_sm.max(6.0)) * 2.0;
         let avail_w = (rect.width() - inset).max(1.0);
-        let natural_w = ui.measure_text(self.label, base_size);
-        let text_size = if natural_w > avail_w {
-            (base_size * (avail_w / natural_w)).max(base_size * 0.70)
-        } else {
-            base_size
-        };
         let text_color = if self.enabled {
             theme.colors.text
         } else {
             theme.colors.text_muted
         };
-        // Final width with the (possibly shrunken) size.
-        let final_w = ui.measure_text(self.label, text_size);
-        let ty = rect.y() + (rect.height() - text_size) * 0.5;
-        // 1 px drop-shadow under the label so it reads
-        // cleanly against the bright bevel hotspot. Skipped
-        // on disabled (already low-contrast and the shadow
-        // would clutter it).
-        let shadow_label = self.enabled;
-        if final_w > avail_w {
-            // Still too wide → ellipsize. Anchor to the inset
-            // so the prefix is visible.
-            let pos = Pos2::new(rect.x() + inset * 0.5, ty);
-            if shadow_label {
-                ui.draw_text_ellipsized(
-                    Pos2::new(pos.x + 1.0, pos.y + 1.0),
-                    self.label,
-                    text_size,
-                    avail_w,
-                    Color::rgba(0.0, 0.0, 0.0, 0.55),
-                );
+
+        if let Some((left, icon_key, right)) = self.compound_icon_row {
+            let gap = theme.spacing.gap_sm.max(5.0);
+            let shadow_label = self.enabled;
+            let mut icon_px = (rect.height() * 0.50).clamp(15.0, rect.height() * 0.62);
+            let mut ls = base_size;
+            let mut rs = base_size;
+            let measure_total = |ls: f32, rs: f32, ipx: f32| -> f32 {
+                ui.measure_text(left, ls) + gap + ipx + gap + ui.measure_text(right, rs)
+            };
+            let total = measure_total(ls, rs, icon_px);
+            if total > avail_w && total > 0.01 {
+                let s = (avail_w / total).clamp(0.72, 1.0);
+                ls = (ls * s).max(base_size * 0.72);
+                rs = (rs * s).max(base_size * 0.72);
+                icon_px *= s;
             }
-            ui.draw_text_ellipsized(pos, self.label, text_size, avail_w, text_color);
-        } else {
-            let tx = rect.x() + (rect.width() - final_w) * 0.5;
+            let wl = ui.measure_text(left, ls);
+            let wr = ui.measure_text(right, rs);
+            let total = wl + gap + icon_px + gap + wr;
+            let x0 = rect.x() + (rect.width() - total).max(0.0) * 0.5;
+            let ty_l = rect.y() + (rect.height() - ls) * 0.5;
+            let ty_r = rect.y() + (rect.height() - rs) * 0.5;
+            let ty_i = rect.y() + (rect.height() - icon_px) * 0.5;
+            let lx = x0;
+            let ix = x0 + wl + gap;
+            let rx = ix + icon_px + gap;
             if shadow_label {
                 ui.draw_text(
-                    Pos2::new(tx + 1.0, ty + 1.0),
-                    self.label,
-                    text_size,
+                    Pos2::new(lx + 1.0, ty_l + 1.0),
+                    left,
+                    ls,
+                    Color::rgba(0.0, 0.0, 0.0, 0.55),
+                );
+                ui.draw_text(
+                    Pos2::new(rx + 1.0, ty_r + 1.0),
+                    right,
+                    rs,
                     Color::rgba(0.0, 0.0, 0.0, 0.55),
                 );
             }
-            ui.draw_text(Pos2::new(tx, ty), self.label, text_size, text_color);
+            ui.draw_text(Pos2::new(lx, ty_l), left, ls, text_color);
+            ui.draw_text(Pos2::new(rx, ty_r), right, rs, text_color);
+            let icon_rect = Rect::from_xywh(ix, ty_i, icon_px, icon_px);
+            ui.draw_icon(
+                icon_rect,
+                icon_key,
+                Color::rgba(0.96, 0.90, 1.0, if self.enabled { 1.0 } else { 0.55 }),
+            );
+        } else {
+            let natural_w = ui.measure_text(self.label, base_size);
+            let text_size = if natural_w > avail_w {
+                (base_size * (avail_w / natural_w)).max(base_size * 0.70)
+            } else {
+                base_size
+            };
+            let final_w = ui.measure_text(self.label, text_size);
+            let ty = rect.y() + (rect.height() - text_size) * 0.5;
+            let shadow_label = self.enabled;
+            if final_w > avail_w {
+                let pos = Pos2::new(rect.x() + inset * 0.5, ty);
+                if shadow_label {
+                    ui.draw_text_ellipsized(
+                        Pos2::new(pos.x + 1.0, pos.y + 1.0),
+                        self.label,
+                        text_size,
+                        avail_w,
+                        Color::rgba(0.0, 0.0, 0.0, 0.55),
+                    );
+                }
+                ui.draw_text_ellipsized(pos, self.label, text_size, avail_w, text_color);
+            } else {
+                let tx = rect.x() + (rect.width() - final_w) * 0.5;
+                if shadow_label {
+                    ui.draw_text(
+                        Pos2::new(tx + 1.0, ty + 1.0),
+                        self.label,
+                        text_size,
+                        Color::rgba(0.0, 0.0, 0.0, 0.55),
+                    );
+                }
+                ui.draw_text(Pos2::new(tx, ty), self.label, text_size, text_color);
+            }
         }
 
         Response {
@@ -451,58 +500,4 @@ impl<'a> Button<'a> {
             focused: ui.state().focus == Some(id),
         }
     }
-}
-
-fn draw_corner_cuts(ui: &mut Ui<'_>, rect: Rect, alpha: f32) {
-    let cut = (rect.height() * 0.23).clamp(5.0, 10.0);
-    let col = Color::rgba(1.0, 0.70, 0.32, alpha);
-    let shadow = Color::rgba(0.0, 0.0, 0.0, alpha * 0.62);
-    ui.draw_line(
-        Pos2::new(rect.x() + 1.0, rect.y() + cut),
-        Pos2::new(rect.x() + cut, rect.y() + 1.0),
-        1.0,
-        col,
-    );
-    ui.draw_line(
-        Pos2::new(rect.x() + 2.0, rect.y() + cut + 1.0),
-        Pos2::new(rect.x() + cut + 1.0, rect.y() + 2.0),
-        1.0,
-        shadow,
-    );
-    ui.draw_line(
-        Pos2::new(rect.max.x - cut, rect.y() + 1.0),
-        Pos2::new(rect.max.x - 1.0, rect.y() + cut),
-        1.0,
-        col,
-    );
-    ui.draw_line(
-        Pos2::new(rect.max.x - cut - 1.0, rect.y() + 2.0),
-        Pos2::new(rect.max.x - 2.0, rect.y() + cut + 1.0),
-        1.0,
-        shadow,
-    );
-    ui.draw_line(
-        Pos2::new(rect.x() + 1.0, rect.max.y - cut),
-        Pos2::new(rect.x() + cut, rect.max.y - 1.0),
-        1.0,
-        col,
-    );
-    ui.draw_line(
-        Pos2::new(rect.x() + 2.0, rect.max.y - cut - 1.0),
-        Pos2::new(rect.x() + cut + 1.0, rect.max.y - 2.0),
-        1.0,
-        shadow,
-    );
-    ui.draw_line(
-        Pos2::new(rect.max.x - cut, rect.max.y - 1.0),
-        Pos2::new(rect.max.x - 1.0, rect.max.y - cut),
-        1.0,
-        col,
-    );
-    ui.draw_line(
-        Pos2::new(rect.max.x - cut - 1.0, rect.max.y - 2.0),
-        Pos2::new(rect.max.x - 2.0, rect.max.y - cut - 1.0),
-        1.0,
-        shadow,
-    );
 }
